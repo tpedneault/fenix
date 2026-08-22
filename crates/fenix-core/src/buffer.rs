@@ -120,6 +120,16 @@ impl Buffer {
         self.rope.slice(start..end).to_string()
     }
 
+    /// The text in `[start, end)`, without modifying the buffer. Used by
+    /// Vim's yank, which reads a range without deleting it.
+    pub fn text_range(&self, start: usize, end: usize) -> String {
+        if start >= end {
+            return String::new();
+        }
+        let end = end.min(self.rope.len_chars());
+        self.rope.slice(start..end).to_string()
+    }
+
     pub fn line_count(&self) -> usize {
         self.rope.len_lines()
     }
@@ -150,7 +160,7 @@ impl Buffer {
     }
 
     /// Length of a line's content in chars, excluding its line terminator.
-    fn line_content_len(&self, line_idx: usize) -> usize {
+    pub fn line_len(&self, line_idx: usize) -> usize {
         let line = self.rope.line(line_idx);
         let mut len = line.len_chars();
         if len > 0 && line.char(len - 1) == '\n' {
@@ -399,7 +409,7 @@ impl Buffer {
     pub fn move_end(&mut self, cursor: &mut Cursor) {
         self.flush_pending();
         let (line, _) = self.line_col(cursor);
-        let len = self.line_content_len(line);
+        let len = self.line_len(line);
         cursor.char_idx = self.rope.line_to_char(line) + len;
         cursor.sticky_col = len;
     }
@@ -424,7 +434,7 @@ impl Buffer {
         let (line, _) = self.line_col(cursor);
         let last_line = self.rope.len_lines().saturating_sub(1);
         let target_line = (line as isize + delta).clamp(0, last_line as isize) as usize;
-        let target_len = self.line_content_len(target_line);
+        let target_len = self.line_len(target_line);
         let col = cursor.sticky_col.min(target_len);
         cursor.char_idx = self.rope.line_to_char(target_line) + col;
     }
