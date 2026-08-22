@@ -6,6 +6,35 @@ use ropey::{Rope, RopeSlice};
 
 use crate::Cursor;
 
+/// A single undoable change: replaces `removed` with `inserted` at `at`.
+/// Applying it forward performs the edit; applying its inverse reverses it.
+struct Edit {
+    at: usize,
+    removed: String,
+    inserted: String,
+    cursor_before: Cursor,
+    cursor_after: Cursor,
+}
+
+#[derive(PartialEq)]
+enum PendingKind {
+    Insert,
+    DeleteBackward,
+    DeleteForward,
+}
+
+/// An in-progress run of same-kind, contiguous edits (e.g. a typed word, or
+/// a run of backspaces) not yet committed to the undo stack, so that undo
+/// removes a whole run at once instead of one character at a time.
+struct Pending {
+    kind: PendingKind,
+    at: usize,
+    removed: String,
+    inserted: String,
+    cursor_before: Cursor,
+    cursor_after: Cursor,
+}
+
 /// A rope-backed text buffer.
 ///
 /// Editing and movement methods take a `&mut Cursor` argument instead of
@@ -15,17 +44,34 @@ pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
     dirty: bool,
+    undo_stack: Vec<Edit>,
+    redo_stack: Vec<Edit>,
+    pending: Option<Pending>,
 }
 
 impl Buffer {
     pub fn empty() -> Self {
-        Self { rope: Rope::new(), path: None, dirty: false }
+        Self {
+            rope: Rope::new(),
+            path: None,
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+        }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
-        Ok(Self { rope, path: Some(path.to_path_buf()), dirty: false })
+        Ok(Self {
+            rope,
+            path: Some(path.to_path_buf()),
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+        })
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -37,6 +83,7 @@ impl Buffer {
     }
 
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
+        self.flush_pending();
         let path = path.as_ref();
         self.rope.write_to(BufWriter::new(File::create(path)?))?;
         self.path = Some(path.to_path_buf());
@@ -58,6 +105,19 @@ impl Buffer {
 
     pub fn text(&self) -> String {
         self.rope.to_string()
+    }
+
+    /// The concatenated content of lines `[first_line, first_line + max_lines)`,
+    /// for windowed rendering of large files instead of laying out the whole
+    /// buffer every frame.
+    pub fn visible_text(&self, first_line: usize, max_lines: usize) -> String {
+        if first_line >= self.rope.len_lines() {
+            return String::new();
+        }
+        let last_line = (first_line + max_lines).min(self.rope.len_lines());
+        let start = self.rope.line_to_char(first_line);
+        let end = self.rope.line_to_char(last_line);
+        self.rope.slice(start..end).to_string()
     }
 
     pub fn line_count(&self) -> usize {
@@ -89,33 +149,162 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, cursor: &mut Cursor, ch: char) {
-        self.rope.insert_char(cursor.char_idx, ch);
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+
+        self.rope.insert_char(at, ch);
         cursor.char_idx += 1;
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::Insert && p.at + p.inserted.chars().count() == at => {
+                p.inserted.push(ch);
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::Insert,
+                    at,
+                    removed: String::new(),
+                    inserted: ch.to_string(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
     }
 
     pub fn delete_backward(&mut self, cursor: &mut Cursor) {
         if cursor.char_idx == 0 {
             return;
         }
-        self.rope.remove(cursor.char_idx - 1..cursor.char_idx);
-        cursor.char_idx -= 1;
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed_at = cursor.char_idx - 1;
+        let removed_char = self.rope.char(removed_at);
+
+        self.rope.remove(removed_at..cursor.char_idx);
+        cursor.char_idx = removed_at;
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::DeleteBackward && p.at == removed_at + 1 => {
+                p.removed.insert(0, removed_char);
+                p.at = removed_at;
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::DeleteBackward,
+                    at: removed_at,
+                    removed: removed_char.to_string(),
+                    inserted: String::new(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
     }
 
     pub fn delete_forward(&mut self, cursor: &mut Cursor) {
         if cursor.char_idx >= self.rope.len_chars() {
             return;
         }
-        self.rope.remove(cursor.char_idx..cursor.char_idx + 1);
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+        let removed_char = self.rope.char(at);
+
+        self.rope.remove(at..at + 1);
         self.dirty = true;
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::DeleteForward && p.at == at => {
+                p.removed.push(removed_char);
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::DeleteForward,
+                    at,
+                    removed: removed_char.to_string(),
+                    inserted: String::new(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
     }
 
-    pub fn move_left(&self, cursor: &mut Cursor) {
+    /// Commits the in-progress coalesced edit run (if any) to the undo
+    /// stack, ending it as an undo boundary. Movement calls this so undo
+    /// removes one "run" of typing/deleting at a time, not one char.
+    fn flush_pending(&mut self) {
+        if let Some(p) = self.pending.take() {
+            self.undo_stack.push(Edit {
+                at: p.at,
+                removed: p.removed,
+                inserted: p.inserted,
+                cursor_before: p.cursor_before,
+                cursor_after: p.cursor_after,
+            });
+        }
+    }
+
+    fn apply_forward(&mut self, edit: &Edit) {
+        if !edit.removed.is_empty() {
+            let end = edit.at + edit.removed.chars().count();
+            self.rope.remove(edit.at..end);
+        }
+        if !edit.inserted.is_empty() {
+            self.rope.insert(edit.at, &edit.inserted);
+        }
+    }
+
+    fn apply_inverse(&mut self, edit: &Edit) {
+        if !edit.inserted.is_empty() {
+            let end = edit.at + edit.inserted.chars().count();
+            self.rope.remove(edit.at..end);
+        }
+        if !edit.removed.is_empty() {
+            self.rope.insert(edit.at, &edit.removed);
+        }
+    }
+
+    /// Undoes the most recent edit run, restoring the cursor to where it was
+    /// before that run started. Returns `false` if there was nothing to undo.
+    pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
+        self.flush_pending();
+        let Some(edit) = self.undo_stack.pop() else { return false };
+        self.apply_inverse(&edit);
+        *cursor = edit.cursor_before;
+        self.dirty = true;
+        self.redo_stack.push(edit);
+        true
+    }
+
+    /// Reapplies the most recently undone edit run. Returns `false` if there
+    /// was nothing to redo.
+    pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
+        self.flush_pending();
+        let Some(edit) = self.redo_stack.pop() else { return false };
+        self.apply_forward(&edit);
+        *cursor = edit.cursor_after;
+        self.dirty = true;
+        self.undo_stack.push(edit);
+        true
+    }
+
+    pub fn move_left(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         if cursor.char_idx > 0 {
             cursor.char_idx -= 1;
         }
@@ -123,7 +312,8 @@ impl Buffer {
         cursor.sticky_col = col;
     }
 
-    pub fn move_right(&self, cursor: &mut Cursor) {
+    pub fn move_right(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         if cursor.char_idx < self.rope.len_chars() {
             cursor.char_idx += 1;
         }
@@ -131,28 +321,33 @@ impl Buffer {
         cursor.sticky_col = col;
     }
 
-    pub fn move_home(&self, cursor: &mut Cursor) {
+    pub fn move_home(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         let (line, _) = self.line_col(cursor);
         cursor.char_idx = self.rope.line_to_char(line);
         cursor.sticky_col = 0;
     }
 
-    pub fn move_end(&self, cursor: &mut Cursor) {
+    pub fn move_end(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         let (line, _) = self.line_col(cursor);
         let len = self.line_content_len(line);
         cursor.char_idx = self.rope.line_to_char(line) + len;
         cursor.sticky_col = len;
     }
 
-    pub fn move_up(&self, cursor: &mut Cursor) {
+    pub fn move_up(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         self.move_vertical(cursor, -1);
     }
 
-    pub fn move_down(&self, cursor: &mut Cursor) {
+    pub fn move_down(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
         self.move_vertical(cursor, 1);
     }
 
-    pub fn move_page(&self, cursor: &mut Cursor, lines: usize, down: bool) {
+    pub fn move_page(&mut self, cursor: &mut Cursor, lines: usize, down: bool) {
+        self.flush_pending();
         let delta = if down { lines as isize } else { -(lines as isize) };
         self.move_vertical(cursor, delta);
     }
@@ -172,7 +367,14 @@ mod tests {
     use super::*;
 
     fn buffer_with(text: &str) -> Buffer {
-        Buffer { rope: Rope::from_str(text), path: None, dirty: false }
+        Buffer {
+            rope: Rope::from_str(text),
+            path: None,
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+        }
     }
 
     #[test]
@@ -200,7 +402,7 @@ mod tests {
 
     #[test]
     fn horizontal_movement_clamps_at_buffer_edges() {
-        let buf = buffer_with("ab");
+        let mut buf = buffer_with("ab");
         let mut cur = Cursor::at_start();
         buf.move_left(&mut cur);
         assert_eq!(cur.char_idx, 0);
@@ -213,7 +415,7 @@ mod tests {
 
     #[test]
     fn home_and_end_use_line_content_length_excluding_newline() {
-        let buf = buffer_with("hello\nworld\n");
+        let mut buf = buffer_with("hello\nworld\n");
         let mut cur = Cursor { char_idx: 8, sticky_col: 2 };
         buf.move_home(&mut cur);
         assert_eq!(buf.line_col(&cur), (1, 0));
@@ -224,7 +426,7 @@ mod tests {
 
     #[test]
     fn vertical_movement_uses_sticky_column_through_short_lines() {
-        let buf = buffer_with("longline\nhi\nlongline");
+        let mut buf = buffer_with("longline\nhi\nlongline");
         let mut cur = Cursor::at_start();
         buf.move_end(&mut cur);
         assert_eq!(buf.line_col(&cur), (0, 8));
@@ -238,9 +440,81 @@ mod tests {
 
     #[test]
     fn page_movement_clamps_to_last_line() {
-        let buf = buffer_with("a\nb\nc");
+        let mut buf = buffer_with("a\nb\nc");
         let mut cur = Cursor::at_start();
         buf.move_page(&mut cur, 100, true);
         assert_eq!(buf.line_col(&cur), (2, 0));
+    }
+
+    #[test]
+    fn undo_removes_a_whole_coalesced_typing_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        for ch in "hello".chars() {
+            buf.insert_char(&mut cur, ch);
+        }
+        assert_eq!(buf.text(), "hello");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "");
+        assert_eq!(cur.char_idx, 0);
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn redo_reapplies_an_undone_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        for ch in "hi".chars() {
+            buf.insert_char(&mut cur, ch);
+        }
+        buf.undo(&mut cur);
+        assert_eq!(buf.text(), "");
+
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.text(), "hi");
+        assert_eq!(cur.char_idx, 2);
+        assert!(!buf.redo(&mut cur));
+    }
+
+    #[test]
+    fn editing_after_undo_clears_the_redo_stack() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'a');
+        buf.undo(&mut cur);
+        buf.insert_char(&mut cur, 'b');
+        assert!(!buf.redo(&mut cur));
+        assert_eq!(buf.text(), "b");
+    }
+
+    #[test]
+    fn cursor_movement_ends_the_coalescing_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'a');
+        buf.insert_char(&mut cur, 'b');
+        buf.move_left(&mut cur); // boundary: commits "ab" as its own run
+        buf.insert_char(&mut cur, 'c'); // starts a new run at position 1
+
+        buf.undo(&mut cur); // undoes only "c"
+        assert_eq!(buf.text(), "ab");
+
+        buf.undo(&mut cur); // undoes "ab"
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn backspace_run_coalesces_into_one_undo_step() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        for _ in 0..5 {
+            buf.delete_backward(&mut cur);
+        }
+        assert_eq!(buf.text(), "");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
     }
 }
