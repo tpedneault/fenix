@@ -1,0 +1,8 @@
+[package]
+name = "fenix-syntax"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"

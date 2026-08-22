@@ -8,6 +8,7 @@ anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 fenix-core = { path = "../fenix-core" }
 fenix-keymap = { path = "../fenix-keymap" }
+fenix-syntax = { path = "../fenix-syntax" }
 fenix-vim = { path = "../fenix-vim" }
 glyphon = "0.12.0"
 pollster = "1.0.1"

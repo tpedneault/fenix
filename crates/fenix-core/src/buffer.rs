@@ -6,6 +6,21 @@ use ropey::{Rope, RopeSlice};
 
 use crate::Cursor;
 
+/// A single low-level text mutation, in char offsets against the buffer's
+/// *current* (post-edit) state, plus the text that was there before.
+/// Unlike `Edit`, this is logged for *every* rope mutation (including each
+/// char typed, not just coalesced runs) -- consumers that need to track
+/// the buffer incrementally (e.g. `fenix-syntax`'s tree-sitter integration)
+/// drain these via `Buffer::drain_edits` rather than reconstructing them
+/// from the coalescing-oriented undo stack, which isn't precise enough for
+/// that use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditDelta {
+    pub start_char: usize,
+    pub new_end_char: usize,
+    pub removed: String,
+}
+
 /// A single undoable change: replaces `removed` with `inserted` at `at`.
 /// Applying it forward performs the edit; applying its inverse reverses it.
 struct Edit {
@@ -47,6 +62,7 @@ pub struct Buffer {
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
     pending: Option<Pending>,
+    pending_syntax_edits: Vec<EditDelta>,
 }
 
 impl Buffer {
@@ -58,6 +74,7 @@ impl Buffer {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            pending_syntax_edits: Vec::new(),
         }
     }
 
@@ -71,6 +88,7 @@ impl Buffer {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            pending_syntax_edits: Vec::new(),
         })
     }
 
@@ -97,6 +115,31 @@ impl Buffer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Byte offset of the `char_idx`-th char -- needed by consumers that
+    /// work in bytes (e.g. tree-sitter, via `fenix-syntax`), since `Buffer`
+    /// itself is entirely char-indexed.
+    pub fn char_to_byte(&self, char_idx: usize) -> usize {
+        self.rope.char_to_byte(char_idx)
+    }
+
+    pub fn byte_to_char(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_char(byte_idx)
+    }
+
+    /// Records a low-level mutation for any consumer tracking the buffer
+    /// incrementally. Called at every rope-mutating site, unlike the
+    /// undo stack which coalesces contiguous edits into runs -- see
+    /// `EditDelta`'s doc comment for why the distinction matters.
+    fn log_edit(&mut self, start_char: usize, removed: String, new_end_char: usize) {
+        self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+    }
+
+    /// Drains and returns every low-level edit recorded since the last
+    /// call, in the order they happened.
+    pub fn drain_edits(&mut self) -> Vec<EditDelta> {
+        std::mem::take(&mut self.pending_syntax_edits)
     }
 
     pub fn len_chars(&self) -> usize {
@@ -193,6 +236,7 @@ impl Buffer {
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+        self.log_edit(at, String::new(), at + 1);
 
         match &mut self.pending {
             Some(p) if p.kind == PendingKind::Insert && p.at + p.inserted.chars().count() == at => {
@@ -227,6 +271,7 @@ impl Buffer {
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+        self.log_edit(removed_at, removed_char.to_string(), removed_at);
 
         match &mut self.pending {
             Some(p) if p.kind == PendingKind::DeleteBackward && p.at == removed_at + 1 => {
@@ -259,6 +304,7 @@ impl Buffer {
 
         self.rope.remove(at..at + 1);
         self.dirty = true;
+        self.log_edit(at, removed_char.to_string(), at);
 
         match &mut self.pending {
             Some(p) if p.kind == PendingKind::DeleteForward && p.at == at => {
@@ -296,6 +342,7 @@ impl Buffer {
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+        self.log_edit(start, removed.clone(), start);
 
         self.undo_stack.push(Edit {
             at: start,
@@ -323,6 +370,7 @@ impl Buffer {
         self.dirty = true;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
+        self.log_edit(at, String::new(), cursor.char_idx);
 
         self.undo_stack.push(Edit {
             at,
@@ -356,6 +404,7 @@ impl Buffer {
         if !edit.inserted.is_empty() {
             self.rope.insert(edit.at, &edit.inserted);
         }
+        self.log_edit(edit.at, edit.removed.clone(), edit.at + edit.inserted.chars().count());
     }
 
     fn apply_inverse(&mut self, edit: &Edit) {
@@ -366,6 +415,7 @@ impl Buffer {
         if !edit.removed.is_empty() {
             self.rope.insert(edit.at, &edit.removed);
         }
+        self.log_edit(edit.at, edit.inserted.clone(), edit.at + edit.removed.chars().count());
     }
 
     /// Undoes the most recent edit run, restoring the cursor to where it was
@@ -463,6 +513,7 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            pending_syntax_edits: Vec::new(),
         }
     }
 
@@ -669,5 +720,55 @@ mod tests {
         assert_eq!(buffer_with("a\nb\nc").visual_line_count(), 3);
         assert_eq!(buffer_with("").visual_line_count(), 1);
         assert_eq!(buffer_with("\n").visual_line_count(), 1);
+    }
+
+    #[test]
+    fn char_to_byte_and_back_round_trip_multi_byte_text() {
+        let buf = buffer_with("café");
+        assert_eq!(buf.char_to_byte(4), 5); // 'é' is 2 bytes
+        assert_eq!(buf.byte_to_char(5), 4);
+    }
+
+    #[test]
+    fn drain_edits_logs_every_char_typed_not_just_coalesced_runs() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'h');
+        buf.insert_char(&mut cur, 'i');
+        let edits = buf.drain_edits();
+        assert_eq!(
+            edits,
+            vec![
+                EditDelta { start_char: 0, new_end_char: 1, removed: String::new() },
+                EditDelta { start_char: 1, new_end_char: 2, removed: String::new() },
+            ]
+        );
+        // Drained -- a second call sees nothing new until another edit happens.
+        assert!(buf.drain_edits().is_empty());
+    }
+
+    #[test]
+    fn drain_edits_logs_deletes_with_the_removed_text() {
+        let mut buf = buffer_with("abc");
+        let mut cur = Cursor { char_idx: 3, sticky_col: 3 };
+        buf.delete_backward(&mut cur);
+        let edits = buf.drain_edits();
+        assert_eq!(edits, vec![EditDelta { start_char: 2, new_end_char: 2, removed: "c".to_string() }]);
+    }
+
+    #[test]
+    fn drain_edits_logs_undo_and_redo_as_their_own_mutations() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'x');
+        buf.drain_edits(); // discard the initial insert's log entry
+
+        buf.undo(&mut cur);
+        let undo_edits = buf.drain_edits();
+        assert_eq!(undo_edits, vec![EditDelta { start_char: 0, new_end_char: 0, removed: "x".to_string() }]);
+
+        buf.redo(&mut cur);
+        let redo_edits = buf.drain_edits();
+        assert_eq!(redo_edits, vec![EditDelta { start_char: 0, new_end_char: 1, removed: String::new() }]);
     }
 }

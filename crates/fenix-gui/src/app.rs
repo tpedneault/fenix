@@ -92,6 +92,45 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Splits `line_text` into colored sub-spans according to `highlights`
+/// (document-wide byte ranges, already resolved to colors, sorted and
+/// non-overlapping -- the contract `fenix_syntax::SyntaxState::
+/// highlights_in_range` guarantees) that overlap `[line_byte_start,
+/// line_byte_end)`. Gaps between them fall back to `default_color`. Pure
+/// and independent of `Buffer`/`App` so it's testable with hand-built
+/// strings and ranges, not a real parsed buffer.
+fn split_line_by_highlights(
+    line_text: &str,
+    line_byte_start: usize,
+    line_byte_end: usize,
+    highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+    default_color: glyphon::Color,
+) -> Vec<(String, glyphon::Color)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0usize; // byte offset within line_text
+    for (range, color) in highlights {
+        if range.end <= line_byte_start || range.start >= line_byte_end {
+            continue;
+        }
+        let local_start = range.start.max(line_byte_start) - line_byte_start;
+        let local_end = range.end.min(line_byte_end) - line_byte_start;
+        if local_start > cursor {
+            spans.push((line_text[cursor..local_start].to_string(), default_color));
+        }
+        if local_end > local_start {
+            spans.push((line_text[local_start..local_end].to_string(), *color));
+        }
+        cursor = cursor.max(local_end);
+    }
+    if cursor < line_text.len() {
+        spans.push((line_text[cursor..].to_string(), default_color));
+    }
+    if spans.is_empty() {
+        spans.push((line_text.to_string(), default_color));
+    }
+    spans
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -107,6 +146,11 @@ pub struct App {
 
     buffer: Buffer,
     cursor: Cursor,
+    /// `None` when the buffer's file extension isn't a registered
+    /// language (including buffers with no path at all) -- `content_spans`
+    /// just falls back to plain `fg` text in that case, same as before
+    /// this feature existed.
+    syntax: Option<fenix_syntax::SyntaxState>,
     /// Index of the topmost buffer line currently on screen -- the
     /// *target* `ensure_cursor_visible` maintains; rendering uses
     /// `rendered_scroll` instead, which eases toward this.
@@ -155,6 +199,12 @@ impl App {
             }),
             None => Buffer::empty(),
         };
+        let syntax = buffer
+            .path()
+            .and_then(|p| p.extension())
+            .and_then(|ext| ext.to_str())
+            .and_then(fenix_syntax::detect_language)
+            .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
 
         Self {
             window: None,
@@ -164,6 +214,7 @@ impl App {
             caret_rect: None,
             buffer,
             cursor: Cursor::at_start(),
+            syntax,
             scroll_line: 0,
             rendered_scroll: 0.0,
             scroll_anim: None,
@@ -441,11 +492,15 @@ impl App {
     /// text; rows past the end of the buffer get a `~` marker instead,
     /// matching Vim's convention for "there's no line here" -- shown even
     /// with the gutter off, same as Vim shows it regardless of `number`.
+    /// `syntax_highlights` (document-wide byte ranges, already resolved to
+    /// colors) splits each line's text into colored sub-spans instead of
+    /// one flat `theme.fg` span when non-empty.
     fn content_spans(
         &self,
         render_base_line: usize,
         rows: usize,
         gutter_chars: usize,
+        syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
         let visual_lines = self.buffer.visual_line_count();
@@ -472,13 +527,64 @@ impl App {
             if has_line {
                 let start = self.buffer.line_start_char(buffer_line);
                 let len = self.buffer.line_len(buffer_line);
-                spans.push((self.buffer.text_range(start, start + len), theme.fg));
+                let line_text = self.buffer.text_range(start, start + len);
+                if syntax_highlights.is_empty() {
+                    spans.push((line_text, theme.fg));
+                } else {
+                    let line_byte_start = self.buffer.char_to_byte(start);
+                    let line_byte_end = self.buffer.char_to_byte(start + len);
+                    spans.extend(split_line_by_highlights(
+                        &line_text,
+                        line_byte_start,
+                        line_byte_end,
+                        syntax_highlights,
+                        theme.fg,
+                    ));
+                }
             }
             if r + 1 < rows {
                 spans.push(("\n".to_string(), theme.fg));
             }
         }
         spans
+    }
+
+    /// Drains buffer edits since the last frame, feeds them through the
+    /// active language's incremental parser (if any), and returns resolved
+    /// syntax-highlight colors for the visible byte range only -- same
+    /// windowing discipline `Buffer::visible_text` already uses. Always
+    /// drains, even with no active language, so the buffer's edit log
+    /// doesn't grow unbounded for files nothing is consuming it for.
+    fn syntax_highlights_for_visible_range(
+        &mut self,
+        render_base_line: usize,
+        rows: usize,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let deltas = self.buffer.drain_edits();
+        let Some(syntax) = &mut self.syntax else { return Vec::new() };
+
+        let edits: Vec<fenix_syntax::RawEdit> = deltas
+            .into_iter()
+            .map(|d| fenix_syntax::RawEdit { start_char: d.start_char, new_end_char: d.new_end_char, removed: d.removed })
+            .collect();
+        let source = self.buffer.text();
+        syntax.apply_edits(&source, &edits);
+
+        let visual_lines = self.buffer.visual_line_count();
+        if render_base_line >= visual_lines {
+            return Vec::new();
+        }
+        let last_line = (render_base_line + rows).min(visual_lines) - 1;
+        let start_char = self.buffer.line_start_char(render_base_line);
+        let end_char = self.buffer.line_start_char(last_line) + self.buffer.line_len(last_line);
+        let byte_range = self.buffer.char_to_byte(start_char)..self.buffer.char_to_byte(end_char);
+
+        let theme = self.theme;
+        syntax
+            .highlights_in_range(&source, byte_range)
+            .into_iter()
+            .map(|(range, name)| (range, theme.syntax_color(name)))
+            .collect()
     }
 
     /// Per-visible-line (view_row, col_start, col_end) segments of the
@@ -609,7 +715,8 @@ impl App {
         let render_frac = self.render_frac();
         let gutter_chars = self.gutter_chars();
         let gutter_px = gutter_chars as f32 * text::CHAR_WIDTH;
-        let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars);
+        let syntax_highlights = self.syntax_highlights_for_visible_range(render_base_line, visible_lines + 1);
+        let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text =
             if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
@@ -1147,7 +1254,7 @@ mod tests {
     fn content_spans_marks_rows_past_buffer_end_with_tilde() {
         let app = App::with_file(None); // single empty line, cursor on it
         let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 3, gutter);
+        let spans = app.content_spans(0, 3, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -1156,7 +1263,7 @@ mod tests {
     fn content_spans_off_mode_still_shows_tilde_for_rows_past_end() {
         let mut app = App::with_file(None);
         app.line_number_mode = LineNumberMode::Off;
-        let spans = app.content_spans(0, 2, app.gutter_chars());
+        let spans = app.content_spans(0, 2, app.gutter_chars(), &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -1168,7 +1275,7 @@ mod tests {
         app.buffer.insert_str(&mut app.cursor, "a\nb\nc\nd");
         app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
         let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 4, gutter);
+        let spans = app.content_spans(0, 4, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -1179,7 +1286,7 @@ mod tests {
         app.buffer.insert_str(&mut app.cursor, "a\nb");
         app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
         let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 2, gutter);
+        let spans = app.content_spans(0, 2, gutter, &[]);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
     }
@@ -1194,5 +1301,62 @@ mod tests {
         assert_eq!(app.line_number_mode, LineNumberMode::Relative);
         app.cycle_line_number_mode();
         assert_eq!(app.line_number_mode, LineNumberMode::Off);
+    }
+
+    #[test]
+    fn split_line_by_highlights_covers_a_middle_span() {
+        let theme = &theme::ORBIT_DARK;
+        let spans = split_line_by_highlights("let x = 1;", 0, 10, &[(4..5, theme.syntax_variable)], theme.fg);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "let x = 1;");
+        assert_eq!(spans[1], ("x".to_string(), theme.syntax_variable));
+        assert_eq!(spans[0].1, theme.fg);
+        assert_eq!(spans[2].1, theme.fg);
+    }
+
+    #[test]
+    fn split_line_by_highlights_clips_ranges_extending_past_the_line() {
+        let theme = &theme::ORBIT_DARK;
+        // A highlight spanning into the next line should only color this
+        // line's portion of it.
+        let spans = split_line_by_highlights("abc", 10, 13, &[(8..15, theme.syntax_string)], theme.fg);
+        assert_eq!(spans, vec![("abc".to_string(), theme.syntax_string)]);
+    }
+
+    #[test]
+    fn split_line_by_highlights_ignores_ranges_outside_the_line() {
+        let theme = &theme::ORBIT_DARK;
+        let spans = split_line_by_highlights("abc", 10, 13, &[(0..5, theme.syntax_string)], theme.fg);
+        assert_eq!(spans, vec![("abc".to_string(), theme.fg)]);
+    }
+
+    #[test]
+    fn syntax_state_seeds_from_the_detected_language() {
+        let mut app = App::with_file(None);
+        assert!(app.syntax.is_none()); // no path -> no language
+
+        app.syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, ""));
+        app.buffer.insert_str(&mut app.cursor, "fn main() {}");
+
+        let highlights = app.syntax_highlights_for_visible_range(0, 1);
+        assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
+
+        let spans = app.content_spans(0, 1, 0, &highlights);
+        let fn_span = spans.iter().find(|(s, _)| s == "fn");
+        assert_eq!(
+            fn_span.map(|(_, c)| *c),
+            Some(app.theme.syntax_color("keyword")),
+            "expected \"fn\" colored as a keyword, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_highlights_drain_edits_even_without_an_active_language() {
+        let mut app = App::with_file(None);
+        assert!(app.syntax.is_none());
+        app.buffer.insert_str(&mut app.cursor, "hello");
+        assert!(app.syntax_highlights_for_visible_range(0, 1).is_empty());
+        // The edit log should have been drained regardless, not left to grow.
+        assert!(app.buffer.drain_edits().is_empty());
     }
 }
