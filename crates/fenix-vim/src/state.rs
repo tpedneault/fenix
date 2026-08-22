@@ -33,6 +33,10 @@ pub struct VimState {
     mode: Mode,
     register: Register,
     pending_op: Option<Operator>,
+    /// Set by `r`: the *next* key replaces the char under the cursor
+    /// instead of going through the normal trie at all -- no motion/text
+    /// object composition, just one raw key.
+    pending_replace: bool,
     visual_anchor: usize,
     command_line: String,
 
@@ -47,6 +51,7 @@ impl VimState {
             mode: Mode::Normal,
             register: Register { text: String::new(), linewise: false },
             pending_op: None,
+            pending_replace: false,
             visual_anchor: 0,
             command_line: String::new(),
             normal_matcher: keymaps::normal_trie().matcher(),
@@ -160,6 +165,16 @@ impl VimState {
     }
 
     fn handle_normal_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
+        if self.pending_replace {
+            self.pending_replace = false;
+            if key.code != KeyCode::Named(NamedKey::Escape) {
+                if let KeyCode::Char(c) = key.code {
+                    self.replace_char(buffer, cursor, c);
+                }
+            }
+            return VimEvent::None;
+        }
+
         if let Some(op) = self.pending_op {
             self.handle_operator_pending_key(buffer, cursor, op, key);
             return VimEvent::None;
@@ -206,7 +221,83 @@ impl VimState {
             }
             VimAction::PasteAfter => self.paste(buffer, cursor, true),
             VimAction::PasteBefore => self.paste(buffer, cursor, false),
+            VimAction::OperatorToLineEnd(op) => {
+                let range = range_for_motion(buffer, cursor, Motion::LineEnd);
+                self.finish_operator(buffer, cursor, op, range, false);
+            }
+            VimAction::ChangeLine => {
+                let (line, _) = buffer.line_col(cursor);
+                let range = current_line_content_range(buffer, line);
+                self.finish_operator(buffer, cursor, Operator::Change, range, true);
+            }
+            VimAction::SubstituteChar => {
+                let end = (cursor.char_idx + 1).min(buffer.len_chars());
+                if end > cursor.char_idx {
+                    let text = buffer.delete_range(cursor, cursor.char_idx, end);
+                    self.register = Register { text, linewise: false };
+                }
+                self.mode = Mode::Insert;
+            }
+            VimAction::JoinLines => self.join_lines(buffer, cursor),
+            VimAction::ToggleCase => self.toggle_case(buffer, cursor),
+            VimAction::ReplaceChar => self.pending_replace = true,
         }
+    }
+
+    /// `J`: joins the current line with the next, trimming the next
+    /// line's leading whitespace and separating with a single space.
+    /// A no-op on the buffer's last real line.
+    fn join_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let (line, _) = buffer.line_col(cursor);
+        if line >= motion::last_line(buffer) {
+            return;
+        }
+        let this_line_end = buffer.line_start_char(line) + buffer.line_len(line);
+        let next_start = buffer.line_start_char(line + 1);
+        let next_len = buffer.line_len(line + 1);
+        let mut skip = 0;
+        while skip < next_len && buffer.char_at(next_start + skip).is_some_and(|c| c.is_whitespace()) {
+            skip += 1;
+        }
+        buffer.delete_range(cursor, this_line_end, next_start + skip);
+        cursor.char_idx = this_line_end;
+        buffer.insert_str(cursor, " ");
+        cursor.char_idx = this_line_end;
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    /// `~`: flips the case of the char under the cursor and advances,
+    /// like Vim (not full Unicode case-folding -- takes the first char of
+    /// `to_uppercase`/`to_lowercase`, which is lossy for the rare
+    /// multi-char cases).
+    fn toggle_case(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let Some(c) = buffer.char_at(cursor.char_idx) else { return };
+        let toggled = if c.is_uppercase() {
+            c.to_lowercase().next().unwrap_or(c)
+        } else if c.is_lowercase() {
+            c.to_uppercase().next().unwrap_or(c)
+        } else {
+            c
+        };
+        let start = cursor.char_idx;
+        buffer.delete_range(cursor, start, start + 1);
+        buffer.insert_str(cursor, &toggled.to_string());
+        cursor.char_idx = (start + 1).min(buffer.len_chars());
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    fn replace_char(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, c: char) {
+        if buffer.char_at(cursor.char_idx).is_none() {
+            return;
+        }
+        let start = cursor.char_idx;
+        buffer.delete_range(cursor, start, start + 1);
+        buffer.insert_str(cursor, &c.to_string());
+        cursor.char_idx = start;
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
     }
 
     fn enter_insert(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, entry: InsertEntry) {
@@ -253,11 +344,17 @@ impl VimState {
         }
 
         // Doubled operator (dd/cc/yy): linewise, current line. Only applies
-        // as the very first key after the operator, matching Vim.
+        // as the very first key after the operator, matching Vim. cc
+        // (unlike dd/yy) keeps the line itself -- it only clears the
+        // content, leaving a blank line to type into.
         if !self.pending_matcher.is_pending() && key == op.trigger_key() {
             self.pending_op = None;
             let (line, _) = buffer.line_col(cursor);
-            let range = linewise_range(buffer, line, line);
+            let range = if op == Operator::Change {
+                current_line_content_range(buffer, line)
+            } else {
+                linewise_range(buffer, line, line)
+            };
             self.finish_operator(buffer, cursor, op, range, true);
             return;
         }
@@ -397,6 +494,16 @@ fn linewise_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<usize>
     start..end
 }
 
+/// Just `line`'s content, excluding its line terminator -- unlike
+/// `linewise_range`, deleting this leaves the line itself (now empty)
+/// intact instead of removing it. `cc`/`S` want this: change replaces a
+/// line's content but doesn't remove the line, so a blank line remains
+/// for the user to type into.
+fn current_line_content_range(buffer: &Buffer, line: usize) -> Range<usize> {
+    let start = buffer.line_start_char(line);
+    start..(start + buffer.line_len(line))
+}
+
 fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion) -> Range<usize> {
     let target = motion::target(buffer, cursor, motion);
     if motion.is_linewise() {
@@ -500,6 +607,16 @@ mod tests {
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "dd");
         assert_eq!(b.text(), "one\nthree");
+    }
+
+    #[test]
+    fn cc_clears_the_line_but_keeps_it_unlike_dd() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // on "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "cc");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "one\n\nthree");
     }
 
     #[test]
@@ -679,5 +796,116 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "i");
         let children = vim.pending_children();
         assert!(children.iter().any(|(_, label)| *label == "inner word"));
+    }
+
+    #[test]
+    fn big_word_motions_are_available_in_normal_mode() {
+        let mut b = buf("foo.bar baz");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "W");
+        assert_eq!(c.char_idx, 8); // straight to "baz", not stopping at the "."
+    }
+
+    #[test]
+    fn shift_d_c_y_act_to_end_of_line() {
+        let mut b = buf("hello world");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "D");
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn shift_c_enters_insert_after_deleting_to_eol() {
+        let mut b = buf("hello world");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "C");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn shift_y_yanks_to_eol_without_deleting() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "Y");
+        assert_eq!(b.text(), "hello world");
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "hhello worldello world");
+    }
+
+    #[test]
+    fn shift_s_changes_the_whole_line() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // on "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "S");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "one\n\nthree");
+    }
+
+    #[test]
+    fn lowercase_s_substitutes_one_char() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "s");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "bc");
+    }
+
+    #[test]
+    fn j_joins_lines_trimming_leading_whitespace() {
+        let mut b = buf("hello\n   world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "J");
+        assert_eq!(b.text(), "hello world");
+    }
+
+    #[test]
+    fn j_on_last_line_is_a_no_op() {
+        let mut b = buf("only");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "J");
+        assert_eq!(b.text(), "only");
+    }
+
+    #[test]
+    fn tilde_toggles_case_and_advances() {
+        let mut b = buf("aB");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "~");
+        assert_eq!(b.text(), "AB");
+        assert_eq!(c.char_idx, 1);
+        keys(&mut vim, &mut b, &mut c, "~");
+        assert_eq!(b.text(), "Ab");
+    }
+
+    #[test]
+    fn r_replaces_the_char_under_cursor_and_stays_normal() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "r");
+        keys(&mut vim, &mut b, &mut c, "x");
+        assert_eq!(b.text(), "xbc");
+        assert_eq!(c.char_idx, 0);
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn r_then_escape_cancels_without_editing() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "r");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(b.text(), "abc");
     }
 }

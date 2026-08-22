@@ -20,6 +20,16 @@ pub enum InsertEntry {
 pub enum VimAction {
     Motion(Motion),
     Operator(Operator),
+    /// `D`/`C`/`Y`: the operator applied from the cursor to end of line in
+    /// one keypress, rather than composing with a separately-typed motion.
+    OperatorToLineEnd(Operator),
+    /// `S`: change the whole current line (`cc` in one keypress).
+    ChangeLine,
+    /// `s`: delete the char under the cursor and enter Insert (`cl`).
+    SubstituteChar,
+    JoinLines,
+    ToggleCase,
+    ReplaceChar,
     EnterInsert(InsertEntry),
     EnterVisual,
     EnterCommandLine,
@@ -57,6 +67,9 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('w')], "word forward", wrap(Motion::WordForward));
     trie.insert(&[KeyPress::char('b')], "word backward", wrap(Motion::WordBackward));
     trie.insert(&[KeyPress::char('e')], "word end", wrap(Motion::WordEndForward));
+    trie.insert(&[KeyPress::char('W')], "WORD forward", wrap(Motion::BigWordForward));
+    trie.insert(&[KeyPress::char('B')], "WORD backward", wrap(Motion::BigWordBackward));
+    trie.insert(&[KeyPress::char('E')], "WORD end", wrap(Motion::BigWordEndForward));
     trie.insert(&[KeyPress::char('0')], "line start", wrap(Motion::LineStart));
     trie.insert(&[KeyPress::char('^')], "first non-blank", wrap(Motion::LineFirstNonBlank));
     trie.insert(&[KeyPress::char('$')], "line end", wrap(Motion::LineEnd));
@@ -89,6 +102,15 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);
+
+    t.insert(&[KeyPress::char('D')], "delete to eol", VimAction::OperatorToLineEnd(Operator::Delete));
+    t.insert(&[KeyPress::char('C')], "change to eol", VimAction::OperatorToLineEnd(Operator::Change));
+    t.insert(&[KeyPress::char('Y')], "yank to eol", VimAction::OperatorToLineEnd(Operator::Yank));
+    t.insert(&[KeyPress::char('S')], "change line", VimAction::ChangeLine);
+    t.insert(&[KeyPress::char('s')], "substitute char", VimAction::SubstituteChar);
+    t.insert(&[KeyPress::char('J')], "join lines", VimAction::JoinLines);
+    t.insert(&[KeyPress::char('~')], "toggle case", VimAction::ToggleCase);
+    t.insert(&[KeyPress::char('r')], "replace char", VimAction::ReplaceChar);
 
     t
 }

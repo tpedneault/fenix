@@ -11,6 +11,11 @@ pub enum Motion {
     WordForward,
     WordBackward,
     WordEndForward,
+    /// WORD motions: whitespace-only boundaries, no word/punctuation
+    /// split, so "foo.bar" is one WORD instead of three.
+    BigWordForward,
+    BigWordBackward,
+    BigWordEndForward,
     LineStart,
     LineFirstNonBlank,
     LineEnd,
@@ -30,7 +35,7 @@ pub enum Inclusivity {
 impl Motion {
     pub fn inclusivity(self) -> Inclusivity {
         match self {
-            Motion::WordEndForward | Motion::LineEnd => Inclusivity::Inclusive,
+            Motion::WordEndForward | Motion::BigWordEndForward | Motion::LineEnd => Inclusivity::Inclusive,
             _ => Inclusivity::Exclusive,
         }
     }
@@ -68,9 +73,12 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion) -> usize {
         }
         Motion::Up => vertical(buffer, cursor, -1),
         Motion::Down => vertical(buffer, cursor, 1),
-        Motion::WordForward => word_forward(buffer, cursor.char_idx),
-        Motion::WordBackward => word_backward(buffer, cursor.char_idx),
-        Motion::WordEndForward => word_end_forward(buffer, cursor.char_idx),
+        Motion::WordForward => word_forward(buffer, cursor.char_idx, classify),
+        Motion::WordBackward => word_backward(buffer, cursor.char_idx, classify),
+        Motion::WordEndForward => word_end_forward(buffer, cursor.char_idx, classify),
+        Motion::BigWordForward => word_forward(buffer, cursor.char_idx, classify_big),
+        Motion::BigWordBackward => word_backward(buffer, cursor.char_idx, classify_big),
+        Motion::BigWordEndForward => word_end_forward(buffer, cursor.char_idx, classify_big),
         Motion::LineStart => {
             let (line, _) = buffer.line_col(cursor);
             buffer.line_start_char(line)
@@ -95,10 +103,20 @@ pub fn is_non_blank_at(buffer: &Buffer, idx: usize) -> bool {
     matches!(buffer.char_at(idx).map(classify), Some(CharClass::Word) | Some(CharClass::Punct))
 }
 
+/// WORD boundaries: whitespace vs. everything else, no word/punctuation
+/// split -- used by `W`/`B`/`E`.
+fn classify_big(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else {
+        CharClass::Word
+    }
+}
+
 /// Ropey counts a phantom empty final line after a trailing `\n` (a file
 /// "a\nb\n" reports 3 lines: "a\n", "b\n", ""). Vim's `G`/`j` shouldn't be
 /// able to land the cursor there -- it isn't a line the file actually has.
-fn last_line(buffer: &Buffer) -> usize {
+pub(crate) fn last_line(buffer: &Buffer) -> usize {
     let last = buffer.line_count().saturating_sub(1);
     if last > 0 && buffer.line_len(last) == 0 {
         last - 1
@@ -129,7 +147,7 @@ fn line_first_non_blank(buffer: &Buffer, line: usize) -> usize {
     start
 }
 
-fn word_forward(buffer: &Buffer, idx: usize) -> usize {
+fn word_forward(buffer: &Buffer, idx: usize, classify: fn(char) -> CharClass) -> usize {
     let len = buffer.len_chars();
     let mut i = idx;
     if i >= len {
@@ -147,7 +165,7 @@ fn word_forward(buffer: &Buffer, idx: usize) -> usize {
     i
 }
 
-fn word_end_forward(buffer: &Buffer, idx: usize) -> usize {
+fn word_end_forward(buffer: &Buffer, idx: usize, classify: fn(char) -> CharClass) -> usize {
     let len = buffer.len_chars();
     if len == 0 {
         return 0;
@@ -166,7 +184,7 @@ fn word_end_forward(buffer: &Buffer, idx: usize) -> usize {
     i
 }
 
-fn word_backward(buffer: &Buffer, idx: usize) -> usize {
+fn word_backward(buffer: &Buffer, idx: usize, classify: fn(char) -> CharClass) -> usize {
     if idx == 0 {
         return 0;
     }
@@ -246,6 +264,20 @@ mod tests {
         let c = Cursor { char_idx: 8, sticky_col: 8 }; // end of "longline"
         let after_down = target(&b, &c, Motion::Down);
         assert_eq!(b.line_col(&Cursor { char_idx: after_down, sticky_col: 0 }), (1, 1)); // clamped onto "hi"
+    }
+
+    #[test]
+    fn big_word_forward_ignores_punctuation_boundaries() {
+        let b = buf("foo.bar baz");
+        // unlike WordForward, "foo.bar" is one WORD, not three
+        assert_eq!(target(&b, &cur(0), Motion::BigWordForward), 8);
+    }
+
+    #[test]
+    fn big_word_end_and_backward_ignore_punctuation_too() {
+        let b = buf("foo.bar baz");
+        assert_eq!(target(&b, &cur(0), Motion::BigWordEndForward), 6); // end of "foo.bar"
+        assert_eq!(target(&b, &cur(8), Motion::BigWordBackward), 0);
     }
 
     #[test]
