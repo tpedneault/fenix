@@ -124,4 +124,72 @@ mod tests {
         let state = SyntaxState::new(LanguageId::Rust, "");
         assert_eq!(state.highlights_in_range("", 0..0), Vec::<(Range<usize>, &str)>::new());
     }
+
+    /// One smoke test per newly-registered language: confirms `new` doesn't
+    /// panic (grammar ABI compatible, bundled highlights.scm compiles) and
+    /// that at least one capture comes back for representative source --
+    /// catches per-crate wiring mistakes (wrong query constant, wrong
+    /// `LanguageFn`) that pure logic tests wouldn't, the same role
+    /// `parses_rust_and_highlights_a_keyword_and_a_string` played for Rust.
+    fn smoke_test(lang: LanguageId, source: &str) {
+        let state = SyntaxState::new(lang, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        assert!(!highlights.is_empty(), "expected at least one highlight span for {lang:?}, got none");
+    }
+
+    #[test]
+    fn toml_highlights_something() {
+        smoke_test(LanguageId::Toml, "[package]\nname = \"fenix\"\nversion = \"0.0.1\"\n");
+    }
+
+    #[test]
+    fn markdown_highlights_something() {
+        smoke_test(LanguageId::Markdown, "# Heading\n\nSome *text* and a ```code``` fence.\n");
+    }
+
+    #[test]
+    fn json_highlights_something() {
+        smoke_test(LanguageId::Json, r#"{"key": "value", "n": 1, "ok": true}"#);
+    }
+
+    #[test]
+    fn yaml_highlights_something() {
+        smoke_test(LanguageId::Yaml, "key: value\nlist:\n  - one\n  - two\n");
+    }
+
+    #[test]
+    fn python_highlights_something() {
+        smoke_test(LanguageId::Python, "def main():\n    print(\"hi\")\n");
+    }
+
+    #[test]
+    fn javascript_highlights_something() {
+        smoke_test(LanguageId::JavaScript, "function main() { return \"hi\"; }");
+    }
+
+    #[test]
+    fn typescript_highlights_something() {
+        smoke_test(LanguageId::TypeScript, "function main(): string { return \"hi\"; }");
+    }
+
+    #[test]
+    fn tsx_highlights_something() {
+        // tree-sitter-typescript 0.23.2's bundled HIGHLIGHTS_QUERY only
+        // covers a small capture set (type, type.builtin,
+        // punctuation.bracket, variable.parameter, keyword) -- no
+        // standalone string/comment/keyword-per-token coverage. A type
+        // annotation is one of the few things it reliably captures under
+        // either TypeScript or Tsx.
+        smoke_test(LanguageId::Tsx, "function main(): string { return 1; }");
+    }
+
+    #[test]
+    fn c_highlights_something() {
+        smoke_test(LanguageId::C, "int main() { return 0; }");
+    }
+
+    #[test]
+    fn bash_highlights_something() {
+        smoke_test(LanguageId::Bash, "echo \"hello\"\n");
+    }
 }
