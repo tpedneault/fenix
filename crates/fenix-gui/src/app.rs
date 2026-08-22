@@ -2,16 +2,19 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use fenix_keymap::{KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
+use fenix_vim::{Mode, VimEvent, VimState};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
 use crate::commands::CommandRegistry;
 use crate::gpu::GpuState;
+use crate::keymap;
 use crate::rect::RectRenderer;
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
@@ -40,6 +43,13 @@ pub struct App {
     cursor: Cursor,
     /// Index of the topmost buffer line currently on screen.
     scroll_line: usize,
+
+    vim: VimState,
+    /// Persists across keystrokes so a `SPC f s` sequence can span several
+    /// `handle_key` calls; `'static` because the leader trie is a global
+    /// singleton (see `keymap::leader_trie`), which sidesteps
+    /// `Matcher` borrowing from a trie `App` would otherwise also own.
+    leader_matcher: Matcher<'static, &'static str>,
 
     theme: &'static Theme,
 
@@ -70,6 +80,8 @@ impl App {
             buffer,
             cursor: Cursor::at_start(),
             scroll_line: 0,
+            vim: VimState::new(),
+            leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
             modifiers: ModifiersState::empty(),
             blink_on: true,
@@ -134,39 +146,59 @@ impl App {
                     // just a few fn-pointer entries, and this sidesteps
                     // borrowing `self` both as receiver and argument.
                     CommandRegistry::with_builtins().run(self, event_loop, id);
+                    self.wake_caret();
+                    return;
                 }
             }
+            // Not a recognized global chord (e.g. Ctrl-r is Vim's redo):
+            // fall through instead of swallowing it.
+        }
+
+        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+
+        // Window-size-aware paging is a GUI concern, handled the same way
+        // regardless of Vim mode -- fenix-vim doesn't know about viewport size.
+        if keypress == KeyPress::named(FenixNamedKey::PageUp)
+            || keypress == KeyPress::named(FenixNamedKey::PageDown)
+        {
+            let page_size = self
+                .gpu
+                .as_ref()
+                .map(|gpu| text::visible_line_count(gpu.size.height as f32))
+                .unwrap_or(20);
+            let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
+            self.buffer.move_page(&mut self.cursor, page_size, down);
+            self.wake_caret();
             return;
         }
 
-        let page_size = self
-            .gpu
-            .as_ref()
-            .map(|gpu| text::visible_line_count(gpu.size.height as f32))
-            .unwrap_or(20);
-
-        match &event.logical_key {
-            Key::Named(NamedKey::ArrowLeft) => self.buffer.move_left(&mut self.cursor),
-            Key::Named(NamedKey::ArrowRight) => self.buffer.move_right(&mut self.cursor),
-            Key::Named(NamedKey::ArrowUp) => self.buffer.move_up(&mut self.cursor),
-            Key::Named(NamedKey::ArrowDown) => self.buffer.move_down(&mut self.cursor),
-            Key::Named(NamedKey::Home) => self.buffer.move_home(&mut self.cursor),
-            Key::Named(NamedKey::End) => self.buffer.move_end(&mut self.cursor),
-            Key::Named(NamedKey::PageUp) => self.buffer.move_page(&mut self.cursor, page_size, false),
-            Key::Named(NamedKey::PageDown) => self.buffer.move_page(&mut self.cursor, page_size, true),
-            Key::Named(NamedKey::Backspace) => self.buffer.delete_backward(&mut self.cursor),
-            Key::Named(NamedKey::Delete) => self.buffer.delete_forward(&mut self.cursor),
-            Key::Named(NamedKey::Enter) => self.buffer.insert_char(&mut self.cursor, '\n'),
-            Key::Named(NamedKey::Tab) => self.buffer.insert_char(&mut self.cursor, '\t'),
-            _ => {
-                if let Some(text) = &event.text {
-                    for ch in text.chars().filter(|c| !c.is_control()) {
-                        self.buffer.insert_char(&mut self.cursor, ch);
-                    }
-                }
+        // Leader sequences span multiple keystrokes: stay routed here while
+        // one is already in progress, or start one on SPC from Normal mode
+        // (matching orbit-emacs, where SPC is a Normal-mode-only leader --
+        // in Insert mode it should just insert a space).
+        if self.leader_matcher.is_pending()
+            || (self.vim.mode() == Mode::Normal && keypress == KeyPress::char(' '))
+        {
+            if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
+                CommandRegistry::with_builtins().run(self, event_loop, id);
             }
+            self.wake_caret();
+            return;
         }
 
+        match self.vim.handle_key(&mut self.buffer, &mut self.cursor, keypress) {
+            VimEvent::RequestSave => {
+                CommandRegistry::with_builtins().run(self, event_loop, "file.save");
+            }
+            VimEvent::RequestQuit => {
+                CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
+            }
+            VimEvent::RequestSaveAndQuit => {
+                CommandRegistry::with_builtins().run(self, event_loop, "file.save");
+                CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
+            }
+            VimEvent::None => {}
+        }
         self.wake_caret();
     }
 
@@ -178,6 +210,9 @@ impl App {
     }
 
     fn modeline_text(&self) -> String {
+        if self.vim.mode() == Mode::Command {
+            return format!(":{}", self.vim.command_line());
+        }
         let filename = self
             .buffer
             .path()
@@ -186,7 +221,33 @@ impl App {
             .unwrap_or_else(|| "[No Name]".to_string());
         let modified = if self.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = self.buffer.line_col(&self.cursor);
-        format!(" {filename}{modified}   TEXT   Ln {}, Col {} ", line + 1, col + 1)
+        format!(" {filename}{modified}   {}   Ln {}, Col {} ", self.vim.mode().label(), line + 1, col + 1)
+    }
+
+    /// Per-visible-line (view_row, col_start, col_end) segments of the
+    /// active Visual-mode selection, for highlighting. Empty outside Visual
+    /// mode.
+    fn visual_selection_segments(&self, visible_lines: usize) -> Vec<(usize, usize, usize)> {
+        if self.vim.mode() != Mode::Visual {
+            return Vec::new();
+        }
+        let anchor = self.vim.visual_anchor();
+        let cursor_idx = self.cursor.char_idx;
+        let (lo, hi) = if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+        let hi = hi.min(self.buffer.len_chars());
+
+        let last_visible = (self.scroll_line + visible_lines).min(self.buffer.line_count());
+        let mut segments = Vec::new();
+        for line in self.scroll_line..last_visible {
+            let line_start = self.buffer.line_start_char(line);
+            let line_end = line_start + self.buffer.line_len(line);
+            let seg_start = lo.max(line_start);
+            let seg_end = hi.min(line_end);
+            if seg_start < seg_end {
+                segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
+            }
+        }
+        segments
     }
 
     fn redraw(&mut self) {
@@ -200,6 +261,7 @@ impl App {
         let modeline_text = self.modeline_text();
         let (line, col) = self.buffer.line_col(&self.cursor);
         let caret_row_in_view = line - self.scroll_line;
+        let selection_segments = self.visual_selection_segments(visible_lines);
         let blink_on = self.blink_on;
         let theme = self.theme;
 
@@ -221,6 +283,12 @@ impl App {
             text::MODELINE_HEIGHT,
             theme.bg_modeline,
         );
+        for (row, col_start, col_end) in selection_segments {
+            let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
+            let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+            let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
+            rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
+        }
         if blink_on {
             let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
             let caret_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
@@ -382,12 +450,42 @@ mod tests {
     }
 
     #[test]
-    fn modeline_reflects_filename_dirty_state_and_position() {
+    fn modeline_reflects_filename_dirty_state_mode_and_position() {
         let mut app = App::with_file(None);
-        assert_eq!(app.modeline_text(), " [No Name]   TEXT   Ln 1, Col 1 ");
+        assert_eq!(app.modeline_text(), " [No Name]   NORMAL   Ln 1, Col 1 ");
 
         app.buffer.insert_char(&mut app.cursor, 'a');
         app.buffer.insert_char(&mut app.cursor, 'b');
-        assert_eq!(app.modeline_text(), " [No Name] [+]   TEXT   Ln 1, Col 3 ");
+        assert_eq!(app.modeline_text(), " [No Name] [+]   NORMAL   Ln 1, Col 3 ");
+    }
+
+    #[test]
+    fn modeline_shows_command_line_while_typing_an_ex_command() {
+        let mut app = App::with_file(None);
+        for ch in [':', 'w', 'q'] {
+            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char(ch));
+        }
+        assert_eq!(app.modeline_text(), ":wq");
+    }
+
+    #[test]
+    fn visual_selection_segments_cover_the_selected_range() {
+        let mut app = App::with_file(None);
+        for ch in "hello world".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.cursor = Cursor::at_start();
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        for _ in 0..4 {
+            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('l'));
+        }
+        // anchor 0, cursor now at 4 ("hello"[0..5))
+        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 5)]);
+    }
+
+    #[test]
+    fn visual_selection_segments_empty_outside_visual_mode() {
+        let app = App::with_file(None);
+        assert!(app.visual_selection_segments(10).is_empty());
     }
 }

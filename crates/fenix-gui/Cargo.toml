@@ -7,6 +7,8 @@ edition.workspace = true
 anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 fenix-core = { path = "../fenix-core" }
+fenix-keymap = { path = "../fenix-keymap" }
+fenix-vim = { path = "../fenix-vim" }
 glyphon = "0.12.0"
 pollster = "1.0.1"
 wgpu = "30.0.1"

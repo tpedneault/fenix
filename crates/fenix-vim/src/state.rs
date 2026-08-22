@@ -63,6 +63,13 @@ impl VimState {
         &self.command_line
     }
 
+    /// The char offset Visual mode's selection is anchored at. Only
+    /// meaningful while `mode()` is `Visual`; the host UI uses this
+    /// together with the cursor position to render the selection.
+    pub fn visual_anchor(&self) -> usize {
+        self.visual_anchor
+    }
+
     /// Whether a multi-key sequence (operator-pending, `gg`, ...) is
     /// waiting on more input, for a which-key-style hint in the host UI.
     pub fn is_pending(&self) -> bool {

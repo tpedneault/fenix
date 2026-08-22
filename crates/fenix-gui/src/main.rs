@@ -1,6 +1,7 @@
 mod app;
 mod commands;
 mod gpu;
+mod keymap;
 mod rect;
 mod text;
 mod theme;

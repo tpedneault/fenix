@@ -7,6 +7,7 @@ pub struct Theme {
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
     pub caret: [f32; 4],
+    pub selection: [f32; 4],
 }
 
 const fn rgba(hex: u32) -> [f32; 4] {
@@ -29,4 +30,6 @@ pub const ORBIT_DARK: Theme = Theme {
     fg: text_color(0xc0caf5),
     fg_modeline: text_color(0xc0caf5),
     caret: rgba(0xe0af68),
+    // orbit-dark's "bg-hl": hl-line / selection.
+    selection: rgba(0x292e42),
 };
