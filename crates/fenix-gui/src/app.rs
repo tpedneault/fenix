@@ -20,6 +20,14 @@ use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the caret takes to fade in/out at each blink toggle, instead
+/// of flipping instantly.
+const BLINK_FADE: Duration = Duration::from_millis(120);
+/// Redraw cadence while an animation (blink fade, later scroll/pulse) is
+/// actively transitioning. Idle time uses the much longer `WaitUntil`s
+/// below instead -- see the plan's "animations are short bursts, not
+/// continuous idle work" rationale.
+const ANIM_TICK: Duration = Duration::from_millis(16);
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
 /// `[scroll_line, scroll_line + visible_lines)` window.
@@ -31,6 +39,13 @@ fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usiz
     } else {
         scroll_line
     }
+}
+
+/// Ease-out cubic: fast start, gentle settle. Used for every short
+/// transition animation (caret fade now; scroll/pulse reuse it too).
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
 pub struct App {
@@ -61,7 +76,12 @@ pub struct App {
     theme: &'static Theme,
 
     modifiers: ModifiersState,
-    blink_on: bool,
+    /// Whether the caret is fading toward visible or toward hidden --
+    /// the *target* of the current transition, not necessarily what's on
+    /// screen right now (see `caret_alpha`).
+    blink_visible: bool,
+    /// When the current fade started; `caret_alpha` eases from this.
+    blink_transition_start: Instant,
     next_blink: Instant,
 }
 
@@ -92,7 +112,8 @@ impl App {
             leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
             modifiers: ModifiersState::empty(),
-            blink_on: true,
+            blink_visible: true,
+            blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
         }
     }
@@ -122,11 +143,25 @@ impl App {
     /// Resets the caret blink timer so an edit or navigation always leaves
     /// the caret visible instead of possibly mid-blink.
     fn wake_caret(&mut self) {
-        self.blink_on = true;
-        self.next_blink = Instant::now() + BLINK_INTERVAL;
+        let now = Instant::now();
+        self.blink_visible = true;
+        // Already-elapsed transition: caret snaps to fully visible right
+        // away. A fade-in here would read as input lag, not polish -- the
+        // soft fade is for idle blinking, not for the moment right after
+        // a keypress.
+        self.blink_transition_start = now - BLINK_FADE;
+        self.next_blink = now + BLINK_INTERVAL;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
+    /// whichever state the caret last toggled into.
+    fn caret_alpha(&self) -> f32 {
+        let elapsed = Instant::now().duration_since(self.blink_transition_start);
+        let t = ease_out_cubic(elapsed.as_secs_f32() / BLINK_FADE.as_secs_f32());
+        if self.blink_visible { t } else { 1.0 - t }
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
@@ -370,7 +405,7 @@ impl App {
         let caret_row_in_view = line - self.scroll_line;
         let selection_segments = self.visual_selection_segments(visible_lines);
         let which_key_lines = self.which_key_lines();
-        let blink_on = self.blink_on;
+        let caret_alpha = self.caret_alpha();
         let theme = self.theme;
 
         let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
@@ -420,10 +455,11 @@ impl App {
         bg_rect.flush(gpu);
 
         caret_rect.clear();
-        if blink_on {
+        if caret_alpha > 0.0 {
             let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
             let caret_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
-            caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, theme.caret);
+            let [r, g, b, a] = theme.caret;
+            caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
         }
         caret_rect.flush(gpu);
 
@@ -536,14 +572,32 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        let mut needs_redraw = false;
+
         if now >= self.next_blink {
-            self.blink_on = !self.blink_on;
+            self.blink_visible = !self.blink_visible;
+            self.blink_transition_start = now;
             self.next_blink = now + BLINK_INTERVAL;
+            needs_redraw = true;
+        }
+
+        // Keep redrawing at animation cadence only while the fade is
+        // actually in flight; once it settles, fall back to the long,
+        // efficient wait for the next toggle -- an idle editor still does
+        // no per-frame work between blinks.
+        let transitioning = now.duration_since(self.blink_transition_start) < BLINK_FADE;
+        if transitioning {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(self.next_blink));
+
+        let wait_until = if transitioning { now + ANIM_TICK } else { self.next_blink };
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }
 
@@ -682,5 +736,41 @@ mod tests {
             app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char(ch));
         }
         assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
+    }
+
+    #[test]
+    fn ease_out_cubic_starts_at_zero_ends_at_one_and_is_monotonic() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0); // clamps past the end
+        assert_eq!(ease_out_cubic(-1.0), 0.0); // clamps before the start
+
+        let mut prev = 0.0;
+        for i in 1..=10 {
+            let v = ease_out_cubic(i as f32 / 10.0);
+            assert!(v >= prev, "not monotonic at step {i}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn ease_out_cubic_front_loads_motion_more_than_linear() {
+        // "ease-out": faster at the start than a linear ramp would be
+        assert!(ease_out_cubic(0.25) > 0.25);
+    }
+
+    #[test]
+    fn fresh_app_caret_is_immediately_fully_visible_no_fade_in_delay() {
+        let app = App::with_file(None);
+        assert_eq!(app.caret_alpha(), 1.0);
+    }
+
+    #[test]
+    fn wake_caret_snaps_to_visible_without_fading_in() {
+        let mut app = App::with_file(None);
+        app.blink_visible = false;
+        app.blink_transition_start = Instant::now(); // mid fade-out
+        app.wake_caret();
+        assert_eq!(app.caret_alpha(), 1.0);
     }
 }
