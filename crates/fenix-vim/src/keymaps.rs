@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use fenix_keymap::{KeyPress, KeyTrie};
 
+use crate::mode::VisualKind;
 use crate::motion::Motion;
 use crate::operator::Operator;
 use crate::textobject::TextObject;
@@ -31,7 +32,7 @@ pub enum VimAction {
     ToggleCase,
     ReplaceChar,
     EnterInsert(InsertEntry),
-    EnterVisual,
+    EnterVisual(VisualKind),
     EnterCommandLine,
     Undo,
     Redo,
@@ -45,7 +46,10 @@ pub enum VimAction {
 pub enum VisualAction {
     Motion(Motion),
     Apply(Operator),
-    Exit,
+    /// Pressing a visual-entry key (`v`/`V`/`Ctrl-v`) while already in
+    /// Visual mode: same kind as the current selection exits to Normal
+    /// (toggle), a different kind switches to it in place (anchor kept).
+    SetKind(VisualKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,7 +101,8 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('o')], "open line below", VimAction::EnterInsert(InsertEntry::NewlineBelow));
     t.insert(&[KeyPress::char('O')], "open line above", VimAction::EnterInsert(InsertEntry::NewlineAbove));
 
-    t.insert(&[KeyPress::char('v')], "visual", VimAction::EnterVisual);
+    t.insert(&[KeyPress::char('v')], "visual", VimAction::EnterVisual(VisualKind::Char));
+    t.insert(&[KeyPress::char('V')], "visual line", VimAction::EnterVisual(VisualKind::Line));
     t.insert(&[KeyPress::char(':')], "command line", VimAction::EnterCommandLine);
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
@@ -121,7 +126,8 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[Operator::Delete.trigger_key()], "delete selection", VisualAction::Apply(Operator::Delete));
     t.insert(&[Operator::Change.trigger_key()], "change selection", VisualAction::Apply(Operator::Change));
     t.insert(&[Operator::Yank.trigger_key()], "yank selection", VisualAction::Apply(Operator::Yank));
-    t.insert(&[KeyPress::char('v')], "exit visual", VisualAction::Exit);
+    t.insert(&[KeyPress::char('v')], "visual (char)", VisualAction::SetKind(VisualKind::Char));
+    t.insert(&[KeyPress::char('V')], "visual (line)", VisualAction::SetKind(VisualKind::Line));
     t
 }
 

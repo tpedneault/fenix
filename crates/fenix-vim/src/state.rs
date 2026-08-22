@@ -4,7 +4,7 @@ use fenix_core::{Buffer, Cursor};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
 use crate::keymaps::{self, InsertEntry, PendingTarget, VimAction, VisualAction};
-use crate::mode::Mode;
+use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
 use crate::operator::Operator;
 use crate::textobject;
@@ -48,6 +48,7 @@ pub struct VimState {
     /// `gg`) so `3gg` doesn't lose the `3` on the first `g`.
     count: Option<u32>,
     visual_anchor: usize,
+    visual_kind: VisualKind,
     command_line: String,
 
     normal_matcher: Matcher<'static, VimAction>,
@@ -65,6 +66,7 @@ impl VimState {
             pending_replace: None,
             count: None,
             visual_anchor: 0,
+            visual_kind: VisualKind::Char,
             command_line: String::new(),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
@@ -74,6 +76,12 @@ impl VimState {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Which kind of selection Visual mode is making. Only meaningful
+    /// while `mode()` is `Visual`.
+    pub fn visual_kind(&self) -> VisualKind {
+        self.visual_kind
     }
 
     pub fn command_line(&self) -> &str {
@@ -227,8 +235,9 @@ impl VimState {
                 self.pending_op_count = count;
             }
             VimAction::EnterInsert(entry) => self.enter_insert(buffer, cursor, entry),
-            VimAction::EnterVisual => {
+            VimAction::EnterVisual(kind) => {
                 self.mode = Mode::Visual;
+                self.visual_kind = kind;
                 self.visual_anchor = cursor.char_idx;
             }
             VimAction::EnterCommandLine => {
@@ -533,21 +542,47 @@ impl VimState {
                 // is already explicit, unlike Normal mode's motions.
                 VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1),
                 VisualAction::Apply(op) => {
-                    let (lo, hi) = if self.visual_anchor <= cursor.char_idx {
-                        (self.visual_anchor, cursor.char_idx + 1)
-                    } else {
-                        (cursor.char_idx, self.visual_anchor + 1)
-                    };
-                    let hi = hi.min(buffer.len_chars());
-                    self.finish_operator(buffer, cursor, op, lo..hi, false);
+                    let (range, linewise) = self.visual_range(buffer, cursor);
+                    self.finish_operator(buffer, cursor, op, range, linewise);
                     if self.mode == Mode::Visual {
                         self.mode = Mode::Normal;
                     }
                 }
-                VisualAction::Exit => self.mode = Mode::Normal,
+                VisualAction::SetKind(kind) => {
+                    if kind == self.visual_kind {
+                        self.mode = Mode::Normal; // same key again: toggle out
+                    } else {
+                        self.visual_kind = kind; // different kind: switch, keep anchor
+                    }
+                }
             }
         }
         VimEvent::None
+    }
+
+    /// The char range (and whether it's linewise) the current selection
+    /// covers, per `visual_kind`.
+    fn visual_range(&self, buffer: &Buffer, cursor: &Cursor) -> (Range<usize>, bool) {
+        match self.visual_kind {
+            VisualKind::Line => {
+                let anchor_cursor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
+                let (anchor_line, _) = buffer.line_col(&anchor_cursor);
+                let (cursor_line, _) = buffer.line_col(cursor);
+                (linewise_range(buffer, anchor_line, cursor_line), true)
+            }
+            // Block gets its own multi-line, per-row handling (see the
+            // Visual Block work); until that's wired up this falls back to
+            // charwise, which is harmless since nothing can reach Block
+            // mode yet (no keybinding enters it).
+            VisualKind::Char | VisualKind::Block => {
+                let (lo, hi) = if self.visual_anchor <= cursor.char_idx {
+                    (self.visual_anchor, cursor.char_idx + 1)
+                } else {
+                    (cursor.char_idx, self.visual_anchor + 1)
+                };
+                (lo..hi.min(buffer.len_chars()), false)
+            }
+        }
     }
 }
 
@@ -819,6 +854,71 @@ mod tests {
         named(&mut vim, &mut b, &mut c, NamedKey::Escape);
         assert_eq!(vim.mode(), Mode::Normal);
         assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn shift_v_enters_visual_line_mode() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        assert_eq!(vim.mode(), Mode::Visual);
+        assert_eq!(vim.visual_kind(), VisualKind::Line);
+    }
+
+    #[test]
+    fn visual_line_delete_removes_whole_lines_regardless_of_column() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), "one\nthree");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn visual_line_extends_by_whole_lines_with_motions() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "j"); // extend to line 1
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), "three\nfour");
+    }
+
+    #[test]
+    fn v_then_v_again_toggles_back_to_normal() {
+        let mut b = buf("hello");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vv");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn v_then_shift_v_switches_kind_without_exiting() {
+        let mut b = buf("hello");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v");
+        assert_eq!(vim.visual_kind(), VisualKind::Char);
+        keys(&mut vim, &mut b, &mut c, "V");
+        assert_eq!(vim.mode(), Mode::Visual); // still in Visual, not exited
+        assert_eq!(vim.visual_kind(), VisualKind::Line);
+    }
+
+    #[test]
+    fn visual_line_yank_then_paste_duplicates_lines() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "y");
+        assert_eq!(b.text(), "one\ntwo\nthree"); // yank doesn't delete
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "one\none\ntwo\nthree");
     }
 
     #[test]
