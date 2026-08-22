@@ -135,6 +135,20 @@ impl Buffer {
         (line, col)
     }
 
+    /// The char offset where `line` begins.
+    pub fn line_start_char(&self, line: usize) -> usize {
+        self.rope.line_to_char(line)
+    }
+
+    /// The character at `idx`, or `None` past the end of the buffer.
+    pub fn char_at(&self, idx: usize) -> Option<char> {
+        if idx >= self.rope.len_chars() {
+            None
+        } else {
+            Some(self.rope.char(idx))
+        }
+    }
+
     /// Length of a line's content in chars, excluding its line terminator.
     fn line_content_len(&self, line_idx: usize) -> usize {
         let line = self.rope.line(line_idx);
@@ -242,6 +256,60 @@ impl Buffer {
                 });
             }
         }
+    }
+
+    /// Removes `start..end` as a single atomic edit (one undo step, not
+    /// coalesced char-by-char), returning the removed text. Used by Vim
+    /// operators (`dw`, `diw`, `dd`, ...) and as the yank source for `y`.
+    pub fn delete_range(&mut self, cursor: &mut Cursor, start: usize, end: usize) -> String {
+        if start >= end {
+            return String::new();
+        }
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed = self.rope.slice(start..end).to_string();
+
+        self.rope.remove(start..end);
+        cursor.char_idx = start;
+        self.dirty = true;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+
+        self.undo_stack.push(Edit {
+            at: start,
+            removed: removed.clone(),
+            inserted: String::new(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
+        removed
+    }
+
+    /// Inserts `text` at the cursor as a single atomic edit (one undo step).
+    /// Used for paste (`p`/`P`).
+    pub fn insert_str(&mut self, cursor: &mut Cursor, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+
+        self.rope.insert(at, text);
+        cursor.char_idx = at + text.chars().count();
+        self.dirty = true;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+
+        self.undo_stack.push(Edit {
+            at,
+            removed: String::new(),
+            inserted: text.to_string(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
     }
 
     /// Commits the in-progress coalesced edit run (if any) to the undo
@@ -452,6 +520,54 @@ mod tests {
         assert_eq!(buf.visible_text(1, 2), "two\nthree\n");
         assert_eq!(buf.visible_text(4, 10), "five\n");
         assert_eq!(buf.visible_text(10, 2), "");
+    }
+
+    #[test]
+    fn char_at_and_line_start_char() {
+        let buf = buffer_with("ab\ncd\n");
+        assert_eq!(buf.char_at(0), Some('a'));
+        assert_eq!(buf.char_at(3), Some('c'));
+        assert_eq!(buf.char_at(100), None);
+        assert_eq!(buf.line_start_char(0), 0);
+        assert_eq!(buf.line_start_char(1), 3);
+    }
+
+    #[test]
+    fn delete_range_removes_atomically_and_is_one_undo_step() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 11, sticky_col: 11 };
+        let removed = buf.delete_range(&mut cur, 5, 11);
+        assert_eq!(removed, " world");
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
+        assert!(!buf.undo(&mut cur)); // one step, not six
+    }
+
+    #[test]
+    fn insert_str_inserts_atomically_and_is_one_undo_step() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        buf.insert_str(&mut cur, " world");
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello");
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn delete_range_and_insert_str_are_no_ops_on_empty_input() {
+        let mut buf = buffer_with("abc");
+        let mut cur = Cursor { char_idx: 1, sticky_col: 1 };
+        assert_eq!(buf.delete_range(&mut cur, 2, 2), "");
+        assert_eq!(buf.text(), "abc");
+        buf.insert_str(&mut cur, "");
+        assert_eq!(buf.text(), "abc");
     }
 
     #[test]
