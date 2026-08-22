@@ -37,7 +37,14 @@ pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
     text: Option<TextPipeline>,
-    rect: Option<RectRenderer>,
+    /// Opaque panel backgrounds (modeline bar, which-key popup) and the
+    /// selection highlight -- drawn *before* text, so they sit behind it
+    /// instead of covering it. A single alpha-blended draw call can't do
+    /// both "opaque background behind this text" and "opaque background
+    /// in front of that text" at once, so the caret gets its own renderer
+    /// drawn after text instead of sharing this one.
+    bg_rect: Option<RectRenderer>,
+    caret_rect: Option<RectRenderer>,
 
     buffer: Buffer,
     cursor: Cursor,
@@ -76,7 +83,8 @@ impl App {
             window: None,
             gpu: None,
             text: None,
-            rect: None,
+            bg_rect: None,
+            caret_rect: None,
             buffer,
             cursor: Cursor::at_start(),
             scroll_line: 0,
@@ -286,8 +294,8 @@ impl App {
         let blink_on = self.blink_on;
         let theme = self.theme;
 
-        let (Some(window), Some(gpu), Some(text), Some(rect)) =
-            (&self.window, &mut self.gpu, &mut self.text, &mut self.rect)
+        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
+            (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect)
         else {
             return;
         };
@@ -304,23 +312,26 @@ impl App {
             Some((modeline_top - panel_height).max(0.0))
         };
 
-        rect.clear();
-        rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
+        bg_rect.clear();
+        bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
         if let Some(top) = which_key_panel {
-            rect.push_rect(gpu, 0.0, top, text::WHICH_KEY_WIDTH, modeline_top - top, theme.bg_modeline);
+            bg_rect.push_rect(gpu, 0.0, top, text::WHICH_KEY_WIDTH, modeline_top - top, theme.bg_modeline);
         }
         for (row, col_start, col_end) in selection_segments {
             let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
             let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
             let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
-            rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
+            bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
         }
+        bg_rect.flush(gpu);
+
+        caret_rect.clear();
         if blink_on {
             let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
             let caret_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
-            rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, theme.caret);
+            caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, theme.caret);
         }
-        rect.flush(gpu);
+        caret_rect.flush(gpu);
 
         text.prepare(gpu, theme, which_key_panel);
 
@@ -365,8 +376,9 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            bg_rect.render(&mut pass);
             text.render(&mut pass);
-            rect.render(&mut pass);
+            caret_rect.render(&mut pass);
         }
         gpu.queue.submit(Some(encoder.finish()));
         window.pre_present_notify();
@@ -388,12 +400,14 @@ impl ApplicationHandler for App {
         let gpu = pollster::block_on(GpuState::new(window.clone()));
         let mut text = TextPipeline::new(&gpu);
         text.set_text(&self.buffer.visible_text(0, text::visible_line_count(gpu.size.height as f32)));
-        let rect = RectRenderer::new(&gpu);
+        let bg_rect = RectRenderer::new(&gpu);
+        let caret_rect = RectRenderer::new(&gpu);
 
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);
-        self.rect = Some(rect);
+        self.bg_rect = Some(bg_rect);
+        self.caret_rect = Some(caret_rect);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
