@@ -1,0 +1,7 @@
+[package]
+name = "fenix-explorer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-keymap = { path = "../fenix-keymap" }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fenix-core", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-syntax", "crates/fenix-vim"]
+members = ["crates/fenix-core", "crates/fenix-explorer", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-syntax", "crates/fenix-vim"]
 
 [workspace.package]
 version = "0.0.1"
