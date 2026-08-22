@@ -592,14 +592,20 @@ impl VimState {
             cursor.char_idx = at;
             buffer.insert_str(cursor, &block);
             self.pending_pulse = Some(at..(at + block.chars().count()));
-            cursor.char_idx = at;
+            // Vim leaves the cursor on the first non-blank of the pasted
+            // block's first line, not at column 0 -- matches `^`.
+            cursor.char_idx = motion::target(buffer, &Cursor { char_idx: at, sticky_col: 0 }, Motion::LineFirstNonBlank);
         } else {
             let text = self.register.text.repeat(count);
             let at = if after { (cursor.char_idx + 1).min(buffer.len_chars()) } else { cursor.char_idx };
             cursor.char_idx = at;
             buffer.insert_str(cursor, &text);
-            self.pending_pulse = Some(at..(at + text.chars().count()));
-            cursor.char_idx = at;
+            let inserted_len = text.chars().count();
+            self.pending_pulse = Some(at..(at + inserted_len));
+            // Charwise paste leaves the cursor on the last pasted char, not
+            // the first -- matches Vim (e.g. `yiw` then `p` lands you at
+            // the end of the word you just pasted, ready to keep typing).
+            cursor.char_idx = at + inserted_len - 1;
         }
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
@@ -1001,6 +1007,39 @@ mod tests {
         assert_eq!(b.text(), "bc");
         keys(&mut vim, &mut b, &mut c, "p");
         assert_eq!(b.text(), "bac");
+    }
+
+    #[test]
+    fn charwise_paste_after_lands_on_last_pasted_char() {
+        let mut b = buf("ab");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.register = Register { text: "xyz".to_string(), linewise: false };
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "axyzb");
+        assert_eq!(c.char_idx, 3); // on 'z', not back at the pasted 'x'
+    }
+
+    #[test]
+    fn charwise_paste_before_lands_on_last_pasted_char() {
+        let mut b = buf("ab");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.register = Register { text: "xyz".to_string(), linewise: false };
+        keys(&mut vim, &mut b, &mut c, "P");
+        assert_eq!(b.text(), "xyzab");
+        assert_eq!(c.char_idx, 2); // on 'z'
+    }
+
+    #[test]
+    fn linewise_paste_lands_on_first_non_blank_of_pasted_line() {
+        let mut b = buf("one\ntwo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.register = Register { text: "  hi\n".to_string(), linewise: true };
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "one\n  hi\ntwo");
+        assert_eq!(b.line_col(&c), (1, 2)); // first non-blank of "  hi", not column 0
     }
 
     #[test]
