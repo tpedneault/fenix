@@ -1,5 +1,5 @@
 use glyphon::{
-    Attrs, Buffer as GlyphBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
+    Attrs, Buffer as GlyphBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 
@@ -16,6 +16,10 @@ pub const PAD_TOP: f32 = 4.0;
 pub const MODELINE_HEIGHT: f32 = LINE_HEIGHT + 8.0;
 /// Width of the which-key popup panel.
 pub const WHICH_KEY_WIDTH: f32 = 260.0;
+/// Width (in chars) of the modeline's mode badge, centered within it.
+/// Fits the longest label ("V-BLOCK"/"REPLACE"/"COMMAND", 7 chars) with a
+/// little breathing room.
+pub const MODE_BADGE_CHARS: usize = 8;
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
@@ -65,13 +69,18 @@ impl TextPipeline {
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
-    pub fn set_modeline_text(&mut self, text: &str) {
-        self.modeline.set_text(
-            text,
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
+    /// Sets the modeline text as a sequence of differently-colored spans
+    /// (e.g. the mode badge in its own accent, the rest in the normal
+    /// modeline color) -- a single flat color can't do that, so this
+    /// takes rich text instead of a plain string like `set_text`/
+    /// `set_which_key_text`.
+    pub fn set_modeline_text(&mut self, segments: &[(&str, Color)]) {
+        let default_attrs = Attrs::new().family(Family::Monospace);
+        let spans: Vec<(&str, Attrs)> = segments
+            .iter()
+            .map(|(text, color)| (*text, Attrs::new().family(Family::Monospace).color(*color)))
+            .collect();
+        self.modeline.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 

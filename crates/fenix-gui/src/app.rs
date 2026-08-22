@@ -217,9 +217,12 @@ impl App {
         self.scroll_line = scroll_to_include(self.scroll_line, line, visible_lines);
     }
 
-    fn modeline_text(&self) -> String {
+    /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
+    /// command, since that replaces the whole modeline with raw command
+    /// text instead of the usual badge + filename + position layout.
+    fn modeline_pieces(&self) -> Option<(&'static str, String)> {
         if self.vim.mode() == Mode::Command {
-            return format!(":{}", self.vim.command_line());
+            return None;
         }
         let filename = self
             .buffer
@@ -231,7 +234,35 @@ impl App {
         let (line, col) = self.buffer.line_col(&self.cursor);
         let mode_label =
             if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
-        format!(" {filename}{modified}   {mode_label}   Ln {}, Col {} ", line + 1, col + 1)
+        let suffix = format!("│ {filename}{modified}   Ln {}, Col {} ", line + 1, col + 1);
+        Some((mode_label, suffix))
+    }
+
+    /// Test-only: the modeline as one plain string, for assertions --
+    /// `redraw` renders it as separately-colored spans instead (see
+    /// `modeline_pieces`/`mode_colors`), so nothing else needs this.
+    #[cfg(test)]
+    fn modeline_text(&self) -> String {
+        if self.vim.mode() == Mode::Command {
+            return format!(":{}", self.vim.command_line());
+        }
+        let (mode_label, suffix) = self.modeline_pieces().unwrap();
+        format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
+    }
+
+    /// (badge background, badge text color) for the current mode. Visual's
+    /// three kinds all share one accent (matching orbit-emacs's own
+    /// evil-state table, which has a single "Visual" entry) -- only the
+    /// badge's label text differs between them.
+    fn mode_colors(&self) -> ([f32; 4], glyphon::Color) {
+        let theme = self.theme;
+        match self.vim.mode() {
+            Mode::Normal => (theme.mode_normal, theme.mode_text_dark),
+            Mode::Insert => (theme.mode_insert, theme.mode_text_dark),
+            Mode::Visual => (theme.mode_visual, theme.mode_text_light),
+            Mode::Replace => (theme.mode_replace, theme.mode_text_dark),
+            Mode::Command => (theme.mode_command, theme.mode_text_dark),
+        }
     }
 
     /// Per-visible-line (view_row, col_start, col_end) segments of the
@@ -331,7 +362,10 @@ impl App {
         self.ensure_cursor_visible(visible_lines);
 
         let content_text = self.buffer.visible_text(self.scroll_line, visible_lines);
-        let modeline_text = self.modeline_text();
+        let modeline_pieces = self.modeline_pieces();
+        let modeline_command_text =
+            if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
+        let (badge_bg, badge_fg) = self.mode_colors();
         let (line, col) = self.buffer.line_col(&self.cursor);
         let caret_row_in_view = line - self.scroll_line;
         let selection_segments = self.visual_selection_segments(visible_lines);
@@ -346,7 +380,16 @@ impl App {
         };
 
         text.set_text(&content_text);
-        text.set_modeline_text(&modeline_text);
+        match &modeline_pieces {
+            Some((mode_label, suffix)) => {
+                let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
+                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
+            }
+            None => {
+                let cmd = modeline_command_text.as_deref().unwrap_or("");
+                text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
+            }
+        }
 
         let modeline_top = gpu.size.height as f32 - text::MODELINE_HEIGHT;
         let which_key_panel = if which_key_lines.is_empty() {
@@ -358,7 +401,13 @@ impl App {
         };
 
         bg_rect.clear();
+        let hl_line_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
+        bg_rect.push_rect(gpu, 0.0, hl_line_y, gpu.size.width as f32, text::LINE_HEIGHT, theme.hl_line);
         bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
+        if modeline_pieces.is_some() {
+            let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * text::CHAR_WIDTH;
+            bg_rect.push_rect(gpu, 0.0, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
+        }
         if let Some(top) = which_key_panel {
             bg_rect.push_rect(gpu, 0.0, top, text::WHICH_KEY_WIDTH, modeline_top - top, theme.bg_modeline);
         }
@@ -537,11 +586,11 @@ mod tests {
     #[test]
     fn modeline_reflects_filename_dirty_state_mode_and_position() {
         let mut app = App::with_file(None);
-        assert_eq!(app.modeline_text(), " [No Name]   NORMAL   Ln 1, Col 1 ");
+        assert_eq!(app.modeline_text(), "  NORMAL │ [No Name]   Ln 1, Col 1 ");
 
         app.buffer.insert_char(&mut app.cursor, 'a');
         app.buffer.insert_char(&mut app.cursor, 'b');
-        assert_eq!(app.modeline_text(), " [No Name] [+]   NORMAL   Ln 1, Col 3 ");
+        assert_eq!(app.modeline_text(), "  NORMAL │ [No Name] [+]   Ln 1, Col 3 ");
     }
 
     #[test]
@@ -590,6 +639,24 @@ mod tests {
 
         app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v').with_ctrl());
         assert!(app.modeline_text().contains("V-BLOCK"));
+    }
+
+    #[test]
+    fn mode_colors_differ_per_mode_and_visual_kinds_share_one_accent() {
+        let mut app = App::with_file(None);
+        let (normal_bg, _) = app.mode_colors();
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('i'));
+        let (insert_bg, _) = app.mode_colors();
+        assert_ne!(normal_bg, insert_bg);
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::named(FenixNamedKey::Escape));
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        let (char_visual_bg, _) = app.mode_colors();
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        let (line_visual_bg, _) = app.mode_colors();
+        assert_eq!(char_visual_bg, line_visual_bg); // one accent for all Visual kinds
+        assert_ne!(char_visual_bg, normal_bg);
     }
 
     #[test]
