@@ -71,6 +71,21 @@ impl TextPipeline {
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Sets the buffer-content text as differently-colored spans -- the
+    /// line-number gutter prefix (or `~` for past-end-of-buffer rows) in
+    /// one color per span, the actual line content in another. Same
+    /// rich-text mechanism as `set_modeline_text`, applied per source line
+    /// instead of once for the whole area.
+    pub fn set_content_rich(&mut self, segments: &[(&str, Color)]) {
+        let default_attrs = Attrs::new().family(Family::Monospace);
+        let spans: Vec<(&str, Attrs)> = segments
+            .iter()
+            .map(|(text, color)| (*text, Attrs::new().family(Family::Monospace).color(*color)))
+            .collect();
+        self.buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+    }
+
     /// Sets the modeline text as a sequence of differently-colored spans
     /// (e.g. the mode badge in its own accent, the rest in the normal
     /// modeline color) -- a single flat color can't do that, so this

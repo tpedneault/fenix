@@ -33,6 +33,11 @@ impl CommandRegistry {
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix", cmd_quit);
+        registry.register(
+            "view.cycle_line_numbers",
+            "Cycle the line-number gutter: off, absolute, relative",
+            cmd_cycle_line_numbers,
+        );
         registry
     }
 
@@ -69,4 +74,8 @@ fn cmd_redo(ctx: &mut CommandCtx) {
 
 fn cmd_quit(ctx: &mut CommandCtx) {
     ctx.event_loop.exit();
+}
+
+fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
+    ctx.app.cycle_line_number_mode();
 }

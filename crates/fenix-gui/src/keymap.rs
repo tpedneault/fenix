@@ -73,9 +73,10 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
 /// through to a resolved command -- is just one uniform walk of this trie.
 ///
 /// Deliberately sparse: only wires groups that have a real command behind
-/// them today (`file.save`, `app.quit`). Orbit-emacs's `SPC w`/`SPC b`/
-/// `SPC t` groups have nothing to bind to yet -- no splits, multi-buffer,
-/// or toggles exist until later phases -- so they're not stubbed in here.
+/// them today (`file.save`, `app.quit`, the `SPC t` toggle group's line-
+/// number cycle). Orbit-emacs's `SPC w`/`SPC b` groups have nothing to
+/// bind to yet -- no splits or multi-buffer exist until later phases -- so
+/// they're not stubbed in here.
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -88,6 +89,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         t.label_group(&[spc, KeyPress::char('q')], "quit");
         t.insert(&[spc, KeyPress::char('q'), KeyPress::char('q')], "quit", "app.quit");
+
+        t.label_group(&[spc, KeyPress::char('t')], "toggle");
+        t.insert(
+            &[spc, KeyPress::char('t'), KeyPress::char('n')],
+            "line numbers",
+            "view.cycle_line_numbers",
+        );
 
         t
     })
@@ -118,6 +126,18 @@ mod tests {
         match m.feed(KeyPress::char('s')) {
             fenix_keymap::Step::Matched(&"file.save") => {}
             _ => panic!("expected SPC f s to resolve to file.save"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_line_number_toggle() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('t'));
+        match m.feed(KeyPress::char('n')) {
+            fenix_keymap::Step::Matched(&"view.cycle_line_numbers") => {}
+            _ => panic!("expected SPC t n to resolve to view.cycle_line_numbers"),
         }
     }
 }

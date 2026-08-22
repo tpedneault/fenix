@@ -29,6 +29,12 @@ pub struct Theme {
     pub mode_text_dark: glyphon::Color,
     /// Badge text color for the one mode whose accent is too dark for that (red).
     pub mode_text_light: glyphon::Color,
+
+    /// Line-number gutter: muted so it recedes behind actual content, same
+    /// role as most editors' "line number" / vim's `LineNr` highlight group.
+    /// The current line's number uses `fg` instead (see `App::mode_colors`'
+    /// sibling gutter logic), so it stands out without needing its own color.
+    pub gutter_fg: glyphon::Color,
 }
 
 const fn rgba(hex: u32) -> [f32; 4] {
@@ -68,4 +74,6 @@ pub const ORBIT_DARK: Theme = Theme {
     mode_command: rgba(0x7aa2f7),
     mode_text_dark: text_color(0x1a1b26),
     mode_text_light: text_color(0xffffff),
+
+    gutter_fg: text_color(0x565f89),
 };

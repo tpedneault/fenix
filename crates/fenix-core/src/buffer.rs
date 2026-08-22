@@ -134,6 +134,17 @@ impl Buffer {
         self.rope.len_lines()
     }
 
+    /// Like `line_count`, but corrected for ropey's phantom trailing line: a
+    /// rope ending in `\n` reports one more line than a reader would
+    /// actually see (an empty "line" past the final newline). Used wherever
+    /// that count needs to match what's visually on screen -- `gg`/`G`
+    /// motions and the line-number gutter both care about the real last
+    /// line, not ropey's internal one.
+    pub fn visual_line_count(&self) -> usize {
+        let n = self.rope.len_lines();
+        if n > 1 && self.line_len(n - 1) == 0 { n - 1 } else { n }
+    }
+
     pub fn line(&self, line_idx: usize) -> RopeSlice<'_> {
         self.rope.line(line_idx)
     }
@@ -650,5 +661,13 @@ mod tests {
         assert!(buf.undo(&mut cur));
         assert_eq!(buf.text(), "hello");
         assert_eq!(cur.char_idx, 5);
+    }
+
+    #[test]
+    fn visual_line_count_excludes_ropeys_phantom_trailing_line() {
+        assert_eq!(buffer_with("a\nb\nc\n").visual_line_count(), 3);
+        assert_eq!(buffer_with("a\nb\nc").visual_line_count(), 3);
+        assert_eq!(buffer_with("").visual_line_count(), 1);
+        assert_eq!(buffer_with("\n").visual_line_count(), 1);
     }
 }

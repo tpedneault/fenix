@@ -62,6 +62,17 @@ struct ScrollAnim {
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
 
+/// Line-number gutter display. Not wired to a config file yet -- there
+/// isn't one yet (`App::with_file` just picks a hardcoded default) -- but
+/// the enum exists now so hooking that up later is a matter of reading
+/// this field from somewhere else, not redesigning the rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineNumberMode {
+    Off,
+    Absolute,
+    Relative,
+}
+
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
 /// `[scroll_line, scroll_line + visible_lines)` window.
 fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usize) -> usize {
@@ -108,6 +119,9 @@ pub struct App {
     rendered_scroll: f32,
     scroll_anim: Option<ScrollAnim>,
 
+    /// See `LineNumberMode` doc comment -- hardcoded for now.
+    line_number_mode: LineNumberMode,
+
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
     /// `handle_key` calls; `'static` because the leader trie is a global
@@ -153,6 +167,7 @@ impl App {
             scroll_line: 0,
             rendered_scroll: 0.0,
             scroll_anim: None,
+            line_number_mode: LineNumberMode::Absolute,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
@@ -184,6 +199,21 @@ impl App {
     pub(crate) fn redo(&mut self) {
         self.buffer.redo(&mut self.cursor);
         self.wake_caret();
+    }
+
+    /// Off -> Absolute -> Relative -> Off. Stands in for a config-file
+    /// setting that doesn't exist yet (see `LineNumberMode`) -- a keybound
+    /// cycle is how you'd want to flip this at runtime anyway, so it's not
+    /// wasted work once config loading lands.
+    pub(crate) fn cycle_line_number_mode(&mut self) {
+        self.line_number_mode = match self.line_number_mode {
+            LineNumberMode::Off => LineNumberMode::Absolute,
+            LineNumberMode::Absolute => LineNumberMode::Relative,
+            LineNumberMode::Relative => LineNumberMode::Off,
+        };
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Resets the caret blink timer so an edit or navigation always leaves
@@ -391,6 +421,66 @@ impl App {
         }
     }
 
+    /// Character width of the line-number gutter, including one trailing
+    /// column of padding before the text starts; 0 when the gutter is off.
+    /// Sized to the buffer's total line count regardless of Absolute vs.
+    /// Relative, so the gutter doesn't resize if that mode is ever toggled
+    /// at runtime -- matching how Vim shares one `numberwidth` between
+    /// `number` and `relativenumber` instead of sizing them separately.
+    fn gutter_chars(&self) -> usize {
+        if self.line_number_mode == LineNumberMode::Off {
+            return 0;
+        }
+        self.buffer.visual_line_count().max(1).to_string().len() + 1
+    }
+
+    /// Rich-text spans for the buffer-content area covering `rows` screen
+    /// rows starting at `render_base_line`: each row that maps to a real
+    /// buffer line gets an optional gutter prefix (its line number, right-
+    /// aligned, brighter on the cursor's own line) followed by that line's
+    /// text; rows past the end of the buffer get a `~` marker instead,
+    /// matching Vim's convention for "there's no line here" -- shown even
+    /// with the gutter off, same as Vim shows it regardless of `number`.
+    fn content_spans(
+        &self,
+        render_base_line: usize,
+        rows: usize,
+        gutter_chars: usize,
+    ) -> Vec<(String, glyphon::Color)> {
+        let theme = self.theme;
+        let visual_lines = self.buffer.visual_line_count();
+        let (cursor_line, _) = self.buffer.line_col(&self.cursor);
+        let mut spans = Vec::new();
+        for r in 0..rows {
+            let buffer_line = render_base_line + r;
+            let has_line = buffer_line < visual_lines;
+            if gutter_chars > 0 {
+                let gutter = if has_line {
+                    let n = match self.line_number_mode {
+                        LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
+                        _ => buffer_line + 1,
+                    };
+                    format!("{:>width$} ", n, width = gutter_chars - 1)
+                } else {
+                    format!("{:<width$}", "~", width = gutter_chars)
+                };
+                let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
+                spans.push((gutter, color));
+            } else if !has_line {
+                spans.push(("~".to_string(), theme.gutter_fg));
+            }
+            if has_line {
+                let start = self.buffer.line_start_char(buffer_line);
+                let len = self.buffer.line_len(buffer_line);
+                spans.push((self.buffer.text_range(start, start + len), theme.fg));
+            }
+            if r + 1 < rows {
+                spans.push(("\n".to_string(), theme.fg));
+            }
+        }
+        spans
+    }
+
     /// Per-visible-line (view_row, col_start, col_end) segments of the
     /// active Visual-mode selection, for highlighting. Empty outside Visual
     /// mode. Shape depends on `visual_kind()`: Char is a single charwise
@@ -517,7 +607,9 @@ impl App {
         // trailing edge needs one more line of content to reveal.
         let render_base_line = self.render_base_line();
         let render_frac = self.render_frac();
-        let content_text = self.buffer.visible_text(render_base_line, visible_lines + 1);
+        let gutter_chars = self.gutter_chars();
+        let gutter_px = gutter_chars as f32 * text::CHAR_WIDTH;
+        let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars);
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text =
             if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
@@ -541,7 +633,9 @@ impl App {
             return;
         };
 
-        text.set_text(&content_text);
+        let content_refs: Vec<(&str, glyphon::Color)> =
+            content_spans.iter().map(|(s, c)| (s.as_str(), *c)).collect();
+        text.set_content_rich(&content_refs);
         match &modeline_pieces {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
@@ -590,7 +684,7 @@ impl App {
             bg_rect.push_rect(gpu, left, top, text::WHICH_KEY_WIDTH, height, theme.bg_modeline);
         }
         for (row, col_start, col_end) in selection_segments {
-            let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
+            let x = text::PAD_LEFT + gutter_px + col_start as f32 * text::CHAR_WIDTH;
             let y = row_y(row);
             let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
             bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
@@ -598,7 +692,7 @@ impl App {
         if let Some((segments, alpha)) = pulse_overlay {
             let [r, g, b, _] = theme.caret;
             for (row, col_start, col_end) in segments {
-                let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
+                let x = text::PAD_LEFT + gutter_px + col_start as f32 * text::CHAR_WIDTH;
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
                 bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
@@ -609,7 +703,7 @@ impl App {
         caret_rect.clear();
         if let Some(row) = caret_row_in_view {
             if caret_alpha > 0.0 {
-                let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
+                let caret_x = text::PAD_LEFT + gutter_px + col as f32 * text::CHAR_WIDTH;
                 let caret_y = row_y(row);
                 let [r, g, b, a] = theme.caret;
                 caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
@@ -1034,5 +1128,71 @@ mod tests {
         let fenix_vim::VimEvent::Pulse(range) = event else { panic!("expected a Pulse event from yw") };
         app.pulse = Some(Pulse { range, started: Instant::now() });
         assert!(app.pulse_overlay(10).is_some());
+    }
+
+    #[test]
+    fn gutter_chars_zero_when_off() {
+        let mut app = App::with_file(None);
+        app.line_number_mode = LineNumberMode::Off;
+        assert_eq!(app.gutter_chars(), 0);
+    }
+
+    #[test]
+    fn gutter_chars_defaults_to_absolute_and_sizes_for_line_count() {
+        let app = App::with_file(None); // empty buffer: one visual line
+        assert_eq!(app.gutter_chars(), 2); // 1-digit number + 1 padding column
+    }
+
+    #[test]
+    fn content_spans_marks_rows_past_buffer_end_with_tilde() {
+        let app = App::with_file(None); // single empty line, cursor on it
+        let gutter = app.gutter_chars();
+        let spans = app.content_spans(0, 3, gutter);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "1 \n~ \n~ ");
+    }
+
+    #[test]
+    fn content_spans_off_mode_still_shows_tilde_for_rows_past_end() {
+        let mut app = App::with_file(None);
+        app.line_number_mode = LineNumberMode::Off;
+        let spans = app.content_spans(0, 2, app.gutter_chars());
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "\n~");
+    }
+
+    #[test]
+    fn content_spans_relative_mode_shows_distance_from_cursor() {
+        let mut app = App::with_file(None);
+        app.line_number_mode = LineNumberMode::Relative;
+        app.buffer.insert_str(&mut app.cursor, "a\nb\nc\nd");
+        app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
+        let gutter = app.gutter_chars();
+        let spans = app.content_spans(0, 4, gutter);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
+    }
+
+    #[test]
+    fn content_spans_current_line_number_uses_fg_not_gutter_fg() {
+        let mut app = App::with_file(None);
+        app.buffer.insert_str(&mut app.cursor, "a\nb");
+        app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
+        let gutter = app.gutter_chars();
+        let spans = app.content_spans(0, 2, gutter);
+        assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
+        assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
+    }
+
+    #[test]
+    fn cycle_line_number_mode_goes_off_absolute_relative_off() {
+        let mut app = App::with_file(None);
+        app.line_number_mode = LineNumberMode::Off;
+        app.cycle_line_number_mode();
+        assert_eq!(app.line_number_mode, LineNumberMode::Absolute);
+        app.cycle_line_number_mode();
+        assert_eq!(app.line_number_mode, LineNumberMode::Relative);
+        app.cycle_line_number_mode();
+        assert_eq!(app.line_number_mode, LineNumberMode::Off);
     }
 }
