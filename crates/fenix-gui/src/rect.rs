@@ -7,15 +7,17 @@ struct Vertex {
     color: [f32; 4],
 }
 
-const MAX_RECTS: usize = 64;
+const MAX_RECTS: usize = 256;
 const VERTICES_PER_RECT: usize = 6;
 
-/// Draws small solid-color rectangles (caret, selection, current-line
-/// highlight later) as simple two-triangle quads, independent of the text
-/// pipeline.
+/// Draws small solid-color rectangles (caret, modeline bar, selection and
+/// current-line highlight later) as simple two-triangle quads, independent
+/// of the text pipeline. Rects are accumulated on the CPU side across a
+/// frame via `push_rect`, then uploaded once in `flush`.
 pub struct RectRenderer {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    vertices: Vec<Vertex>,
     vertex_count: u32,
 }
 
@@ -81,12 +83,21 @@ impl RectRenderer {
             mapped_at_creation: false,
         });
 
-        Self { pipeline, vertex_buffer, vertex_count: 0 }
+        Self { pipeline, vertex_buffer, vertices: Vec::new(), vertex_count: 0 }
     }
 
-    /// Replace this frame's rects with a single one, in pixel space
-    /// (top-left x/y, width/height), color as straight-alpha RGBA in 0..1.
-    pub fn set_rect(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+    /// Start a new frame's worth of rects.
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+    }
+
+    /// Queue one rect in pixel space (top-left x/y, width/height), color as
+    /// straight-alpha RGBA in 0..1.
+    pub fn push_rect(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        if self.vertices.len() + VERTICES_PER_RECT > MAX_RECTS * VERTICES_PER_RECT {
+            return;
+        }
+
         let sw = gpu.config.width as f32;
         let sh = gpu.config.height as f32;
         let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
@@ -96,21 +107,23 @@ impl RectRenderer {
         let p01 = to_ndc(x, y + h);
         let p11 = to_ndc(x + w, y + h);
 
-        let verts = [
+        self.vertices.extend_from_slice(&[
             Vertex { position: p00, color },
             Vertex { position: p10, color },
             Vertex { position: p01, color },
             Vertex { position: p10, color },
             Vertex { position: p11, color },
             Vertex { position: p01, color },
-        ];
-
-        gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
-        self.vertex_count = verts.len() as u32;
+        ]);
     }
 
-    pub fn clear(&mut self) {
-        self.vertex_count = 0;
+    /// Uploads this frame's queued rects. Call after all `push_rect` calls,
+    /// before `render`.
+    pub fn flush(&mut self, gpu: &GpuState) {
+        if !self.vertices.is_empty() {
+            gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+        }
+        self.vertex_count = self.vertices.len() as u32;
     }
 
     pub fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {

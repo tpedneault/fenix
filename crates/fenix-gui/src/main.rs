@@ -1,7 +1,9 @@
 mod app;
+mod commands;
 mod gpu;
 mod rect;
 mod text;
+mod theme;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
