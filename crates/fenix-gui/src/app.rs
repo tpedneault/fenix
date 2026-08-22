@@ -28,6 +28,22 @@ const BLINK_FADE: Duration = Duration::from_millis(120);
 /// below instead -- see the plan's "animations are short bursts, not
 /// continuous idle work" rationale.
 const ANIM_TICK: Duration = Duration::from_millis(16);
+/// How long a yank/paste pulse stays visible before fully fading out.
+/// Modeled on orbit-emacs's own yank/paste pulse feature.
+const PULSE_DURATION: Duration = Duration::from_millis(300);
+/// Alpha the pulse starts at before fading -- brighter than the steady
+/// Visual-selection overlay so it reads as a distinct flash, not a
+/// held selection.
+const PULSE_PEAK_ALPHA: f32 = 0.45;
+
+/// An active yank/paste highlight, fading out over `PULSE_DURATION`.
+struct Pulse {
+    range: std::ops::Range<usize>,
+    started: Instant,
+}
+
+/// Per-visible-line highlight segments: (view_row, col_start, col_end).
+type Segments = Vec<(usize, usize, usize)>;
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
 /// `[scroll_line, scroll_line + visible_lines)` window.
@@ -83,6 +99,7 @@ pub struct App {
     /// When the current fade started; `caret_alpha` eases from this.
     blink_transition_start: Instant,
     next_blink: Instant,
+    pulse: Option<Pulse>,
 }
 
 impl App {
@@ -115,6 +132,7 @@ impl App {
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
+            pulse: None,
         }
     }
 
@@ -240,6 +258,9 @@ impl App {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
             }
+            VimEvent::Pulse(range) => {
+                self.pulse = Some(Pulse { range, started: Instant::now() });
+            }
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -306,7 +327,7 @@ impl App {
     /// span, Line highlights whole lines regardless of column, Block is a
     /// column-range rectangle across lines (clamped per ragged line, like
     /// the Block operators themselves).
-    fn visual_selection_segments(&self, visible_lines: usize) -> Vec<(usize, usize, usize)> {
+    fn visual_selection_segments(&self, visible_lines: usize) -> Segments {
         if self.vim.mode() != Mode::Visual {
             return Vec::new();
         }
@@ -320,15 +341,7 @@ impl App {
                 let (lo, hi) =
                     if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
                 let hi = hi.min(self.buffer.len_chars());
-                for line in self.scroll_line..last_visible {
-                    let line_start = self.buffer.line_start_char(line);
-                    let line_end = line_start + self.buffer.line_len(line);
-                    let seg_start = lo.max(line_start);
-                    let seg_end = hi.min(line_end);
-                    if seg_start < seg_end {
-                        segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
-                    }
-                }
+                segments = self.range_to_segments(lo..hi, visible_lines);
             }
             VisualKind::Line => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
@@ -369,6 +382,25 @@ impl App {
         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
+    /// Per-visible-line (view_row, col_start, col_end) segments a plain
+    /// char range covers -- shared by Char-kind Visual selection and the
+    /// yank/paste pulse, which are both "highlight this contiguous span"
+    /// even though they come from different sources.
+    fn range_to_segments(&self, range: std::ops::Range<usize>, visible_lines: usize) -> Segments {
+        let last_visible = (self.scroll_line + visible_lines).min(self.buffer.line_count());
+        let mut segments = Vec::new();
+        for line in self.scroll_line..last_visible {
+            let line_start = self.buffer.line_start_char(line);
+            let line_end = line_start + self.buffer.line_len(line);
+            let seg_start = range.start.max(line_start);
+            let seg_end = range.end.min(line_end);
+            if seg_start < seg_end {
+                segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
+            }
+        }
+        segments
+    }
+
     /// Key/label pairs for whichever pending sequence is currently active
     /// (the leader menu takes priority, since it's the outermost one --
     /// Vim can't be mid-sequence while a leader sequence is in progress).
@@ -379,6 +411,20 @@ impl App {
         } else {
             self.vim.pending_children()
         }
+    }
+
+    /// Segments and current alpha for an active yank/paste pulse, or
+    /// `None` when there isn't one. Fades quickly at first then lingers
+    /// faintly, via the same ease-out curve as the caret (inverted: pulses
+    /// start bright and fade, blink fades in toward its target instead).
+    fn pulse_overlay(&self, visible_lines: usize) -> Option<(Segments, f32)> {
+        let pulse = self.pulse.as_ref()?;
+        let t = Instant::now().duration_since(pulse.started).as_secs_f32() / PULSE_DURATION.as_secs_f32();
+        let alpha = PULSE_PEAK_ALPHA * (1.0 - ease_out_cubic(t));
+        if alpha <= 0.0 {
+            return None;
+        }
+        Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
     }
 
     /// Which-key popup text, sorted alphabetically by label for
@@ -404,6 +450,7 @@ impl App {
         let (line, col) = self.buffer.line_col(&self.cursor);
         let caret_row_in_view = line - self.scroll_line;
         let selection_segments = self.visual_selection_segments(visible_lines);
+        let pulse_overlay = self.pulse_overlay(visible_lines);
         let which_key_lines = self.which_key_lines();
         let caret_alpha = self.caret_alpha();
         let theme = self.theme;
@@ -451,6 +498,15 @@ impl App {
             let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
             let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
             bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
+        }
+        if let Some((segments, alpha)) = pulse_overlay {
+            let [r, g, b, _] = theme.caret;
+            for (row, col_start, col_end) in segments {
+                let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
+                let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+                let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
+                bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
+            }
         }
         bg_rect.flush(gpu);
 
@@ -581,12 +637,23 @@ impl ApplicationHandler for App {
             needs_redraw = true;
         }
 
-        // Keep redrawing at animation cadence only while the fade is
-        // actually in flight; once it settles, fall back to the long,
-        // efficient wait for the next toggle -- an idle editor still does
-        // no per-frame work between blinks.
-        let transitioning = now.duration_since(self.blink_transition_start) < BLINK_FADE;
-        if transitioning {
+        // Keep redrawing at animation cadence only while something is
+        // actually transitioning (blink fade or an active pulse); once
+        // everything settles, fall back to the long, efficient wait for
+        // the next blink toggle -- an idle editor still does no per-frame
+        // work between blinks.
+        let blink_transitioning = now.duration_since(self.blink_transition_start) < BLINK_FADE;
+        let pulse_active = match &self.pulse {
+            Some(p) if now.duration_since(p.started) < PULSE_DURATION => true,
+            Some(_) => {
+                self.pulse = None; // expired -- drop it so redraw stops drawing it
+                needs_redraw = true;
+                false
+            }
+            None => false,
+        };
+        let animating = blink_transitioning || pulse_active;
+        if animating {
             needs_redraw = true;
         }
 
@@ -596,7 +663,7 @@ impl ApplicationHandler for App {
             }
         }
 
-        let wait_until = if transitioning { now + ANIM_TICK } else { self.next_blink };
+        let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }
@@ -772,5 +839,56 @@ mod tests {
         app.blink_transition_start = Instant::now(); // mid fade-out
         app.wake_caret();
         assert_eq!(app.caret_alpha(), 1.0);
+    }
+
+    #[test]
+    fn no_pulse_by_default() {
+        let app = App::with_file(None);
+        assert!(app.pulse_overlay(10).is_none());
+    }
+
+    #[test]
+    fn fresh_pulse_is_near_peak_alpha_and_covers_its_range() {
+        let mut app = App::with_file(None);
+        for ch in "hello world".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.pulse = Some(Pulse { range: 0..5, started: Instant::now() });
+        let (segments, alpha) = app.pulse_overlay(10).expect("pulse should be active");
+        assert_eq!(segments, vec![(0, 0, 5)]);
+        assert!(alpha > 0.0 && alpha <= PULSE_PEAK_ALPHA);
+    }
+
+    #[test]
+    fn expired_pulse_produces_no_overlay() {
+        let mut app = App::with_file(None);
+        for ch in "hello".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.pulse = Some(Pulse { range: 0..5, started: Instant::now() - PULSE_DURATION * 2 });
+        assert!(app.pulse_overlay(10).is_none());
+    }
+
+    // App::handle_key itself needs a real winit KeyEvent/ActiveEventLoop,
+    // which aren't constructible in a unit test (same constraint as the
+    // rest of the winit-facing integration, verified by code review
+    // instead -- see the plan). This exercises the layer below it: that a
+    // VimEvent::Pulse from VimState turns into a renderable pulse_overlay,
+    // which is the actual logic worth covering here; App's own arm that
+    // wires the two together is two lines and reviewed by eye.
+    #[test]
+    fn vim_pulse_event_yields_a_renderable_pulse_overlay() {
+        let mut app = App::with_file(None);
+        for ch in "hello world".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.cursor = Cursor::at_start();
+        assert!(app.pulse.is_none());
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('y'));
+        let event = app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('w'));
+        let fenix_vim::VimEvent::Pulse(range) = event else { panic!("expected a Pulse event from yw") };
+        app.pulse = Some(Pulse { range, started: Instant::now() });
+        assert!(app.pulse_overlay(10).is_some());
     }
 }

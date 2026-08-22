@@ -12,13 +12,19 @@ use crate::textobject;
 /// What `VimState::handle_key` wants the host application to do -- the one
 /// escape hatch out of pure buffer/cursor editing, for the handful of `:`
 /// ex-commands that need app-level action (save/quit) rather than a buffer
-/// edit. Everything else stays inside fenix-vim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// edit, plus a visual-feedback hint the host UI can act on however it
+/// likes. Everything else stays inside fenix-vim.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VimEvent {
     None,
     RequestSave,
     RequestQuit,
     RequestSaveAndQuit,
+    /// A yank or paste just happened over this char range -- modeled on
+    /// orbit-emacs's own yank/paste pulse feature, for the host UI to
+    /// briefly highlight and fade. Not raised for Block-mode yank/paste
+    /// (no single contiguous range to pulse cleanly) or delete.
+    Pulse(Range<usize>),
 }
 
 struct Register {
@@ -64,6 +70,9 @@ pub struct VimState {
     /// selection, for `gv` to restore.
     last_visual: Option<(VisualKind, usize, usize)>,
     block_insert: Option<BlockInsert>,
+    /// Set by a yank or (non-block) paste; consumed by `handle_key` right
+    /// after dispatch and turned into `VimEvent::Pulse`.
+    pending_pulse: Option<Range<usize>>,
     command_line: String,
 
     normal_matcher: Matcher<'static, VimAction>,
@@ -84,6 +93,7 @@ impl VimState {
             visual_kind: VisualKind::Char,
             last_visual: None,
             block_insert: None,
+            pending_pulse: None,
             command_line: String::new(),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
@@ -134,12 +144,20 @@ impl VimState {
     }
 
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
-        match self.mode {
+        let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
             Mode::Command => self.handle_command_key(key),
             Mode::Normal => self.handle_normal_key(buffer, cursor, key),
             Mode::Visual => self.handle_visual_key(buffer, cursor, key),
+        };
+        // A pulse is purely a visual-feedback hint layered on top of
+        // whatever else happened; None is the only event a yank/paste
+        // keypress would otherwise produce, so this never shadows a real
+        // RequestSave/Quit.
+        match self.pending_pulse.take() {
+            Some(range) => VimEvent::Pulse(range),
+            None => event,
         }
     }
 
@@ -537,6 +555,7 @@ impl VimState {
         match op {
             Operator::Yank => {
                 let text = buffer.text_range(range.start, range.end);
+                self.pending_pulse = Some(range.clone());
                 self.register = Register { text, linewise };
                 cursor.char_idx = range.start.min(buffer.len_chars());
                 let (_, col) = buffer.line_col(cursor);
@@ -572,12 +591,14 @@ impl VimState {
             };
             cursor.char_idx = at;
             buffer.insert_str(cursor, &block);
+            self.pending_pulse = Some(at..(at + block.chars().count()));
             cursor.char_idx = at;
         } else {
             let text = self.register.text.repeat(count);
             let at = if after { (cursor.char_idx + 1).min(buffer.len_chars()) } else { cursor.char_idx };
             cursor.char_idx = at;
             buffer.insert_str(cursor, &text);
+            self.pending_pulse = Some(at..(at + text.chars().count()));
             cursor.char_idx = at;
         }
         let (_, col) = buffer.line_col(cursor);
@@ -929,6 +950,46 @@ mod tests {
         assert_eq!(b.text(), "one\ntwo"); // yank doesn't delete
         keys(&mut vim, &mut b, &mut c, "p");
         assert_eq!(b.text(), "one\none\ntwo");
+    }
+
+    #[test]
+    fn yank_produces_a_pulse_event_over_the_yanked_range() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "y"); // operator-pending, no pulse yet
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('w'));
+        assert_eq!(ev, VimEvent::Pulse(0..6)); // "hello " (word-forward, exclusive)
+    }
+
+    #[test]
+    fn paste_produces_a_pulse_event_over_the_inserted_range() {
+        let mut b = buf("ab");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yl"); // yank "a"
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('p'));
+        assert_eq!(ev, VimEvent::Pulse(1..2)); // pasted "a" right after the cursor
+    }
+
+    #[test]
+    fn doubled_yy_also_produces_a_pulse() {
+        let mut b = buf("one\ntwo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "y");
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('y'));
+        assert_eq!(ev, VimEvent::Pulse(0..4)); // "one\n"
+    }
+
+    #[test]
+    fn ordinary_keys_produce_no_pulse() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('l')), VimEvent::None);
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('x')); // delete, not yank
+        assert_eq!(ev, VimEvent::None);
     }
 
     #[test]
