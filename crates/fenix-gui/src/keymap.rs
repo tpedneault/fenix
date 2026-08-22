@@ -35,6 +35,39 @@ pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
     })
 }
 
+/// A short human-readable label for a keypress, for the which-key popup
+/// (`SPC` rather than a literal space, `C-r` for Ctrl-r, `Esc` for Escape).
+pub fn describe_keypress(kp: &KeyPress) -> String {
+    let mut s = String::new();
+    if kp.mods.ctrl {
+        s.push_str("C-");
+    }
+    if kp.mods.alt {
+        s.push_str("M-");
+    }
+    if kp.mods.super_ {
+        s.push_str("S-");
+    }
+    match kp.code {
+        KeyCode::Char(' ') => s.push_str("SPC"),
+        KeyCode::Char(c) => s.push(c),
+        KeyCode::Named(FenixNamedKey::Escape) => s.push_str("Esc"),
+        KeyCode::Named(FenixNamedKey::Enter) => s.push_str("Enter"),
+        KeyCode::Named(FenixNamedKey::Tab) => s.push_str("Tab"),
+        KeyCode::Named(FenixNamedKey::Backspace) => s.push_str("Backspace"),
+        KeyCode::Named(FenixNamedKey::Delete) => s.push_str("Delete"),
+        KeyCode::Named(FenixNamedKey::Left) => s.push_str("Left"),
+        KeyCode::Named(FenixNamedKey::Right) => s.push_str("Right"),
+        KeyCode::Named(FenixNamedKey::Up) => s.push_str("Up"),
+        KeyCode::Named(FenixNamedKey::Down) => s.push_str("Down"),
+        KeyCode::Named(FenixNamedKey::Home) => s.push_str("Home"),
+        KeyCode::Named(FenixNamedKey::End) => s.push_str("End"),
+        KeyCode::Named(FenixNamedKey::PageUp) => s.push_str("PgUp"),
+        KeyCode::Named(FenixNamedKey::PageDown) => s.push_str("PgDn"),
+    }
+    s
+}
+
 /// The `SPC`-leader menu. Includes the leading space itself as the trie's
 /// first key, so the whole leader interaction -- from the initial `SPC`
 /// through to a resolved command -- is just one uniform walk of this trie.
@@ -58,4 +91,33 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         t
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_keypress_formats_plain_and_modified_chars() {
+        assert_eq!(describe_keypress(&KeyPress::char('f')), "f");
+        assert_eq!(describe_keypress(&KeyPress::char(' ')), "SPC");
+        assert_eq!(describe_keypress(&KeyPress::char('r').with_ctrl()), "C-r");
+    }
+
+    #[test]
+    fn describe_keypress_formats_named_keys() {
+        assert_eq!(describe_keypress(&KeyPress::named(FenixNamedKey::Escape)), "Esc");
+    }
+
+    #[test]
+    fn leader_trie_resolves_save_and_quit() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('f'));
+        match m.feed(KeyPress::char('s')) {
+            fenix_keymap::Step::Matched(&"file.save") => {}
+            _ => panic!("expected SPC f s to resolve to file.save"),
+        }
+    }
 }

@@ -88,10 +88,7 @@ impl<'a, A> Matcher<'a, A> {
     /// The key/label pairs reachable from the current position, for
     /// re-rendering a which-key popup without needing to feed another key.
     pub fn pending_children(&self) -> Vec<(KeyPress, &'static str)> {
-        match self.current {
-            Some(node) => children_labels(node),
-            None => Vec::new(),
-        }
+        children_labels(self.current.unwrap_or(&self.trie.root))
     }
 
     pub fn feed(&mut self, key: KeyPress) -> Step<'a, A> {
@@ -192,6 +189,22 @@ mod tests {
         m.feed(KeyPress::char('d'));
         m.cancel();
         assert!(!m.is_pending());
+    }
+
+    #[test]
+    fn pending_children_at_root_lists_top_level_bindings() {
+        let mut trie = KeyTrie::new();
+        trie.insert(&[KeyPress::char('h')], "left", 1);
+        trie.insert(&[KeyPress::char('l')], "right", 2);
+        let m = trie.matcher();
+        // no feed() yet, i.e. a fresh matcher sitting at the root -- this is
+        // the state fenix-vim's operator-pending context starts in, since
+        // entering it doesn't itself consume a key.
+        assert!(!m.is_pending());
+        let children = m.pending_children();
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&(KeyPress::char('h'), "left")));
+        assert!(children.contains(&(KeyPress::char('l'), "right")));
     }
 
     #[test]

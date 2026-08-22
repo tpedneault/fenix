@@ -76,6 +76,21 @@ impl VimState {
         self.pending_op.is_some() || self.normal_matcher.is_pending() || self.visual_matcher.is_pending()
     }
 
+    /// The key/label pairs reachable from wherever a pending sequence
+    /// currently sits, for a which-key-style hint in the host UI. Empty
+    /// when nothing is pending.
+    pub fn pending_children(&self) -> Vec<(KeyPress, &'static str)> {
+        if self.pending_op.is_some() {
+            self.pending_matcher.pending_children()
+        } else if self.normal_matcher.is_pending() {
+            self.normal_matcher.pending_children()
+        } else if self.visual_matcher.is_pending() {
+            self.visual_matcher.pending_children()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
@@ -647,5 +662,22 @@ mod tests {
         assert!(vim.is_pending());
         keys(&mut vim, &mut b, &mut c, "w");
         assert!(!vim.is_pending());
+    }
+
+    #[test]
+    fn pending_children_lists_operator_pending_continuations() {
+        let mut b = buf("hello");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert!(vim.pending_children().is_empty());
+        keys(&mut vim, &mut b, &mut c, "d");
+        let children = vim.pending_children();
+        // top-level: motions directly, text objects behind their "i"/"a" prefix
+        assert!(children.iter().any(|(_, label)| *label == "word forward"));
+        assert!(children.iter().any(|(_, label)| *label == "inner..."));
+
+        keys(&mut vim, &mut b, &mut c, "i");
+        let children = vim.pending_children();
+        assert!(children.iter().any(|(_, label)| *label == "inner word"));
     }
 }

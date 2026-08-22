@@ -106,11 +106,13 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
 fn build_pending_trie() -> KeyTrie<PendingTarget> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, PendingTarget::Motion);
+    t.label_group(&[KeyPress::char('i')], "inner...");
     t.insert(
         &[KeyPress::char('i'), KeyPress::char('w')],
         "inner word",
         PendingTarget::TextObject(TextObject::InnerWord),
     );
+    t.label_group(&[KeyPress::char('a')], "a...");
     t.insert(
         &[KeyPress::char('a'), KeyPress::char('w')],
         "a word",

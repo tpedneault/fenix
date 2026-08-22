@@ -14,12 +14,16 @@ pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
 pub const MODELINE_HEIGHT: f32 = LINE_HEIGHT + 8.0;
+/// Width of the which-key popup panel.
+pub const WHICH_KEY_WIDTH: f32 = 260.0;
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
-/// Holds two independent glyph buffers sharing one atlas/renderer: `buffer`
-/// for the windowed slice of editor content currently on screen, and
-/// `modeline` for the single-line status bar.
+/// Holds three independent glyph buffers sharing one atlas/renderer:
+/// `buffer` for the windowed slice of editor content currently on screen,
+/// `modeline` for the single-line status bar, and `which_key` for the
+/// popup listing a pending key sequence's continuations (only shown while
+/// one is in progress).
 pub struct TextPipeline {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -28,6 +32,7 @@ pub struct TextPipeline {
     renderer: TextRenderer,
     buffer: GlyphBuffer,
     modeline: GlyphBuffer,
+    which_key: GlyphBuffer,
 }
 
 impl TextPipeline {
@@ -48,7 +53,11 @@ impl TextPipeline {
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(MODELINE_HEIGHT));
 
-        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline }
+        let mut which_key = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        which_key.set_wrap(Wrap::None);
+        which_key.set_size(Some(WHICH_KEY_WIDTH), None);
+
+        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key }
     }
 
     pub fn set_text(&mut self, text: &str) {
@@ -66,6 +75,16 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
+    pub fn set_which_key_text(&mut self, text: &str) {
+        self.which_key.set_text(
+            text,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        self.which_key.shape_until_scroll(&mut self.font_system, false);
+    }
+
     pub fn resize(&mut self, width: f32, height: f32) {
         self.buffer.set_size(Some(width), Some(content_height(height)));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
@@ -73,7 +92,11 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
-    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme) {
+    /// `which_key_panel`, when present, is the y-coordinate to render the
+    /// pending-sequence popup at. The caller (App) already knows the
+    /// panel's height from the hint count it built the text from, and
+    /// draws the panel's background rect itself.
+    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, which_key_panel: Option<f32>) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
@@ -112,6 +135,24 @@ impl TextPipeline {
             custom_glyphs: &[],
         };
 
+        let mut areas = vec![content_area, modeline_area];
+        if let Some(top) = which_key_panel {
+            areas.push(TextArea {
+                buffer: &self.which_key,
+                left: PAD_LEFT,
+                top: top + 4.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: top as i32,
+                    right: gpu.config.width as i32,
+                    bottom: modeline_top as i32,
+                },
+                default_color: theme.fg_modeline,
+                custom_glyphs: &[],
+            });
+        }
+
         self.renderer
             .prepare(
                 &gpu.device,
@@ -119,7 +160,7 @@ impl TextPipeline {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [content_area, modeline_area],
+                areas,
                 &mut self.swash_cache,
             )
             .expect("glyphon prepare failed");

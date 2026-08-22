@@ -250,6 +250,26 @@ impl App {
         segments
     }
 
+    /// Key/label pairs for whichever pending sequence is currently active
+    /// (the leader menu takes priority, since it's the outermost one --
+    /// Vim can't be mid-sequence while a leader sequence is in progress).
+    /// Empty when nothing is pending.
+    fn pending_hints(&self) -> Vec<(KeyPress, &'static str)> {
+        if self.leader_matcher.is_pending() {
+            self.leader_matcher.pending_children()
+        } else {
+            self.vim.pending_children()
+        }
+    }
+
+    /// Which-key popup text, sorted alphabetically by label for
+    /// scannability, one `"key  label"` per line.
+    fn which_key_lines(&self) -> Vec<String> {
+        let mut hints = self.pending_hints();
+        hints.sort_by(|a, b| a.1.cmp(b.1));
+        hints.iter().map(|(k, label)| format!("{:<6}{}", keymap::describe_keypress(k), label)).collect()
+    }
+
     fn redraw(&mut self) {
         let Some(window_height) = self.gpu.as_ref().map(|gpu| gpu.size.height as f32) else {
             return;
@@ -262,6 +282,7 @@ impl App {
         let (line, col) = self.buffer.line_col(&self.cursor);
         let caret_row_in_view = line - self.scroll_line;
         let selection_segments = self.visual_selection_segments(visible_lines);
+        let which_key_lines = self.which_key_lines();
         let blink_on = self.blink_on;
         let theme = self.theme;
 
@@ -274,15 +295,20 @@ impl App {
         text.set_text(&content_text);
         text.set_modeline_text(&modeline_text);
 
+        let modeline_top = gpu.size.height as f32 - text::MODELINE_HEIGHT;
+        let which_key_panel = if which_key_lines.is_empty() {
+            None
+        } else {
+            let panel_height = which_key_lines.len() as f32 * text::LINE_HEIGHT + 8.0;
+            text.set_which_key_text(&which_key_lines.join("\n"));
+            Some((modeline_top - panel_height).max(0.0))
+        };
+
         rect.clear();
-        rect.push_rect(
-            gpu,
-            0.0,
-            gpu.size.height as f32 - text::MODELINE_HEIGHT,
-            gpu.size.width as f32,
-            text::MODELINE_HEIGHT,
-            theme.bg_modeline,
-        );
+        rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
+        if let Some(top) = which_key_panel {
+            rect.push_rect(gpu, 0.0, top, text::WHICH_KEY_WIDTH, modeline_top - top, theme.bg_modeline);
+        }
         for (row, col_start, col_end) in selection_segments {
             let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
             let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
@@ -296,7 +322,7 @@ impl App {
         }
         rect.flush(gpu);
 
-        text.prepare(gpu, theme);
+        text.prepare(gpu, theme, which_key_panel);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
