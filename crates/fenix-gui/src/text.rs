@@ -16,6 +16,8 @@ pub const PAD_TOP: f32 = 4.0;
 pub const MODELINE_HEIGHT: f32 = LINE_HEIGHT + 8.0;
 /// Width of the which-key popup panel.
 pub const WHICH_KEY_WIDTH: f32 = 260.0;
+/// Gap between the which-key panel and the window's top/right edges.
+pub const WHICH_KEY_MARGIN: f32 = 12.0;
 /// Width (in chars) of the modeline's mode badge, centered within it.
 /// Fits the longest label ("V-BLOCK"/"REPLACE"/"COMMAND", 7 chars) with a
 /// little breathing room.
@@ -107,11 +109,18 @@ impl TextPipeline {
     /// integer line the transition has reached and shifts it up by the
     /// fractional remainder so it pans instead of jumping.
     ///
-    /// `which_key_panel`, when present, is the y-coordinate to render the
-    /// pending-sequence popup at. The caller (App) already knows the
-    /// panel's height from the hint count it built the text from, and
-    /// draws the panel's background rect itself.
-    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, content_top_offset: f32, which_key_panel: Option<f32>) {
+    /// `which_key_panel`, when present, is the (left, top, height) box to
+    /// render the pending-sequence popup in -- top-right corner of the
+    /// window, clear of both the content being edited and the modeline.
+    /// The caller (App) already knows this from the hint count it built
+    /// the text from, and draws the panel's background rect itself.
+    pub fn prepare(
+        &mut self,
+        gpu: &GpuState,
+        theme: &Theme,
+        content_top_offset: f32,
+        which_key_panel: Option<(f32, f32, f32)>,
+    ) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
@@ -151,17 +160,17 @@ impl TextPipeline {
         };
 
         let mut areas = vec![content_area, modeline_area];
-        if let Some(top) = which_key_panel {
+        if let Some((left, top, height)) = which_key_panel {
             areas.push(TextArea {
                 buffer: &self.which_key,
-                left: PAD_LEFT,
+                left: left + PAD_LEFT,
                 top: top + 4.0,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: 0,
+                    left: left as i32,
                     top: top as i32,
-                    right: gpu.config.width as i32,
-                    bottom: modeline_top as i32,
+                    right: (left + WHICH_KEY_WIDTH) as i32,
+                    bottom: (top + height) as i32,
                 },
                 default_color: theme.fg_modeline,
                 custom_glyphs: &[],

@@ -554,12 +554,16 @@ impl App {
         }
 
         let modeline_top = gpu.size.height as f32 - text::MODELINE_HEIGHT;
+        // Top-right corner, clear of both the content the user is actively
+        // editing (top-left, where the cursor usually is) and the modeline
+        // (bottom) -- least likely to sit under whatever they're looking at.
         let which_key_panel = if which_key_lines.is_empty() {
             None
         } else {
             let panel_height = which_key_lines.len() as f32 * text::LINE_HEIGHT + 8.0;
             text.set_which_key_text(&which_key_lines.join("\n"));
-            Some((modeline_top - panel_height).max(0.0))
+            let left = gpu.size.width as f32 - text::WHICH_KEY_WIDTH - text::WHICH_KEY_MARGIN;
+            Some((left, text::WHICH_KEY_MARGIN, panel_height))
         };
 
         // Every content-row rect shares this: row index (relative to
@@ -574,11 +578,16 @@ impl App {
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
         if modeline_pieces.is_some() {
+            // Starts at PAD_LEFT, matching where the badge text itself
+            // starts rendering (`text.rs`'s modeline TextArea uses the same
+            // left inset) -- starting this at the window edge instead left
+            // the rendered label overflowing past the badge's right edge,
+            // throwing off how centered it looked inside the colored badge.
             let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * text::CHAR_WIDTH;
-            bg_rect.push_rect(gpu, 0.0, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
+            bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
         }
-        if let Some(top) = which_key_panel {
-            bg_rect.push_rect(gpu, 0.0, top, text::WHICH_KEY_WIDTH, modeline_top - top, theme.bg_modeline);
+        if let Some((left, top, height)) = which_key_panel {
+            bg_rect.push_rect(gpu, left, top, text::WHICH_KEY_WIDTH, height, theme.bg_modeline);
         }
         for (row, col_start, col_end) in selection_segments {
             let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
