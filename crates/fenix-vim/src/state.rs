@@ -29,6 +29,17 @@ struct Register {
     linewise: bool,
 }
 
+/// Tracks a Visual-Block `I` session: what's typed on the top line gets
+/// replayed at the same column on every other line in the block when
+/// `Escape` ends Insert mode. Ragged lines shorter than `col` are skipped
+/// rather than padded with spaces -- a deliberate simplification.
+struct BlockInsert {
+    line_lo: usize,
+    line_hi: usize,
+    col: usize,
+    typed: String,
+}
+
 pub struct VimState {
     mode: Mode,
     register: Register,
@@ -49,6 +60,10 @@ pub struct VimState {
     count: Option<u32>,
     visual_anchor: usize,
     visual_kind: VisualKind,
+    /// The kind/anchor/cursor of the most recently exited Visual
+    /// selection, for `gv` to restore.
+    last_visual: Option<(VisualKind, usize, usize)>,
+    block_insert: Option<BlockInsert>,
     command_line: String,
 
     normal_matcher: Matcher<'static, VimAction>,
@@ -67,6 +82,8 @@ impl VimState {
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
+            last_visual: None,
+            block_insert: None,
             command_line: String::new(),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
@@ -140,8 +157,14 @@ impl VimState {
                 if col > 0 {
                     buffer.move_left(cursor);
                 }
+                self.replay_block_insert(buffer);
             }
-            KeyCode::Named(NamedKey::Backspace) => buffer.delete_backward(cursor),
+            KeyCode::Named(NamedKey::Backspace) => {
+                buffer.delete_backward(cursor);
+                if let Some(bi) = &mut self.block_insert {
+                    bi.typed.pop();
+                }
+            }
             KeyCode::Named(NamedKey::Delete) => buffer.delete_forward(cursor),
             KeyCode::Named(NamedKey::Enter) => buffer.insert_char(cursor, '\n'),
             KeyCode::Named(NamedKey::Tab) => buffer.insert_char(cursor, '\t'),
@@ -156,10 +179,31 @@ impl VimState {
                     buffer.delete_forward(cursor);
                 }
                 buffer.insert_char(cursor, c);
+                if let Some(bi) = &mut self.block_insert {
+                    bi.typed.push(c);
+                }
             }
             _ => {}
         }
         VimEvent::None
+    }
+
+    /// Replays a Visual-Block `I` session's typed text at the same column
+    /// on every other line in the block. Lines too short to reach that
+    /// column are skipped rather than padded with spaces.
+    fn replay_block_insert(&mut self, buffer: &mut Buffer) {
+        let Some(bi) = self.block_insert.take() else { return };
+        if bi.typed.is_empty() {
+            return;
+        }
+        for line in (bi.line_lo + 1)..=bi.line_hi {
+            if line >= buffer.line_count() || bi.col > buffer.line_len(line) {
+                continue;
+            }
+            let at = buffer.line_start_char(line) + bi.col;
+            let mut c = Cursor { char_idx: at, sticky_col: 0 };
+            buffer.insert_str(&mut c, &bi.typed);
+        }
     }
 
     fn handle_command_key(&mut self, key: KeyPress) -> VimEvent {
@@ -243,6 +287,16 @@ impl VimState {
             VimAction::EnterCommandLine => {
                 self.mode = Mode::Command;
                 self.command_line.clear();
+            }
+            VimAction::ReselectVisual => {
+                if let Some((kind, anchor, last_cursor)) = self.last_visual {
+                    self.mode = Mode::Visual;
+                    self.visual_kind = kind;
+                    self.visual_anchor = anchor.min(buffer.len_chars());
+                    cursor.char_idx = last_cursor.min(buffer.len_chars());
+                    let (_, col) = buffer.line_col(cursor);
+                    cursor.sticky_col = col;
+                }
             }
             VimAction::Undo => {
                 for _ in 0..count {
@@ -532,6 +586,7 @@ impl VimState {
 
     fn handle_visual_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         if key.code == KeyCode::Named(NamedKey::Escape) {
+            self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
             self.mode = Mode::Normal;
             return VimEvent::None;
         }
@@ -542,17 +597,33 @@ impl VimState {
                 // is already explicit, unlike Normal mode's motions.
                 VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1),
                 VisualAction::Apply(op) => {
-                    let (range, linewise) = self.visual_range(buffer, cursor);
-                    self.finish_operator(buffer, cursor, op, range, linewise);
+                    self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                    if self.visual_kind == VisualKind::Block {
+                        self.apply_block_operator(buffer, cursor, op);
+                    } else {
+                        let (range, linewise) = self.visual_range(buffer, cursor);
+                        self.finish_operator(buffer, cursor, op, range, linewise);
+                    }
                     if self.mode == Mode::Visual {
                         self.mode = Mode::Normal;
                     }
                 }
                 VisualAction::SetKind(kind) => {
                     if kind == self.visual_kind {
+                        self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
                         self.mode = Mode::Normal; // same key again: toggle out
                     } else {
                         self.visual_kind = kind; // different kind: switch, keep anchor
+                    }
+                }
+                VisualAction::BlockInsertLeft => {
+                    if self.visual_kind == VisualKind::Block {
+                        let (line_lo, line_hi, col_lo, _) = self.block_bounds(buffer, cursor);
+                        cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
+                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new() });
+                        self.mode = Mode::Insert;
+                        let (_, col) = buffer.line_col(cursor);
+                        cursor.sticky_col = col;
                     }
                 }
             }
@@ -561,7 +632,9 @@ impl VimState {
     }
 
     /// The char range (and whether it's linewise) the current selection
-    /// covers, per `visual_kind`.
+    /// covers, for Char/Line kinds. Block has its own per-row handling in
+    /// `apply_block_operator` (a single contiguous range can't represent a
+    /// column rectangle), so this is never called for it.
     fn visual_range(&self, buffer: &Buffer, cursor: &Cursor) -> (Range<usize>, bool) {
         match self.visual_kind {
             VisualKind::Line => {
@@ -570,10 +643,6 @@ impl VimState {
                 let (cursor_line, _) = buffer.line_col(cursor);
                 (linewise_range(buffer, anchor_line, cursor_line), true)
             }
-            // Block gets its own multi-line, per-row handling (see the
-            // Visual Block work); until that's wired up this falls back to
-            // charwise, which is harmless since nothing can reach Block
-            // mode yet (no keybinding enters it).
             VisualKind::Char | VisualKind::Block => {
                 let (lo, hi) = if self.visual_anchor <= cursor.char_idx {
                     (self.visual_anchor, cursor.char_idx + 1)
@@ -582,6 +651,64 @@ impl VimState {
                 };
                 (lo..hi.min(buffer.len_chars()), false)
             }
+        }
+    }
+
+    /// (line_lo, line_hi, col_lo, col_hi_exclusive) of the Block selection
+    /// rectangle spanned by the anchor and the cursor.
+    fn block_bounds(&self, buffer: &Buffer, cursor: &Cursor) -> (usize, usize, usize, usize) {
+        let anchor_cursor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
+        let (anchor_line, anchor_col) = buffer.line_col(&anchor_cursor);
+        let (cursor_line, cursor_col) = buffer.line_col(cursor);
+        let (line_lo, line_hi) =
+            if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
+        let (col_lo, col_hi) =
+            if anchor_col <= cursor_col { (anchor_col, cursor_col + 1) } else { (cursor_col, anchor_col + 1) };
+        (line_lo, line_hi, col_lo, col_hi)
+    }
+
+    /// `d`/`y`/`c` on a Block selection: acts on the same column range on
+    /// every line in the block, clamped to each (possibly ragged) line's
+    /// length. Simplification, disclosed in the plan: this is N separate
+    /// undo steps (one delete_range per line), not one atomic block edit,
+    /// and the register just joins the per-line pieces with '\n' -- paste
+    /// (`p`/`P`) won't reconstruct the block shape, only Delete/Yank
+    /// themselves are block-aware.
+    fn apply_block_operator(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, op: Operator) {
+        let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
+        let mut pieces = vec![String::new(); line_hi - line_lo + 1];
+
+        if op == Operator::Yank {
+            for line in line_lo..=line_hi {
+                let start = buffer.line_start_char(line);
+                let len = buffer.line_len(line);
+                let seg_start = start + col_lo.min(len);
+                let seg_end = start + col_hi.min(len);
+                if seg_start < seg_end {
+                    pieces[line - line_lo] = buffer.text_range(seg_start, seg_end);
+                }
+            }
+        } else {
+            // Bottom to top so deleting a lower line never invalidates the
+            // char offsets of lines above it that haven't been processed yet.
+            for line in (line_lo..=line_hi).rev() {
+                let start = buffer.line_start_char(line);
+                let len = buffer.line_len(line);
+                let seg_start = start + col_lo.min(len);
+                let seg_end = start + col_hi.min(len);
+                if seg_start < seg_end {
+                    pieces[line - line_lo] = buffer.delete_range(cursor, seg_start, seg_end);
+                }
+            }
+        }
+
+        self.register = Register { text: pieces.join("\n"), linewise: false };
+        cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+
+        if op == Operator::Change {
+            self.mode = Mode::Insert;
         }
     }
 }
@@ -1218,5 +1345,139 @@ mod tests {
         vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Tab)); // unbound in Normal mode
         keys(&mut vim, &mut b, &mut c, "l");
         assert_eq!(c.char_idx, 1); // single step, not 2
+    }
+
+    #[test]
+    fn ctrl_v_enters_visual_block_mode() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        assert_eq!(vim.mode(), Mode::Visual);
+        assert_eq!(vim.visual_kind(), VisualKind::Block);
+    }
+
+    #[test]
+    fn block_delete_removes_the_column_rectangle_from_every_line() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjl"); // rectangle: lines 0-2, cols 0-1
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), "c\nf\ni");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn block_yank_does_not_modify_the_buffer() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjl");
+        keys(&mut vim, &mut b, &mut c, "y");
+        assert_eq!(b.text(), "abc\ndef\nghi");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn block_yank_register_joins_column_pieces_with_newline() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjl");
+        keys(&mut vim, &mut b, &mut c, "y");
+        // paste into a separate empty buffer to inspect the register's
+        // exact content without the arithmetic of pasting back into the
+        // same (now-shifted) buffer
+        let mut b2 = buf("");
+        let mut c2 = Cursor::at_start();
+        keys(&mut vim, &mut b2, &mut c2, "P");
+        assert_eq!(b2.text(), "ab\nde\ngh");
+    }
+
+    #[test]
+    fn block_delete_on_ragged_lines_clamps_per_line() {
+        let mut b = buf("abcdef\nx\nghijkl");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jj"); // down to line 2, still col 0
+        keys(&mut vim, &mut b, &mut c, "lll"); // extend to col 3
+        keys(&mut vim, &mut b, &mut c, "d");
+        // middle line "x" is shorter than the rectangle -- clamped, not padded
+        assert_eq!(b.text(), "ef\n\nkl");
+    }
+
+    #[test]
+    fn block_change_deletes_column_and_enters_insert_without_propagating() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "j");
+        keys(&mut vim, &mut b, &mut c, "c");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "bc\nef"); // deleted on both lines, no I-style propagation
+    }
+
+    #[test]
+    fn block_insert_left_propagates_typed_text_to_other_lines_on_escape() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jj"); // column 0 across all 3 lines
+        keys(&mut vim, &mut b, &mut c, "I");
+        assert_eq!(vim.mode(), Mode::Insert);
+        keys(&mut vim, &mut b, &mut c, "X");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(b.text(), "Xabc\nXdef\nXghi");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn block_insert_left_skips_lines_too_short_to_reach_the_column() {
+        let mut b = buf("abcdef\nxy\nghijkl");
+        let mut c = Cursor { char_idx: 3, sticky_col: 3 }; // col 3 of line 0
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jj"); // down to line 2, keeping col 3
+        keys(&mut vim, &mut b, &mut c, "I");
+        keys(&mut vim, &mut b, &mut c, "Z");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        // line 1 ("xy") is only 2 chars -- too short for column 3, skipped
+        assert_eq!(b.text(), "abcZdef\nxy\nghiZjkl");
+    }
+
+    #[test]
+    fn v_then_ctrl_v_switches_to_block_without_exiting() {
+        let mut b = buf("hello");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        assert_eq!(vim.mode(), Mode::Visual);
+        assert_eq!(vim.visual_kind(), VisualKind::Block);
+    }
+
+    #[test]
+    fn gv_reselects_the_last_visual_selection() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v");
+        keys(&mut vim, &mut b, &mut c, "llll"); // select "hello"
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(vim.mode(), Mode::Normal);
+
+        keys(&mut vim, &mut b, &mut c, "$"); // move away
+        keys(&mut vim, &mut b, &mut c, "gv");
+        assert_eq!(vim.mode(), Mode::Visual);
+        assert_eq!(vim.visual_kind(), VisualKind::Char);
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), " world");
     }
 }

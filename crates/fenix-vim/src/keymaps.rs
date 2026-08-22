@@ -34,6 +34,8 @@ pub enum VimAction {
     EnterInsert(InsertEntry),
     EnterVisual(VisualKind),
     EnterCommandLine,
+    /// `gv`: re-enter Visual mode with the most recently exited selection.
+    ReselectVisual,
     Undo,
     Redo,
     DeleteCharUnder,
@@ -50,6 +52,11 @@ pub enum VisualAction {
     /// Visual mode: same kind as the current selection exits to Normal
     /// (toggle), a different kind switches to it in place (anchor kept).
     SetKind(VisualKind),
+    /// `I` in Visual Block: insert at the block's left column, replaying
+    /// what's typed onto the other lines when Insert mode ends. A no-op
+    /// outside Block mode (bound unconditionally since the trie is shared
+    /// across all three Visual kinds).
+    BlockInsertLeft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +110,10 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 
     t.insert(&[KeyPress::char('v')], "visual", VimAction::EnterVisual(VisualKind::Char));
     t.insert(&[KeyPress::char('V')], "visual line", VimAction::EnterVisual(VisualKind::Line));
+    t.insert(&[KeyPress::char('v').with_ctrl()], "visual block", VimAction::EnterVisual(VisualKind::Block));
     t.insert(&[KeyPress::char(':')], "command line", VimAction::EnterCommandLine);
+
+    t.insert(&[KeyPress::char('g'), KeyPress::char('v')], "reselect visual", VimAction::ReselectVisual);
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);
@@ -128,6 +138,8 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[Operator::Yank.trigger_key()], "yank selection", VisualAction::Apply(Operator::Yank));
     t.insert(&[KeyPress::char('v')], "visual (char)", VisualAction::SetKind(VisualKind::Char));
     t.insert(&[KeyPress::char('V')], "visual (line)", VisualAction::SetKind(VisualKind::Line));
+    t.insert(&[KeyPress::char('v').with_ctrl()], "visual (block)", VisualAction::SetKind(VisualKind::Block));
+    t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
     t
 }
 
