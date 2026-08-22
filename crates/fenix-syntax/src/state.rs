@@ -192,4 +192,37 @@ mod tests {
     fn bash_highlights_something() {
         smoke_test(LanguageId::Bash, "echo \"hello\"\n");
     }
+
+    #[test]
+    fn tcl_highlights_something() {
+        smoke_test(LanguageId::Tcl, "proc greet {name} {\n    puts \"hello $name\"\n}\n");
+    }
+
+    /// Tcl is the primary language Fenix is meant to support well, and its
+    /// vendored `highlights.scm` pairs several captures on the same node
+    /// (`@repeat @keyword`, `@spell @comment`) -- confirms overlap
+    /// resolution doesn't just pick an arbitrary one of the pair that
+    /// happens to have no theme mapping.
+    #[test]
+    fn tcl_control_flow_keywords_and_comments_are_captured() {
+        let source = "# a comment\nif {1} {\n    puts hi\n} else {\n    while {0} {\n        break\n    }\n}\n";
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let comment_start = source.find('#').unwrap();
+        let has_comment = highlights.iter().any(|(r, n)| r.start == comment_start && (*n == "comment" || *n == "spell"));
+        assert!(has_comment, "expected the comment to be captured, got {highlights:?}");
+
+        let if_start = source.find("if").unwrap();
+        let has_if = highlights
+            .iter()
+            .any(|(r, n)| r.start == if_start && (*n == "keyword" || *n == "conditional"));
+        assert!(has_if, "expected \"if\" to be captured as keyword/conditional, got {highlights:?}");
+
+        let while_start = source.find("while").unwrap();
+        let has_while = highlights
+            .iter()
+            .any(|(r, n)| r.start == while_start && (*n == "keyword" || *n == "repeat"));
+        assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
+    }
 }

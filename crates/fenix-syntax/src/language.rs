@@ -23,7 +23,16 @@ pub enum LanguageId {
     Tsx,
     C,
     Bash,
+    Tcl,
 }
+
+/// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
+/// its `HIGHLIGHTS_QUERY` constant is commented out upstream (as of the
+/// pinned commit; see `Cargo.toml`'s `rev`), unlike every other grammar
+/// here. Vendored directly from the same repo (MIT-licensed) instead of
+/// left unavailable -- Tcl is a genuinely well-used language, not worth
+/// leaving without highlighting over a bindings gap in one specific crate.
+const TCL_HIGHLIGHTS_QUERY: &str = include_str!("../queries/tcl/highlights.scm");
 
 impl LanguageId {
     pub(crate) fn language(self) -> Language {
@@ -39,6 +48,7 @@ impl LanguageId {
             LanguageId::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             LanguageId::C => tree_sitter_c::LANGUAGE.into(),
             LanguageId::Bash => tree_sitter_bash::LANGUAGE.into(),
+            LanguageId::Tcl => tree_sitter_tcl::LANGUAGE.into(),
         }
     }
 
@@ -54,6 +64,7 @@ impl LanguageId {
             LanguageId::TypeScript | LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
             LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
             LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
+            LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -75,6 +86,7 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "tsx" => Some(LanguageId::Tsx),
         "c" | "h" => Some(LanguageId::C),
         "sh" | "bash" => Some(LanguageId::Bash),
+        "tcl" | "tm" => Some(LanguageId::Tcl),
         _ => None,
     }
 }
@@ -108,5 +120,7 @@ mod tests {
         assert_eq!(detect_language("c"), Some(LanguageId::C));
         assert_eq!(detect_language("h"), Some(LanguageId::C));
         assert_eq!(detect_language("sh"), Some(LanguageId::Bash));
+        assert_eq!(detect_language("tcl"), Some(LanguageId::Tcl));
+        assert_eq!(detect_language("tm"), Some(LanguageId::Tcl));
     }
 }

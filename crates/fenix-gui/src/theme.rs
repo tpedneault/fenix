@@ -66,10 +66,16 @@ impl Theme {
     pub fn syntax_color(&self, capture_name: &str) -> glyphon::Color {
         let top = capture_name.split('.').next().unwrap_or(capture_name);
         match top {
-            "keyword" => self.syntax_keyword,
+            // "repeat"/"conditional" are Tcl's own bare (non-dotted) names
+            // for loop/if-family keywords -- its highlights.scm pairs them
+            // with a plain "keyword" capture on the same node too, but
+            // it's not guaranteed which of the two wins the overlap
+            // resolution, so both need a real mapping. Same for "spell",
+            // which it pairs with "comment".
+            "keyword" | "repeat" | "conditional" => self.syntax_keyword,
             "string" => self.syntax_string,
             "escape" => self.syntax_string,
-            "comment" => self.syntax_comment,
+            "comment" | "spell" => self.syntax_comment,
             "function" => self.syntax_function,
             "type" => self.syntax_type,
             "number" => self.syntax_number,
@@ -156,5 +162,12 @@ mod tests {
     #[test]
     fn unrecognized_capture_falls_back_to_plain_fg() {
         assert_eq!(ORBIT_DARK.syntax_color("some.unknown.capture"), ORBIT_DARK.fg);
+    }
+
+    #[test]
+    fn tcls_bare_control_flow_and_spell_captures_resolve() {
+        assert_eq!(ORBIT_DARK.syntax_color("repeat"), ORBIT_DARK.syntax_keyword);
+        assert_eq!(ORBIT_DARK.syntax_color("conditional"), ORBIT_DARK.syntax_keyword);
+        assert_eq!(ORBIT_DARK.syntax_color("spell"), ORBIT_DARK.syntax_comment);
     }
 }
