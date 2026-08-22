@@ -1,0 +1,8 @@
+[package]
+name = "fenix-vim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-core = { path = "../fenix-core" }
+fenix-keymap = { path = "../fenix-keymap" }
