@@ -447,6 +447,14 @@ mod tests {
     }
 
     #[test]
+    fn visible_text_windows_a_line_range() {
+        let buf = buffer_with("one\ntwo\nthree\nfour\nfive\n");
+        assert_eq!(buf.visible_text(1, 2), "two\nthree\n");
+        assert_eq!(buf.visible_text(4, 10), "five\n");
+        assert_eq!(buf.visible_text(10, 2), "");
+    }
+
+    #[test]
     fn undo_removes_a_whole_coalesced_typing_run() {
         let mut buf = buffer_with("");
         let mut cur = Cursor::at_start();
