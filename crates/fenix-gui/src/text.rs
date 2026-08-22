@@ -101,11 +101,17 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// `content_top_offset` shifts the buffer-content text up by that many
+    /// pixels (0..LINE_HEIGHT) -- the sub-line-height part of a smooth
+    /// scroll transition; the caller fetches text starting from the
+    /// integer line the transition has reached and shifts it up by the
+    /// fractional remainder so it pans instead of jumping.
+    ///
     /// `which_key_panel`, when present, is the y-coordinate to render the
     /// pending-sequence popup at. The caller (App) already knows the
     /// panel's height from the hint count it built the text from, and
     /// draws the panel's background rect itself.
-    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, which_key_panel: Option<f32>) {
+    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, content_top_offset: f32, which_key_panel: Option<f32>) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
@@ -120,7 +126,7 @@ impl TextPipeline {
         let content_area = TextArea {
             buffer: &self.buffer,
             left: PAD_LEFT,
-            top: PAD_TOP,
+            top: PAD_TOP - content_top_offset,
             scale: 1.0,
             bounds: content_bounds,
             default_color: theme.fg,

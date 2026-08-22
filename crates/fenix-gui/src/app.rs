@@ -35,10 +35,27 @@ const PULSE_DURATION: Duration = Duration::from_millis(300);
 /// Visual-selection overlay so it reads as a distinct flash, not a
 /// held selection.
 const PULSE_PEAK_ALPHA: f32 = 0.45;
+/// How long the viewport takes to ease to a new scroll position.
+const SCROLL_DURATION: Duration = Duration::from_millis(150);
+/// Jumps larger than this many screens snap instantly instead of
+/// animating. Panning smoothly through a huge jump (`G` on a large file)
+/// would either blur past unreadably fast or need fetching far more
+/// content than the viewport actually needs, fighting the whole point of
+/// windowed rendering (`Buffer::visible_text` only ever fetches what's
+/// on screen).
+const SCROLL_SNAP_SCREENS: usize = 3;
 
 /// An active yank/paste highlight, fading out over `PULSE_DURATION`.
 struct Pulse {
     range: std::ops::Range<usize>,
+    started: Instant,
+}
+
+/// An in-flight scroll transition: eases `rendered_scroll` from `from`
+/// to the (now-current) `scroll_line` target.
+struct ScrollAnim {
+    from: f32,
+    to: usize,
     started: Instant,
 }
 
@@ -79,8 +96,17 @@ pub struct App {
 
     buffer: Buffer,
     cursor: Cursor,
-    /// Index of the topmost buffer line currently on screen.
+    /// Index of the topmost buffer line currently on screen -- the
+    /// *target* `ensure_cursor_visible` maintains; rendering uses
+    /// `rendered_scroll` instead, which eases toward this.
     scroll_line: usize,
+    /// The actual (possibly fractional, mid-transition) render position.
+    /// `rendered_scroll.floor()` is which buffer line rendering starts
+    /// from; the fractional part is a sub-line-height pixel shift, giving
+    /// the smooth-scroll illusion without changing how much content gets
+    /// fetched.
+    rendered_scroll: f32,
+    scroll_anim: Option<ScrollAnim>,
 
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
@@ -125,6 +151,8 @@ impl App {
             buffer,
             cursor: Cursor::at_start(),
             scroll_line: 0,
+            rendered_scroll: 0.0,
+            scroll_anim: None,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
@@ -270,7 +298,49 @@ impl App {
     /// needed. Must be called with the same `visible_lines` used to render.
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         let (line, _) = self.buffer.line_col(&self.cursor);
-        self.scroll_line = scroll_to_include(self.scroll_line, line, visible_lines);
+        let target = scroll_to_include(self.scroll_line, line, visible_lines);
+        if target != self.scroll_line {
+            let jump = target.abs_diff(self.scroll_line);
+            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) {
+                self.scroll_anim = None;
+                self.rendered_scroll = target as f32;
+            } else {
+                self.scroll_anim = Some(ScrollAnim { from: self.rendered_scroll, to: target, started: Instant::now() });
+            }
+            self.scroll_line = target;
+        }
+        self.update_rendered_scroll();
+    }
+
+    /// Advances `rendered_scroll` toward `scroll_line` if a transition is
+    /// in flight, clearing it once settled.
+    fn update_rendered_scroll(&mut self) {
+        let Some(anim) = &self.scroll_anim else {
+            self.rendered_scroll = self.scroll_line as f32;
+            return;
+        };
+        let t = Instant::now().duration_since(anim.started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
+        if t >= 1.0 {
+            self.rendered_scroll = anim.to as f32;
+            self.scroll_anim = None;
+        } else {
+            self.rendered_scroll = anim.from + (anim.to as f32 - anim.from) * ease_out_cubic(t);
+        }
+    }
+
+    /// The buffer line rendering starts from -- `rendered_scroll` rounded
+    /// down. Content, caret, hl-line, selection, and pulse all anchor
+    /// their row math to this (not `scroll_line`, which is only the
+    /// *target* `rendered_scroll` is easing toward).
+    fn render_base_line(&self) -> usize {
+        self.rendered_scroll.floor().max(0.0) as usize
+    }
+
+    /// Sub-line-height pixel offset (0.0..1.0 of `LINE_HEIGHT`) to shift
+    /// every content-area row up by, so a transition between two integer
+    /// scroll positions looks like a smooth pan instead of a jump.
+    fn render_frac(&self) -> f32 {
+        self.rendered_scroll - self.rendered_scroll.floor()
     }
 
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
@@ -332,7 +402,7 @@ impl App {
             return Vec::new();
         }
         let anchor = self.vim.visual_anchor();
-        let last_visible = (self.scroll_line + visible_lines).min(self.buffer.line_count());
+        let last_visible = (self.render_base_line() + visible_lines).min(self.buffer.line_count());
         let mut segments = Vec::new();
 
         match self.vim.visual_kind() {
@@ -345,10 +415,10 @@ impl App {
             }
             VisualKind::Line => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
-                for line in self.scroll_line.max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
                     // at least 1 col wide so an empty line still shows a sliver
                     let width = self.buffer.line_len(line).max(1);
-                    segments.push((line - self.scroll_line, 0, width));
+                    segments.push((line - self.render_base_line(), 0, width));
                 }
             }
             VisualKind::Block => {
@@ -361,12 +431,12 @@ impl App {
                 } else {
                     (cursor_col, anchor_col + 1)
                 };
-                for line in self.scroll_line.max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
                     let len = self.buffer.line_len(line);
                     let seg_start = col_lo.min(len);
                     let seg_end = col_hi.min(len);
                     if seg_start < seg_end {
-                        segments.push((line - self.scroll_line, seg_start, seg_end));
+                        segments.push((line - self.render_base_line(), seg_start, seg_end));
                     }
                 }
             }
@@ -387,15 +457,15 @@ impl App {
     /// yank/paste pulse, which are both "highlight this contiguous span"
     /// even though they come from different sources.
     fn range_to_segments(&self, range: std::ops::Range<usize>, visible_lines: usize) -> Segments {
-        let last_visible = (self.scroll_line + visible_lines).min(self.buffer.line_count());
+        let last_visible = (self.render_base_line() + visible_lines).min(self.buffer.line_count());
         let mut segments = Vec::new();
-        for line in self.scroll_line..last_visible {
+        for line in self.render_base_line()..last_visible {
             let line_start = self.buffer.line_start_char(line);
             let line_end = line_start + self.buffer.line_len(line);
             let seg_start = range.start.max(line_start);
             let seg_end = range.end.min(line_end);
             if seg_start < seg_end {
-                segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
+                segments.push((line - self.render_base_line(), seg_start - line_start, seg_end - line_start));
             }
         }
         segments
@@ -442,15 +512,25 @@ impl App {
         let visible_lines = text::visible_line_count(window_height);
         self.ensure_cursor_visible(visible_lines);
 
-        let content_text = self.buffer.visible_text(self.scroll_line, visible_lines);
+        // Fetch one extra line beyond what's strictly visible: mid-scroll,
+        // render_frac() shifts everything up by a partial line, so the
+        // trailing edge needs one more line of content to reveal.
+        let render_base_line = self.render_base_line();
+        let render_frac = self.render_frac();
+        let content_text = self.buffer.visible_text(render_base_line, visible_lines + 1);
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text =
             if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
         let (badge_bg, badge_fg) = self.mode_colors();
         let (line, col) = self.buffer.line_col(&self.cursor);
-        let caret_row_in_view = line - self.scroll_line;
-        let selection_segments = self.visual_selection_segments(visible_lines);
-        let pulse_overlay = self.pulse_overlay(visible_lines);
+        // During a large animated pan the cursor's actual line can
+        // legitimately be outside the currently-fetched window for part
+        // of the transition (it hasn't panned into view yet) -- None
+        // means "don't draw the caret/hl-line this frame", not a bug.
+        let caret_row_in_view =
+            line.checked_sub(render_base_line).filter(|&row| row <= visible_lines);
+        let selection_segments = self.visual_selection_segments(visible_lines + 1);
+        let pulse_overlay = self.pulse_overlay(visible_lines + 1);
         let which_key_lines = self.which_key_lines();
         let caret_alpha = self.caret_alpha();
         let theme = self.theme;
@@ -482,9 +562,16 @@ impl App {
             Some((modeline_top - panel_height).max(0.0))
         };
 
+        // Every content-row rect shares this: row index (relative to
+        // render_base_line) -> pixel y, shifted up by the mid-scroll
+        // fractional offset so it pans in step with the text.
+        let row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT - render_frac * text::LINE_HEIGHT;
+
         bg_rect.clear();
-        let hl_line_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
-        bg_rect.push_rect(gpu, 0.0, hl_line_y, gpu.size.width as f32, text::LINE_HEIGHT, theme.hl_line);
+        if let Some(row) = caret_row_in_view {
+            let hl_line_y = row_y(row);
+            bg_rect.push_rect(gpu, 0.0, hl_line_y, gpu.size.width as f32, text::LINE_HEIGHT, theme.hl_line);
+        }
         bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
         if modeline_pieces.is_some() {
             let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * text::CHAR_WIDTH;
@@ -495,7 +582,7 @@ impl App {
         }
         for (row, col_start, col_end) in selection_segments {
             let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
-            let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+            let y = row_y(row);
             let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
             bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
         }
@@ -503,7 +590,7 @@ impl App {
             let [r, g, b, _] = theme.caret;
             for (row, col_start, col_end) in segments {
                 let x = text::PAD_LEFT + col_start as f32 * text::CHAR_WIDTH;
-                let y = text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+                let y = row_y(row);
                 let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
                 bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
             }
@@ -511,15 +598,17 @@ impl App {
         bg_rect.flush(gpu);
 
         caret_rect.clear();
-        if caret_alpha > 0.0 {
-            let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
-            let caret_y = text::PAD_TOP + caret_row_in_view as f32 * text::LINE_HEIGHT;
-            let [r, g, b, a] = theme.caret;
-            caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
+        if let Some(row) = caret_row_in_view {
+            if caret_alpha > 0.0 {
+                let caret_x = text::PAD_LEFT + col as f32 * text::CHAR_WIDTH;
+                let caret_y = row_y(row);
+                let [r, g, b, a] = theme.caret;
+                caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
+            }
         }
         caret_rect.flush(gpu);
 
-        text.prepare(gpu, theme, which_key_panel);
+        text.prepare(gpu, theme, render_frac * text::LINE_HEIGHT, which_key_panel);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -652,7 +741,7 @@ impl ApplicationHandler for App {
             }
             None => false,
         };
-        let animating = blink_transitioning || pulse_active;
+        let animating = blink_transitioning || pulse_active || self.scroll_anim.is_some();
         if animating {
             needs_redraw = true;
         }
@@ -702,6 +791,52 @@ mod tests {
         // cursor is now on line 30; a 10-line viewport starting at 0 doesn't include it
         app.ensure_cursor_visible(10);
         assert_eq!(app.scroll_line, 21);
+    }
+
+    #[test]
+    fn small_scroll_change_starts_an_animation_not_an_instant_jump() {
+        let mut app = App::with_file(None);
+        for _ in 0..5 {
+            app.buffer.insert_char(&mut app.cursor, '\n');
+        }
+        app.ensure_cursor_visible(3); // 6 lines, 3-line viewport -> scrolls a bit
+        assert!(app.scroll_anim.is_some());
+        assert_ne!(app.rendered_scroll, app.scroll_line as f32); // still mid-ease, not snapped
+    }
+
+    #[test]
+    fn huge_scroll_jump_snaps_instantly_without_animating() {
+        let mut app = App::with_file(None);
+        for _ in 0..500 {
+            app.buffer.insert_char(&mut app.cursor, '\n');
+        }
+        app.ensure_cursor_visible(10); // jump of ~490 lines, way past the snap threshold
+        assert!(app.scroll_anim.is_none());
+        assert_eq!(app.rendered_scroll, app.scroll_line as f32);
+    }
+
+    #[test]
+    fn rendered_scroll_eases_toward_target_and_settles() {
+        let mut app = App::with_file(None);
+        app.scroll_line = 10;
+        app.rendered_scroll = 0.0;
+        app.scroll_anim = Some(ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION / 2 });
+        app.update_rendered_scroll();
+        assert!(app.rendered_scroll > 0.0 && app.rendered_scroll < 10.0, "should be partway there");
+        assert!(app.scroll_anim.is_some());
+
+        app.scroll_anim = Some(ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION * 2 });
+        app.update_rendered_scroll();
+        assert_eq!(app.rendered_scroll, 10.0);
+        assert!(app.scroll_anim.is_none()); // settled, animation cleared
+    }
+
+    #[test]
+    fn render_base_line_and_frac_split_a_fractional_scroll_position() {
+        let mut app = App::with_file(None);
+        app.rendered_scroll = 4.25;
+        assert_eq!(app.render_base_line(), 4);
+        assert!((app.render_frac() - 0.25).abs() < f32::EPSILON);
     }
 
     #[test]
