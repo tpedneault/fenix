@@ -1,0 +1,7 @@
+[package]
+name = "fenix-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ropey = "1"
