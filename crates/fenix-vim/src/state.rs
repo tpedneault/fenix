@@ -33,10 +33,20 @@ pub struct VimState {
     mode: Mode,
     register: Register,
     pending_op: Option<Operator>,
-    /// Set by `r`: the *next* key replaces the char under the cursor
-    /// instead of going through the normal trie at all -- no motion/text
-    /// object composition, just one raw key.
-    pending_replace: bool,
+    /// The count that was accumulated before the operator was entered
+    /// (`3dd`); combined multiplicatively with whatever count is typed
+    /// between the operator and its motion (`d3w`, or `d3d` for the
+    /// doubled form) at resolution time.
+    pending_op_count: u32,
+    /// Set by `r`: the *next* key replaces the char under the cursor with
+    /// itself repeated `count` times, instead of going through the normal
+    /// trie at all -- no motion/text object composition, just one raw key.
+    pending_replace: Option<u32>,
+    /// Digits accumulated so far for a numeric count prefix (`3w`, `2dd`).
+    /// Consumed whenever a key sequence actually resolves to an action;
+    /// preserved across `Step::Pending` (mid multi-key sequences like
+    /// `gg`) so `3gg` doesn't lose the `3` on the first `g`.
+    count: Option<u32>,
     visual_anchor: usize,
     command_line: String,
 
@@ -51,7 +61,9 @@ impl VimState {
             mode: Mode::Normal,
             register: Register { text: String::new(), linewise: false },
             pending_op: None,
-            pending_replace: false,
+            pending_op_count: 1,
+            pending_replace: None,
+            count: None,
             visual_anchor: 0,
             command_line: String::new(),
             normal_matcher: keymaps::normal_trie().matcher(),
@@ -165,11 +177,10 @@ impl VimState {
     }
 
     fn handle_normal_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
-        if self.pending_replace {
-            self.pending_replace = false;
+        if let Some(count) = self.pending_replace.take() {
             if key.code != KeyCode::Named(NamedKey::Escape) {
                 if let KeyCode::Char(c) = key.code {
-                    self.replace_char(buffer, cursor, c);
+                    self.replace_char(buffer, cursor, c, count);
                 }
             }
             return VimEvent::None;
@@ -180,16 +191,41 @@ impl VimState {
             return VimEvent::None;
         }
 
-        if let Step::Matched(action) = self.normal_matcher.feed(key) {
-            self.apply_normal_action(buffer, cursor, *action);
+        // Count prefix (`3w`, `2dd`): digits were never trie leaves, so
+        // intercept them here rather than feeding them to the matcher.
+        // Only while not already mid-sequence, so e.g. the second `g` of
+        // `gg` is never misread as a count digit.
+        if !self.normal_matcher.is_pending() {
+            if let KeyCode::Char(c) = key.code {
+                if key.mods == Mods::default() {
+                    if let Some(d) = c.to_digit(10) {
+                        if d != 0 || self.count.is_some() {
+                            self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
+                            return VimEvent::None;
+                        }
+                    }
+                }
+            }
+        }
+
+        match self.normal_matcher.feed(key) {
+            Step::Matched(action) => {
+                let count = self.count.take().unwrap_or(1).max(1);
+                self.apply_normal_action(buffer, cursor, *action, count);
+            }
+            Step::NoMatch => self.count = None,
+            Step::Pending(_) => {}
         }
         VimEvent::None
     }
 
-    fn apply_normal_action(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, action: VimAction) {
+    fn apply_normal_action(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, action: VimAction, count: u32) {
         match action {
-            VimAction::Motion(m) => apply_motion(buffer, cursor, m),
-            VimAction::Operator(op) => self.pending_op = Some(op),
+            VimAction::Motion(m) => apply_motion(buffer, cursor, m, count),
+            VimAction::Operator(op) => {
+                self.pending_op = Some(op);
+                self.pending_op_count = count;
+            }
             VimAction::EnterInsert(entry) => self.enter_insert(buffer, cursor, entry),
             VimAction::EnterVisual => {
                 self.mode = Mode::Visual;
@@ -200,47 +236,65 @@ impl VimState {
                 self.command_line.clear();
             }
             VimAction::Undo => {
-                buffer.undo(cursor);
+                for _ in 0..count {
+                    buffer.undo(cursor);
+                }
             }
             VimAction::Redo => {
-                buffer.redo(cursor);
+                for _ in 0..count {
+                    buffer.redo(cursor);
+                }
             }
             VimAction::DeleteCharUnder => {
-                let end = (cursor.char_idx + 1).min(buffer.len_chars());
+                let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
                     self.register = Register { text, linewise: false };
                 }
             }
             VimAction::DeleteCharBefore => {
-                if cursor.char_idx > 0 {
-                    let start = cursor.char_idx - 1;
+                let start = cursor.char_idx.saturating_sub(count as usize);
+                if start < cursor.char_idx {
                     let text = buffer.delete_range(cursor, start, cursor.char_idx);
                     self.register = Register { text, linewise: false };
                 }
             }
-            VimAction::PasteAfter => self.paste(buffer, cursor, true),
-            VimAction::PasteBefore => self.paste(buffer, cursor, false),
+            VimAction::PasteAfter => self.paste(buffer, cursor, true, count),
+            VimAction::PasteBefore => self.paste(buffer, cursor, false, count),
             VimAction::OperatorToLineEnd(op) => {
-                let range = range_for_motion(buffer, cursor, Motion::LineEnd);
+                // Count support skipped here (real Vim's "3D" also pulls in
+                // the next 2 full lines, a nuance not worth the complexity
+                // for this action) -- always behaves as a plain d$/c$/y$.
+                let range = range_for_motion(buffer, cursor, Motion::LineEnd, 1);
                 self.finish_operator(buffer, cursor, op, range, false);
             }
             VimAction::ChangeLine => {
                 let (line, _) = buffer.line_col(cursor);
-                let range = current_line_content_range(buffer, line);
+                let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
+                let range = lines_content_range(buffer, line, end_line);
                 self.finish_operator(buffer, cursor, Operator::Change, range, true);
             }
             VimAction::SubstituteChar => {
-                let end = (cursor.char_idx + 1).min(buffer.len_chars());
+                let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
                     self.register = Register { text, linewise: false };
                 }
                 self.mode = Mode::Insert;
             }
-            VimAction::JoinLines => self.join_lines(buffer, cursor),
-            VimAction::ToggleCase => self.toggle_case(buffer, cursor),
-            VimAction::ReplaceChar => self.pending_replace = true,
+            VimAction::JoinLines => {
+                // "NJ" joins N lines together (N-1 individual joins); bare
+                // J (count=1) and 2J both mean "join with just the next line".
+                for _ in 0..count.saturating_sub(1).max(1) {
+                    self.join_lines(buffer, cursor);
+                }
+            }
+            VimAction::ToggleCase => {
+                for _ in 0..count.max(1) {
+                    self.toggle_case(buffer, cursor);
+                }
+            }
+            VimAction::ReplaceChar => self.pending_replace = Some(count),
         }
     }
 
@@ -288,13 +342,19 @@ impl VimState {
         cursor.sticky_col = col;
     }
 
-    fn replace_char(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, c: char) {
-        if buffer.char_at(cursor.char_idx).is_none() {
+    /// `r<char>`, with `count` (`3rx` replaces 3 chars with `x`). Vim
+    /// rejects the whole thing if there aren't `count` chars available
+    /// (no partial replace) -- matched here rather than silently clamping.
+    fn replace_char(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, c: char, count: u32) {
+        let count = count.max(1) as usize;
+        let start = cursor.char_idx;
+        let end = start + count;
+        if end > buffer.len_chars() {
             return;
         }
-        let start = cursor.char_idx;
-        buffer.delete_range(cursor, start, start + 1);
-        buffer.insert_str(cursor, &c.to_string());
+        buffer.delete_range(cursor, start, end);
+        let replacement: String = std::iter::repeat_n(c, count).collect();
+        buffer.insert_str(cursor, &replacement);
         cursor.char_idx = start;
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
@@ -340,20 +400,40 @@ impl VimState {
         if key.code == KeyCode::Named(NamedKey::Escape) {
             self.pending_op = None;
             self.pending_matcher.cancel();
+            self.count = None;
             return;
         }
 
-        // Doubled operator (dd/cc/yy): linewise, current line. Only applies
-        // as the very first key after the operator, matching Vim. cc
-        // (unlike dd/yy) keeps the line itself -- it only clears the
+        // Count typed between the operator and its motion/doubled key
+        // (`d3w`, `d3d`) -- combines multiplicatively with pending_op_count
+        // (`2d3w` = 6 words) at resolution time below. Same "not mid-
+        // sequence" guard as the Normal-mode count check.
+        if !self.pending_matcher.is_pending() {
+            if let KeyCode::Char(c) = key.code {
+                if key.mods == Mods::default() {
+                    if let Some(d) = c.to_digit(10) {
+                        if d != 0 || self.count.is_some() {
+                            self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Doubled operator (dd/cc/yy): linewise, current line(s). Only
+        // applies as the very first key after the operator, matching Vim.
+        // cc (unlike dd/yy) keeps the line itself -- it only clears the
         // content, leaving a blank line to type into.
         if !self.pending_matcher.is_pending() && key == op.trigger_key() {
             self.pending_op = None;
+            let total_count = self.pending_op_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
             let (line, _) = buffer.line_col(cursor);
+            let end_line = (line + total_count as usize - 1).min(motion::last_line(buffer));
             let range = if op == Operator::Change {
-                current_line_content_range(buffer, line)
+                lines_content_range(buffer, line, end_line)
             } else {
-                linewise_range(buffer, line, line)
+                linewise_range(buffer, line, end_line)
             };
             self.finish_operator(buffer, cursor, op, range, true);
             return;
@@ -361,15 +441,21 @@ impl VimState {
 
         match self.pending_matcher.feed(key) {
             Step::Pending(_) => {}
-            Step::NoMatch => self.pending_op = None,
+            Step::NoMatch => {
+                self.pending_op = None;
+                self.count = None;
+            }
             Step::Matched(target) => {
                 let target = *target;
                 self.pending_op = None;
+                let total_count = self.pending_op_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
                 let (range, linewise) = match target {
                     PendingTarget::Motion(m) => {
                         let m = adjust_for_change_word(op, m, buffer, cursor);
-                        (range_for_motion(buffer, cursor, m), m.is_linewise())
+                        (range_for_motion(buffer, cursor, m, total_count), m.is_linewise())
                     }
+                    // Counts on text objects aren't supported ("2diw" behaves
+                    // like "diw") -- a disclosed simplification.
                     PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj), false),
                 };
                 self.finish_operator(buffer, cursor, op, range, linewise);
@@ -403,11 +489,17 @@ impl VimState {
         }
     }
 
-    fn paste(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, after: bool) {
+    fn paste(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, after: bool, count: u32) {
         if self.register.text.is_empty() {
             return;
         }
+        let count = count.max(1) as usize;
         if self.register.linewise {
+            let mut block = self.register.text.clone();
+            if !block.ends_with('\n') {
+                block.push('\n');
+            }
+            let block = block.repeat(count);
             let (line, _) = buffer.line_col(cursor);
             let insert_line = if after { line + 1 } else { line };
             let at = if insert_line < buffer.line_count() {
@@ -416,16 +508,13 @@ impl VimState {
                 buffer.len_chars()
             };
             cursor.char_idx = at;
-            let mut block = self.register.text.clone();
-            if !block.ends_with('\n') {
-                block.push('\n');
-            }
             buffer.insert_str(cursor, &block);
             cursor.char_idx = at;
         } else {
+            let text = self.register.text.repeat(count);
             let at = if after { (cursor.char_idx + 1).min(buffer.len_chars()) } else { cursor.char_idx };
             cursor.char_idx = at;
-            buffer.insert_str(cursor, &self.register.text);
+            buffer.insert_str(cursor, &text);
             cursor.char_idx = at;
         }
         let (_, col) = buffer.line_col(cursor);
@@ -440,7 +529,9 @@ impl VimState {
 
         if let Step::Matched(action) = self.visual_matcher.feed(key) {
             match *action {
-                VisualAction::Motion(m) => apply_motion(buffer, cursor, m),
+                // Counts aren't supported in Visual mode -- the selection
+                // is already explicit, unlike Normal mode's motions.
+                VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1),
                 VisualAction::Apply(op) => {
                     let (lo, hi) = if self.visual_anchor <= cursor.char_idx {
                         (self.visual_anchor, cursor.char_idx + 1)
@@ -466,12 +557,28 @@ impl Default for VimState {
     }
 }
 
-fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion) {
-    cursor.char_idx = motion::target(buffer, cursor, m);
-    if !matches!(m, Motion::Up | Motion::Down) {
-        let (_, col) = buffer.line_col(cursor);
-        cursor.sticky_col = col;
+fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32) {
+    for _ in 0..count.max(1) {
+        let target = motion::target(buffer, cursor, m);
+        if target == cursor.char_idx {
+            break; // no progress (already at a boundary) -- stop instead of spinning
+        }
+        cursor.char_idx = target;
+        if !matches!(m, Motion::Up | Motion::Down) {
+            let (_, col) = buffer.line_col(cursor);
+            cursor.sticky_col = col;
+        }
     }
+}
+
+/// Where `count` repeated applications of `m` from `cursor` would land,
+/// without mutating `cursor` -- used to compute an operator's range
+/// (`3dw`, `d3w`) without moving the cursor before the delete/change/yank
+/// actually happens.
+fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32) -> usize {
+    let mut probe = *cursor;
+    apply_motion(buffer, &mut probe, m, count);
+    probe.char_idx
 }
 
 /// Vim's well-known `cw`-behaves-like-`ce` rule: changing a word from a
@@ -494,18 +601,20 @@ fn linewise_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<usize>
     start..end
 }
 
-/// Just `line`'s content, excluding its line terminator -- unlike
-/// `linewise_range`, deleting this leaves the line itself (now empty)
-/// intact instead of removing it. `cc`/`S` want this: change replaces a
-/// line's content but doesn't remove the line, so a blank line remains
-/// for the user to type into.
-fn current_line_content_range(buffer: &Buffer, line: usize) -> Range<usize> {
-    let start = buffer.line_start_char(line);
-    start..(start + buffer.line_len(line))
+/// `line_a..line_b`'s content, excluding the *last* line's terminator --
+/// unlike `linewise_range`, deleting this collapses the lines into one
+/// (now empty, if `line_a == line_b`) instead of removing them entirely.
+/// `cc`/`S` want this: change replaces content but doesn't remove the
+/// line(s), so a blank line remains for the user to type into.
+fn lines_content_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<usize> {
+    let (lo, hi) = if line_a <= line_b { (line_a, line_b) } else { (line_b, line_a) };
+    let start = buffer.line_start_char(lo);
+    let end = buffer.line_start_char(hi) + buffer.line_len(hi);
+    start..end
 }
 
-fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion) -> Range<usize> {
-    let target = motion::target(buffer, cursor, motion);
+fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32) -> Range<usize> {
+    let target = motion_target_repeated(buffer, cursor, motion, count);
     if motion.is_linewise() {
         let (cur_line, _) = buffer.line_col(cursor);
         let (tgt_line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
@@ -907,5 +1016,107 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "r");
         named(&mut vim, &mut b, &mut c, NamedKey::Escape);
         assert_eq!(b.text(), "abc");
+    }
+
+    #[test]
+    fn count_repeats_a_plain_motion() {
+        let mut b = buf("one two three four");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3w");
+        assert_eq!(c.char_idx, 14); // start of "four", three words forward
+    }
+
+    #[test]
+    fn count_before_doubled_operator_spans_n_lines() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2dd");
+        assert_eq!(b.text(), "three\nfour");
+    }
+
+    #[test]
+    fn count_after_operator_and_before_doubled_key_also_works() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "d2d");
+        assert_eq!(b.text(), "three\nfour");
+    }
+
+    #[test]
+    fn counts_before_operator_and_before_motion_multiply() {
+        let mut b = buf("one two three four five six seven");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2d3w"); // delete 6 words
+        assert_eq!(b.text(), "seven");
+    }
+
+    #[test]
+    fn count_survives_a_multi_key_motion_like_gg() {
+        let mut b = buf("a\nb\nc\nd\ne");
+        let mut c = Cursor { char_idx: 8, sticky_col: 0 }; // on "e"
+        let mut vim = VimState::new();
+        // 3gg isn't "repeat gg 3 times" (idempotent) but this exercises
+        // that the count typed before a two-key sequence isn't dropped
+        // partway through -- gg still resolves to line 0 either way.
+        keys(&mut vim, &mut b, &mut c, "3gg");
+        assert_eq!(b.line_col(&c).0, 0);
+    }
+
+    #[test]
+    fn count_on_x_deletes_n_chars_into_one_register() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3x");
+        assert_eq!(b.text(), "def");
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "dabcef");
+    }
+
+    #[test]
+    fn count_on_paste_repeats_the_register() {
+        let mut b = buf("ab");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yl"); // yank "a"
+        keys(&mut vim, &mut b, &mut c, "3p");
+        assert_eq!(b.text(), "aaaab");
+    }
+
+    #[test]
+    fn count_on_replace_needs_that_many_chars_available() {
+        let mut b = buf("ab");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        // like every other count, it precedes the trigger key: "3rx", not "r3x"
+        keys(&mut vim, &mut b, &mut c, "3rx");
+        // only 2 chars available, so this should refuse rather than partially replace
+        assert_eq!(b.text(), "ab");
+    }
+
+    #[test]
+    fn count_on_join_joins_n_lines() {
+        let mut b = buf("a\nb\nc\nd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3J");
+        assert_eq!(b.text(), "a b c\nd");
+    }
+
+    #[test]
+    fn no_match_during_count_resets_it() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        // an unbound key after a count should abort the count, not leave
+        // it silently applied to whatever comes next
+        vim.handle_key(&mut b, &mut c, KeyPress::char('2'));
+        vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Tab)); // unbound in Normal mode
+        keys(&mut vim, &mut b, &mut c, "l");
+        assert_eq!(c.char_idx, 1); // single step, not 2
     }
 }
