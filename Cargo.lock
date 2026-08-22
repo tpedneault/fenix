@@ -465,6 +465,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-keymap"
+version = "0.0.1"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
