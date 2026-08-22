@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fenix_keymap::{KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
-use fenix_vim::{Mode, VimEvent, VimState};
+use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -229,33 +229,78 @@ impl App {
             .unwrap_or_else(|| "[No Name]".to_string());
         let modified = if self.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = self.buffer.line_col(&self.cursor);
-        format!(" {filename}{modified}   {}   Ln {}, Col {} ", self.vim.mode().label(), line + 1, col + 1)
+        let mode_label =
+            if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
+        format!(" {filename}{modified}   {mode_label}   Ln {}, Col {} ", line + 1, col + 1)
     }
 
     /// Per-visible-line (view_row, col_start, col_end) segments of the
     /// active Visual-mode selection, for highlighting. Empty outside Visual
-    /// mode.
+    /// mode. Shape depends on `visual_kind()`: Char is a single charwise
+    /// span, Line highlights whole lines regardless of column, Block is a
+    /// column-range rectangle across lines (clamped per ragged line, like
+    /// the Block operators themselves).
     fn visual_selection_segments(&self, visible_lines: usize) -> Vec<(usize, usize, usize)> {
         if self.vim.mode() != Mode::Visual {
             return Vec::new();
         }
         let anchor = self.vim.visual_anchor();
-        let cursor_idx = self.cursor.char_idx;
-        let (lo, hi) = if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
-        let hi = hi.min(self.buffer.len_chars());
-
         let last_visible = (self.scroll_line + visible_lines).min(self.buffer.line_count());
         let mut segments = Vec::new();
-        for line in self.scroll_line..last_visible {
-            let line_start = self.buffer.line_start_char(line);
-            let line_end = line_start + self.buffer.line_len(line);
-            let seg_start = lo.max(line_start);
-            let seg_end = hi.min(line_end);
-            if seg_start < seg_end {
-                segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
+
+        match self.vim.visual_kind() {
+            VisualKind::Char => {
+                let cursor_idx = self.cursor.char_idx;
+                let (lo, hi) =
+                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                let hi = hi.min(self.buffer.len_chars());
+                for line in self.scroll_line..last_visible {
+                    let line_start = self.buffer.line_start_char(line);
+                    let line_end = line_start + self.buffer.line_len(line);
+                    let seg_start = lo.max(line_start);
+                    let seg_end = hi.min(line_end);
+                    if seg_start < seg_end {
+                        segments.push((line - self.scroll_line, seg_start - line_start, seg_end - line_start));
+                    }
+                }
+            }
+            VisualKind::Line => {
+                let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
+                for line in self.scroll_line.max(line_lo)..last_visible.min(line_hi + 1) {
+                    // at least 1 col wide so an empty line still shows a sliver
+                    let width = self.buffer.line_len(line).max(1);
+                    segments.push((line - self.scroll_line, 0, width));
+                }
+            }
+            VisualKind::Block => {
+                let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
+                let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
+                let (_, anchor_col) = self.buffer.line_col(&anchor_cursor);
+                let (_, cursor_col) = self.buffer.line_col(&self.cursor);
+                let (col_lo, col_hi) = if anchor_col <= cursor_col {
+                    (anchor_col, cursor_col + 1)
+                } else {
+                    (cursor_col, anchor_col + 1)
+                };
+                for line in self.scroll_line.max(line_lo)..last_visible.min(line_hi + 1) {
+                    let len = self.buffer.line_len(line);
+                    let seg_start = col_lo.min(len);
+                    let seg_end = col_hi.min(len);
+                    if seg_start < seg_end {
+                        segments.push((line - self.scroll_line, seg_start, seg_end));
+                    }
+                }
             }
         }
         segments
+    }
+
+    /// (min, max) line index spanned by the visual anchor and the cursor.
+    fn anchor_cursor_line_range(&self, anchor: usize) -> (usize, usize) {
+        let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
+        let (anchor_line, _) = self.buffer.line_col(&anchor_cursor);
+        let (cursor_line, _) = self.buffer.line_col(&self.cursor);
+        if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
     /// Key/label pairs for whichever pending sequence is currently active
@@ -527,5 +572,48 @@ mod tests {
     fn visual_selection_segments_empty_outside_visual_mode() {
         let app = App::with_file(None);
         assert!(app.visual_selection_segments(10).is_empty());
+    }
+
+    #[test]
+    fn modeline_shows_visual_kind_not_just_visual() {
+        let mut app = App::with_file(None);
+        for ch in "one\ntwo\nthree".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.cursor = Cursor::at_start();
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        assert!(app.modeline_text().contains("VISUAL"));
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        assert!(app.modeline_text().contains("V-LINE"));
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v').with_ctrl());
+        assert!(app.modeline_text().contains("V-BLOCK"));
+    }
+
+    #[test]
+    fn visual_line_segments_cover_whole_lines_regardless_of_column() {
+        let mut app = App::with_file(None);
+        for ch in "one\ntwo\nthree".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.cursor = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two"
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        assert_eq!(app.visual_selection_segments(10), vec![(1, 0, 3)]);
+    }
+
+    #[test]
+    fn visual_block_segments_form_a_column_rectangle() {
+        let mut app = App::with_file(None);
+        for ch in "abc\ndef\nghi".chars() {
+            app.buffer.insert_char(&mut app.cursor, ch);
+        }
+        app.cursor = Cursor::at_start();
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v').with_ctrl());
+        for ch in ['j', 'j', 'l'] {
+            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char(ch));
+        }
+        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
     }
 }

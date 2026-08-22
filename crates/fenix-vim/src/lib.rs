@@ -10,7 +10,7 @@ mod textobject;
 mod test_util;
 
 pub use keymaps::{InsertEntry, VimAction};
-pub use mode::Mode;
+pub use mode::{Mode, VisualKind};
 pub use motion::Motion;
 pub use operator::Operator;
 pub use state::{VimEvent, VimState};
