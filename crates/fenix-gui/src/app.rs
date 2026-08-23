@@ -1,18 +1,21 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use fenix_buffers::{BufferId, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
+use fenix_window::WindowTree;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
-use fenix_core::{Buffer, Cursor};
+use fenix_core::Cursor;
 
 use crate::commands::CommandRegistry;
 use crate::gpu::GpuState;
@@ -304,24 +307,22 @@ pub struct App {
     bg_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
 
-    buffer: Buffer,
-    cursor: Cursor,
-    /// `None` when the buffer's file extension isn't a registered
-    /// language (including buffers with no path at all) -- `content_spans`
-    /// just falls back to plain `fg` text in that case, same as before
-    /// this feature existed.
-    syntax: Option<fenix_syntax::SyntaxState>,
-    /// Index of the topmost buffer line currently on screen -- the
-    /// *target* `ensure_cursor_visible` maintains; rendering uses
-    /// `rendered_scroll` instead, which eases toward this.
-    scroll_line: usize,
-    /// The actual (possibly fractional, mid-transition) render position.
-    /// `rendered_scroll.floor()` is which buffer line rendering starts
-    /// from; the fractional part is a sub-line-height pixel shift, giving
-    /// the smooth-scroll illusion without changing how much content gets
-    /// fetched.
-    rendered_scroll: f32,
-    scroll_anim: Option<ScrollAnim>,
+    /// Every open buffer, keyed by `BufferId` -- cursor, scroll position,
+    /// and syntax state all live on each buffer's own `OpenBuffer`
+    /// (buffer-local, not per-window; see the type's own doc comment for
+    /// why). `App` never touches a buffer directly, only through this and
+    /// `windows` -- use the `open`/`open_mut`/`focused_buffer_id` helpers.
+    buffers: BufferList,
+    /// A single-window tree for now -- `WindowTree<BufferId>`'s split/
+    /// navigate/close operations land in a later step; today it's always
+    /// exactly one leaf, so `focused_content()` is "the" open buffer.
+    windows: WindowTree<BufferId>,
+    /// In-flight scroll transitions, keyed by which buffer they're
+    /// easing -- kept here rather than on `OpenBuffer` since `ScrollAnim`
+    /// needs `Instant`, an animation/rendering-layer concern `fenix-
+    /// buffers` (host-agnostic, no such concept) shouldn't need to know
+    /// about.
+    scroll_anims: HashMap<BufferId, ScrollAnim>,
 
     /// See `LineNumberMode` doc comment -- hardcoded for now.
     line_number_mode: LineNumberMode,
@@ -343,10 +344,6 @@ pub struct App {
     /// -- only meaningful while `sidebar_open`. The sidebar stays visible
     /// but unfocused while editing, like a persistent project tree.
     sidebar_focused: bool,
-    /// The editor state stashed when entering full-buffer explorer mode,
-    /// restored if the explorer is quit without opening a file, dropped
-    /// if a file *is* opened (the new file becomes current).
-    stashed_editor: Option<(Buffer, Cursor, Option<fenix_syntax::SyntaxState>)>,
     explorer_prompt: Option<ExplorerPrompt>,
     /// Topmost visible row of the full-buffer/sidebar listings. Plain
     /// integers, not eased like `rendered_scroll` -- a directory listing
@@ -410,11 +407,15 @@ impl App {
     }
 
     fn with_file(file_arg: Option<String>) -> Self {
-        let (buffer, syntax) = match file_arg {
-            Some(path) => Self::buffer_and_syntax_for_path(Path::new(&path)),
-            None => (Buffer::empty(), None),
+        let mut buffers = BufferList::new();
+        let initial_id = match file_arg {
+            Some(path) => buffers.open_path(Path::new(&path)),
+            None => buffers.open_scratch(),
         };
-        let project_root = buffer.path().and_then(fenix_project::find_project_root);
+        let windows = WindowTree::new(initial_id);
+
+        let project_root =
+            buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
         let known_projects_path =
             fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
         let mut known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
@@ -431,19 +432,15 @@ impl App {
             text: None,
             bg_rect: None,
             caret_rect: None,
-            buffer,
-            cursor: Cursor::at_start(),
-            syntax,
-            scroll_line: 0,
-            rendered_scroll: 0.0,
-            scroll_anim: None,
+            buffers,
+            windows,
+            scroll_anims: HashMap::new(),
             line_number_mode: LineNumberMode::Absolute,
             main_view: MainView::Editor,
             explorer: None,
             sidebar: None,
             sidebar_open: false,
             sidebar_focused: false,
-            stashed_editor: None,
             explorer_prompt: None,
             explorer_scroll: 0,
             sidebar_scroll: 0,
@@ -465,31 +462,31 @@ impl App {
         }
     }
 
-    /// Opens `path` as a buffer plus whatever syntax highlighting its
-    /// extension resolves to (or none) -- the same logic `with_file` uses
-    /// at startup, shared with opening a file from the explorer so
-    /// there's one "visit this path" implementation, not two.
-    fn buffer_and_syntax_for_path(path: &Path) -> (Buffer, Option<fenix_syntax::SyntaxState>) {
-        let buffer = Buffer::from_path(path).unwrap_or_else(|err| {
-            eprintln!("fenix: couldn't open {} ({err}), starting empty buffer", path.display());
-            Buffer::empty()
-        });
-        let syntax = buffer
-            .path()
-            .and_then(|p| p.extension())
-            .and_then(|ext| ext.to_str())
-            .and_then(fenix_syntax::detect_language)
-            .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
-        (buffer, syntax)
+    fn focused_buffer_id(&self) -> BufferId {
+        *self.windows.focused_content()
     }
 
-    /// Re-derives `project_root` for the current buffer and registers it
+    /// The currently-focused pane's open buffer. Free to use anywhere
+    /// that doesn't *also* need another `App` field (like `self.vim`) in
+    /// the same expression -- being a method call on `self`, it borrows
+    /// opaquely, so those few spots inline `self.buffers.get_mut(id)`
+    /// directly instead (see e.g. `handle_key`'s Vim dispatch).
+    fn open(&self) -> &OpenBuffer {
+        self.buffers.get(self.focused_buffer_id()).expect("focused window always has an open buffer")
+    }
+
+    fn open_mut(&mut self) -> &mut OpenBuffer {
+        let id = self.focused_buffer_id();
+        self.buffers.get_mut(id).expect("focused window always has an open buffer")
+    }
+
+    /// Re-derives `project_root` for the focused buffer and registers it
     /// in `known_projects` (auto-add-on-visit, matching Projectile's own
-    /// behavior) -- called every time the buffer is replaced with a new
-    /// file, not just at startup (`with_file` does the equivalent inline
-    /// before `self` exists to call this on).
+    /// behavior) -- called every time a pane's buffer changes, not just
+    /// at startup (`with_file` does the equivalent inline before `self`
+    /// exists to call this on).
     fn refresh_project_root(&mut self) {
-        self.project_root = self.buffer.path().and_then(fenix_project::find_project_root);
+        self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
         if let Some(root) = self.project_root.clone() {
             self.known_projects.add(root);
             if let Err(err) = self.known_projects.save() {
@@ -499,22 +496,24 @@ impl App {
     }
 
     pub(crate) fn save(&mut self) {
-        if self.buffer.path().is_none() {
+        if self.open().buffer.path().is_none() {
             eprintln!("fenix: no file path to save to yet; pass a file path as the first argument");
             return;
         }
-        match self.buffer.save() {
-            Ok(()) => println!("fenix: saved {:?}", self.buffer.path().unwrap()),
+        let ob = self.open_mut();
+        match ob.buffer.save() {
+            Ok(()) => println!("fenix: saved {:?}", ob.buffer.path().unwrap()),
             Err(err) => eprintln!("fenix: save failed: {err}"),
         }
         self.wake_caret();
     }
 
     /// Directory the explorer opens in when asked to "start somewhere
-    /// sensible": the current buffer's own directory if it has a path,
+    /// sensible": the focused buffer's own directory if it has a path,
     /// else the process's cwd.
     fn explorer_start_dir(&self) -> PathBuf {
-        self.buffer
+        self.open()
+            .buffer
             .path()
             .and_then(|p| p.parent())
             .filter(|p| !p.as_os_str().is_empty())
@@ -523,8 +522,11 @@ impl App {
     }
 
     /// `SPC f j` (dired-jump): replaces the main view with a full-buffer
-    /// directory listing at the current file's directory, stashing the
-    /// editor state so quitting without opening anything restores it.
+    /// directory listing at the current file's directory. No stashing
+    /// needed -- the focused pane's `BufferId` is left untouched (the
+    /// buffer itself stays safely owned by `self.buffers` the whole
+    /// time), `main_view` alone controls whether it's rendered as buffer
+    /// content or the explorer/picker UI.
     pub(crate) fn explorer_jump(&mut self) {
         let dir = self.explorer_start_dir();
         let explorer = match ExplorerState::open(&dir) {
@@ -534,10 +536,6 @@ impl App {
                 return;
             }
         };
-        let old_buffer = std::mem::replace(&mut self.buffer, Buffer::empty());
-        let old_cursor = std::mem::replace(&mut self.cursor, Cursor::at_start());
-        let old_syntax = self.syntax.take();
-        self.stashed_editor = Some((old_buffer, old_cursor, old_syntax));
         self.explorer = Some(explorer);
         self.main_view = MainView::Explorer;
         self.wake_caret();
@@ -648,29 +646,20 @@ impl App {
         }
     }
 
-    /// Stashes the editor exactly like `explorer_jump` already does --
-    /// reused as-is, since it was never Explorer-specific, just "what to
-    /// restore when leaving the main content area."
+    /// No stashing needed -- same reasoning as `explorer_jump`, now that
+    /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
-        let old_buffer = std::mem::replace(&mut self.buffer, Buffer::empty());
-        let old_cursor = std::mem::replace(&mut self.cursor, Cursor::at_start());
-        let old_syntax = self.syntax.take();
-        self.stashed_editor = Some((old_buffer, old_cursor, old_syntax));
         self.active_picker = Some(picker);
         self.picker_scroll = 0;
         self.main_view = MainView::Picker;
         self.wake_caret();
     }
 
-    /// `Escape`: cancels the active picker and restores whatever was
-    /// stashed on entry -- no file/project opened.
+    /// `Escape`: cancels the active picker -- no file/project opened, the
+    /// focused pane's buffer was never touched, so returning to the
+    /// editor just means switching `main_view` back.
     fn picker_cancel(&mut self) {
         self.active_picker = None;
-        if let Some((buffer, cursor, syntax)) = self.stashed_editor.take() {
-            self.buffer = buffer;
-            self.cursor = cursor;
-            self.syntax = syntax;
-        }
         self.main_view = MainView::Editor;
     }
 
@@ -700,28 +689,28 @@ impl App {
         self.wake_caret();
     }
 
-    /// Replaces the editor buffer with `path`, exactly like opening a
-    /// file from the explorer -- a picker always fully took over
-    /// `main_view` to get here (unlike the explorer's sidebar case), so
-    /// confirming always means "drop the stash, this is current now,
-    /// back to the editor."
+    /// Points the focused pane at `path` (opening it in the registry --
+    /// reusing an already-open buffer for the same path, per
+    /// `BufferList::open_path`), exactly like opening a file from the
+    /// explorer. A picker always fully took over `main_view` to get
+    /// here, so confirming always means "this is current now, back to
+    /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
-        let (buffer, syntax) = Self::buffer_and_syntax_for_path(path);
-        self.buffer = buffer;
-        self.cursor = Cursor::at_start();
-        self.syntax = syntax;
+        let id = self.buffers.open_path(path);
+        let focused = self.windows.focused_id();
+        self.windows.set_content(focused, id);
         self.refresh_project_root();
-        self.stashed_editor = None;
         self.main_view = MainView::Editor;
     }
 
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
-        let target_line = m.line.saturating_sub(1).min(self.buffer.visual_line_count().saturating_sub(1));
-        let start = self.buffer.line_start_char(target_line);
-        let col = m.col.saturating_sub(1).min(self.buffer.line_len(target_line));
-        self.cursor.char_idx = start + col;
-        let (_, sticky) = self.buffer.line_col(&self.cursor);
-        self.cursor.sticky_col = sticky;
+        let ob = self.open_mut();
+        let target_line = m.line.saturating_sub(1).min(ob.buffer.visual_line_count().saturating_sub(1));
+        let start = ob.buffer.line_start_char(target_line);
+        let col = m.col.saturating_sub(1).min(ob.buffer.line_len(target_line));
+        ob.cursor.char_idx = start + col;
+        let (_, sticky) = ob.buffer.line_col(&ob.cursor);
+        ob.cursor.sticky_col = sticky;
     }
 
     /// Registers `root` as the current project and immediately chains
@@ -894,14 +883,12 @@ impl App {
             return;
         }
 
-        let (buffer, syntax) = Self::buffer_and_syntax_for_path(&path);
-        self.buffer = buffer;
-        self.cursor = Cursor::at_start();
-        self.syntax = syntax;
+        let id = self.buffers.open_path(&path);
+        let focused = self.windows.focused_id();
+        self.windows.set_content(focused, id);
         self.refresh_project_root();
 
         if self.main_view == MainView::Explorer {
-            self.stashed_editor = None;
             self.main_view = MainView::Editor;
             self.explorer = None;
         } else {
@@ -909,21 +896,12 @@ impl App {
         }
     }
 
-    /// `q`/`Escape`: in full-buffer mode, restores the stashed editor (or
-    /// falls back to an empty buffer if there wasn't one) and leaves the
-    /// explorer entirely; in the sidebar, just hands focus back to the
-    /// editor without closing it.
+    /// `q`/`Escape`: in full-buffer mode, leaves the explorer entirely --
+    /// the focused pane's buffer was never touched by entering it, so
+    /// there's nothing to restore, just switch `main_view` back; in the
+    /// sidebar, just hands focus back to the editor without closing it.
     fn explorer_quit(&mut self) {
         if self.main_view == MainView::Explorer {
-            if let Some((buffer, cursor, syntax)) = self.stashed_editor.take() {
-                self.buffer = buffer;
-                self.cursor = cursor;
-                self.syntax = syntax;
-            } else {
-                self.buffer = Buffer::empty();
-                self.cursor = Cursor::at_start();
-                self.syntax = None;
-            }
             self.main_view = MainView::Editor;
             self.explorer = None;
         } else if self.sidebar_focused {
@@ -983,12 +961,14 @@ impl App {
     }
 
     pub(crate) fn undo(&mut self) {
-        self.buffer.undo(&mut self.cursor);
+        let ob = self.open_mut();
+        ob.buffer.undo(&mut ob.cursor);
         self.wake_caret();
     }
 
     pub(crate) fn redo(&mut self) {
-        self.buffer.redo(&mut self.cursor);
+        let ob = self.open_mut();
+        ob.buffer.redo(&mut ob.cursor);
         self.wake_caret();
     }
 
@@ -1129,7 +1109,8 @@ impl App {
                 .map(|gpu| text::visible_line_count(gpu.size.height as f32))
                 .unwrap_or(20);
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
-            self.buffer.move_page(&mut self.cursor, page_size, down);
+            let ob = self.open_mut();
+            ob.buffer.move_page(&mut ob.cursor, page_size, down);
             self.wake_caret();
             return;
         }
@@ -1148,7 +1129,12 @@ impl App {
             return;
         }
 
-        match self.vim.handle_key(&mut self.buffer, &mut self.cursor, keypress) {
+        let id = self.focused_buffer_id();
+        let vim_event = {
+            let Some(ob) = self.buffers.get_mut(id) else { return };
+            self.vim.handle_key(&mut ob.buffer, &mut ob.cursor, keypress)
+        };
+        match vim_event {
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
             }
@@ -1170,34 +1156,43 @@ impl App {
     /// Keeps the cursor's line within the visible window, scrolling as
     /// needed. Must be called with the same `visible_lines` used to render.
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
-        let (line, _) = self.buffer.line_col(&self.cursor);
-        let target = scroll_to_include(self.scroll_line, line, visible_lines);
-        if target != self.scroll_line {
-            let jump = target.abs_diff(self.scroll_line);
+        let id = self.focused_buffer_id();
+        let (line, scroll_line) = {
+            let ob = self.buffers.get(id).expect("focused window always has an open buffer");
+            (ob.buffer.line_col(&ob.cursor).0, ob.scroll_line)
+        };
+        let target = scroll_to_include(scroll_line, line, visible_lines);
+        if target != scroll_line {
+            let jump = target.abs_diff(scroll_line);
             if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) {
-                self.scroll_anim = None;
-                self.rendered_scroll = target as f32;
+                self.scroll_anims.remove(&id);
+                self.buffers.get_mut(id).unwrap().rendered_scroll = target as f32;
             } else {
-                self.scroll_anim = Some(ScrollAnim { from: self.rendered_scroll, to: target, started: Instant::now() });
+                let from = self.buffers.get(id).unwrap().rendered_scroll;
+                self.scroll_anims.insert(id, ScrollAnim { from, to: target, started: Instant::now() });
             }
-            self.scroll_line = target;
+            self.buffers.get_mut(id).unwrap().scroll_line = target;
         }
         self.update_rendered_scroll();
     }
 
-    /// Advances `rendered_scroll` toward `scroll_line` if a transition is
-    /// in flight, clearing it once settled.
+    /// Advances the focused buffer's `rendered_scroll` toward its
+    /// `scroll_line` if a transition is in flight, clearing it once
+    /// settled.
     fn update_rendered_scroll(&mut self) {
-        let Some(anim) = &self.scroll_anim else {
-            self.rendered_scroll = self.scroll_line as f32;
+        let id = self.focused_buffer_id();
+        let scroll_line = self.buffers.get(id).unwrap().scroll_line;
+        let Some(anim) = self.scroll_anims.get(&id) else {
+            self.buffers.get_mut(id).unwrap().rendered_scroll = scroll_line as f32;
             return;
         };
         let t = Instant::now().duration_since(anim.started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
         if t >= 1.0 {
-            self.rendered_scroll = anim.to as f32;
-            self.scroll_anim = None;
+            self.buffers.get_mut(id).unwrap().rendered_scroll = anim.to as f32;
+            self.scroll_anims.remove(&id);
         } else {
-            self.rendered_scroll = anim.from + (anim.to as f32 - anim.from) * ease_out_cubic(t);
+            let (from, to) = (anim.from, anim.to as f32);
+            self.buffers.get_mut(id).unwrap().rendered_scroll = from + (to - from) * ease_out_cubic(t);
         }
     }
 
@@ -1206,14 +1201,15 @@ impl App {
     /// their row math to this (not `scroll_line`, which is only the
     /// *target* `rendered_scroll` is easing toward).
     fn render_base_line(&self) -> usize {
-        self.rendered_scroll.floor().max(0.0) as usize
+        self.open().rendered_scroll.floor().max(0.0) as usize
     }
 
     /// Sub-line-height pixel offset (0.0..1.0 of `LINE_HEIGHT`) to shift
     /// every content-area row up by, so a transition between two integer
     /// scroll positions looks like a smooth pan instead of a jump.
     fn render_frac(&self) -> f32 {
-        self.rendered_scroll - self.rendered_scroll.floor()
+        let r = self.open().rendered_scroll;
+        r - r.floor()
     }
 
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
@@ -1243,14 +1239,15 @@ impl App {
             };
             return Some((label, format!("│ {count} matches ")));
         }
-        let filename = self
+        let ob = self.open();
+        let filename = ob
             .buffer
             .path()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "[No Name]".to_string());
-        let modified = if self.buffer.is_dirty() { " [+]" } else { "" };
-        let (line, col) = self.buffer.line_col(&self.cursor);
+        let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
+        let (line, col) = ob.buffer.line_col(&ob.cursor);
         let mode_label =
             if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
         let suffix = format!("│ {filename}{modified}   Ln {}, Col {} ", line + 1, col + 1);
@@ -1311,7 +1308,7 @@ impl App {
         if self.line_number_mode == LineNumberMode::Off {
             return 0;
         }
-        self.buffer.visual_line_count().max(1).to_string().len() + 1
+        self.open().buffer.visual_line_count().max(1).to_string().len() + 1
     }
 
     /// Rich-text spans for the buffer-content area covering `rows` screen
@@ -1332,8 +1329,9 @@ impl App {
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
-        let visual_lines = self.buffer.visual_line_count();
-        let (cursor_line, _) = self.buffer.line_col(&self.cursor);
+        let ob = self.open();
+        let visual_lines = ob.buffer.visual_line_count();
+        let (cursor_line, _) = ob.buffer.line_col(&ob.cursor);
         let mut spans = Vec::new();
         for r in 0..rows {
             let buffer_line = render_base_line + r;
@@ -1354,14 +1352,14 @@ impl App {
                 spans.push(("~".to_string(), theme.gutter_fg));
             }
             if has_line {
-                let start = self.buffer.line_start_char(buffer_line);
-                let len = self.buffer.line_len(buffer_line);
-                let line_text = self.buffer.text_range(start, start + len);
+                let start = ob.buffer.line_start_char(buffer_line);
+                let len = ob.buffer.line_len(buffer_line);
+                let line_text = ob.buffer.text_range(start, start + len);
                 if syntax_highlights.is_empty() {
                     spans.push((line_text, theme.fg));
                 } else {
-                    let line_byte_start = self.buffer.char_to_byte(start);
-                    let line_byte_end = self.buffer.char_to_byte(start + len);
+                    let line_byte_start = ob.buffer.char_to_byte(start);
+                    let line_byte_end = ob.buffer.char_to_byte(start + len);
                     spans.extend(split_line_by_highlights(
                         &line_text,
                         line_byte_start,
@@ -1389,26 +1387,27 @@ impl App {
         render_base_line: usize,
         rows: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
-        let deltas = self.buffer.drain_edits();
-        let Some(syntax) = &mut self.syntax else { return Vec::new() };
+        let theme = self.theme;
+        let ob = self.open_mut();
+        let deltas = ob.buffer.drain_edits();
+        let Some(syntax) = &mut ob.syntax else { return Vec::new() };
 
         let edits: Vec<fenix_syntax::RawEdit> = deltas
             .into_iter()
             .map(|d| fenix_syntax::RawEdit { start_char: d.start_char, new_end_char: d.new_end_char, removed: d.removed })
             .collect();
-        let source = self.buffer.text();
+        let source = ob.buffer.text();
         syntax.apply_edits(&source, &edits);
 
-        let visual_lines = self.buffer.visual_line_count();
+        let visual_lines = ob.buffer.visual_line_count();
         if render_base_line >= visual_lines {
             return Vec::new();
         }
         let last_line = (render_base_line + rows).min(visual_lines) - 1;
-        let start_char = self.buffer.line_start_char(render_base_line);
-        let end_char = self.buffer.line_start_char(last_line) + self.buffer.line_len(last_line);
-        let byte_range = self.buffer.char_to_byte(start_char)..self.buffer.char_to_byte(end_char);
+        let start_char = ob.buffer.line_start_char(render_base_line);
+        let end_char = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
+        let byte_range = ob.buffer.char_to_byte(start_char)..ob.buffer.char_to_byte(end_char);
 
-        let theme = self.theme;
         syntax
             .highlights_in_range(&source, byte_range)
             .into_iter()
@@ -1427,37 +1426,37 @@ impl App {
             return Vec::new();
         }
         let anchor = self.vim.visual_anchor();
-        let last_visible = (self.render_base_line() + visible_lines).min(self.buffer.line_count());
+        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
         let mut segments = Vec::new();
 
         match self.vim.visual_kind() {
             VisualKind::Char => {
-                let cursor_idx = self.cursor.char_idx;
+                let cursor_idx = self.open().cursor.char_idx;
                 let (lo, hi) =
                     if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
-                let hi = hi.min(self.buffer.len_chars());
+                let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }
             VisualKind::Line => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
                 for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
                     // at least 1 col wide so an empty line still shows a sliver
-                    let width = self.buffer.line_len(line).max(1);
+                    let width = self.open().buffer.line_len(line).max(1);
                     segments.push((line - self.render_base_line(), 0, width));
                 }
             }
             VisualKind::Block => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
                 let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
-                let (_, anchor_col) = self.buffer.line_col(&anchor_cursor);
-                let (_, cursor_col) = self.buffer.line_col(&self.cursor);
+                let (_, anchor_col) = self.open().buffer.line_col(&anchor_cursor);
+                let (_, cursor_col) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
                 let (col_lo, col_hi) = if anchor_col <= cursor_col {
                     (anchor_col, cursor_col + 1)
                 } else {
                     (cursor_col, anchor_col + 1)
                 };
                 for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
-                    let len = self.buffer.line_len(line);
+                    let len = self.open().buffer.line_len(line);
                     let seg_start = col_lo.min(len);
                     let seg_end = col_hi.min(len);
                     if seg_start < seg_end {
@@ -1472,8 +1471,8 @@ impl App {
     /// (min, max) line index spanned by the visual anchor and the cursor.
     fn anchor_cursor_line_range(&self, anchor: usize) -> (usize, usize) {
         let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
-        let (anchor_line, _) = self.buffer.line_col(&anchor_cursor);
-        let (cursor_line, _) = self.buffer.line_col(&self.cursor);
+        let (anchor_line, _) = self.open().buffer.line_col(&anchor_cursor);
+        let (cursor_line, _) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
@@ -1482,11 +1481,11 @@ impl App {
     /// yank/paste pulse, which are both "highlight this contiguous span"
     /// even though they come from different sources.
     fn range_to_segments(&self, range: std::ops::Range<usize>, visible_lines: usize) -> Segments {
-        let last_visible = (self.render_base_line() + visible_lines).min(self.buffer.line_count());
+        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
         let mut segments = Vec::new();
         for line in self.render_base_line()..last_visible {
-            let line_start = self.buffer.line_start_char(line);
-            let line_end = line_start + self.buffer.line_len(line);
+            let line_start = self.open().buffer.line_start_char(line);
+            let line_end = line_start + self.open().buffer.line_len(line);
             let seg_start = range.start.max(line_start);
             let seg_end = range.end.min(line_end);
             if seg_start < seg_end {
@@ -1691,7 +1690,7 @@ impl App {
                 let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
                 let content_spans: Vec<(String, glyphon::Color, bool)> =
                     content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
-                let (line, col) = self.buffer.line_col(&self.cursor);
+                let (line, col) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
                 // During a large animated pan the cursor's actual line can
                 // legitimately be outside the currently-fetched window for
                 // part of the transition (it hasn't panned into view yet)
@@ -1915,7 +1914,7 @@ impl ApplicationHandler for App {
 
         let gpu = pollster::block_on(GpuState::new(window.clone()));
         let mut text = TextPipeline::new(&gpu);
-        text.set_text(&self.buffer.visible_text(0, text::visible_line_count(gpu.size.height as f32)));
+        text.set_text(&self.open().buffer.visible_text(0, text::visible_line_count(gpu.size.height as f32)));
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
 
@@ -1982,7 +1981,7 @@ impl ApplicationHandler for App {
             }
             None => false,
         };
-        let animating = blink_transitioning || pulse_active || self.scroll_anim.is_some();
+        let animating = blink_transitioning || pulse_active || self.scroll_anims.contains_key(&self.focused_buffer_id());
         if animating {
             needs_redraw = true;
         }
@@ -1995,6 +1994,40 @@ impl ApplicationHandler for App {
 
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
+    }
+}
+
+/// Test-only conveniences for driving the focused buffer directly --
+/// mirrors the exact inline-field-access pattern the equivalent
+/// production code paths use (see e.g. `handle_key`'s Vim dispatch),
+/// just named so test setup isn't repeating the borrow-splitting dance
+/// at every call site.
+#[cfg(test)]
+impl App {
+    fn test_insert(&mut self, ch: char) {
+        let ob = self.open_mut();
+        ob.buffer.insert_char(&mut ob.cursor, ch);
+    }
+
+    fn test_insert_str(&mut self, s: &str) {
+        for ch in s.chars() {
+            self.test_insert(ch);
+        }
+    }
+
+    fn test_vim_key(&mut self, key: KeyPress) -> VimEvent {
+        let id = self.focused_buffer_id();
+        let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
+        self.vim.handle_key(&mut ob.buffer, &mut ob.cursor, key)
+    }
+
+    /// Points the focused pane at `path`, opening it fresh in the
+    /// registry -- test-only equivalent of what `open_file_from_picker`/
+    /// `explorer_open_selected` do in production.
+    fn test_open_path(&mut self, path: &Path) {
+        let id = self.buffers.open_path(path);
+        let focused = self.windows.focused_id();
+        self.windows.set_content(focused, id);
     }
 }
 
@@ -2027,55 +2060,62 @@ mod tests {
     fn app_auto_scrolls_to_keep_cursor_in_view() {
         let mut app = App::with_file(None);
         for _ in 0..30 {
-            app.buffer.insert_char(&mut app.cursor, '\n');
+            app.test_insert('\n');
         }
         // cursor is now on line 30; a 10-line viewport starting at 0 doesn't include it
         app.ensure_cursor_visible(10);
-        assert_eq!(app.scroll_line, 21);
+        assert_eq!(app.open().scroll_line, 21);
     }
 
     #[test]
     fn small_scroll_change_starts_an_animation_not_an_instant_jump() {
         let mut app = App::with_file(None);
         for _ in 0..5 {
-            app.buffer.insert_char(&mut app.cursor, '\n');
+            app.test_insert('\n');
         }
         app.ensure_cursor_visible(3); // 6 lines, 3-line viewport -> scrolls a bit
-        assert!(app.scroll_anim.is_some());
-        assert_ne!(app.rendered_scroll, app.scroll_line as f32); // still mid-ease, not snapped
+        assert!(app.scroll_anims.contains_key(&app.focused_buffer_id()));
+        let ob = app.open();
+        assert_ne!(ob.rendered_scroll, ob.scroll_line as f32); // still mid-ease, not snapped
     }
 
     #[test]
     fn huge_scroll_jump_snaps_instantly_without_animating() {
         let mut app = App::with_file(None);
         for _ in 0..500 {
-            app.buffer.insert_char(&mut app.cursor, '\n');
+            app.test_insert('\n');
         }
         app.ensure_cursor_visible(10); // jump of ~490 lines, way past the snap threshold
-        assert!(app.scroll_anim.is_none());
-        assert_eq!(app.rendered_scroll, app.scroll_line as f32);
+        assert!(!app.scroll_anims.contains_key(&app.focused_buffer_id()));
+        let ob = app.open();
+        assert_eq!(ob.rendered_scroll, ob.scroll_line as f32);
     }
 
     #[test]
     fn rendered_scroll_eases_toward_target_and_settles() {
         let mut app = App::with_file(None);
-        app.scroll_line = 10;
-        app.rendered_scroll = 0.0;
-        app.scroll_anim = Some(ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION / 2 });
+        let id = app.focused_buffer_id();
+        {
+            let ob = app.open_mut();
+            ob.scroll_line = 10;
+            ob.rendered_scroll = 0.0;
+        }
+        app.scroll_anims.insert(id, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION / 2 });
         app.update_rendered_scroll();
-        assert!(app.rendered_scroll > 0.0 && app.rendered_scroll < 10.0, "should be partway there");
-        assert!(app.scroll_anim.is_some());
+        let r = app.open().rendered_scroll;
+        assert!(r > 0.0 && r < 10.0, "should be partway there");
+        assert!(app.scroll_anims.contains_key(&id));
 
-        app.scroll_anim = Some(ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION * 2 });
+        app.scroll_anims.insert(id, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION * 2 });
         app.update_rendered_scroll();
-        assert_eq!(app.rendered_scroll, 10.0);
-        assert!(app.scroll_anim.is_none()); // settled, animation cleared
+        assert_eq!(app.open().rendered_scroll, 10.0);
+        assert!(!app.scroll_anims.contains_key(&id)); // settled, animation cleared
     }
 
     #[test]
     fn render_base_line_and_frac_split_a_fractional_scroll_position() {
         let mut app = App::with_file(None);
-        app.rendered_scroll = 4.25;
+        app.open_mut().rendered_scroll = 4.25;
         assert_eq!(app.render_base_line(), 4);
         assert!((app.render_frac() - 0.25).abs() < f32::EPSILON);
     }
@@ -2085,8 +2125,8 @@ mod tests {
         let mut app = App::with_file(None);
         assert_eq!(app.modeline_text(), "  NORMAL │ [No Name]   Ln 1, Col 1 ");
 
-        app.buffer.insert_char(&mut app.cursor, 'a');
-        app.buffer.insert_char(&mut app.cursor, 'b');
+        app.test_insert('a');
+        app.test_insert('b');
         assert_eq!(app.modeline_text(), "  NORMAL │ [No Name] [+]   Ln 1, Col 3 ");
     }
 
@@ -2094,7 +2134,7 @@ mod tests {
     fn modeline_shows_command_line_while_typing_an_ex_command() {
         let mut app = App::with_file(None);
         for ch in [':', 'w', 'q'] {
-            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char(ch));
+            app.test_vim_key(KeyPress::char(ch));
         }
         assert_eq!(app.modeline_text(), ":wq");
     }
@@ -2103,12 +2143,12 @@ mod tests {
     fn visual_selection_segments_cover_the_selected_range() {
         let mut app = App::with_file(None);
         for ch in "hello world".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
-        app.cursor = Cursor::at_start();
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        app.open_mut().cursor = Cursor::at_start();
+        app.test_vim_key(KeyPress::char('v'));
         for _ in 0..4 {
-            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('l'));
+            app.test_vim_key(KeyPress::char('l'));
         }
         // anchor 0, cursor now at 4 ("hello"[0..5))
         assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 5)]);
@@ -2124,17 +2164,17 @@ mod tests {
     fn modeline_shows_visual_kind_not_just_visual() {
         let mut app = App::with_file(None);
         for ch in "one\ntwo\nthree".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
-        app.cursor = Cursor::at_start();
+        app.open_mut().cursor = Cursor::at_start();
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        app.test_vim_key(KeyPress::char('v'));
         assert!(app.modeline_text().contains("VISUAL"));
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        app.test_vim_key(KeyPress::char('V'));
         assert!(app.modeline_text().contains("V-LINE"));
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v').with_ctrl());
+        app.test_vim_key(KeyPress::char('v').with_ctrl());
         assert!(app.modeline_text().contains("V-BLOCK"));
     }
 
@@ -2143,14 +2183,14 @@ mod tests {
         let mut app = App::with_file(None);
         let (normal_bg, _) = app.mode_colors();
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('i'));
+        app.test_vim_key(KeyPress::char('i'));
         let (insert_bg, _) = app.mode_colors();
         assert_ne!(normal_bg, insert_bg);
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::named(FenixNamedKey::Escape));
+        app.test_vim_key(KeyPress::named(FenixNamedKey::Escape));
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        app.test_vim_key(KeyPress::char('v'));
         let (char_visual_bg, _) = app.mode_colors();
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        app.test_vim_key(KeyPress::char('V'));
         let (line_visual_bg, _) = app.mode_colors();
         assert_eq!(char_visual_bg, line_visual_bg); // one accent for all Visual kinds
         assert_ne!(char_visual_bg, normal_bg);
@@ -2161,12 +2201,12 @@ mod tests {
         let mut app = App::with_file(None);
         assert!(app.caret_is_block()); // starts in Normal
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('i'));
+        app.test_vim_key(KeyPress::char('i'));
         assert!(!app.caret_is_block()); // Insert -- thin bar
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::named(FenixNamedKey::Escape));
+        app.test_vim_key(KeyPress::named(FenixNamedKey::Escape));
         assert!(app.caret_is_block()); // back to Normal
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        app.test_vim_key(KeyPress::char('v'));
         assert!(app.caret_is_block()); // Visual
     }
 
@@ -2174,10 +2214,10 @@ mod tests {
     fn visual_line_segments_cover_whole_lines_regardless_of_column() {
         let mut app = App::with_file(None);
         for ch in "one\ntwo\nthree".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
-        app.cursor = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two"
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('V'));
+        app.open_mut().cursor = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two"
+        app.test_vim_key(KeyPress::char('V'));
         assert_eq!(app.visual_selection_segments(10), vec![(1, 0, 3)]);
     }
 
@@ -2185,12 +2225,12 @@ mod tests {
     fn visual_block_segments_form_a_column_rectangle() {
         let mut app = App::with_file(None);
         for ch in "abc\ndef\nghi".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
-        app.cursor = Cursor::at_start();
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v').with_ctrl());
+        app.open_mut().cursor = Cursor::at_start();
+        app.test_vim_key(KeyPress::char('v').with_ctrl());
         for ch in ['j', 'j', 'l'] {
-            app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char(ch));
+            app.test_vim_key(KeyPress::char(ch));
         }
         assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
     }
@@ -2241,7 +2281,7 @@ mod tests {
     fn fresh_pulse_is_near_peak_alpha_and_covers_its_range() {
         let mut app = App::with_file(None);
         for ch in "hello world".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() });
         let (segments, alpha) = app.pulse_overlay(10).expect("pulse should be active");
@@ -2253,7 +2293,7 @@ mod tests {
     fn expired_pulse_produces_no_overlay() {
         let mut app = App::with_file(None);
         for ch in "hello".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() - PULSE_DURATION * 2 });
         assert!(app.pulse_overlay(10).is_none());
@@ -2270,13 +2310,13 @@ mod tests {
     fn vim_pulse_event_yields_a_renderable_pulse_overlay() {
         let mut app = App::with_file(None);
         for ch in "hello world".chars() {
-            app.buffer.insert_char(&mut app.cursor, ch);
+            app.test_insert(ch);
         }
-        app.cursor = Cursor::at_start();
+        app.open_mut().cursor = Cursor::at_start();
         assert!(app.pulse.is_none());
 
-        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('y'));
-        let event = app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('w'));
+        app.test_vim_key(KeyPress::char('y'));
+        let event = app.test_vim_key(KeyPress::char('w'));
         let fenix_vim::VimEvent::Pulse(range) = event else { panic!("expected a Pulse event from yw") };
         app.pulse = Some(Pulse { range, started: Instant::now() });
         assert!(app.pulse_overlay(10).is_some());
@@ -2317,8 +2357,8 @@ mod tests {
     fn content_spans_relative_mode_shows_distance_from_cursor() {
         let mut app = App::with_file(None);
         app.line_number_mode = LineNumberMode::Relative;
-        app.buffer.insert_str(&mut app.cursor, "a\nb\nc\nd");
-        app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
+        app.test_insert_str("a\nb\nc\nd");
+        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
         let gutter = app.gutter_chars();
         let spans = app.content_spans(0, 4, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
@@ -2328,8 +2368,8 @@ mod tests {
     #[test]
     fn content_spans_current_line_number_uses_fg_not_gutter_fg() {
         let mut app = App::with_file(None);
-        app.buffer.insert_str(&mut app.cursor, "a\nb");
-        app.cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
+        app.test_insert_str("a\nb");
+        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
         let gutter = app.gutter_chars();
         let spans = app.content_spans(0, 2, gutter, &[]);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
@@ -2397,10 +2437,10 @@ mod tests {
     #[test]
     fn syntax_state_seeds_from_the_detected_language() {
         let mut app = App::with_file(None);
-        assert!(app.syntax.is_none()); // no path -> no language
+        assert!(app.open().syntax.is_none()); // no path -> no language
 
-        app.syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, ""));
-        app.buffer.insert_str(&mut app.cursor, "fn main() {}");
+        app.open_mut().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, ""));
+        app.test_insert_str("fn main() {}");
 
         let highlights = app.syntax_highlights_for_visible_range(0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
@@ -2417,11 +2457,11 @@ mod tests {
     #[test]
     fn syntax_highlights_drain_edits_even_without_an_active_language() {
         let mut app = App::with_file(None);
-        assert!(app.syntax.is_none());
-        app.buffer.insert_str(&mut app.cursor, "hello");
+        assert!(app.open().syntax.is_none());
+        app.test_insert_str("hello");
         assert!(app.syntax_highlights_for_visible_range(0, 1).is_empty());
         // The edit log should have been drained regardless, not left to grow.
-        assert!(app.buffer.drain_edits().is_empty());
+        assert!(app.open_mut().buffer.drain_edits().is_empty());
     }
 
     /// A real, uniquely-named temp directory, removed on drop -- these
@@ -2458,16 +2498,20 @@ mod tests {
     }
 
     #[test]
-    fn explorer_jump_stashes_the_editor_and_switches_to_explorer_view() {
+    fn explorer_jump_switches_to_explorer_view_without_touching_the_buffer() {
         let dir = TempDir::new("jump_stashes");
         let file = dir.touch("a.txt");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.buffer.insert_str(&mut app.cursor, " extra"); // dirty the buffer so the stash is checkable
+        app.test_insert_str(" extra"); // dirty the buffer so "untouched" is checkable
+        let focused_before = app.focused_buffer_id();
 
         app.explorer_jump();
         assert_eq!(app.main_view, MainView::Explorer);
         assert!(app.explorer.is_some());
-        assert!(app.stashed_editor.is_some());
+        // No stashing needed -- the focused pane's buffer id (and its
+        // content) is left exactly as it was; only `main_view` changed.
+        assert_eq!(app.focused_buffer_id(), focused_before);
+        assert_eq!(app.open().buffer.text(), " extrahello\n");
         assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.path());
     }
 
@@ -2485,7 +2529,7 @@ mod tests {
         app.sidebar_open = true;
         app.sidebar_focused = false;
 
-        app.buffer = Buffer::from_path(&file).unwrap();
+        app.test_open_path(&file);
         app.explorer_jump();
 
         assert_eq!(app.main_view, MainView::Explorer);
@@ -2559,20 +2603,19 @@ mod tests {
     }
 
     #[test]
-    fn quitting_full_buffer_explorer_restores_the_stashed_editor() {
+    fn quitting_full_buffer_explorer_leaves_the_buffer_exactly_as_it_was() {
         let dir = TempDir::new("jump_quit_restores");
         let file = dir.touch("a.txt");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.buffer.insert_str(&mut app.cursor, " extra");
-        let dirty_text = app.buffer.text();
+        app.test_insert_str(" extra");
+        let dirty_text = app.open().buffer.text();
 
         app.explorer_jump();
         app.explorer_quit();
 
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.explorer.is_none());
-        assert!(app.stashed_editor.is_none());
-        assert_eq!(app.buffer.text(), dirty_text);
+        assert_eq!(app.open().buffer.text(), dirty_text);
     }
 
     #[test]
@@ -2580,7 +2623,7 @@ mod tests {
         let dir = TempDir::new("toggle_sidebar");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
-        app.buffer = fenix_core::Buffer::from_path(dir.path().join("a.txt")).unwrap();
+        app.test_open_path(&dir.path().join("a.txt"));
 
         app.toggle_sidebar();
         assert!(app.sidebar_open);
@@ -2613,13 +2656,11 @@ mod tests {
         let mut app = App::with_file(None);
         app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
-        app.stashed_editor = Some((Buffer::empty(), Cursor::at_start(), None));
 
         app.explorer_open_selected();
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.explorer.is_none());
-        assert!(app.stashed_editor.is_none()); // dropped, not restored -- the opened file is current
-        assert_eq!(app.buffer.text(), "hello\n");
+        assert_eq!(app.open().buffer.text(), "hello\n");
     }
 
     #[test]
@@ -2635,7 +2676,7 @@ mod tests {
         assert!(app.sidebar_open); // sidebar persists
         assert!(!app.sidebar_focused); // focus returns to the editor
         assert!(app.sidebar.is_some());
-        assert_eq!(app.buffer.text(), "hello\n");
+        assert_eq!(app.open().buffer.text(), "hello\n");
     }
 
     #[test]
@@ -2719,23 +2760,23 @@ mod tests {
     }
 
     #[test]
-    fn enter_picker_stashes_and_picker_cancel_restores() {
+    fn enter_picker_and_picker_cancel_leave_the_buffer_untouched() {
         let dir = TempDir::new("picker_enter_cancel");
         let file = dir.touch("a.txt");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.buffer.insert_str(&mut app.cursor, " extra");
-        let dirty_text = app.buffer.text();
+        app.test_insert_str(" extra");
+        let dirty_text = app.open().buffer.text();
+        let focused_before = app.focused_buffer_id();
 
         app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(Vec::new())));
         assert_eq!(app.main_view, MainView::Picker);
         assert!(app.active_picker.is_some());
-        assert!(app.stashed_editor.is_some());
+        assert_eq!(app.focused_buffer_id(), focused_before);
 
         app.picker_cancel();
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.active_picker.is_none());
-        assert!(app.stashed_editor.is_none());
-        assert_eq!(app.buffer.text(), dirty_text);
+        assert_eq!(app.open().buffer.text(), dirty_text);
     }
 
     #[test]
@@ -2750,9 +2791,8 @@ mod tests {
 
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.active_picker.is_none());
-        assert!(app.stashed_editor.is_none());
-        assert_eq!(app.buffer.path(), Some(target.as_path()));
-        assert_eq!(app.buffer.text(), "picked contents\n");
+        assert_eq!(app.open().buffer.path(), Some(target.as_path()));
+        assert_eq!(app.open().buffer.text(), "picked contents\n");
     }
 
     #[test]
@@ -2788,7 +2828,7 @@ mod tests {
         app.picker_confirm();
 
         assert_eq!(app.main_view, MainView::Editor);
-        let (line, _) = app.buffer.line_col(&app.cursor);
+        let (line, _) = { let ob = app.open(); ob.buffer.line_col(&ob.cursor) };
         assert_eq!(line, 1); // "needle here" is the second line (index 1)
     }
 
@@ -2849,17 +2889,17 @@ mod tests {
         project_dir.touch("main.rs");
 
         // Already mid-picker (as `picker_confirm` would leave it before
-        // dispatching to `switch_to_project`) -- switch shouldn't stash
-        // a second time or touch `main_view`, just swap the active picker.
+        // dispatching to `switch_to_project`) -- switch shouldn't touch
+        // `main_view` or the focused buffer, just swap the active picker.
+        let focused_before = app.focused_buffer_id();
         app.enter_picker(ActivePicker::SwitchProject(fenix_picker::PickerState::new(Vec::new())));
-        assert!(app.stashed_editor.is_some());
 
         app.switch_to_project(project_dir.path().to_path_buf());
 
         assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
         assert_eq!(app.known_projects.roots(), &[project_dir.path().to_path_buf()]);
         assert_eq!(app.main_view, MainView::Picker);
-        assert!(app.stashed_editor.is_some());
+        assert_eq!(app.focused_buffer_id(), focused_before);
         match &app.active_picker {
             Some(ActivePicker::FindFile(state)) => {
                 assert_eq!(state.selected().map(|c| c.label.as_str()), Some("main.rs"))
@@ -2911,7 +2951,7 @@ mod tests {
         app.picker_key(KeyPress::named(FenixNamedKey::Enter));
 
         assert_eq!(app.main_view, MainView::Editor);
-        assert_eq!(app.buffer.path(), Some(target.as_path()));
+        assert_eq!(app.open().buffer.path(), Some(target.as_path()));
     }
 
     #[test]

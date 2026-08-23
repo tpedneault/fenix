@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 dirs = "6"
+fenix-buffers = { path = "../fenix-buffers" }
 fenix-core = { path = "../fenix-core" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-keymap = { path = "../fenix-keymap" }
@@ -14,6 +15,7 @@ fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-vim = { path = "../fenix-vim" }
+fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
 pollster = "1.0.1"
 wgpu = "30.0.1"
