@@ -110,6 +110,7 @@ enum ActivePicker {
     FindFile(fenix_picker::PickerState<PathBuf>),
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
+    SwitchBuffer(fenix_picker::PickerState<BufferId>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -121,6 +122,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::FindFile(s) => s.push_char(c),
         ActivePicker::Grep(s) => s.push_char(c),
         ActivePicker::SwitchProject(s) => s.push_char(c),
+        ActivePicker::SwitchBuffer(s) => s.push_char(c),
     }
 }
 
@@ -129,6 +131,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::FindFile(s) => s.backspace(),
         ActivePicker::Grep(s) => s.backspace(),
         ActivePicker::SwitchProject(s) => s.backspace(),
+        ActivePicker::SwitchBuffer(s) => s.backspace(),
     }
 }
 
@@ -137,6 +140,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::FindFile(s) => s.move_selection(delta),
         ActivePicker::Grep(s) => s.move_selection(delta),
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
+        ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
     }
 }
 
@@ -145,6 +149,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::FindFile(s) => s.query(),
         ActivePicker::Grep(s) => s.query(),
         ActivePicker::SwitchProject(s) => s.query(),
+        ActivePicker::SwitchBuffer(s) => s.query(),
     }
 }
 
@@ -153,6 +158,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::FindFile(s) => s.len(),
         ActivePicker::Grep(s) => s.len(),
         ActivePicker::SwitchProject(s) => s.len(),
+        ActivePicker::SwitchBuffer(s) => s.len(),
     }
 }
 
@@ -161,6 +167,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::FindFile(s) => s.selected_row(),
         ActivePicker::Grep(s) => s.selected_row(),
         ActivePicker::SwitchProject(s) => s.selected_row(),
+        ActivePicker::SwitchBuffer(s) => s.selected_row(),
     }
 }
 
@@ -173,6 +180,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::FindFile(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Grep(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -646,6 +654,87 @@ impl App {
         }
     }
 
+    /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
+    /// (most-recently-touched first, matching Doom's own buffer switcher),
+    /// each labeled with its path (or `*scratch*` for an unnamed buffer)
+    /// and a leading `+` marker for unsaved changes.
+    pub(crate) fn picker_switch_buffer(&mut self) {
+        let candidates = self
+            .buffers
+            .mru()
+            .iter()
+            .map(|&id| {
+                let ob = self.buffers.get(id).expect("mru only lists open buffers");
+                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
+                let marker = if ob.buffer.is_dirty() { "+ " } else { "" };
+                fenix_picker::Candidate::new(format!("{marker}{name}"), id)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Points the focused pane at an already-open buffer -- `SPC b b`'s
+    /// confirm action, and shared by nothing else (unlike `open_file_from_
+    /// picker`, there's no path to resolve/read; the buffer already
+    /// exists in the registry).
+    fn switch_focused_to_buffer(&mut self, id: BufferId) {
+        let focused = self.windows.focused_id();
+        self.windows.set_content(focused, id);
+        self.buffers.touch(id);
+        self.refresh_project_root();
+        self.main_view = MainView::Editor;
+    }
+
+    /// `SPC b n`/`SPC b p`: cycles the focused pane through every open
+    /// buffer in a stable, path-sorted order (not MRU -- repeated `n`/`p`
+    /// should walk a fixed list, not bounce between the two most recent).
+    fn cycle_buffer(&mut self, delta: isize) {
+        let ids = self.buffers.ids_sorted_by_path();
+        if ids.len() <= 1 {
+            return;
+        }
+        let current = self.focused_buffer_id();
+        let pos = ids.iter().position(|&id| id == current).unwrap_or(0) as isize;
+        let next = ids[(pos + delta).rem_euclid(ids.len() as isize) as usize];
+        self.switch_focused_to_buffer(next);
+        self.wake_caret();
+    }
+
+    pub(crate) fn next_buffer(&mut self) {
+        self.cycle_buffer(1);
+    }
+
+    pub(crate) fn prev_buffer(&mut self) {
+        self.cycle_buffer(-1);
+    }
+
+    /// `SPC b k`: closes the focused buffer. Any pane (in this window
+    /// tree) currently showing it falls back to the MRU-next open buffer,
+    /// or a fresh scratch buffer if none remain -- never leaves a pane
+    /// pointing at a closed `BufferId`.
+    pub(crate) fn kill_buffer(&mut self) {
+        let id = self.focused_buffer_id();
+        self.buffers.close(id);
+        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+        for pane in self.windows.windows() {
+            if self.windows.content(pane) == Some(&id) {
+                self.windows.set_content(pane, fallback);
+            }
+        }
+        self.buffers.touch(fallback);
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
+    pub(crate) fn new_scratch_buffer(&mut self) {
+        let id = self.buffers.open_scratch();
+        let focused = self.windows.focused_id();
+        self.windows.set_content(focused, id);
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
@@ -683,6 +772,11 @@ impl App {
                 self.active_picker = None;
                 self.open_file_from_picker(&m.path);
                 self.jump_to_grep_match(&m);
+            }
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                let Some(id) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.switch_focused_to_buffer(id);
             }
             None => {}
         }
@@ -1289,6 +1383,7 @@ impl App {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ ActivePicker::Grep(_)) => ("GREP", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return Some((label, format!("│ {count} matches ")));
@@ -3168,6 +3263,146 @@ mod tests {
             }
             _ => panic!("expected switch_to_project to chain into a FindFile picker"),
         }
+    }
+
+    #[test]
+    fn picker_switch_buffer_lists_open_buffers_mru_first() {
+        let dir = TempDir::new("switch_buffer_candidates");
+        let a = dir.write("a.txt", "a");
+        let b = dir.write("b.txt", "b");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        app.test_open_path(&b); // b opened (and touched) last -> MRU-first
+
+        app.picker_switch_buffer();
+
+        match &app.active_picker {
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels[0], b.display().to_string());
+                assert!(labels.contains(&a.display().to_string().as_str()));
+            }
+            _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
+        }
+    }
+
+    #[test]
+    fn picker_switch_buffer_marks_dirty_buffers() {
+        let mut app = App::with_file(None); // one scratch buffer, untouched
+        app.picker_switch_buffer();
+        match &app.active_picker {
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "*scratch*");
+            }
+            _ => panic!("expected a SwitchBuffer picker"),
+        }
+
+        app.test_insert('x'); // now dirty
+        app.picker_switch_buffer();
+        match &app.active_picker {
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "+ *scratch*");
+            }
+            _ => panic!("expected a SwitchBuffer picker"),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_switch_buffer_points_the_focused_pane_at_it() {
+        let dir = TempDir::new("switch_buffer_confirm");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let scratch_id = app.focused_buffer_id();
+        app.test_open_path(&a); // now focused on a.txt
+
+        let candidates = vec![fenix_picker::Candidate::new("*scratch*", scratch_id)];
+        app.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+
+        assert_eq!(app.focused_buffer_id(), scratch_id);
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn next_and_prev_buffer_cycle_through_every_open_buffer() {
+        let dir = TempDir::new("cycle_buffer");
+        let a = dir.write("a.txt", "a");
+        let b = dir.write("b.txt", "b");
+        let mut app = App::with_file(None); // scratch, then a, then b
+        app.test_open_path(&a);
+        app.test_open_path(&b);
+
+        let ids = app.buffers.ids_sorted_by_path(); // scratch, a, b (scratch sorts first)
+        assert_eq!(app.focused_buffer_id(), ids[2]); // currently on b
+
+        app.next_buffer(); // wraps to scratch
+        assert_eq!(app.focused_buffer_id(), ids[0]);
+
+        app.prev_buffer(); // back to b
+        assert_eq!(app.focused_buffer_id(), ids[2]);
+
+        app.prev_buffer(); // to a
+        assert_eq!(app.focused_buffer_id(), ids[1]);
+    }
+
+    #[test]
+    fn kill_buffer_falls_back_to_the_mru_next_buffer() {
+        let dir = TempDir::new("kill_buffer");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let scratch_id = app.focused_buffer_id();
+        app.test_open_path(&a); // focused on a, scratch is MRU-next
+
+        app.kill_buffer();
+
+        assert_eq!(app.focused_buffer_id(), scratch_id);
+        assert!(app.buffers.get(scratch_id).is_some());
+        assert_eq!(app.buffers.len(), 1);
+    }
+
+    #[test]
+    fn kill_buffer_on_the_last_buffer_falls_back_to_a_fresh_scratch() {
+        let mut app = App::with_file(None); // single scratch buffer
+        let original_id = app.focused_buffer_id();
+
+        app.kill_buffer();
+
+        assert_ne!(app.focused_buffer_id(), original_id); // a *new* scratch, not the old one
+        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.open().buffer.text(), "");
+    }
+
+    #[test]
+    fn kill_buffer_retargets_every_other_pane_showing_it() {
+        let dir = TempDir::new("kill_buffer_multi_pane");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let scratch_id = app.focused_buffer_id();
+        app.test_open_path(&a); // focused pane now on a
+        app.split_vertical(); // new pane, also showing a
+        assert_eq!(app.windows.window_count(), 2);
+
+        app.kill_buffer(); // closes a, focused in the new pane
+
+        for pane in app.windows.windows() {
+            assert_eq!(app.windows.content(pane), Some(&scratch_id));
+        }
+    }
+
+    #[test]
+    fn new_scratch_buffer_opens_a_fresh_empty_buffer_in_the_focused_pane() {
+        let dir = TempDir::new("new_scratch");
+        let a = dir.write("a.txt", "hello");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        let a_id = app.focused_buffer_id();
+
+        app.new_scratch_buffer();
+
+        assert_ne!(app.focused_buffer_id(), a_id);
+        assert_eq!(app.open().buffer.text(), "");
+        assert_eq!(app.open().buffer.path(), None);
     }
 
     #[test]

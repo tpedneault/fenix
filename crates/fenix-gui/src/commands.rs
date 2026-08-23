@@ -58,6 +58,11 @@ impl CommandRegistry {
         registry.register("window.close", "Close the focused window", cmd_close_window);
         registry.register("window.only", "Close every window except the focused one", cmd_only_window);
         registry.register("window.balance", "Reset every split ratio to 0.5", cmd_balance_windows);
+        registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
+        registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
+        registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
+        registry.register("buffer.kill", "Close the focused buffer", cmd_kill_buffer);
+        registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);
         registry
     }
 
@@ -162,4 +167,24 @@ fn cmd_only_window(ctx: &mut CommandCtx) {
 
 fn cmd_balance_windows(ctx: &mut CommandCtx) {
     ctx.app.balance_windows();
+}
+
+fn cmd_switch_buffer(ctx: &mut CommandCtx) {
+    ctx.app.picker_switch_buffer();
+}
+
+fn cmd_next_buffer(ctx: &mut CommandCtx) {
+    ctx.app.next_buffer();
+}
+
+fn cmd_prev_buffer(ctx: &mut CommandCtx) {
+    ctx.app.prev_buffer();
+}
+
+fn cmd_kill_buffer(ctx: &mut CommandCtx) {
+    ctx.app.kill_buffer();
+}
+
+fn cmd_new_scratch_buffer(ctx: &mut CommandCtx) {
+    ctx.app.new_scratch_buffer();
 }

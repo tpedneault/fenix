@@ -73,9 +73,9 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
 /// through to a resolved command -- is just one uniform walk of this trie.
 ///
 /// Deliberately sparse: only wires groups that have a real command behind
-/// them today. `SPC b` (buffers) and `SPC TAB` (workspaces) have nothing
-/// to bind to yet -- no multi-buffer switcher or workspace list exist
-/// until later phases -- so they're not stubbed in here.
+/// them today. `SPC TAB` (workspaces) has nothing to bind to yet -- no
+/// workspace list exists until a later phase -- so it's not stubbed in
+/// here.
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -125,6 +125,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('q')], "close window", "window.close");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('o')], "only", "window.only");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('=')], "balance", "window.balance");
+
+        t.label_group(&[spc, KeyPress::char('b')], "buffer");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('b')], "switch buffer", "buffer.switch");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('n')], "next buffer", "buffer.next");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('p')], "prev buffer", "buffer.prev");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('k')], "kill buffer", "buffer.kill");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('X')], "scratch buffer", "buffer.scratch");
 
         t
     })
@@ -257,5 +264,27 @@ mod tests {
         assert!(matches!(resolve(&['q']), fenix_keymap::Step::Matched(&"window.close")));
         assert!(matches!(resolve(&['o']), fenix_keymap::Step::Matched(&"window.only")));
         assert!(matches!(resolve(&['=']), fenix_keymap::Step::Matched(&"window.balance")));
+    }
+
+    #[test]
+    fn leader_trie_resolves_buffer_switch_next_prev_kill_and_scratch() {
+        let trie = leader_trie();
+
+        let resolve = |keys: &[char]| {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('b'));
+            let mut last = None;
+            for &k in keys {
+                last = Some(m.feed(KeyPress::char(k)));
+            }
+            last.unwrap()
+        };
+
+        assert!(matches!(resolve(&['b']), fenix_keymap::Step::Matched(&"buffer.switch")));
+        assert!(matches!(resolve(&['n']), fenix_keymap::Step::Matched(&"buffer.next")));
+        assert!(matches!(resolve(&['p']), fenix_keymap::Step::Matched(&"buffer.prev")));
+        assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"buffer.kill")));
+        assert!(matches!(resolve(&['X']), fenix_keymap::Step::Matched(&"buffer.scratch")));
     }
 }
