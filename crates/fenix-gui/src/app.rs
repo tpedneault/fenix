@@ -1273,6 +1273,14 @@ impl App {
     }
 
     /// (badge background, badge text color) for the current mode. Visual's
+    /// Whether the caret should render as a full-cell block (Normal,
+    /// Visual, Replace, Command) rather than the thin Insert-mode bar --
+    /// matches real Vim's own cursor-shape convention (block outside
+    /// Insert, thin bar while actively typing).
+    fn caret_is_block(&self) -> bool {
+        self.vim.mode() != Mode::Insert
+    }
+
     /// three kinds all share one accent (matching orbit-emacs's own
     /// evil-state table, which has a single "Visual" entry) -- only the
     /// badge's label text differs between them.
@@ -1607,6 +1615,23 @@ impl App {
         };
         let visible_lines = text::visible_line_count(window_height);
 
+        // Resolved once, up front: the active theme's font (so
+        // `char_width` below reflects it) and the real measured advance
+        // width for that font, used for every per-column pixel
+        // computation below instead of the fixed-ratio `text::
+        // CHAR_WIDTH` constant, which broke the moment a second font
+        // (the bundled TempleOS bitmap font, a ~1.0x-em advance vs. the
+        // constant's assumed ~0.6x) entered the mix.
+        let theme = self.theme;
+        let char_width = match &mut self.text {
+            Some(text) => {
+                text.set_theme(theme);
+                text.char_width()
+            }
+            None => text::CHAR_WIDTH,
+        };
+        let caret_is_block = self.caret_is_block();
+
         // Sidebar is independent of `main_view` -- kept alive (and its
         // own scroll adjusted) even while a full-buffer explorer is
         // showing, but only actually rendered in Editor mode (see
@@ -1661,7 +1686,7 @@ impl App {
                 let render_base_line = self.render_base_line();
                 let render_frac = self.render_frac();
                 let gutter_chars = self.gutter_chars();
-                let gutter_px = gutter_chars as f32 * text::CHAR_WIDTH;
+                let gutter_px = gutter_chars as f32 * char_width;
                 let syntax_highlights = self.syntax_highlights_for_visible_range(render_base_line, visible_lines + 1);
                 let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
                 let content_spans: Vec<(String, glyphon::Color, bool)> =
@@ -1690,7 +1715,6 @@ impl App {
         let (badge_bg, badge_fg) = self.mode_colors();
         let which_key_lines = self.which_key_lines();
         let caret_alpha = self.caret_alpha();
-        let theme = self.theme;
 
         let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
             (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect)
@@ -1698,7 +1722,6 @@ impl App {
             return;
         };
 
-        text.set_theme(theme);
         let content_refs: Vec<(&str, glyphon::Color, bool)> =
             content_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
         text.set_content_rich(&content_refs);
@@ -1762,7 +1785,7 @@ impl App {
             // left inset) -- starting this at the window edge instead left
             // the rendered label overflowing past the badge's right edge,
             // throwing off how centered it looked inside the colored badge.
-            let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * text::CHAR_WIDTH;
+            let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
             bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
         }
         if let Some((left, top, height)) = which_key_panel {
@@ -1776,17 +1799,17 @@ impl App {
             }
         }
         for (row, col_start, col_end) in selection_segments {
-            let x = content_x + col_start as f32 * text::CHAR_WIDTH;
+            let x = content_x + col_start as f32 * char_width;
             let y = row_y(row);
-            let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
+            let w = (col_end - col_start) as f32 * char_width;
             bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
         }
         if let Some((segments, alpha)) = pulse_overlay {
             let [r, g, b, _] = theme.caret;
             for (row, col_start, col_end) in segments {
-                let x = content_x + col_start as f32 * text::CHAR_WIDTH;
+                let x = content_x + col_start as f32 * char_width;
                 let y = row_y(row);
-                let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
+                let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
             }
         }
@@ -1808,10 +1831,20 @@ impl App {
         caret_rect.clear();
         if let Some((row, col)) = caret {
             if caret_alpha > 0.0 {
-                let caret_x = content_x + col as f32 * text::CHAR_WIDTH;
+                let caret_x = content_x + col as f32 * char_width;
                 let caret_y = row_y(row);
                 let [r, g, b, a] = theme.caret;
-                caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
+                // Insert keeps the thin bar (an I-beam-style "about to
+                // type here" marker); every other mode (Normal, Visual,
+                // Replace, Command) gets a full-cell block, matching real
+                // Vim's own cursor-shape convention. The block is drawn
+                // at reduced opacity -- caret_rect is composited *after*
+                // text (so the caret always shows on top, no glyph-recolor
+                // trick needed), and a fully opaque block would otherwise
+                // completely hide the character underneath it instead of
+                // just marking its position.
+                let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
+                caret_rect.push_rect(gpu, caret_x, caret_y, width, text::LINE_HEIGHT, [r, g, b, a * caret_alpha * block_alpha]);
             }
         }
         caret_rect.flush(gpu);
@@ -2121,6 +2154,20 @@ mod tests {
         let (line_visual_bg, _) = app.mode_colors();
         assert_eq!(char_visual_bg, line_visual_bg); // one accent for all Visual kinds
         assert_ne!(char_visual_bg, normal_bg);
+    }
+
+    #[test]
+    fn caret_is_block_everywhere_except_insert_mode() {
+        let mut app = App::with_file(None);
+        assert!(app.caret_is_block()); // starts in Normal
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('i'));
+        assert!(!app.caret_is_block()); // Insert -- thin bar
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.caret_is_block()); // back to Normal
+
+        app.vim.handle_key(&mut app.buffer, &mut app.cursor, KeyPress::char('v'));
+        assert!(app.caret_is_block()); // Visual
     }
 
     #[test]

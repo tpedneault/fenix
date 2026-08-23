@@ -9,8 +9,13 @@ use crate::theme::Theme;
 
 pub const FONT_SIZE: f32 = 16.0;
 pub const LINE_HEIGHT: f32 = 20.0;
-/// Rough monospace advance width as a fraction of font size; good enough
-/// until the caret is positioned from real glyph metrics instead.
+/// A rough monospace advance-width fallback -- used only by
+/// `TextPipeline::measure_char_width` if shaping ever somehow fails to
+/// produce usable glyphs. Real per-column pixel math (caret, selection,
+/// badge sizing) should use `TextPipeline::char_width()` instead, which
+/// measures the *actual* active font's advance width rather than
+/// assuming this ratio holds -- it doesn't across fonts (the bundled
+/// TempleOS bitmap font is ~1.0x its em size, not ~0.6x).
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
@@ -59,6 +64,17 @@ pub struct TextPipeline {
     /// `Family::Name(name)`. Icon spans in `rich_spans` are unaffected,
     /// always `ICON_FONT_FAMILY` regardless of this.
     content_family: Option<&'static str>,
+    /// The active font's real, measured monospace advance width in
+    /// pixels at `FONT_SIZE` -- recomputed only when `content_family`
+    /// actually changes (see `set_theme`), not every frame. Different
+    /// fonts have very different advance-to-em ratios (the bundled
+    /// TempleOS bitmap font is a full square cell, ~1.0x its em size,
+    /// vastly wider than a typical outline monospace font's ~0.6x), so
+    /// a single hardcoded ratio (`CHAR_WIDTH`) breaks caret/column
+    /// alignment the moment a second font enters the mix -- callers
+    /// needing per-column pixel math should use `char_width()`, not
+    /// the `CHAR_WIDTH` constant.
+    char_width: f32,
 }
 
 impl TextPipeline {
@@ -88,7 +104,21 @@ impl TextPipeline {
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32)));
 
-        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key, sidebar, content_family: None }
+        let char_width = Self::measure_char_width(&mut font_system, Family::Monospace);
+
+        Self {
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            renderer,
+            buffer,
+            modeline,
+            which_key,
+            sidebar,
+            content_family: None,
+            char_width,
+        }
     }
 
     /// Resolves the active theme's body-text font: `Family::Name(_)` when
@@ -99,10 +129,51 @@ impl TextPipeline {
     }
 
     /// Adopts `theme`'s font choice for all subsequent `set_*` calls --
-    /// called once per `redraw()`, before them. Cheap (just a field copy)
-    /// even called unconditionally every frame.
+    /// called once per `redraw()`, before them. A no-op beyond the
+    /// equality check when the family hasn't actually changed since
+    /// last frame, so re-measuring `char_width` (a real shaping pass)
+    /// only happens on an actual theme/font switch, not every redraw.
     pub fn set_theme(&mut self, theme: &Theme) {
+        if self.content_family == theme.font_family {
+            return;
+        }
         self.content_family = theme.font_family;
+        let family = self.content_family();
+        self.char_width = Self::measure_char_width(&mut self.font_system, family);
+    }
+
+    /// The active font's real monospace advance width in pixels --
+    /// callers doing per-column pixel math (caret, selection, badge
+    /// sizing) should use this instead of the `CHAR_WIDTH` constant.
+    pub fn char_width(&self) -> f32 {
+        self.char_width
+    }
+
+    /// Measures `family`'s real advance width by shaping two characters
+    /// and taking the pixel distance between them, rather than assuming
+    /// a fixed ratio of `FONT_SIZE` -- see the `char_width` field's doc
+    /// comment for why a single hardcoded ratio doesn't hold across
+    /// fonts. Falls back to the old assumed `FONT_SIZE * 0.6` ratio only
+    /// if shaping somehow produces fewer than two glyphs (should not
+    /// happen for two ordinary ASCII letters, but a shaping failure
+    /// shouldn't be able to divide-by-zero or panic downstream).
+    fn measure_char_width(font_system: &mut FontSystem, family: Family<'static>) -> f32 {
+        let mut probe = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        probe.set_wrap(Wrap::None);
+        probe.set_size(Some(1000.0), Some(LINE_HEIGHT));
+        probe.set_text("MM", &Attrs::new().family(family), Shaping::Advanced, None);
+        probe.shape_until_scroll(font_system, false);
+        probe
+            .layout_runs()
+            .next()
+            .and_then(|run| {
+                let mut glyphs = run.glyphs.iter();
+                let a = glyphs.next()?;
+                let b = glyphs.next()?;
+                Some(b.x - a.x)
+            })
+            .filter(|w| *w > 0.0)
+            .unwrap_or(FONT_SIZE * 0.6)
     }
 
     /// Plain, single-color content text -- used only for the very first
@@ -325,5 +396,33 @@ mod tests {
             .faces()
             .any(|face| face.families.iter().any(|(name, _)| name == "TempleOS"));
         assert!(found, "expected the embedded font to register under the family name \"TempleOS\"");
+    }
+
+    #[test]
+    fn measured_char_width_reflects_the_bundled_fonts_real_1_to_1_advance_ratio() {
+        // Confirmed via fontTools against the actual font file: every
+        // glyph's advance is exactly 1000/1000 units (a full square
+        // cell) -- i.e. at FONT_SIZE=16 the real advance is ~16px, not
+        // the ~9.6px a typical outline monospace font's ~0.6 ratio
+        // would give. This is the bug the caret/column misalignment
+        // traced back to: a single hardcoded CHAR_WIDTH assumed every
+        // font shared that ~0.6 ratio.
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        let width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"));
+        assert!((width - FONT_SIZE).abs() < 0.5, "expected ~{FONT_SIZE}px (1:1 ratio), got {width}px");
+    }
+
+    #[test]
+    fn measured_char_width_for_the_default_family_is_narrower_than_the_bitmap_font() {
+        let mut font_system = FontSystem::new();
+        let default_width = TextPipeline::measure_char_width(&mut font_system, Family::Monospace);
+        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        let templeos_width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"));
+        assert!(
+            default_width < templeos_width,
+            "expected the system default monospace font ({default_width}px) to be narrower \
+             than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
+        );
     }
 }
