@@ -1838,6 +1838,22 @@ impl App {
         segments
     }
 
+    /// Segments for the bracket under the cursor and its match, when the
+    /// cursor sits exactly on one of `(){}[]` and a match exists --
+    /// empty otherwise (unmatched brackets, or the cursor isn't on a
+    /// bracket at all). Reuses `range_to_segments` for the "char range
+    /// -> view segments" conversion, called once per bracket rather
+    /// than over a combined range since the two are rarely adjacent.
+    fn bracket_match_segments(&self, visible_lines: usize) -> Segments {
+        let cursor_idx = self.open().cursor.char_idx;
+        let Some(match_idx) = fenix_vim::find_matching_bracket(&self.open().buffer, cursor_idx) else {
+            return Vec::new();
+        };
+        let mut segments = self.range_to_segments(cursor_idx..cursor_idx + 1, visible_lines);
+        segments.extend(self.range_to_segments(match_idx..match_idx + 1, visible_lines));
+        segments
+    }
+
     /// Key/label pairs for whichever pending sequence is currently active
     /// (the leader menu takes priority, since it's the outermost one --
     /// Vim can't be mid-sequence while a leader sequence is in progress).
@@ -2073,6 +2089,7 @@ impl App {
             marked_rows: Vec<usize>,
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
+            bracket_match_segments: Segments,
             caret: Option<(usize, usize)>,
             content_frac: f32,
             gutter_px: f32,
@@ -2101,6 +2118,7 @@ impl App {
                     marked_rows: marks,
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -2124,6 +2142,7 @@ impl App {
                     marked_rows: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -2161,14 +2180,15 @@ impl App {
             // a bug.
             let hl_row = line.checked_sub(render_base_line).filter(|&row| row <= pane_visible_lines);
 
-            let (selection_segments, pulse_overlay, caret) = if is_focused {
+            let (selection_segments, pulse_overlay, bracket_match_segments, caret) = if is_focused {
                 (
                     self.visual_selection_segments(pane_visible_lines + 1),
                     self.pulse_overlay(pane_visible_lines + 1),
+                    self.bracket_match_segments(pane_visible_lines + 1),
                     hl_row.map(|row| (row, col)),
                 )
             } else {
-                (Segments::new(), None, None)
+                (Segments::new(), None, Segments::new(), None)
             };
 
             panes_render.push(PaneRender {
@@ -2179,6 +2199,7 @@ impl App {
                 marked_rows: Vec::new(),
                 selection_segments,
                 pulse_overlay,
+                bracket_match_segments,
                 caret,
                 content_frac: render_frac,
                 gutter_px,
@@ -2270,6 +2291,12 @@ impl App {
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection);
+            }
+            for &(row, col_start, col_end) in &pane.bracket_match_segments {
+                let x = content_x + col_start as f32 * char_width;
+                let y = row_y(row);
+                let w = (col_end - col_start) as f32 * char_width;
+                bg_rect.push_rect(gpu, x, y, w, line_height, theme.bracket_match);
             }
             if let Some((segments, alpha)) = &pane.pulse_overlay {
                 let [r, g, b, _] = theme.caret;
@@ -2669,6 +2696,38 @@ mod tests {
     fn visual_selection_segments_empty_outside_visual_mode() {
         let app = App::with_file(None);
         assert!(app.visual_selection_segments(10).is_empty());
+    }
+
+    #[test]
+    fn bracket_match_segments_covers_both_brackets_when_the_cursor_is_on_one() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("(hello)");
+        app.open_mut().cursor = Cursor::at_start(); // on the opening '('
+        assert_eq!(app.bracket_match_segments(10), vec![(0, 0, 1), (0, 6, 7)]);
+    }
+
+    #[test]
+    fn bracket_match_segments_works_from_the_closing_side_too() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("(hello)");
+        app.open_mut().cursor = Cursor { char_idx: 6, sticky_col: 6 }; // on the ')'
+        assert_eq!(app.bracket_match_segments(10), vec![(0, 6, 7), (0, 0, 1)]);
+    }
+
+    #[test]
+    fn bracket_match_segments_empty_when_the_cursor_is_not_on_a_bracket() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("(hello)");
+        app.open_mut().cursor = Cursor { char_idx: 3, sticky_col: 3 }; // on 'l'
+        assert!(app.bracket_match_segments(10).is_empty());
+    }
+
+    #[test]
+    fn bracket_match_segments_empty_for_an_unmatched_bracket() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("(hello");
+        app.open_mut().cursor = Cursor::at_start();
+        assert!(app.bracket_match_segments(10).is_empty());
     }
 
     #[test]

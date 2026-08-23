@@ -41,6 +41,11 @@ pub struct Theme {
     /// here, before `hl_line` existed to actually use that color) wasn't
     /// visibly distinguishable from the background.
     pub selection: [f32; 4],
+    /// Backdrop drawn behind a bracket and its match when the cursor
+    /// sits on one of `(){}[]` -- a distinct color from `selection`/
+    /// `hl_line` so it reads as its own thing even when it happens to
+    /// land on the current line.
+    pub bracket_match: [f32; 4],
 
     /// Per-mode accent, matching orbit-emacs's own evil-state modeline
     /// colors (see its docs/design.org "Evil state colors" table) so the
@@ -183,6 +188,7 @@ pub const ORBIT_DARK: Theme = Theme {
     caret: rgba(0xe0af68),
     hl_line: rgba(0x292e42),
     selection: rgba_alpha(0xe0af68, 0.25),
+    bracket_match: rgba_alpha(0x2ac3de, 0.35),
 
     mode_normal: rgba(0xe0af68),
     mode_insert: rgba(0x7dcfff),
@@ -249,6 +255,7 @@ pub const TEMPLEOS: Theme = Theme {
     caret: rgba(0xffff55),
     hl_line: rgba_alpha(0x5555ff, 0.15),
     selection: rgba_alpha(0xffff55, 0.45),
+    bracket_match: rgba_alpha(0x00aa00, 0.35),
 
     mode_normal: rgba(0x55ff55),
     mode_insert: rgba(0x55ffff),

@@ -179,7 +179,27 @@ impl VimState {
                 self.replay_block_insert(buffer);
             }
             KeyCode::Named(NamedKey::Backspace) => {
-                buffer.delete_backward(cursor);
+                // Backspace right between an empty bracket pair (`{|}`)
+                // removes both characters at once rather than leaving the
+                // close bracket dangling behind -- the companion to
+                // auto-pairing's own insert, same "un-type as a unit"
+                // posture. Structural, not provenance-tracked: applies
+                // whether or not this exact pair was just auto-inserted,
+                // same as type-through above. Its own atomic step
+                // (`delete_range` flushes pending), same tradeoff as
+                // electric dedent.
+                let before = cursor.char_idx.checked_sub(1).and_then(|i| buffer.char_at(i));
+                let after = buffer.char_at(cursor.char_idx);
+                let is_empty_pair = !replace
+                    && match (before, after) {
+                        (Some(open), Some(close)) => indent::matching_close_bracket(open) == Some(close),
+                        _ => false,
+                    };
+                if is_empty_pair {
+                    buffer.delete_range(cursor, cursor.char_idx - 1, cursor.char_idx + 1);
+                } else {
+                    buffer.delete_backward(cursor);
+                }
                 if let Some(bi) = &mut self.block_insert {
                     bi.typed.pop();
                 }
@@ -225,28 +245,65 @@ impl VimState {
                 if replace && buffer.char_at(cursor.char_idx).is_some() {
                     buffer.delete_forward(cursor);
                 }
-                // Electric dedent: typing a closing bracket as the first
-                // non-whitespace char on the line snaps it one indent
-                // level shallower first, the common "type `}` and watch
-                // it jump left" habit. A fixed one-level heuristic, not
-                // real bracket matching -- its own undo step (dedent_line
-                // uses delete_range, which doesn't coalesce), separate
-                // from whatever's typed next.
-                if !replace && indent::is_closing_bracket(c) && indent::line_blank_before_cursor(buffer, cursor) {
-                    let (line, _) = buffer.line_col(cursor);
-                    indent::dedent_line(buffer, cursor, line);
-                    // Not `line_first_non_blank` -- the line is entirely
-                    // whitespace (that's the trigger condition), so
-                    // "first non-blank" degenerates to the line start,
-                    // not where the bracket should land. The line's
-                    // remaining content is exactly the un-removed
-                    // leading whitespace, so its own end is the right
-                    // spot to type into.
-                    cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
+                if !replace && indent::is_closing_bracket(c) && buffer.char_at(cursor.char_idx) == Some(c) {
+                    // Type-through: the bracket you just typed is already
+                    // the very next character (almost always one this
+                    // same self-insert arm auto-paired a moment ago) --
+                    // move past it instead of inserting a duplicate, the
+                    // standard "close over" behavior every auto-pairing
+                    // editor has. Checked before electric dedent below:
+                    // if the bracket's already there, nothing should be
+                    // inserted or dedented, just stepped over.
+                    cursor.char_idx += 1;
                     let (_, col) = buffer.line_col(cursor);
                     cursor.sticky_col = col;
+                } else {
+                    // Electric dedent: typing a closing bracket as the
+                    // first non-whitespace char on the line snaps it one
+                    // indent level shallower first, the common "type `}`
+                    // and watch it jump left" habit. A fixed one-level
+                    // heuristic, not real bracket matching -- its own
+                    // undo step (dedent_line uses delete_range, which
+                    // doesn't coalesce), separate from whatever's typed
+                    // next.
+                    if !replace && indent::is_closing_bracket(c) && indent::line_blank_before_cursor(buffer, cursor) {
+                        let (line, _) = buffer.line_col(cursor);
+                        indent::dedent_line(buffer, cursor, line);
+                        // Not `line_first_non_blank` -- the line is
+                        // entirely whitespace (that's the trigger
+                        // condition), so "first non-blank" degenerates to
+                        // the line start, not where the bracket should
+                        // land. The line's remaining content is exactly
+                        // the un-removed leading whitespace, so its own
+                        // end is the right spot to type into.
+                        cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
+                        let (_, col) = buffer.line_col(cursor);
+                        cursor.sticky_col = col;
+                    }
+                    buffer.insert_char(cursor, c);
+                    // Auto-pair: typing an opening bracket also inserts
+                    // its close right after, then steps the cursor back
+                    // between them -- via `insert_char` (not `insert_str`)
+                    // so it coalesces with the opening char into one
+                    // pending run (undoing right after a bare `{}` removes
+                    // both together); the manual `char_idx -= 1` (not
+                    // `Buffer::move_left`, which flushes pending) is what
+                    // keeps that coalescing intact. Typing content after
+                    // stepping back does end that run at the next
+                    // `insert_char` call, since its target position no
+                    // longer immediately follows the pending run's end --
+                    // a disclosed side effect, and arguably the right one:
+                    // undoing what you just typed *inside* the brackets
+                    // shouldn't also remove the brackets themselves.
+                    if !replace {
+                        if let Some(close) = indent::matching_close_bracket(c) {
+                            buffer.insert_char(cursor, close);
+                            cursor.char_idx -= 1;
+                            let (_, col) = buffer.line_col(cursor);
+                            cursor.sticky_col = col;
+                        }
+                    }
                 }
-                buffer.insert_char(cursor, c);
                 if let Some(bi) = &mut self.block_insert {
                     bi.typed.push(c);
                 }
@@ -1064,6 +1121,96 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "i");
         keys(&mut vim, &mut b, &mut c, ")");
         assert_eq!(b.text(), "    foo)");
+    }
+
+    #[test]
+    fn typing_an_opening_bracket_auto_inserts_its_close_and_leaves_the_cursor_between() {
+        for (open, pair) in [('(', "()"), ('{', "{}"), ('[', "[]")] {
+            let mut b = buf("");
+            let mut c = Cursor::at_start();
+            let mut vim = VimState::new();
+            keys(&mut vim, &mut b, &mut c, "i");
+            vim.handle_key(&mut b, &mut c, KeyPress::char(open));
+            assert_eq!(b.text(), pair);
+            assert_eq!(c.char_idx, 1); // right after the opening bracket, not the close
+        }
+    }
+
+    #[test]
+    fn typing_inside_an_auto_paired_bracket_lands_between_the_pair() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, "(hi");
+        assert_eq!(b.text(), "(hi)");
+        assert_eq!(c.char_idx, 3);
+    }
+
+    #[test]
+    fn typing_the_matching_close_bracket_types_through_instead_of_duplicating() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, "(hi)"); // the ')' should type through the auto-inserted one
+        assert_eq!(b.text(), "(hi)");
+        assert_eq!(c.char_idx, 4);
+    }
+
+    #[test]
+    fn typing_through_a_bracket_that_was_not_auto_inserted_still_just_steps_over_it() {
+        // Structural, not provenance-tracked -- an existing ")" right at
+        // the cursor is skipped over the same way an auto-inserted one
+        // would be.
+        let mut b = buf(")");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, ")");
+        assert_eq!(b.text(), ")");
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn backspace_between_an_empty_auto_paired_bracket_removes_both() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('{'));
+        assert_eq!(b.text(), "{}");
+        named(&mut vim, &mut b, &mut c, NamedKey::Backspace);
+        assert_eq!(b.text(), "");
+        assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn backspace_with_content_between_the_pair_only_removes_one_char() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, "(x");
+        assert_eq!(b.text(), "(x)");
+        named(&mut vim, &mut b, &mut c, NamedKey::Backspace); // removes "x", not the brackets
+        assert_eq!(b.text(), "()");
+    }
+
+    #[test]
+    fn replace_mode_neither_auto_pairs_nor_types_through_nor_merges_backspace() {
+        // `R` doesn't have a Normal-mode binding yet (a pre-existing,
+        // separate gap -- `Mode::Replace` exists and `handle_insert_key`
+        // already branches on its own `replace` bool, just nothing
+        // transitions into it today), so this drives `handle_insert_key`
+        // directly with `replace: true` rather than going through
+        // `handle_key`/a key sequence.
+        let mut b = buf("(a)");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_insert_key(&mut b, &mut c, KeyPress::char('('), true);
+        assert_eq!(b.text(), "(a)"); // overwrote '(' with '(', no auto-pair inserted
+        assert_eq!(c.char_idx, 1);
     }
 
     #[test]

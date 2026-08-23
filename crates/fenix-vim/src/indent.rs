@@ -55,6 +55,18 @@ pub fn is_closing_bracket(c: char) -> bool {
     matches!(c, '}' | ')' | ']')
 }
 
+/// The closing bracket that pairs with an opening one, for auto-closing
+/// in Insert mode -- `None` for anything `is_opening_bracket` wouldn't
+/// accept.
+pub fn matching_close_bracket(c: char) -> Option<char> {
+    match c {
+        '{' => Some('}'),
+        '(' => Some(')'),
+        '[' => Some(']'),
+        _ => None,
+    }
+}
+
 /// Whether every char from the start of the cursor's line up to (not
 /// including) the cursor itself is whitespace -- i.e. nothing real has
 /// been typed on this line yet. Used to gate the electric-dedent-on-
@@ -140,6 +152,15 @@ mod tests {
         }
         assert!(!is_opening_bracket('a'));
         assert!(!is_closing_bracket('a'));
+    }
+
+    #[test]
+    fn matching_close_bracket_pairs_each_opener_and_rejects_non_openers() {
+        assert_eq!(matching_close_bracket('{'), Some('}'));
+        assert_eq!(matching_close_bracket('('), Some(')'));
+        assert_eq!(matching_close_bracket('['), Some(']'));
+        assert_eq!(matching_close_bracket('}'), None);
+        assert_eq!(matching_close_bracket('a'), None);
     }
 
     #[test]
