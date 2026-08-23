@@ -33,6 +33,13 @@ pub struct Theme {
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
     pub caret: [f32; 4],
+    /// Same hue as `caret`, in the glyph-text `Color` representation
+    /// (`caret` is `[f32; 4]`, rect-fill shaped) -- used wherever this
+    /// accent needs to color actual *text*, not just the caret rect
+    /// itself (e.g. the which-key popup's key column, which needs a
+    /// second accent color that's guaranteed high-contrast against
+    /// `bg_modeline`, the popup's own background).
+    pub caret_text: glyphon::Color,
     /// Current-line highlight -- orbit-dark's own "bg-hl", the shade its
     /// palette table names for exactly this purpose.
     pub hl_line: [f32; 4],
@@ -191,6 +198,7 @@ pub const ORBIT_DARK: Theme = Theme {
     fg: text_color(0xc0caf5),
     fg_modeline: text_color(0xc0caf5),
     caret: rgba(0xe0af68),
+    caret_text: text_color(0xe0af68),
     hl_line: rgba(0x292e42),
     selection: rgba_alpha(0xe0af68, 0.25),
     bracket_match: rgba_alpha(0x2ac3de, 0.35),
@@ -258,6 +266,7 @@ pub const TEMPLEOS: Theme = Theme {
     fg: text_color(0x000000),
     fg_modeline: text_color(0xffffff),
     caret: rgba(0xffff55),
+    caret_text: text_color(0xffff55),
     hl_line: rgba_alpha(0x5555ff, 0.15),
     // Blue, not yellow: yellow's R/G channels already match the white
     // `bg`, so blending only ever moves the B channel -- no alpha gets it

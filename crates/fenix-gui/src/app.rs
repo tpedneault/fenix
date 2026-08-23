@@ -1999,12 +1999,21 @@ impl App {
         Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
     }
 
-    /// The which-key popup's rich-text spans (key column in the theme's
-    /// accent color, label in the modeline's own text color, sorted
-    /// alphabetically by label for scannability) and its resolved
-    /// on-screen rect, or `None` when nothing is pending. Two things
-    /// that could previously make the panel not actually fit its own
-    /// content, both fixed here: its *width* is now sized to the
+    /// The which-key popup's rich-text spans (key column in
+    /// `theme.caret_text`, label/overflow-summary in the modeline's own
+    /// text color, sorted alphabetically by label for scannability) and
+    /// its resolved on-screen rect, or `None` when nothing is pending. The
+    /// popup shares the modeline's background (`bg_modeline`), so both
+    /// colors here are picked from that family, not the content one --
+    /// `syntax_keyword` was tried for the key column originally, but it's
+    /// calibrated for `bg` (the content background), and on TempleOS
+    /// specifically its value is identical to `bg_modeline`, making the
+    /// key column invisible. `caret_text` is guaranteed high-contrast
+    /// against `bg_modeline` in every theme (`caret` already needs that
+    /// against `bg` to work as a caret), which is what makes it a safe
+    /// second accent color here too.
+    /// Two other things could previously make the panel not actually fit
+    /// its own content, both fixed here: its *width* is now sized to the
     /// longest visible label at the font's real measured `char_width`
     /// (clamped to `[WHICH_KEY_MIN_WIDTH, WHICH_KEY_MAX_WIDTH]` and to
     /// what the window can hold) instead of a fixed 260px that didn't
@@ -2043,12 +2052,12 @@ impl App {
             if i > 0 {
                 spans.push(("\n".to_string(), theme.fg_modeline, false));
             }
-            spans.push((format!("{:<KEY_COLUMN_CHARS$}", keymap::describe_keypress(key)), theme.syntax_keyword, false));
+            spans.push((format!("{:<KEY_COLUMN_CHARS$}", keymap::describe_keypress(key)), theme.caret_text, false));
             spans.push(((*label).to_string(), theme.fg_modeline, false));
         }
         if truncated > 0 {
             spans.push(("\n".to_string(), theme.fg_modeline, false));
-            spans.push((format!("+{truncated} more"), theme.gutter_fg, false));
+            spans.push((format!("+{truncated} more"), theme.fg_modeline, false));
         }
 
         let row_count = shown_count + usize::from(truncated > 0);
@@ -2442,9 +2451,8 @@ impl App {
             let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
             bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, modeline_height, badge_bg);
         }
-        for &(_, rect) in &popup_rects {
-            bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
-        }
+        // Popup backgrounds are deliberately *not* pushed into this batch --
+        // see the big comment at the two-pass render sequence below for why.
         if show_sidebar {
             // `theme.bg`, not `theme.bg_modeline` -- the sidebar shows
             // file/directory names with the same icon/syntax-adjacent
@@ -2527,7 +2535,7 @@ impl App {
 
         let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
-        text.prepare(gpu, theme, &prepare_panes, &popup_rects, show_sidebar);
+        text.prepare(gpu, theme, &prepare_panes, show_sidebar);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -2572,6 +2580,47 @@ impl App {
             });
             bg_rect.render(&mut pass);
             text.render(&mut pass);
+        }
+        // Popups (background + text) and the caret are drawn in a second,
+        // separate pass layered on top (`LoadOp::Load`, not `Clear`)
+        // rather than folded into the pass above. A popup's background is
+        // an opaque rect from `bg_rect`, and a pane's content `TextArea`
+        // has no way to be clipped around a popup-shaped hole (a single
+        // `TextBounds` per pane can't express "everywhere except this
+        // corner") -- so if popup content shared the first pass, whichever
+        // pane extends under the popup's corner would simply paint its own
+        // text over the popup's already-drawn background, exactly the
+        // "buffer text on top of the which-key window" bug this two-pass
+        // split fixes. Ending pass one first and starting pass two with
+        // `Load` guarantees popups (and the caret, which already needed to
+        // draw after all text) composite on top of whatever pass one
+        // painted, regardless of what that was.
+        if !popup_rects.is_empty() {
+            bg_rect.clear();
+            for &(_, rect) in &popup_rects {
+                bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+            }
+            bg_rect.flush(gpu);
+            text.prepare_popups(gpu, theme, &popup_rects);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !popup_rects.is_empty() {
+                bg_rect.render(&mut pass);
+                text.render(&mut pass);
+            }
             caret_rect.render(&mut pass);
         }
         gpu.queue.submit(Some(encoder.finish()));
@@ -3679,6 +3728,20 @@ mod tests {
         assert!(joined.find("line numbers").unwrap() < joined.find("theme").unwrap());
         assert!(joined.contains('n')); // the `n` key column, for line numbers
         assert!(!joined.contains("more")); // both entries fit, nothing truncated
+    }
+
+    #[test]
+    fn which_key_popup_key_column_uses_caret_text_not_a_content_calibrated_color() {
+        // Regression test for a real readability bug: the key column used
+        // to be `theme.syntax_keyword`, a color calibrated for `bg` (the
+        // content background). On TempleOS that color happens to be
+        // identical to `bg_modeline` (the popup's own background), making
+        // every key binding invisible. `caret_text` is guaranteed
+        // high-contrast against `bg_modeline` in every theme.
+        let mut app = App::with_file(None);
+        app.leader_matcher.feed(KeyPress::char(' '));
+        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
+        assert_eq!(spans[0].1, app.theme.caret_text); // spans[0] is the first entry's key column
     }
 
     #[test]

@@ -376,14 +376,15 @@ impl TextPipeline {
     /// floating popups: id plus its already-`popup::resolve`d on-screen
     /// rect -- an empty slice when nothing (no pending which-key
     /// sequence, no completion popup) is showing right now.
-    pub fn prepare(
-        &mut self,
-        gpu: &GpuState,
-        theme: &Theme,
-        panes: &[(PaneId, Rect, f32)],
-        popups: &[(PopupId, Rect)],
-        sidebar_open: bool,
-    ) {
+    /// Prepares every *base-layer* text area -- pane content, the
+    /// modeline, and the sidebar -- for the next `render()` call. Popups
+    /// are deliberately not included here: they're prepared and drawn in
+    /// a later, separate pass (`prepare_popups`) so they visually cover
+    /// this layer regardless of how far pane content extends underneath
+    /// them, rather than relying on `TextBounds` clipping (a single
+    /// rectangle per pane can't carve a popup-shaped hole out of it) --
+    /// see `App::redraw`'s two-pass render sequence for the full picture.
+    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, panes: &[(PaneId, Rect, f32)], sidebar_open: bool) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
@@ -391,7 +392,7 @@ impl TextPipeline {
 
         let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
-        let mut areas = Vec::with_capacity(panes.len() + popups.len() + 2);
+        let mut areas = Vec::with_capacity(panes.len() + 2);
         for &(pane, rect, content_frac) in panes {
             let Some(buffer) = self.content_buffers.get(&pane) else { continue };
             areas.push(TextArea {
@@ -426,6 +427,41 @@ impl TextPipeline {
             custom_glyphs: &[],
         });
 
+        if sidebar_open {
+            areas.push(TextArea {
+                buffer: &self.sidebar,
+                left: PAD_LEFT,
+                top: PAD_TOP,
+                scale: 1.0,
+                bounds: TextBounds { left: 0, top: 0, right: SIDEBAR_WIDTH as i32, bottom: modeline_top as i32 },
+                default_color: theme.fg,
+                custom_glyphs: &[],
+            });
+        }
+
+        self.renderer
+            .prepare(
+                &gpu.device,
+                &gpu.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash_cache,
+            )
+            .expect("glyphon prepare failed");
+    }
+
+    /// The overlay layer: just popup text, prepared for a second
+    /// `render()` call in a second render pass (`LoadOp::Load`) drawn
+    /// after the base layer -- see `prepare`'s own doc comment for why.
+    pub fn prepare_popups(&mut self, gpu: &GpuState, theme: &Theme, popups: &[(PopupId, Rect)]) {
+        self.viewport.update(
+            &gpu.queue,
+            Resolution { width: gpu.config.width, height: gpu.config.height },
+        );
+
+        let mut areas = Vec::with_capacity(popups.len());
         for &(id, rect) in popups {
             let Some(buffer) = self.popups.get(&id) else { continue };
             areas.push(TextArea {
@@ -440,17 +476,6 @@ impl TextPipeline {
                     bottom: (rect.y + rect.h) as i32,
                 },
                 default_color: theme.fg_modeline,
-                custom_glyphs: &[],
-            });
-        }
-        if sidebar_open {
-            areas.push(TextArea {
-                buffer: &self.sidebar,
-                left: PAD_LEFT,
-                top: PAD_TOP,
-                scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: SIDEBAR_WIDTH as i32, bottom: modeline_top as i32 },
-                default_color: theme.fg,
                 custom_glyphs: &[],
             });
         }
