@@ -558,6 +558,7 @@ version = "0.0.1"
 dependencies = [
  "fenix-core",
  "fenix-keymap",
+ "regex",
 ]
 
 [[package]]

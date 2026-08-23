@@ -5,6 +5,7 @@ mod keymaps;
 mod mode;
 mod motion;
 mod operator;
+mod search;
 mod state;
 mod textobject;
 

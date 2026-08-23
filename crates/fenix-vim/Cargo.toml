@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 fenix-core = { path = "../fenix-core" }
 fenix-keymap = { path = "../fenix-keymap" }
+regex = "1.13.1"
