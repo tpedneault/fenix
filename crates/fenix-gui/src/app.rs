@@ -21,6 +21,7 @@ use crate::commands::CommandRegistry;
 use crate::gpu::GpuState;
 use crate::icon;
 use crate::keymap;
+use crate::popup;
 use crate::rect::RectRenderer;
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
@@ -55,6 +56,12 @@ const SCROLL_SNAP_SCREENS: usize = 3;
 /// active theme draws one. Comfortably inside `text::PAD_TOP` (4px) and
 /// `text::PAD_LEFT` (8px) so it can never clip into body text.
 const BORDER_WIDTH: f32 = 3.0;
+
+/// Vertical padding inside the which-key popup, above its first row and
+/// below its last -- factored into both its own height and `popup::
+/// max_rows`'s "how many rows actually fit" calculation, so the two stay
+/// consistent with each other.
+const WHICH_KEY_PADDING: f32 = 8.0;
 
 /// An active yank/paste highlight, fading out over `PULSE_DURATION`.
 struct Pulse {
@@ -1809,12 +1816,45 @@ impl App {
         Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
     }
 
-    /// Which-key popup text, sorted alphabetically by label for
-    /// scannability, one `"key  label"` per line.
-    fn which_key_lines(&self) -> Vec<String> {
+    /// The which-key popup's rich-text spans (key column in the theme's
+    /// accent color, label in the modeline's own text color, sorted
+    /// alphabetically by label for scannability) and its resolved
+    /// on-screen rect, or `None` when nothing is pending. Truncates to
+    /// whatever `popup::max_rows` says actually fits above the modeline,
+    /// with a trailing "+N more" summary row instead of letting the
+    /// panel run under it -- previously unbounded, this is what could
+    /// make the popup draw over/past the modeline once enough leader
+    /// groups existed to make its content taller than the window.
+    fn which_key_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
         let mut hints = self.pending_hints();
+        if hints.is_empty() {
+            return None;
+        }
         hints.sort_by(|a, b| a.1.cmp(b.1));
-        hints.iter().map(|(k, label)| format!("{:<6}{}", keymap::describe_keypress(k), label)).collect()
+
+        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, text::LINE_HEIGHT, WHICH_KEY_PADDING);
+        let shown_count = if hints.len() > max_rows { max_rows.saturating_sub(1).max(1) } else { hints.len() };
+        let truncated = hints.len() - shown_count;
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        for (i, (key, label)) in hints[..shown_count].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            spans.push((format!("{:<6}", keymap::describe_keypress(key)), theme.syntax_keyword, false));
+            spans.push(((*label).to_string(), theme.fg_modeline, false));
+        }
+        if truncated > 0 {
+            spans.push(("\n".to_string(), theme.fg_modeline, false));
+            spans.push((format!("+{truncated} more"), theme.gutter_fg, false));
+        }
+
+        let row_count = shown_count + usize::from(truncated > 0);
+        let height = row_count as f32 * text::LINE_HEIGHT + WHICH_KEY_PADDING;
+        let rect =
+            popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, text::WHICH_KEY_WIDTH, height, window_width, modeline_top);
+        Some((rect, spans))
     }
 
     /// Builds the visible rows of a directory listing as rich-text spans
@@ -2085,7 +2125,13 @@ impl App {
             None
         };
         let (badge_bg, badge_fg) = self.mode_colors();
-        let which_key_lines = self.which_key_lines();
+        // Top-right corner, clear of both the content the user is actively
+        // editing (top-left, where the cursor usually is) and the modeline
+        // (bottom) -- least likely to sit under whatever they're looking
+        // at. Resolved (and, if needed, row-truncated) here rather than
+        // left to `text.rs`/`prepare` so its position is known before the
+        // `bg_rect` panel-background push below.
+        let which_key_popup = self.which_key_popup(window_width, modeline_top);
         let caret_alpha = self.caret_alpha();
 
         let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
@@ -2117,17 +2163,14 @@ impl App {
             }
         }
 
-        // Top-right corner, clear of both the content the user is actively
-        // editing (top-left, where the cursor usually is) and the modeline
-        // (bottom) -- least likely to sit under whatever they're looking at.
-        let which_key_panel = if which_key_lines.is_empty() {
-            None
+        let popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = if let Some((rect, spans)) = &which_key_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::WhichKey, text::WHICH_KEY_WIDTH, &refs);
+            vec![(popup::PopupId::WhichKey, *rect)]
         } else {
-            let panel_height = which_key_lines.len() as f32 * text::LINE_HEIGHT + 8.0;
-            text.set_which_key_text(&which_key_lines.join("\n"));
-            let left = window_width - text::WHICH_KEY_WIDTH - text::WHICH_KEY_MARGIN;
-            Some((left, text::WHICH_KEY_MARGIN, panel_height))
+            Vec::new()
         };
+        text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
         let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
 
@@ -2179,8 +2222,8 @@ impl App {
             let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
             bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
         }
-        if let Some((left, top, height)) = which_key_panel {
-            bg_rect.push_rect(gpu, left, top, text::WHICH_KEY_WIDTH, height, theme.bg_modeline);
+        for &(_, rect) in &popup_rects {
+            bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
         }
         if show_sidebar {
             bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg_modeline);
@@ -2243,7 +2286,7 @@ impl App {
 
         let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
-        text.prepare(gpu, theme, &prepare_panes, which_key_panel, show_sidebar);
+        text.prepare(gpu, theme, &prepare_panes, &popup_rects, show_sidebar);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -3188,6 +3231,54 @@ mod tests {
 
         app.new_workspace();
         assert!(app.modeline_text().contains("[2/2 workspace-2]"));
+    }
+
+    #[test]
+    fn which_key_popup_is_none_when_nothing_is_pending() {
+        let app = App::with_file(None);
+        assert!(app.which_key_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn which_key_popup_lists_pending_leader_children_sorted_by_label() {
+        let mut app = App::with_file(None);
+        app.leader_matcher.feed(KeyPress::char(' '));
+        app.leader_matcher.feed(KeyPress::char('t')); // SPC t: "line numbers", "theme"
+
+        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        // "line numbers" sorts before "theme" -- alphabetical by label.
+        assert!(joined.find("line numbers").unwrap() < joined.find("theme").unwrap());
+        assert!(joined.contains('n')); // the `n` key column, for line numbers
+        assert!(!joined.contains("more")); // both entries fit, nothing truncated
+    }
+
+    #[test]
+    fn which_key_popup_rect_never_extends_past_the_window_or_under_the_modeline() {
+        let mut app = App::with_file(None);
+        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups
+
+        // A window far too short for 8 rows -- this is the bug this popup
+        // system fixes: the panel used to have no notion of "not enough
+        // room" and could draw its background/text straight through the
+        // modeline bar.
+        let modeline_top = 40.0;
+        let (rect, _) = app.which_key_popup(300.0, modeline_top).unwrap();
+
+        assert!(rect.x >= 0.0);
+        assert!(rect.y >= 0.0);
+        assert!(rect.x + rect.w <= 300.0 + 0.01);
+        assert!(rect.y <= modeline_top);
+    }
+
+    #[test]
+    fn which_key_popup_truncates_and_reports_how_many_more_when_content_overflows() {
+        let mut app = App::with_file(None);
+        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups, more than fit below
+
+        let (_, spans) = app.which_key_popup(300.0, 40.0).unwrap();
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("more"));
     }
 
     #[test]

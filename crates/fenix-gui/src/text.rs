@@ -9,6 +9,7 @@ use fenix_window::{Rect, WindowId as PaneId};
 
 use crate::gpu::GpuState;
 use crate::icon::ICON_FONT_FAMILY;
+use crate::popup::PopupId;
 use crate::theme::Theme;
 
 pub const FONT_SIZE: f32 = 16.0;
@@ -50,13 +51,15 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 /// Holds one independent glyph buffer per visible window pane
 /// (`content_buffers`, keyed by `PaneId` -- created lazily the first time
 /// a pane renders, dropped once it stops appearing in a `prepare()` call
-/// since splits/closes churn pane ids) plus three fixed panels:
-/// `modeline` for the single-line status bar, `which_key` for the popup
-/// listing a pending key sequence's continuations, and `sidebar` for the
-/// file explorer's persistent side panel. All share one atlas/renderer/
-/// font system -- glyphon's `TextRenderer::prepare` already takes an
-/// arbitrary-length `Vec<TextArea>`, so N panes is just N more entries,
-/// not a different rendering pipeline.
+/// since splits/closes churn pane ids), one per floating popup
+/// (`popups`, keyed by `popup::PopupId` -- same lazy-create/retain
+/// lifecycle as `content_buffers`, since which-key already comes and
+/// goes with what's pending and a future completion popup will too),
+/// plus two fixed panels: `modeline` for the single-line status bar and
+/// `sidebar` for the file explorer's persistent side panel. All share
+/// one atlas/renderer/font system -- glyphon's `TextRenderer::prepare`
+/// already takes an arbitrary-length `Vec<TextArea>`, so N panes or
+/// popups is just N more entries, not a different rendering pipeline.
 pub struct TextPipeline {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -64,8 +67,8 @@ pub struct TextPipeline {
     atlas: TextAtlas,
     renderer: TextRenderer,
     content_buffers: HashMap<PaneId, GlyphBuffer>,
+    popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
-    which_key: GlyphBuffer,
     sidebar: GlyphBuffer,
     /// Body-text font family for the active theme -- `None` resolves to
     /// `Family::Monospace` (see `content_family`), `Some(name)` to
@@ -100,10 +103,6 @@ impl TextPipeline {
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(MODELINE_HEIGHT));
 
-        let mut which_key = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        which_key.set_wrap(Wrap::None);
-        which_key.set_size(Some(WHICH_KEY_WIDTH), None);
-
         let mut sidebar = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32)));
@@ -117,8 +116,8 @@ impl TextPipeline {
             atlas,
             renderer,
             content_buffers: HashMap::new(),
+            popups: HashMap::new(),
             modeline,
-            which_key,
             sidebar,
             content_family: None,
             char_width,
@@ -240,9 +239,35 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
-    pub fn set_which_key_text(&mut self, text: &str) {
-        self.which_key.set_text(text, &Attrs::new().family(self.content_family()), Shaping::Advanced, None);
-        self.which_key.shape_until_scroll(&mut self.font_system, false);
+    /// Sets one popup's content (rich, icon-aware spans, same shape as
+    /// `set_pane_rich`) and pixel width -- creating its `GlyphBuffer`
+    /// lazily the first time it's rendered, same pattern and same
+    /// `entry`/`or_insert_with` borrow conflict avoided the same way.
+    /// Height is left unconstrained (`None`): popups size themselves to
+    /// their own content, clamped by `popup::resolve`'s position math
+    /// and (for how many rows are offered in the first place)
+    /// `popup::max_rows` -- not by wrapping/clipping inside the buffer.
+    pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)]) {
+        let spans = self.rich_spans(segments);
+        let default_attrs = Attrs::new().family(self.content_family());
+
+        if !self.popups.contains_key(&id) {
+            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            buf.set_wrap(Wrap::None);
+            self.popups.insert(id, buf);
+        }
+        let buf = self.popups.get_mut(&id).expect("just inserted if missing");
+        buf.set_size(Some(width), None);
+        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Drops every popup `GlyphBuffer` not in `keep` -- popups come and
+    /// go with what's pending (which-key) or what's being typed
+    /// (completion), so without this, closed ones would accumulate
+    /// forever, same reasoning as `retain_panes`.
+    pub fn retain_popups(&mut self, keep: &[PopupId]) {
+        self.popups.retain(|id, _| keep.contains(id));
     }
 
     /// Sets the sidebar's rows -- same icon/color rich-text mechanism as
@@ -271,13 +296,16 @@ impl TextPipeline {
     /// `GlyphBuffer`), its current pixel rect, and the sub-line-height
     /// fractional offset to shift its content up by (0.0 for panes that
     /// don't animate scroll, i.e. everything but the focused pane's own
-    /// smooth-scroll transition).
+    /// smooth-scroll transition). `popups` is the analogous list for
+    /// floating popups: id plus its already-`popup::resolve`d on-screen
+    /// rect -- an empty slice when nothing (no pending which-key
+    /// sequence, no completion popup) is showing right now.
     pub fn prepare(
         &mut self,
         gpu: &GpuState,
         theme: &Theme,
         panes: &[(PaneId, Rect, f32)],
-        which_key_panel: Option<(f32, f32, f32)>,
+        popups: &[(PopupId, Rect)],
         sidebar_open: bool,
     ) {
         self.viewport.update(
@@ -287,7 +315,7 @@ impl TextPipeline {
 
         let modeline_top = gpu.size.height as f32 - MODELINE_HEIGHT;
 
-        let mut areas = Vec::with_capacity(panes.len() + 3);
+        let mut areas = Vec::with_capacity(panes.len() + popups.len() + 2);
         for &(pane, rect, content_frac) in panes {
             let Some(buffer) = self.content_buffers.get(&pane) else { continue };
             areas.push(TextArea {
@@ -322,17 +350,18 @@ impl TextPipeline {
             custom_glyphs: &[],
         });
 
-        if let Some((left, top, height)) = which_key_panel {
+        for &(id, rect) in popups {
+            let Some(buffer) = self.popups.get(&id) else { continue };
             areas.push(TextArea {
-                buffer: &self.which_key,
-                left: left + PAD_LEFT,
-                top: top + 4.0,
+                buffer,
+                left: rect.x + PAD_LEFT,
+                top: rect.y + 4.0,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: left as i32,
-                    top: top as i32,
-                    right: (left + WHICH_KEY_WIDTH) as i32,
-                    bottom: (top + height) as i32,
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + rect.h) as i32,
                 },
                 default_color: theme.fg_modeline,
                 custom_glyphs: &[],

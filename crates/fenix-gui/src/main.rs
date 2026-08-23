@@ -3,6 +3,7 @@ mod commands;
 mod gpu;
 mod icon;
 mod keymap;
+mod popup;
 mod rect;
 mod text;
 mod theme;
