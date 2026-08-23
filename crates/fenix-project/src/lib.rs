@@ -1,3 +1,13 @@
-// Placeholder while fenix-picker is being scaffolded; real content lands
-// in subsequent commits (root detection, file listing, grep, known
-// projects).
+mod files;
+mod grep;
+mod root;
+
+#[cfg(test)]
+mod test_util;
+
+mod known;
+
+pub use files::list_project_files;
+pub use grep::{grep_project, GrepMatch};
+pub use known::KnownProjects;
+pub use root::find_project_root;
