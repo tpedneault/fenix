@@ -302,6 +302,85 @@ fn format_age(modified: std::time::SystemTime) -> String {
     }
 }
 
+/// One named task layout -- a Doom-Emacs-style workspace. Each remembers
+/// its own split layout; every workspace shares the one global
+/// `BufferList` (`App::buffers`), so a buffer open in two workspaces at
+/// once stays in sync for free (same `BufferId`, same underlying
+/// `OpenBuffer`) -- only the window *layout* is per-workspace, per
+/// design, not a full persp-mode-style buffer-list isolation.
+struct Workspace {
+    name: String,
+    windows: WindowTree<BufferId>,
+}
+
+/// A non-empty, ordered list of workspaces with one active at a time.
+/// Switching workspaces is just moving `active` -- the `WindowTree`s
+/// themselves are untouched, so a workspace's layout is exactly as it
+/// was left.
+struct WorkspaceList {
+    workspaces: Vec<Workspace>,
+    active: usize,
+}
+
+impl WorkspaceList {
+    fn new(initial_windows: WindowTree<BufferId>) -> Self {
+        Self { workspaces: vec![Workspace { name: "workspace-1".to_string(), windows: initial_windows }], active: 0 }
+    }
+
+    fn active(&self) -> &WindowTree<BufferId> {
+        &self.workspaces[self.active].windows
+    }
+
+    fn active_mut(&mut self) -> &mut WindowTree<BufferId> {
+        &mut self.workspaces[self.active].windows
+    }
+
+    fn active_name(&self) -> &str {
+        &self.workspaces[self.active].name
+    }
+
+    fn len(&self) -> usize {
+        self.workspaces.len()
+    }
+
+    fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// `SPC TAB n`: a new, auto-named workspace (`workspace-2`, etc. --
+    /// no name-entry prompt in v1) seeded with a single pane showing
+    /// `content`, so it starts on the buffer you were already looking
+    /// at rather than nothing. Becomes active.
+    fn new_workspace(&mut self, content: BufferId) {
+        let name = format!("workspace-{}", self.workspaces.len() + 1);
+        self.workspaces.push(Workspace { name, windows: WindowTree::new(content) });
+        self.active = self.workspaces.len() - 1;
+    }
+
+    /// `SPC TAB ]`/`SPC TAB [`: cycles the active workspace, wrapping.
+    fn next(&mut self) {
+        self.active = (self.active + 1) % self.workspaces.len();
+    }
+
+    fn prev(&mut self) {
+        self.active = (self.active + self.workspaces.len() - 1) % self.workspaces.len();
+    }
+
+    /// `SPC TAB d`: removes the active workspace. Refuses (returns
+    /// `false`, no-op) if it's the last one -- same safety posture as
+    /// `WindowTree::close_focused` refusing to close the last window.
+    fn remove_active(&mut self) -> bool {
+        if self.workspaces.len() <= 1 {
+            return false;
+        }
+        self.workspaces.remove(self.active);
+        if self.active >= self.workspaces.len() {
+            self.active = self.workspaces.len() - 1;
+        }
+        true
+    }
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -321,10 +400,12 @@ pub struct App {
     /// why). `App` never touches a buffer directly, only through this and
     /// `windows` -- use the `open`/`open_mut`/`focused_buffer_id` helpers.
     buffers: BufferList,
-    /// A single-window tree for now -- `WindowTree<BufferId>`'s split/
-    /// navigate/close operations land in a later step; today it's always
-    /// exactly one leaf, so `focused_content()` is "the" open buffer.
-    windows: WindowTree<BufferId>,
+    /// Every workspace's own split layout -- `windows()`/`windows_mut()`
+    /// (right after the constructor) are the accessors to use everywhere
+    /// else; they read/write whichever workspace is currently active, the
+    /// same "always go through the helper, not the field" discipline
+    /// `open`/`open_mut` already establish for buffers.
+    workspaces: WorkspaceList,
     /// In-flight scroll transitions, keyed by which buffer they're
     /// easing -- kept here rather than on `OpenBuffer` since `ScrollAnim`
     /// needs `Instant`, an animation/rendering-layer concern `fenix-
@@ -420,7 +501,7 @@ impl App {
             Some(path) => buffers.open_path(Path::new(&path)),
             None => buffers.open_scratch(),
         };
-        let windows = WindowTree::new(initial_id);
+        let workspaces = WorkspaceList::new(WindowTree::new(initial_id));
 
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
@@ -441,7 +522,7 @@ impl App {
             bg_rect: None,
             caret_rect: None,
             buffers,
-            windows,
+            workspaces,
             scroll_anims: HashMap::new(),
             line_number_mode: LineNumberMode::Absolute,
             main_view: MainView::Editor,
@@ -470,8 +551,20 @@ impl App {
         }
     }
 
+    /// The active workspace's window tree. Every call site outside this
+    /// pair of accessors goes through here (or `windows_mut`) rather than
+    /// touching `self.workspaces` directly, mirroring the `open`/
+    /// `open_mut` discipline already used for buffers.
+    fn windows(&self) -> &WindowTree<BufferId> {
+        self.workspaces.active()
+    }
+
+    fn windows_mut(&mut self) -> &mut WindowTree<BufferId> {
+        self.workspaces.active_mut()
+    }
+
     fn focused_buffer_id(&self) -> BufferId {
-        *self.windows.focused_content()
+        *self.windows().focused_content()
     }
 
     /// The currently-focused pane's open buffer. Free to use anywhere
@@ -678,8 +771,8 @@ impl App {
     /// picker`, there's no path to resolve/read; the buffer already
     /// exists in the registry).
     fn switch_focused_to_buffer(&mut self, id: BufferId) {
-        let focused = self.windows.focused_id();
-        self.windows.set_content(focused, id);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
         self.buffers.touch(id);
         self.refresh_project_root();
         self.main_view = MainView::Editor;
@@ -716,9 +809,9 @@ impl App {
         let id = self.focused_buffer_id();
         self.buffers.close(id);
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
-        for pane in self.windows.windows() {
-            if self.windows.content(pane) == Some(&id) {
-                self.windows.set_content(pane, fallback);
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                self.windows_mut().set_content(pane, fallback);
             }
         }
         self.buffers.touch(fallback);
@@ -729,8 +822,8 @@ impl App {
     /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
     pub(crate) fn new_scratch_buffer(&mut self) {
         let id = self.buffers.open_scratch();
-        let focused = self.windows.focused_id();
-        self.windows.set_content(focused, id);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -791,8 +884,8 @@ impl App {
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
         let id = self.buffers.open_path(path);
-        let focused = self.windows.focused_id();
-        self.windows.set_content(focused, id);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
         self.refresh_project_root();
         self.main_view = MainView::Editor;
     }
@@ -978,8 +1071,8 @@ impl App {
         }
 
         let id = self.buffers.open_path(&path);
-        let focused = self.windows.focused_id();
-        self.windows.set_content(focused, id);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
         self.refresh_project_root();
 
         if self.main_view == MainView::Explorer {
@@ -1062,7 +1155,7 @@ impl App {
     /// were already looking at.
     fn split_window(&mut self, kind: SplitKind) {
         let id = self.focused_buffer_id();
-        self.windows.split(kind, id);
+        self.windows_mut().split(kind, id);
         self.wake_caret();
     }
 
@@ -1078,14 +1171,14 @@ impl App {
     /// by real layout geometry, not tree adjacency -- a no-op at the
     /// grid's edge (`WindowTree::navigate`'s own contract).
     pub(crate) fn navigate_window(&mut self, dir: NavDirection) {
-        self.windows.navigate(dir);
+        self.windows_mut().navigate(dir);
         self.wake_caret();
     }
 
     /// `SPC w w`: cycles focus to the next window in a stable pre-order
     /// traversal, wrapping around.
     pub(crate) fn cycle_window(&mut self) {
-        self.windows.cycle_next();
+        self.windows_mut().cycle_next();
         self.wake_caret();
     }
 
@@ -1097,7 +1190,7 @@ impl App {
     /// never closed here, only the pane showing it -- other panes may
     /// still reference the same `BufferId`.
     pub(crate) fn close_window(&mut self) {
-        self.windows.close_focused();
+        self.windows_mut().close_focused();
         self.wake_caret();
     }
 
@@ -1106,13 +1199,41 @@ impl App {
     /// closed panes would need layout history this tree doesn't keep yet
     /// (a disclosed cut, see `WindowTree::only`'s own doc comment).
     pub(crate) fn only_window(&mut self) {
-        self.windows.only();
+        self.windows_mut().only();
         self.wake_caret();
     }
 
     /// `SPC w =`: resets every split's ratio back to an even 0.5.
     pub(crate) fn balance_windows(&mut self) {
-        self.windows.balance();
+        self.windows_mut().balance();
+        self.wake_caret();
+    }
+
+    /// `SPC TAB n`: a new workspace, seeded with the focused pane's
+    /// current buffer (so it starts on something, not a blank scratch
+    /// buffer) -- becomes active immediately.
+    pub(crate) fn new_workspace(&mut self) {
+        let id = self.focused_buffer_id();
+        self.workspaces.new_workspace(id);
+        self.wake_caret();
+    }
+
+    /// `SPC TAB ]`/`SPC TAB [`: cycles the active workspace, wrapping.
+    pub(crate) fn next_workspace(&mut self) {
+        self.workspaces.next();
+        self.wake_caret();
+    }
+
+    pub(crate) fn prev_workspace(&mut self) {
+        self.workspaces.prev();
+        self.wake_caret();
+    }
+
+    /// `SPC TAB d`: removes the active workspace. Refuses (no-op) on the
+    /// last one -- same safety posture as `close_window` refusing the
+    /// last window.
+    pub(crate) fn remove_workspace(&mut self) {
+        self.workspaces.remove_active();
         self.wake_caret();
     }
 
@@ -1399,7 +1520,14 @@ impl App {
         let (line, col) = ob.buffer.line_col(&ob.cursor);
         let mode_label =
             if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
-        let suffix = format!("│ {filename}{modified}   Ln {}, Col {} ", line + 1, col + 1);
+        // Only shown once there's more than one workspace to distinguish --
+        // stays out of the way for the common single-workspace case.
+        let workspace_indicator = if self.workspaces.len() > 1 {
+            format!("   [{}/{} {}]", self.workspaces.active_index() + 1, self.workspaces.len(), self.workspaces.active_name())
+        } else {
+            String::new()
+        };
+        let suffix = format!("│ {filename}{modified}{workspace_indicator}   Ln {}, Col {} ", line + 1, col + 1);
         Some((mode_label, suffix))
     }
 
@@ -1813,8 +1941,8 @@ impl App {
         let modeline_top = window_height - text::MODELINE_HEIGHT;
         let pane_area =
             fenix_window::Rect { x: sidebar_px, y: 0.0, w: (window_width - sidebar_px).max(0.0), h: modeline_top.max(0.0) };
-        let layout = self.windows.layout(pane_area);
-        let focused_pane = self.windows.focused_id();
+        let layout = self.windows().layout(pane_area);
+        let focused_pane = self.windows().focused_id();
 
         // One entry per visible window pane -- built fresh every frame
         // from whatever `WindowTree::layout` currently reports (splits/
@@ -1896,7 +2024,7 @@ impl App {
 
             // Plain buffer content -- every pane not currently showing an
             // overlay, focused or not.
-            let buffer_id = *self.windows.content(pane).expect("every pane has a buffer");
+            let buffer_id = *self.windows().content(pane).expect("every pane has a buffer");
             if is_focused {
                 self.ensure_cursor_visible(pane_visible_lines);
             }
@@ -2296,8 +2424,8 @@ impl App {
     /// `explorer_open_selected` do in production.
     fn test_open_path(&mut self, path: &Path) {
         let id = self.buffers.open_path(path);
-        let focused = self.windows.focused_id();
-        self.windows.set_content(focused, id);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
     }
 }
 
@@ -2912,13 +3040,13 @@ mod tests {
     #[test]
     fn split_vertical_adds_a_focused_pane_showing_the_same_buffer() {
         let mut app = App::with_file(None);
-        let original = app.windows.focused_id();
+        let original = app.windows().focused_id();
         let buffer_id = app.focused_buffer_id();
 
         app.split_vertical();
 
-        assert_eq!(app.windows.window_count(), 2);
-        assert_ne!(app.windows.focused_id(), original);
+        assert_eq!(app.windows().window_count(), 2);
+        assert_ne!(app.windows().focused_id(), original);
         assert_eq!(app.focused_buffer_id(), buffer_id); // new pane shows the same buffer
     }
 
@@ -2926,14 +3054,14 @@ mod tests {
     fn split_horizontal_also_adds_a_focused_pane() {
         let mut app = App::with_file(None);
         app.split_horizontal();
-        assert_eq!(app.windows.window_count(), 2);
+        assert_eq!(app.windows().window_count(), 2);
     }
 
     #[test]
     fn close_window_is_a_no_op_on_the_last_window() {
         let mut app = App::with_file(None);
         app.close_window();
-        assert_eq!(app.windows.window_count(), 1);
+        assert_eq!(app.windows().window_count(), 1);
     }
 
     #[test]
@@ -2941,32 +3069,32 @@ mod tests {
         let mut app = App::with_file(None);
         app.split_vertical();
         app.close_window();
-        assert_eq!(app.windows.window_count(), 1);
+        assert_eq!(app.windows().window_count(), 1);
     }
 
     #[test]
     fn cycle_window_wraps_between_the_two_panes() {
         let mut app = App::with_file(None);
-        let first = app.windows.focused_id();
+        let first = app.windows().focused_id();
         app.split_vertical();
-        let second = app.windows.focused_id();
+        let second = app.windows().focused_id();
         assert_ne!(first, second);
 
         app.cycle_window();
-        assert_eq!(app.windows.focused_id(), first);
+        assert_eq!(app.windows().focused_id(), first);
         app.cycle_window();
-        assert_eq!(app.windows.focused_id(), second);
+        assert_eq!(app.windows().focused_id(), second);
     }
 
     #[test]
     fn navigate_window_moves_focus_left_to_the_original_pane() {
         let mut app = App::with_file(None);
-        let left = app.windows.focused_id();
+        let left = app.windows().focused_id();
         app.split_vertical(); // new pane appears to the right, becomes focused
-        assert_ne!(app.windows.focused_id(), left);
+        assert_ne!(app.windows().focused_id(), left);
 
         app.navigate_window(fenix_window::NavDirection::Left);
-        assert_eq!(app.windows.focused_id(), left);
+        assert_eq!(app.windows().focused_id(), left);
     }
 
     #[test]
@@ -2974,23 +3102,92 @@ mod tests {
         let mut app = App::with_file(None);
         app.split_vertical();
         app.split_horizontal();
-        assert_eq!(app.windows.window_count(), 3);
+        assert_eq!(app.windows().window_count(), 3);
 
         app.only_window();
-        assert_eq!(app.windows.window_count(), 1);
+        assert_eq!(app.windows().window_count(), 1);
     }
 
     #[test]
     fn balance_windows_resets_a_skewed_ratio_back_to_half() {
         let mut app = App::with_file(None);
         app.split_vertical();
-        app.windows.resize_focused(0.3); // skew away from 0.5
+        app.windows_mut().resize_focused(0.3); // skew away from 0.5
         app.balance_windows();
 
-        let rects = app.windows.layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
+        let rects = app.windows().layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
         for (_, r) in rects {
             assert!((r.w - 100.0).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn new_workspace_becomes_active_and_is_seeded_with_the_current_buffer() {
+        let mut app = App::with_file(None);
+        let buffer_id = app.focused_buffer_id();
+
+        app.new_workspace();
+
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!(app.workspaces.active_index(), 1);
+        assert_eq!(app.workspaces.active_name(), "workspace-2");
+        assert_eq!(app.focused_buffer_id(), buffer_id); // seeded, not a blank scratch
+        assert_eq!(app.windows().window_count(), 1); // new workspace starts unsplit
+    }
+
+    #[test]
+    fn next_and_prev_workspace_cycle_and_wrap() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.new_workspace(); // 3 workspaces total, active = 2
+
+        app.next_workspace(); // wraps to 0
+        assert_eq!(app.workspaces.active_index(), 0);
+        app.prev_workspace(); // wraps back to 2
+        assert_eq!(app.workspaces.active_index(), 2);
+        app.prev_workspace();
+        assert_eq!(app.workspaces.active_index(), 1);
+    }
+
+    #[test]
+    fn remove_workspace_is_a_no_op_on_the_last_one() {
+        let mut app = App::with_file(None);
+        app.remove_workspace();
+        assert_eq!(app.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn remove_workspace_removes_the_active_one() {
+        let mut app = App::with_file(None);
+        app.new_workspace(); // active: workspace-2
+
+        app.remove_workspace();
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(app.workspaces.active_name(), "workspace-1");
+    }
+
+    #[test]
+    fn each_workspace_keeps_its_own_split_layout() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.split_horizontal();
+        assert_eq!(app.windows().window_count(), 3);
+
+        app.new_workspace(); // fresh, unsplit workspace
+        assert_eq!(app.windows().window_count(), 1);
+
+        app.prev_workspace(); // back to workspace-1
+        assert_eq!(app.windows().window_count(), 3); // layout untouched
+    }
+
+    #[test]
+    fn modeline_shows_the_workspace_indicator_only_once_there_are_several() {
+        let mut app = App::with_file(None);
+        assert!(!app.modeline_text().contains("workspace"));
+
+        app.new_workspace();
+        assert!(app.modeline_text().contains("[2/2 workspace-2]"));
     }
 
     #[test]
@@ -3381,12 +3578,12 @@ mod tests {
         let scratch_id = app.focused_buffer_id();
         app.test_open_path(&a); // focused pane now on a
         app.split_vertical(); // new pane, also showing a
-        assert_eq!(app.windows.window_count(), 2);
+        assert_eq!(app.windows().window_count(), 2);
 
         app.kill_buffer(); // closes a, focused in the new pane
 
-        for pane in app.windows.windows() {
-            assert_eq!(app.windows.content(pane), Some(&scratch_id));
+        for pane in app.windows().windows() {
+            assert_eq!(app.windows().content(pane), Some(&scratch_id));
         }
     }
 

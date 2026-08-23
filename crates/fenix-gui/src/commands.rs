@@ -63,6 +63,10 @@ impl CommandRegistry {
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer", cmd_kill_buffer);
         registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);
+        registry.register("workspace.new", "Create a new workspace", cmd_new_workspace);
+        registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
+        registry.register("workspace.prev", "Switch to the previous workspace", cmd_prev_workspace);
+        registry.register("workspace.remove", "Remove the active workspace", cmd_remove_workspace);
         registry
     }
 
@@ -187,4 +191,20 @@ fn cmd_kill_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_new_scratch_buffer(ctx: &mut CommandCtx) {
     ctx.app.new_scratch_buffer();
+}
+
+fn cmd_new_workspace(ctx: &mut CommandCtx) {
+    ctx.app.new_workspace();
+}
+
+fn cmd_next_workspace(ctx: &mut CommandCtx) {
+    ctx.app.next_workspace();
+}
+
+fn cmd_prev_workspace(ctx: &mut CommandCtx) {
+    ctx.app.prev_workspace();
+}
+
+fn cmd_remove_workspace(ctx: &mut CommandCtx) {
+    ctx.app.remove_workspace();
 }

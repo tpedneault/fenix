@@ -72,10 +72,8 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
 /// first key, so the whole leader interaction -- from the initial `SPC`
 /// through to a resolved command -- is just one uniform walk of this trie.
 ///
-/// Deliberately sparse: only wires groups that have a real command behind
-/// them today. `SPC TAB` (workspaces) has nothing to bind to yet -- no
-/// workspace list exists until a later phase -- so it's not stubbed in
-/// here.
+/// Deliberately sparse: only wires groups that have a real command
+/// behind them today.
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -132,6 +130,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('p')], "prev buffer", "buffer.prev");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('k')], "kill buffer", "buffer.kill");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('X')], "scratch buffer", "buffer.scratch");
+
+        let tab = KeyPress::named(FenixNamedKey::Tab);
+        t.label_group(&[spc, tab], "workspace");
+        t.insert(&[spc, tab, KeyPress::char('n')], "new workspace", "workspace.new");
+        t.insert(&[spc, tab, KeyPress::char(']')], "next workspace", "workspace.next");
+        t.insert(&[spc, tab, KeyPress::char('[')], "prev workspace", "workspace.prev");
+        t.insert(&[spc, tab, KeyPress::char('d')], "remove workspace", "workspace.remove");
 
         t
     })
@@ -286,5 +291,23 @@ mod tests {
         assert!(matches!(resolve(&['p']), fenix_keymap::Step::Matched(&"buffer.prev")));
         assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"buffer.kill")));
         assert!(matches!(resolve(&['X']), fenix_keymap::Step::Matched(&"buffer.scratch")));
+    }
+
+    #[test]
+    fn leader_trie_resolves_workspace_new_next_prev_and_remove() {
+        let trie = leader_trie();
+        let tab = KeyPress::named(FenixNamedKey::Tab);
+
+        let resolve = |key: KeyPress| {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(tab);
+            m.feed(key)
+        };
+
+        assert!(matches!(resolve(KeyPress::char('n')), fenix_keymap::Step::Matched(&"workspace.new")));
+        assert!(matches!(resolve(KeyPress::char(']')), fenix_keymap::Step::Matched(&"workspace.next")));
+        assert!(matches!(resolve(KeyPress::char('[')), fenix_keymap::Step::Matched(&"workspace.prev")));
+        assert!(matches!(resolve(KeyPress::char('d')), fenix_keymap::Step::Matched(&"workspace.remove")));
     }
 }
