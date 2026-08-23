@@ -5,6 +5,11 @@ pub enum Mode {
     Visual,
     Replace,
     Command,
+    /// Typing a `/`/`?` search query -- see `VimState::search_forward`
+    /// for which direction. Shown only fleetingly in practice, since the
+    /// host UI overrides the modeline suffix while actually typing a
+    /// query, the same way it already does for `Command`.
+    Search,
 }
 
 impl Mode {
@@ -18,6 +23,7 @@ impl Mode {
             Mode::Visual => "VISUAL",
             Mode::Replace => "REPLACE",
             Mode::Command => "COMMAND",
+            Mode::Search => "SEARCH",
         }
     }
 }

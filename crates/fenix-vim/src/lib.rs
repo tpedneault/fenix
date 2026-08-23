@@ -7,6 +7,7 @@ mod motion;
 mod operator;
 mod search;
 mod state;
+mod substitute;
 mod textobject;
 
 #[cfg(test)]

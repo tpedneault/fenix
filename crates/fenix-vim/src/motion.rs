@@ -21,6 +21,24 @@ pub enum Motion {
     LineEnd,
     BufferTop,
     BufferBottom,
+    /// `f{c}`: next occurrence of `c` on the current line, cursor lands
+    /// on it. Never crosses to another line.
+    FindChar(char),
+    /// `F{c}`: previous occurrence of `c` on the current line.
+    FindCharBack(char),
+    /// `t{c}`: stops just *before* the next occurrence of `c`.
+    TillChar(char),
+    /// `T{c}`: stops just *after* the previous occurrence of `c`.
+    TillCharBack(char),
+    /// `%`: the bracket matching the one under the cursor, via
+    /// `bracket::find_match` -- a no-op (stays put) off a bracket or with
+    /// no match, matching real Vim.
+    MatchingBracket,
+    /// `}`: the next blank line (paragraph boundary), or the end of the
+    /// buffer if there isn't one.
+    ParagraphForward,
+    /// `{`: the previous blank line, or the start of the buffer.
+    ParagraphBackward,
 }
 
 /// Whether composing this motion with an operator includes the char it
@@ -35,7 +53,18 @@ pub enum Inclusivity {
 impl Motion {
     pub fn inclusivity(self) -> Inclusivity {
         match self {
-            Motion::WordEndForward | Motion::BigWordEndForward | Motion::LineEnd => Inclusivity::Inclusive,
+            Motion::WordEndForward
+            | Motion::BigWordEndForward
+            | Motion::LineEnd
+            | Motion::FindChar(_)
+            | Motion::TillChar(_)
+            | Motion::MatchingBracket => Inclusivity::Inclusive,
+            // `FindCharBack`/`TillCharBack` land at or before the found
+            // char with the cursor itself past it, so the plain
+            // start..cursor range (what Exclusive already gives every
+            // backward motion, e.g. `WordBackward`) is already correct
+            // without extending it -- see `motion.rs`'s module-level
+            // reasoning in the `f`/`F`/`t`/`T` implementation notes.
             _ => Inclusivity::Exclusive,
         }
     }
@@ -93,7 +122,78 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion) -> usize {
         }
         Motion::BufferTop => line_first_non_blank(buffer, 0),
         Motion::BufferBottom => line_first_non_blank(buffer, last_line(buffer)),
+        Motion::FindChar(c) => find_char_forward(buffer, cursor, c).unwrap_or(cursor.char_idx),
+        Motion::FindCharBack(c) => find_char_backward(buffer, cursor, c).unwrap_or(cursor.char_idx),
+        // `- 1`/`+ 1` are always in-bounds when a match was found: a
+        // forward match is strictly past the cursor (so >= line_start +
+        // 1), a backward one strictly before it.
+        Motion::TillChar(c) => find_char_forward(buffer, cursor, c).map(|i| i - 1).unwrap_or(cursor.char_idx),
+        Motion::TillCharBack(c) => find_char_backward(buffer, cursor, c).map(|i| i + 1).unwrap_or(cursor.char_idx),
+        Motion::MatchingBracket => crate::bracket::find_match(buffer, cursor.char_idx).unwrap_or(cursor.char_idx),
+        Motion::ParagraphForward => paragraph_forward(buffer, cursor),
+        Motion::ParagraphBackward => paragraph_backward(buffer, cursor),
     }
+}
+
+/// Char index of the next `target` char on the cursor's current line,
+/// strictly after the cursor -- `f`/`t`'s shared scan, never crossing to
+/// another line (real Vim's own `f`/`t` scope).
+fn find_char_forward(buffer: &Buffer, cursor: &Cursor, target: char) -> Option<usize> {
+    let (line, _) = buffer.line_col(cursor);
+    let line_end = buffer.line_start_char(line) + buffer.line_len(line);
+    let mut i = cursor.char_idx + 1;
+    while i < line_end {
+        if buffer.char_at(i) == Some(target) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Char index of the previous `target` char on the cursor's current
+/// line, strictly before the cursor -- `F`/`T`'s shared scan.
+fn find_char_backward(buffer: &Buffer, cursor: &Cursor, target: char) -> Option<usize> {
+    let (line, _) = buffer.line_col(cursor);
+    let line_start = buffer.line_start_char(line);
+    let mut i = cursor.char_idx;
+    while i > line_start {
+        i -= 1;
+        if buffer.char_at(i) == Some(target) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// The start of the next blank line after the cursor's, or the end of
+/// the buffer if there isn't one -- Vim's own definition of a paragraph
+/// boundary (a fully empty line, not just visually short).
+fn paragraph_forward(buffer: &Buffer, cursor: &Cursor) -> usize {
+    let (line, _) = buffer.line_col(cursor);
+    let last = last_line(buffer);
+    let mut l = line;
+    while l < last {
+        l += 1;
+        if buffer.line_len(l) == 0 {
+            return buffer.line_start_char(l);
+        }
+    }
+    buffer.line_start_char(last) + buffer.line_len(last)
+}
+
+/// The start of the previous blank line before the cursor's, or the
+/// start of the buffer if there isn't one.
+fn paragraph_backward(buffer: &Buffer, cursor: &Cursor) -> usize {
+    let (line, _) = buffer.line_col(cursor);
+    let mut l = line;
+    while l > 0 {
+        l -= 1;
+        if buffer.line_len(l) == 0 {
+            return buffer.line_start_char(l);
+        }
+    }
+    0
 }
 
 /// True if the char at `idx` is a word or punctuation char (not
@@ -330,6 +430,63 @@ mod tests {
         let b = buf("foo.bar baz");
         assert_eq!(target(&b, &cur(0), Motion::BigWordEndForward), 6); // end of "foo.bar"
         assert_eq!(target(&b, &cur(8), Motion::BigWordBackward), 0);
+    }
+
+    #[test]
+    fn find_char_forward_and_backward_stay_on_the_current_line() {
+        let b = buf("abcXbcX\nXafter");
+        assert_eq!(target(&b, &cur(0), Motion::FindChar('X')), 3); // first X on this line
+        assert_eq!(target(&b, &cur(0), Motion::FindCharBack('X')), 0); // none before -- no-op
+        assert_eq!(target(&b, &cur(6), Motion::FindCharBack('X')), 3); // scans back to the first line's X
+        // Never crosses to the next line even though it has an 'X' too.
+        assert_eq!(target(&b, &cur(6), Motion::FindChar('X')), 6);
+    }
+
+    #[test]
+    fn till_char_stops_one_short_of_the_found_char() {
+        let b = buf("abcXdef");
+        assert_eq!(target(&b, &cur(0), Motion::TillChar('X')), 2); // right before the X
+        assert_eq!(target(&b, &cur(6), Motion::TillCharBack('X')), 4); // right after the X
+    }
+
+    #[test]
+    fn find_and_till_char_are_no_ops_when_the_char_is_not_on_the_line() {
+        let b = buf("abcdef");
+        assert_eq!(target(&b, &cur(0), Motion::FindChar('Z')), 0);
+        assert_eq!(target(&b, &cur(0), Motion::TillChar('Z')), 0);
+    }
+
+    #[test]
+    fn matching_bracket_delegates_to_bracket_find_match() {
+        let b = buf("(hello)");
+        assert_eq!(target(&b, &cur(0), Motion::MatchingBracket), 6);
+        assert_eq!(target(&b, &cur(6), Motion::MatchingBracket), 0);
+    }
+
+    #[test]
+    fn matching_bracket_is_a_no_op_off_a_bracket_or_unmatched() {
+        let b = buf("(hello");
+        assert_eq!(target(&b, &cur(1), Motion::MatchingBracket), 1); // 'h', not a bracket
+        assert_eq!(target(&b, &cur(0), Motion::MatchingBracket), 0); // unmatched '('
+    }
+
+    #[test]
+    fn paragraph_forward_and_backward_find_the_nearest_blank_line() {
+        let b = buf("a\nb\n\nc\nd\n\ne");
+        // Lines: 0 "a", 1 "b", 2 "" (blank), 3 "c", 4 "d", 5 "" (blank), 6 "e"
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphForward), b.line_start_char(2));
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphBackward), 0); // none before -- buffer start
+
+        let on_c = Cursor { char_idx: b.line_start_char(3), sticky_col: 0 };
+        assert_eq!(target(&b, &on_c, Motion::ParagraphForward), b.line_start_char(5));
+        assert_eq!(target(&b, &on_c, Motion::ParagraphBackward), b.line_start_char(2));
+    }
+
+    #[test]
+    fn paragraph_forward_lands_at_the_buffer_end_when_no_blank_line_follows() {
+        let b = buf("a\nb\nc");
+        let end = b.line_start_char(2) + b.line_len(2);
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphForward), end);
     }
 
     #[test]

@@ -1537,10 +1537,11 @@ impl App {
     }
 
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
-    /// command, since that replaces the whole modeline with raw command
-    /// text instead of the usual badge + filename + position layout.
+    /// command or a `/`/`?` search query, since either replaces the
+    /// whole modeline with raw prompt text instead of the usual badge +
+    /// filename + position layout.
     fn modeline_pieces(&self) -> Option<(&'static str, String)> {
-        if self.vim.mode() == Mode::Command || self.pending_grep_query.is_some() {
+        if self.vim.mode() == Mode::Command || self.vim.mode() == Mode::Search || self.pending_grep_query.is_some() {
             return None;
         }
         if self.main_view == MainView::Explorer {
@@ -1594,6 +1595,10 @@ impl App {
         if self.vim.mode() == Mode::Command {
             return format!(":{}", self.vim.command_line());
         }
+        if self.vim.mode() == Mode::Search {
+            let prefix = if self.vim.search_forward() { "/" } else { "?" };
+            return format!("{prefix}{}", self.vim.search_query());
+        }
         if let Some(query) = &self.pending_grep_query {
             return format!("rg: {query}");
         }
@@ -1627,6 +1632,9 @@ impl App {
             Mode::Visual => (theme.mode_visual, theme.mode_text_light),
             Mode::Replace => (theme.mode_replace, theme.mode_text_dark),
             Mode::Command => (theme.mode_command, theme.mode_text_dark),
+            // Same "prompt-like input" family as `:` -- not a new theme
+            // color, just reusing the command one.
+            Mode::Search => (theme.mode_command, theme.mode_text_dark),
         }
     }
 
@@ -2209,6 +2217,9 @@ impl App {
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text = if let Some(query) = &self.pending_grep_query {
             Some(format!("rg: {query}"))
+        } else if self.vim.mode() == Mode::Search {
+            let prefix = if self.vim.search_forward() { "/" } else { "?" };
+            Some(format!("{prefix}{}", self.vim.search_query()))
         } else if modeline_pieces.is_none() {
             Some(format!(":{}", self.vim.command_line()))
         } else {
@@ -2675,6 +2686,15 @@ mod tests {
             app.test_vim_key(KeyPress::char(ch));
         }
         assert_eq!(app.modeline_text(), ":wq");
+    }
+
+    #[test]
+    fn modeline_shows_the_search_prompt_while_typing_a_query() {
+        let mut app = App::with_file(None);
+        for ch in ['/', 'f', 'o', 'o'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        assert_eq!(app.modeline_text(), "/foo");
     }
 
     #[test]

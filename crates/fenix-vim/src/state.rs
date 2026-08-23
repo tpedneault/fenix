@@ -75,6 +75,21 @@ pub struct VimState {
     /// after dispatch and turned into `VimEvent::Pulse`.
     pending_pulse: Option<Range<usize>>,
     command_line: String,
+    /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
+    /// trie key -- `(forward, till, count)`, `count` being whatever was
+    /// resolved at the point the prompt started (`3fx`, or the combined
+    /// `2d3fx`), same "one more raw key" shape as `pending_replace`.
+    pending_find: Option<(bool, bool, u32)>,
+    /// The resolved motion (already carrying its target char) plus that
+    /// char, from the most recent `f`/`F`/`t`/`T` -- what `;`/`,` repeat.
+    last_find: Option<(Motion, char)>,
+    /// The query being typed while `mode() == Mode::Search`; direction
+    /// is `search_forward`. Cleared on confirm/cancel.
+    search_query: String,
+    search_forward: bool,
+    /// Pattern + direction of the most recently *confirmed* search (via
+    /// Enter, or `*`/`#`), for `n`/`N` to repeat.
+    last_search: Option<(String, bool)>,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -96,6 +111,11 @@ impl VimState {
             block_insert: None,
             pending_pulse: None,
             command_line: String::new(),
+            pending_find: None,
+            last_find: None,
+            search_query: String::new(),
+            search_forward: true,
+            last_search: None,
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -114,6 +134,19 @@ impl VimState {
 
     pub fn command_line(&self) -> &str {
         &self.command_line
+    }
+
+    /// The in-progress `/`/`?` query text -- only meaningful while
+    /// `mode()` is `Search`. Paired with `search_forward` for the host
+    /// UI to render `/query` or `?query` in place of the modeline.
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Direction of the search prompt currently being typed (`true` for
+    /// `/`, `false` for `?`). Only meaningful while `mode()` is `Search`.
+    pub fn search_forward(&self) -> bool {
+        self.search_forward
     }
 
     /// The char offset Visual mode's selection is anchored at. Only
@@ -148,9 +181,10 @@ impl VimState {
         let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
-            Mode::Command => self.handle_command_key(key),
+            Mode::Command => self.handle_command_key(buffer, cursor, key),
             Mode::Normal => self.handle_normal_key(buffer, cursor, key),
             Mode::Visual => self.handle_visual_key(buffer, cursor, key),
+            Mode::Search => self.handle_search_key(buffer, cursor, key),
         };
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
@@ -331,7 +365,7 @@ impl VimState {
         }
     }
 
-    fn handle_command_key(&mut self, key: KeyPress) -> VimEvent {
+    fn handle_command_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         match key.code {
             KeyCode::Named(NamedKey::Escape) => {
                 self.command_line.clear();
@@ -340,7 +374,7 @@ impl VimState {
             KeyCode::Named(NamedKey::Enter) => {
                 let cmd = std::mem::take(&mut self.command_line);
                 self.mode = Mode::Normal;
-                return run_ex_command(&cmd);
+                return crate::substitute::run_ex_command(&cmd, buffer, cursor);
             }
             KeyCode::Named(NamedKey::Backspace) => {
                 self.command_line.pop();
@@ -353,11 +387,80 @@ impl VimState {
         VimEvent::None
     }
 
+    /// `Mode::Search`'s key handler -- same "next keystrokes are special"
+    /// shape as `handle_command_key`, except `Enter` also runs the search
+    /// and moves the cursor (recording it as `last_search` for `n`/`N`)
+    /// instead of parsing an ex-command.
+    fn handle_search_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
+        match key.code {
+            KeyCode::Named(NamedKey::Escape) => {
+                self.search_query.clear();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Named(NamedKey::Enter) => {
+                let query = std::mem::take(&mut self.search_query);
+                self.mode = Mode::Normal;
+                if !query.is_empty() {
+                    self.last_search = Some((query.clone(), self.search_forward));
+                    self.jump_to_search(buffer, cursor, &query, self.search_forward);
+                }
+            }
+            KeyCode::Named(NamedKey::Backspace) => {
+                self.search_query.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => {
+                self.search_query.push(c);
+            }
+            _ => {}
+        }
+        VimEvent::None
+    }
+
+    /// Runs `search::find_next` and moves the cursor to the result, if
+    /// any -- shared by the search prompt's `Enter`, `n`/`N`, and `*`/`#`.
+    /// A no-op (silent, matching this project's established "log and
+    /// degrade, never crash" posture for a bad user-supplied pattern) on
+    /// a regex compile error or no match found.
+    fn jump_to_search(&mut self, buffer: &Buffer, cursor: &mut Cursor, pattern: &str, forward: bool) {
+        match crate::search::find_next(buffer, cursor, pattern, forward) {
+            Ok(Some(idx)) => {
+                cursor.char_idx = idx;
+                let (_, col) = buffer.line_col(cursor);
+                cursor.sticky_col = col;
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!("fenix: invalid search pattern: {err}"),
+        }
+    }
+
     fn handle_normal_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         if let Some(count) = self.pending_replace.take() {
             if key.code != KeyCode::Named(NamedKey::Escape) {
                 if let KeyCode::Char(c) = key.code {
                     self.replace_char(buffer, cursor, c, count);
+                }
+            }
+            return VimEvent::None;
+        }
+
+        // `f`/`F`/`t`/`T`'s target char -- checked before the
+        // `pending_op` dispatch below so this resolves correctly
+        // whether the find was started standalone or mid-`d{motion}`
+        // (`resolve_find` itself checks `pending_op` to decide which).
+        // Set either by `VimAction::FindCharPrompt` (the standalone
+        // trie leaf) or directly by `handle_operator_pending_key`
+        // (whose own trie has no leaves for these -- the target char
+        // isn't known at trie-build time).
+        if let Some((forward, till, count)) = self.pending_find.take() {
+            match key.code {
+                KeyCode::Char(c) if key.mods == Mods::default() => {
+                    self.resolve_find(buffer, cursor, forward, till, c, count);
+                }
+                _ => {
+                    // Escape, or anything else -- abort, same as
+                    // Escape's own handling in `handle_operator_pending_key`.
+                    self.pending_op = None;
+                    self.count = None;
                 }
             }
             return VimEvent::None;
@@ -510,6 +613,57 @@ impl VimState {
                 }
             }
             VimAction::ReplaceChar => self.pending_replace = Some(count),
+            VimAction::FindCharPrompt { forward, till } => self.pending_find = Some((forward, till, count)),
+            VimAction::RepeatFind { reverse } => {
+                if let Some((m, _)) = self.last_find {
+                    let m = if reverse { reverse_find_motion(m) } else { m };
+                    apply_motion(buffer, cursor, m, count);
+                }
+            }
+            VimAction::EnterSearch { forward } => {
+                self.mode = Mode::Search;
+                self.search_query.clear();
+                self.search_forward = forward;
+            }
+            VimAction::RepeatSearch { reverse } => {
+                if let Some((pattern, dir)) = self.last_search.clone() {
+                    let forward = if reverse { !dir } else { dir };
+                    self.jump_to_search(buffer, cursor, &pattern, forward);
+                }
+            }
+            VimAction::SearchWord { forward } => {
+                if let Some(pattern) = crate::search::word_under_cursor_pattern(buffer, cursor) {
+                    self.last_search = Some((pattern.clone(), forward));
+                    self.jump_to_search(buffer, cursor, &pattern, forward);
+                }
+            }
+        }
+    }
+
+    /// Resolves a pending `f`/`F`/`t`/`T` once its target char arrives --
+    /// shared by the standalone form (`fx`) and the operator-pending one
+    /// (`dfx`), which only differ in what happens with the resolved
+    /// motion: move the cursor directly, or compute a range and hand it
+    /// to `finish_operator`. `count` is whatever was resolved at the
+    /// point `f`/`F`/`t`/`T` itself was pressed (already combined with
+    /// `pending_op_count` if there was one before the operator) --
+    /// passed in rather than re-read from `self.count`, which by this
+    /// point holds whatever (if anything) was typed *after* the prompt
+    /// started, not before it.
+    fn resolve_find(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, forward: bool, till: bool, c: char, count: u32) {
+        let m = match (forward, till) {
+            (true, false) => Motion::FindChar(c),
+            (false, false) => Motion::FindCharBack(c),
+            (true, true) => Motion::TillChar(c),
+            (false, true) => Motion::TillCharBack(c),
+        };
+        self.last_find = Some((m, c));
+        if let Some(op) = self.pending_op.take() {
+            let total_count = self.pending_op_count.saturating_mul(count);
+            let range = range_for_motion(buffer, cursor, m, total_count);
+            self.finish_operator(buffer, cursor, op, range, m.is_linewise());
+        } else {
+            apply_motion(buffer, cursor, m, count);
         }
     }
 
@@ -639,6 +793,33 @@ impl VimState {
                             self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
                             return;
                         }
+                    }
+                }
+            }
+        }
+
+        // `f`/`F`/`t`/`T` as an operator's motion (`dfx`, `d3fx`): not a
+        // `pending_matcher` leaf (the target char isn't known at
+        // trie-build time, same reason it isn't a Normal-trie leaf
+        // either) -- recognized directly here, same as the digit check
+        // above, and resolved once the target char arrives via the
+        // `pending_find` check at the top of `handle_normal_key` (which
+        // every key reaches regardless of `pending_op`, `resolve_find`
+        // itself branches on it).
+        if !self.pending_matcher.is_pending() {
+            if let KeyCode::Char(c) = key.code {
+                if key.mods == Mods::default() {
+                    let find = match c {
+                        'f' => Some((true, false)),
+                        'F' => Some((false, false)),
+                        't' => Some((true, true)),
+                        'T' => Some((false, true)),
+                        _ => None,
+                    };
+                    if let Some((forward, till)) = find {
+                        let count = self.count.take().unwrap_or(1).max(1);
+                        self.pending_find = Some((forward, till, count));
+                        return;
                     }
                 }
             }
@@ -925,6 +1106,20 @@ impl Default for VimState {
     }
 }
 
+/// `,`'s own view of `;`: the opposite-direction counterpart of a
+/// resolved find motion, for `RepeatFind { reverse: true }`. Motions
+/// other than the `FindChar`-family pass through unchanged (can't
+/// happen in practice -- `last_find` only ever stores one of the four).
+fn reverse_find_motion(m: Motion) -> Motion {
+    match m {
+        Motion::FindChar(c) => Motion::FindCharBack(c),
+        Motion::FindCharBack(c) => Motion::FindChar(c),
+        Motion::TillChar(c) => Motion::TillCharBack(c),
+        Motion::TillCharBack(c) => Motion::TillChar(c),
+        other => other,
+    }
+}
+
 fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32) {
     for _ in 0..count.max(1) {
         let target = motion::target(buffer, cursor, m);
@@ -995,15 +1190,6 @@ fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32
         motion::Inclusivity::Exclusive => hi,
     };
     lo..hi
-}
-
-fn run_ex_command(cmd: &str) -> VimEvent {
-    match cmd.trim() {
-        "w" => VimEvent::RequestSave,
-        "q" | "q!" => VimEvent::RequestQuit,
-        "wq" | "x" => VimEvent::RequestSaveAndQuit,
-        _ => VimEvent::None,
-    }
 }
 
 #[cfg(test)]
@@ -1239,6 +1425,195 @@ mod tests {
         vim.handle_insert_key(&mut b, &mut c, KeyPress::char('('), true);
         assert_eq!(b.text(), "(a)"); // overwrote '(' with '(', no auto-pair inserted
         assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn f_moves_to_the_next_occurrence_of_the_char() {
+        let mut b = buf("abcXdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "fX");
+        assert_eq!(c.char_idx, 3);
+    }
+
+    #[test]
+    fn t_stops_just_before_the_char() {
+        let mut b = buf("abcXdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "tX");
+        assert_eq!(c.char_idx, 2);
+    }
+
+    #[test]
+    fn count_before_f_finds_the_nth_occurrence() {
+        let mut b = buf("aXbXcXd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2fX");
+        assert_eq!(c.char_idx, 3); // the second X
+    }
+
+    #[test]
+    fn semicolon_repeats_the_last_find_and_comma_reverses_it() {
+        let mut b = buf("aXbXcXd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "fX"); // first X, index 1
+        keys(&mut vim, &mut b, &mut c, ";"); // next X, index 3
+        assert_eq!(c.char_idx, 3);
+        keys(&mut vim, &mut b, &mut c, ","); // reversed -- back to index 1
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn dfx_deletes_up_to_and_including_the_found_char() {
+        let mut b = buf("abcXdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "dfX");
+        assert_eq!(b.text(), "def");
+    }
+
+    #[test]
+    fn dtx_deletes_up_to_but_not_including_the_found_char() {
+        let mut b = buf("abcXdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "dtX");
+        assert_eq!(b.text(), "Xdef");
+    }
+
+    #[test]
+    fn find_with_no_match_on_the_line_is_a_no_op_and_does_not_leave_pending_state() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "fZ");
+        assert_eq!(c.char_idx, 0);
+        // A follow-up ordinary motion still works -- confirms `pending_find`
+        // didn't leak and swallow the next keypress.
+        keys(&mut vim, &mut b, &mut c, "l");
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn escape_after_f_cancels_a_pending_operator_too() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "df");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        keys(&mut vim, &mut b, &mut c, "l"); // proves we're back in plain Normal mode
+        assert_eq!(b.text(), "abc");
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn percent_jumps_to_the_matching_bracket_and_composes_with_delete() {
+        let mut b = buf("(hello)");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "%");
+        assert_eq!(c.char_idx, 6);
+
+        let mut b2 = buf("(hello) world");
+        let mut c2 = Cursor::at_start();
+        let mut vim2 = VimState::new();
+        keys(&mut vim2, &mut b2, &mut c2, "d%");
+        assert_eq!(b2.text(), " world");
+    }
+
+    #[test]
+    fn paragraph_motions_navigate_between_blank_lines() {
+        let mut b = buf("a\nb\n\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "}");
+        assert_eq!(b.line_col(&c).0, 2);
+        keys(&mut vim, &mut b, &mut c, "{");
+        assert_eq!(b.line_col(&c).0, 0);
+    }
+
+    #[test]
+    fn slash_search_jumps_to_the_next_match_and_enters_normal_mode_on_enter() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        assert_eq!(vim.mode(), Mode::Search);
+        keys(&mut vim, &mut b, &mut c, "foo");
+        assert_eq!(vim.search_query(), "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert_eq!(c.char_idx, 8); // the second "foo", not the one under the cursor
+    }
+
+    #[test]
+    fn question_mark_search_goes_backward() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor { char_idx: 10, sticky_col: 10 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "?");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(c.char_idx, 8);
+    }
+
+    #[test]
+    fn escape_cancels_the_search_prompt_without_moving_the_cursor() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "bar");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn n_and_shift_n_repeat_the_last_search_same_and_reversed() {
+        let mut b = buf("foo bar foo baz foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(c.char_idx, 8); // second "foo"
+
+        keys(&mut vim, &mut b, &mut c, "n");
+        assert_eq!(c.char_idx, 16); // third "foo"
+
+        keys(&mut vim, &mut b, &mut c, "N"); // reversed -- back to the second
+        assert_eq!(c.char_idx, 8);
+    }
+
+    #[test]
+    fn star_searches_the_word_under_the_cursor_forward() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "*");
+        assert_eq!(c.char_idx, 8);
+    }
+
+    #[test]
+    fn hash_searches_the_word_under_the_cursor_backward() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor { char_idx: 8, sticky_col: 8 }; // on the second "foo"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "#");
+        assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn star_on_whitespace_is_a_no_op() {
+        let mut b = buf("   ");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "*");
+        assert_eq!(c.char_idx, 0);
     }
 
     #[test]

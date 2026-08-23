@@ -50,6 +50,24 @@ pub enum VimAction {
     IndentLine,
     /// `<<`: the dedent counterpart of `IndentLine`.
     DedentLine,
+    /// `f`/`F`/`t`/`T`: waits for exactly one more raw key (the target
+    /// char) before resolving to a `Motion::FindChar`-family variant --
+    /// same "next key is special" shape `ReplaceChar`/`pending_replace`
+    /// already use, since the char can't be a fixed trie leaf. `forward`
+    /// picks `f`/`F` vs `t`/`T`, `till` picks `t`/`T` (stop just short)
+    /// vs `f`/`F` (land on it).
+    FindCharPrompt { forward: bool, till: bool },
+    /// `;`/`,`: repeats the last `f`/`F`/`t`/`T`, same direction or
+    /// reversed.
+    RepeatFind { reverse: bool },
+    /// `/`/`?`: enters the search-query prompt (`Mode::Search`).
+    EnterSearch { forward: bool },
+    /// `n`/`N`: repeats the last confirmed search, same direction or
+    /// reversed.
+    RepeatSearch { reverse: bool },
+    /// `*`/`#`: searches for the exact word under the cursor, forward or
+    /// backward, with no prompt (the pattern's already known).
+    SearchWord { forward: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +117,9 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('$')], "line end", wrap(Motion::LineEnd));
     trie.insert(&[KeyPress::char('g'), KeyPress::char('g')], "buffer top", wrap(Motion::BufferTop));
     trie.insert(&[KeyPress::char('G')], "buffer bottom", wrap(Motion::BufferBottom));
+    trie.insert(&[KeyPress::char('%')], "matching bracket", wrap(Motion::MatchingBracket));
+    trie.insert(&[KeyPress::char('{')], "paragraph back", wrap(Motion::ParagraphBackward));
+    trie.insert(&[KeyPress::char('}')], "paragraph forward", wrap(Motion::ParagraphForward));
 }
 
 fn build_normal_trie() -> KeyTrie<VimAction> {
@@ -142,6 +163,20 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 
     t.insert(&[KeyPress::char('>'), KeyPress::char('>')], "indent line", VimAction::IndentLine);
     t.insert(&[KeyPress::char('<'), KeyPress::char('<')], "dedent line", VimAction::DedentLine);
+
+    t.insert(&[KeyPress::char('f')], "find char", VimAction::FindCharPrompt { forward: true, till: false });
+    t.insert(&[KeyPress::char('F')], "find char back", VimAction::FindCharPrompt { forward: false, till: false });
+    t.insert(&[KeyPress::char('t')], "till char", VimAction::FindCharPrompt { forward: true, till: true });
+    t.insert(&[KeyPress::char('T')], "till char back", VimAction::FindCharPrompt { forward: false, till: true });
+    t.insert(&[KeyPress::char(';')], "repeat find", VimAction::RepeatFind { reverse: false });
+    t.insert(&[KeyPress::char(',')], "repeat find back", VimAction::RepeatFind { reverse: true });
+
+    t.insert(&[KeyPress::char('/')], "search", VimAction::EnterSearch { forward: true });
+    t.insert(&[KeyPress::char('?')], "search back", VimAction::EnterSearch { forward: false });
+    t.insert(&[KeyPress::char('n')], "repeat search", VimAction::RepeatSearch { reverse: false });
+    t.insert(&[KeyPress::char('N')], "repeat search back", VimAction::RepeatSearch { reverse: true });
+    t.insert(&[KeyPress::char('*')], "search word", VimAction::SearchWord { forward: true });
+    t.insert(&[KeyPress::char('#')], "search word back", VimAction::SearchWord { forward: false });
 
     t
 }
