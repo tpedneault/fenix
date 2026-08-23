@@ -24,6 +24,9 @@ pub struct Theme {
     /// Thin colored frame drawn around the whole window when `Some`.
     /// `None` (today's only behavior) draws nothing.
     pub border: Option<[f32; 4]>,
+    /// The line drawn along a window split's boundary, between two
+    /// adjacent panes.
+    pub divider: [f32; 4],
 
     pub bg: [f32; 4],
     pub bg_modeline: [f32; 4],
@@ -171,6 +174,7 @@ pub const ORBIT_DARK: Theme = Theme {
     name: "Orbit Dark",
     font_family: None,
     border: None,
+    divider: rgba(0x565f89),
 
     bg: rgba(0x1a1b26),
     bg_modeline: rgba(0x24283b),
@@ -236,6 +240,7 @@ pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
     font_family: Some("TempleOS"),
     border: Some(rgba(0x0000aa)),
+    divider: rgba(0x0000aa),
 
     bg: rgba(0xffffff),
     bg_modeline: rgba(0x0000aa),

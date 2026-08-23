@@ -1,7 +1,11 @@
+use std::collections::HashMap;
+
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
+
+use fenix_window::{Rect, WindowId as PaneId};
 
 use crate::gpu::GpuState;
 use crate::icon::ICON_FONT_FAMILY;
@@ -43,19 +47,23 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
-/// Holds four independent glyph buffers sharing one atlas/renderer:
-/// `buffer` for the windowed slice of editor content (or, in full-buffer
-/// explorer mode, the directory listing) currently on screen, `modeline`
-/// for the single-line status bar, `which_key` for the popup listing a
-/// pending key sequence's continuations, and `sidebar` for the file
-/// explorer's persistent side panel.
+/// Holds one independent glyph buffer per visible window pane
+/// (`content_buffers`, keyed by `PaneId` -- created lazily the first time
+/// a pane renders, dropped once it stops appearing in a `prepare()` call
+/// since splits/closes churn pane ids) plus three fixed panels:
+/// `modeline` for the single-line status bar, `which_key` for the popup
+/// listing a pending key sequence's continuations, and `sidebar` for the
+/// file explorer's persistent side panel. All share one atlas/renderer/
+/// font system -- glyphon's `TextRenderer::prepare` already takes an
+/// arbitrary-length `Vec<TextArea>`, so N panes is just N more entries,
+/// not a different rendering pipeline.
 pub struct TextPipeline {
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: TextRenderer,
-    buffer: GlyphBuffer,
+    content_buffers: HashMap<PaneId, GlyphBuffer>,
     modeline: GlyphBuffer,
     which_key: GlyphBuffer,
     sidebar: GlyphBuffer,
@@ -88,10 +96,6 @@ impl TextPipeline {
         let renderer =
             TextRenderer::new(&mut atlas, &gpu.device, wgpu::MultisampleState::default(), None);
 
-        let mut buffer = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        buffer.set_wrap(Wrap::None);
-        buffer.set_size(Some(gpu.size.width as f32), Some(content_height(gpu.size.height as f32)));
-
         let mut modeline = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(MODELINE_HEIGHT));
@@ -112,7 +116,7 @@ impl TextPipeline {
             viewport,
             atlas,
             renderer,
-            buffer,
+            content_buffers: HashMap::new(),
             modeline,
             which_key,
             sidebar,
@@ -176,14 +180,6 @@ impl TextPipeline {
             .unwrap_or(FONT_SIZE * 0.6)
     }
 
-    /// Plain, single-color content text -- used only for the very first
-    /// frame's priming call in `App::resumed`, before the first real
-    /// `redraw()` (which always uses `set_content_rich` instead) runs.
-    pub fn set_text(&mut self, text: &str) {
-        self.buffer.set_text(text, &Attrs::new().family(self.content_family()), Shaping::Advanced, None);
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
-    }
-
     /// Builds rich-text spans from `(text, color, use_icon_font)` triples --
     /// the icon flag switches that one span to `ICON_FONT_FAMILY` instead
     /// of the body font, letting an icon glyph and ordinary text sit in
@@ -200,23 +196,41 @@ impl TextPipeline {
             .collect()
     }
 
-    /// Sets the buffer-content text as differently-colored, optionally
-    /// icon-font spans -- the line-number gutter prefix (or `~` for
-    /// past-end-of-buffer rows), syntax-highlighted line content, or (in
-    /// full-buffer explorer mode) a directory listing's icon/name/
-    /// attribute columns.
-    pub fn set_content_rich(&mut self, segments: &[(&str, Color, bool)]) {
-        let default_attrs = Attrs::new().family(self.content_family());
+    /// Sets one pane's content text (rich, icon-aware spans same as
+    /// `content_spans`/explorer row building produce) and its pixel size
+    /// (that pane's current layout rect) in one call -- creating the
+    /// pane's `GlyphBuffer` lazily the first time it's rendered. Doesn't
+    /// use `HashMap::entry`/`or_insert_with`: that would need a closure
+    /// capturing `&mut self.font_system` to construct a fresh buffer,
+    /// which can't then *also* be reborrowed for `shape_until_scroll`
+    /// afterward (the closure would move it) -- a plain contains-key
+    /// check plus a fresh `get_mut` avoids the conflict.
+    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)]) {
         let spans = self.rich_spans(segments);
-        self.buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        let default_attrs = Attrs::new().family(self.content_family());
+
+        if !self.content_buffers.contains_key(&pane) {
+            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            buf.set_wrap(Wrap::None);
+            self.content_buffers.insert(pane, buf);
+        }
+        let buf = self.content_buffers.get_mut(&pane).expect("just inserted if missing");
+        buf.set_size(Some(w), Some(h));
+        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Drops every pane `GlyphBuffer` not in `keep` -- splits/closes churn
+    /// `PaneId`s, so without this, closed panes' buffers (and their glyph
+    /// atlas entries) would accumulate forever.
+    pub fn retain_panes(&mut self, keep: &[PaneId]) {
+        self.content_buffers.retain(|id, _| keep.contains(id));
     }
 
     /// Sets the modeline text as a sequence of differently-colored spans
     /// (e.g. the mode badge in its own accent, the rest in the normal
     /// modeline color) -- a single flat color can't do that, so this
-    /// takes rich text instead of a plain string like `set_text`/
-    /// `set_which_key_text`.
+    /// takes rich text instead of a plain string like `set_which_key_text`.
     pub fn set_modeline_text(&mut self, segments: &[(&str, Color)]) {
         let body_family = self.content_family();
         let default_attrs = Attrs::new().family(body_family);
@@ -232,7 +246,7 @@ impl TextPipeline {
     }
 
     /// Sets the sidebar's rows -- same icon/color rich-text mechanism as
-    /// `set_content_rich`, into its own independent glyph buffer since the
+    /// `set_pane_rich`, into its own independent glyph buffer since the
     /// sidebar renders alongside the editor content, not interleaved
     /// with it.
     pub fn set_sidebar_rich(&mut self, segments: &[(&str, Color, bool)]) {
@@ -243,39 +257,26 @@ impl TextPipeline {
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
-        self.buffer.set_size(Some(width), Some(content_height(height)));
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // Pane buffers are resized every frame in `set_pane_rich` (their
+        // rect comes from `WindowTree::layout`, recomputed each redraw
+        // regardless of whether the window itself just resized), so only
+        // the three fixed panels need handling here.
         self.modeline.set_size(Some(width), Some(MODELINE_HEIGHT));
         self.modeline.shape_until_scroll(&mut self.font_system, false);
         self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height)));
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
 
-    /// `content_top_offset` shifts the buffer-content text up by that many
-    /// pixels (0..LINE_HEIGHT) -- the sub-line-height part of a smooth
-    /// scroll transition; the caller fetches text starting from the
-    /// integer line the transition has reached and shifts it up by the
-    /// fractional remainder so it pans instead of jumping.
-    ///
-    /// `content_left_offset` shifts the content area right by that many
-    /// pixels -- `SIDEBAR_WIDTH` when the sidebar is open (so editor text
-    /// starts after it instead of underneath it), `0.0` otherwise.
-    ///
-    /// `which_key_panel`, when present, is the (left, top, height) box to
-    /// render the pending-sequence popup in -- top-right corner of the
-    /// window, clear of both the content being edited and the modeline.
-    /// The caller (App) already knows this from the hint count it built
-    /// the text from, and draws the panel's background rect itself.
-    ///
-    /// `sidebar_open` toggles whether the sidebar's own `TextArea` is
-    /// included at all -- its content only needs setting via
-    /// `set_sidebar_rich` while it's actually visible.
+    /// One pane's render info for `prepare`: its id (to look up the right
+    /// `GlyphBuffer`), its current pixel rect, and the sub-line-height
+    /// fractional offset to shift its content up by (0.0 for panes that
+    /// don't animate scroll, i.e. everything but the focused pane's own
+    /// smooth-scroll transition).
     pub fn prepare(
         &mut self,
         gpu: &GpuState,
         theme: &Theme,
-        content_top_offset: f32,
-        content_left_offset: f32,
+        panes: &[(PaneId, Rect, f32)],
         which_key_panel: Option<(f32, f32, f32)>,
         sidebar_open: bool,
     ) {
@@ -286,21 +287,24 @@ impl TextPipeline {
 
         let modeline_top = gpu.size.height as f32 - MODELINE_HEIGHT;
 
-        let content_bounds = TextBounds {
-            left: content_left_offset as i32,
-            top: 0,
-            right: gpu.config.width as i32,
-            bottom: modeline_top as i32,
-        };
-        let content_area = TextArea {
-            buffer: &self.buffer,
-            left: PAD_LEFT + content_left_offset,
-            top: PAD_TOP - content_top_offset,
-            scale: 1.0,
-            bounds: content_bounds,
-            default_color: theme.fg,
-            custom_glyphs: &[],
-        };
+        let mut areas = Vec::with_capacity(panes.len() + 3);
+        for &(pane, rect, content_frac) in panes {
+            let Some(buffer) = self.content_buffers.get(&pane) else { continue };
+            areas.push(TextArea {
+                buffer,
+                left: rect.x + PAD_LEFT,
+                top: rect.y + PAD_TOP - content_frac * LINE_HEIGHT,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + rect.h) as i32,
+                },
+                default_color: theme.fg,
+                custom_glyphs: &[],
+            });
+        }
 
         let modeline_bounds = TextBounds {
             left: 0,
@@ -308,7 +312,7 @@ impl TextPipeline {
             right: gpu.config.width as i32,
             bottom: gpu.config.height as i32,
         };
-        let modeline_area = TextArea {
+        areas.push(TextArea {
             buffer: &self.modeline,
             left: PAD_LEFT,
             top: modeline_top + 4.0,
@@ -316,9 +320,8 @@ impl TextPipeline {
             bounds: modeline_bounds,
             default_color: theme.fg_modeline,
             custom_glyphs: &[],
-        };
+        });
 
-        let mut areas = vec![content_area, modeline_area];
         if let Some((left, top, height)) = which_key_panel {
             areas.push(TextArea {
                 buffer: &self.which_key,
@@ -373,9 +376,18 @@ fn content_height(window_height: f32) -> f32 {
     (window_height - MODELINE_HEIGHT).max(0.0)
 }
 
-/// How many full text lines fit in the content area above the modeline.
+/// How many full text lines fit in a content area of the given pixel
+/// height (already excluding the modeline, e.g. a pane's own rect
+/// height) -- used both for the whole-window case (`content_height`
+/// applied first) and per-pane.
+pub fn lines_that_fit(height: f32) -> usize {
+    (height / LINE_HEIGHT).floor().max(1.0) as usize
+}
+
+/// How many full text lines fit in the content area above the modeline,
+/// for the single-pane/whole-window case.
 pub fn visible_line_count(window_height: f32) -> usize {
-    (content_height(window_height) / LINE_HEIGHT).floor().max(1.0) as usize
+    lines_that_fit(content_height(window_height))
 }
 
 #[cfg(test)]
@@ -424,5 +436,11 @@ mod tests {
             "expected the system default monospace font ({default_width}px) to be narrower \
              than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
         );
+    }
+
+    #[test]
+    fn lines_that_fit_matches_visible_line_count_when_modeline_already_excluded() {
+        let window_height = 500.0;
+        assert_eq!(lines_that_fit(content_height(window_height)), visible_line_count(window_height));
     }
 }

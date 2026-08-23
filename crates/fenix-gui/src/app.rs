@@ -1204,14 +1204,6 @@ impl App {
         self.open().rendered_scroll.floor().max(0.0) as usize
     }
 
-    /// Sub-line-height pixel offset (0.0..1.0 of `LINE_HEIGHT`) to shift
-    /// every content-area row up by, so a transition between two integer
-    /// scroll positions looks like a smooth pan instead of a jump.
-    fn render_frac(&self) -> f32 {
-        let r = self.open().rendered_scroll;
-        r - r.floor()
-    }
-
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
     /// command, since that replaces the whole modeline with raw command
     /// text instead of the usual badge + filename + position layout.
@@ -1304,14 +1296,17 @@ impl App {
     /// Relative, so the gutter doesn't resize if that mode is ever toggled
     /// at runtime -- matching how Vim shares one `numberwidth` between
     /// `number` and `relativenumber` instead of sizing them separately.
-    fn gutter_chars(&self) -> usize {
+    /// `ob` is passed explicitly (rather than always reading the focused
+    /// buffer) so a split's every visible pane gets a gutter sized to
+    /// *its own* buffer's line count, not just the focused one's.
+    fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
         if self.line_number_mode == LineNumberMode::Off {
             return 0;
         }
-        self.open().buffer.visual_line_count().max(1).to_string().len() + 1
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1
     }
 
-    /// Rich-text spans for the buffer-content area covering `rows` screen
+    /// Rich-text spans for one pane's content area covering `rows` screen
     /// rows starting at `render_base_line`: each row that maps to a real
     /// buffer line gets an optional gutter prefix (its line number, right-
     /// aligned, brighter on the cursor's own line) followed by that line's
@@ -1320,16 +1315,18 @@ impl App {
     /// with the gutter off, same as Vim shows it regardless of `number`.
     /// `syntax_highlights` (document-wide byte ranges, already resolved to
     /// colors) splits each line's text into colored sub-spans instead of
-    /// one flat `theme.fg` span when non-empty.
+    /// one flat `theme.fg` span when non-empty. `ob` (rather than always
+    /// the focused buffer) is what makes every visible pane -- not just
+    /// the focused one -- show its own buffer's real content.
     fn content_spans(
         &self,
+        ob: &OpenBuffer,
         render_base_line: usize,
         rows: usize,
         gutter_chars: usize,
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
-        let ob = self.open();
         let visual_lines = ob.buffer.visual_line_count();
         let (cursor_line, _) = ob.buffer.line_col(&ob.cursor);
         let mut spans = Vec::new();
@@ -1376,19 +1373,25 @@ impl App {
         spans
     }
 
-    /// Drains buffer edits since the last frame, feeds them through the
-    /// active language's incremental parser (if any), and returns resolved
-    /// syntax-highlight colors for the visible byte range only -- same
-    /// windowing discipline `Buffer::visible_text` already uses. Always
-    /// drains, even with no active language, so the buffer's edit log
-    /// doesn't grow unbounded for files nothing is consuming it for.
+    /// Drains buffer `id`'s edits since the last frame, feeds them through
+    /// its active language's incremental parser (if any), and returns
+    /// resolved syntax-highlight colors for the visible byte range only --
+    /// same windowing discipline `Buffer::visible_text` already uses.
+    /// Always drains, even with no active language, so the buffer's edit
+    /// log doesn't grow unbounded for files nothing is consuming it for.
+    /// Takes an explicit `id` (rather than always the focused buffer) so
+    /// every visible pane's buffer gets reparsed, not just the focused
+    /// one's -- `self.buffers.get_mut(id)` is a direct field projection,
+    /// so this can still read `self.theme` first in the same call without
+    /// the opaque-method-call borrow conflict `open_mut()` would risk.
     fn syntax_highlights_for_visible_range(
         &mut self,
+        id: BufferId,
         render_base_line: usize,
         rows: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let theme = self.theme;
-        let ob = self.open_mut();
+        let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
         let deltas = ob.buffer.drain_edits();
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
 
@@ -1609,7 +1612,8 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        let Some(window_height) = self.gpu.as_ref().map(|gpu| gpu.size.height as f32) else {
+        let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+        else {
             return;
         };
         let visible_lines = text::visible_line_count(window_height);
@@ -1631,11 +1635,13 @@ impl App {
         };
         let caret_is_block = self.caret_is_block();
 
-        // Sidebar is independent of `main_view` -- kept alive (and its
-        // own scroll adjusted) even while a full-buffer explorer is
-        // showing, but only actually rendered in Editor mode (see
-        // `show_sidebar` below); two file listings on screen at once
-        // would just be confusing.
+        // Sidebar is independent of window splits *and* `main_view` --
+        // kept alive (and its own scroll adjusted) even while a full-
+        // buffer explorer is showing in the focused pane, but only
+        // actually rendered in Editor mode (see `show_sidebar` below);
+        // a file listing on top of an explorer/picker overlay would just
+        // be confusing. It's a single frame-level strip, not per-pane --
+        // matches Doom's own treemacs sidebar, which is frame-local too.
         if let Some(sidebar) = &self.sidebar {
             self.sidebar_scroll = scroll_to_include(self.sidebar_scroll, sidebar.selected, visible_lines);
         }
@@ -1647,61 +1653,143 @@ impl App {
             None
         };
 
-        // Main content: either the editor buffer (as always) or, in
-        // full-buffer explorer mode, a directory listing rendered through
-        // the exact same rich-text/windowing machinery. `hl_row` is the
-        // row to give a current-line-style highlight (the cursor's row in
-        // Editor mode, the selected entry's row in Explorer mode);
-        // `marked_rows` (Explorer only) and `selection_segments`/
-        // `pulse_overlay`/`caret` (Editor only) are empty/`None` in
-        // whichever mode they don't apply to.
-        let (content_spans, hl_row, marked_rows, selection_segments, pulse_overlay, caret, content_frac, gutter_px) =
-            if self.main_view == MainView::Explorer {
-                let rows = visible_lines + 1;
+        let modeline_top = window_height - text::MODELINE_HEIGHT;
+        let pane_area =
+            fenix_window::Rect { x: sidebar_px, y: 0.0, w: (window_width - sidebar_px).max(0.0), h: modeline_top.max(0.0) };
+        let layout = self.windows.layout(pane_area);
+        let focused_pane = self.windows.focused_id();
+
+        // One entry per visible window pane -- built fresh every frame
+        // from whatever `WindowTree::layout` currently reports (splits/
+        // closes/resizes take effect immediately, no separate relayout
+        // step needed). Only the *focused* pane can show the explorer/
+        // picker overlay (`main_view`/`active_picker`/`explorer` are a
+        // single global "what's the current editing context" concept,
+        // same as before splits existed) or Vim-mode decoration
+        // (selection highlight, pulse, blinking caret) -- every other
+        // pane always renders its own buffer's plain content, still with
+        // its own gutter/syntax highlighting/current-line highlight, so
+        // splitting to see two files is genuinely useful, just without
+        // the "actively being edited" polish on the one you're not in.
+        struct PaneRender {
+            pane: fenix_window::WindowId,
+            rect: fenix_window::Rect,
+            spans: RowSpans,
+            hl_row: Option<usize>,
+            marked_rows: Vec<usize>,
+            selection_segments: Segments,
+            pulse_overlay: Option<(Segments, f32)>,
+            caret: Option<(usize, usize)>,
+            content_frac: f32,
+            gutter_px: f32,
+        }
+
+        let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
+        for (pane, rect) in &layout {
+            let (pane, rect) = (*pane, *rect);
+            let is_focused = pane == focused_pane;
+            let pane_visible_lines = text::lines_that_fit(rect.h);
+
+            if is_focused && self.main_view == MainView::Explorer {
+                let rows = pane_visible_lines + 1;
                 if let Some(explorer) = &self.explorer {
-                    self.explorer_scroll = scroll_to_include(self.explorer_scroll, explorer.selected, visible_lines);
+                    self.explorer_scroll = scroll_to_include(self.explorer_scroll, explorer.selected, pane_visible_lines);
                 }
                 let (spans, selected_row, marks) = match &self.explorer {
                     Some(explorer) => self.explorer_row_spans(explorer, self.explorer_scroll, rows, true),
                     None => (Vec::new(), None, Vec::new()),
                 };
-                (spans, selected_row, marks, Segments::new(), None, None, 0.0f32, 0.0f32)
-            } else if self.main_view == MainView::Picker {
-                let rows = visible_lines + 1;
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    spans,
+                    hl_row: selected_row,
+                    marked_rows: marks,
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    caret: None,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
+            if is_focused && self.main_view == MainView::Picker {
+                let rows = pane_visible_lines + 1;
                 if let Some(picker) = &self.active_picker {
-                    self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), visible_lines);
+                    self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), pane_visible_lines);
                 }
                 let (spans, selected_row) = match &self.active_picker {
                     Some(picker) => self.picker_row_spans(picker, rows),
                     None => (Vec::new(), None),
                 };
-                (spans, selected_row, Vec::new(), Segments::new(), None, None, 0.0f32, 0.0f32)
-            } else {
-                self.ensure_cursor_visible(visible_lines);
-                // Fetch one extra line beyond what's strictly visible:
-                // mid-scroll, render_frac() shifts everything up by a
-                // partial line, so the trailing edge needs one more line
-                // of content to reveal.
-                let render_base_line = self.render_base_line();
-                let render_frac = self.render_frac();
-                let gutter_chars = self.gutter_chars();
-                let gutter_px = gutter_chars as f32 * char_width;
-                let syntax_highlights = self.syntax_highlights_for_visible_range(render_base_line, visible_lines + 1);
-                let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
-                let content_spans: Vec<(String, glyphon::Color, bool)> =
-                    content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
-                let (line, col) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
-                // During a large animated pan the cursor's actual line can
-                // legitimately be outside the currently-fetched window for
-                // part of the transition (it hasn't panned into view yet)
-                // -- None means "don't draw the caret/hl-line this frame",
-                // not a bug.
-                let caret_row_in_view = line.checked_sub(render_base_line).filter(|&row| row <= visible_lines);
-                let selection_segments = self.visual_selection_segments(visible_lines + 1);
-                let pulse_overlay = self.pulse_overlay(visible_lines + 1);
-                let caret = caret_row_in_view.map(|row| (row, col));
-                (content_spans, caret_row_in_view, Vec::new(), selection_segments, pulse_overlay, caret, render_frac, gutter_px)
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    spans,
+                    hl_row: selected_row,
+                    marked_rows: Vec::new(),
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    caret: None,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
+
+            // Plain buffer content -- every pane not currently showing an
+            // overlay, focused or not.
+            let buffer_id = *self.windows.content(pane).expect("every pane has a buffer");
+            if is_focused {
+                self.ensure_cursor_visible(pane_visible_lines);
+            }
+            let rendered_scroll = self.buffers.get(buffer_id).map(|ob| ob.rendered_scroll).unwrap_or(0.0);
+            let render_base_line = rendered_scroll.floor().max(0.0) as usize;
+            let render_frac = rendered_scroll - rendered_scroll.floor();
+            let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
+            let gutter_px = gutter_chars as f32 * char_width;
+            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, render_base_line, pane_visible_lines + 1);
+            let content_spans = match self.buffers.get(buffer_id) {
+                Some(ob) => self.content_spans(ob, render_base_line, pane_visible_lines + 1, gutter_chars, &syntax_highlights),
+                None => Vec::new(),
             };
+            let spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
+
+            let (line, col) = self
+                .buffers
+                .get(buffer_id)
+                .map(|ob| ob.buffer.line_col(&ob.cursor))
+                .unwrap_or((0, 0));
+            // During a large animated pan the cursor's actual line can
+            // legitimately be outside the currently-fetched window for
+            // part of the transition (it hasn't panned into view yet) --
+            // `None` means "don't draw the hl-line/caret this frame," not
+            // a bug.
+            let hl_row = line.checked_sub(render_base_line).filter(|&row| row <= pane_visible_lines);
+
+            let (selection_segments, pulse_overlay, caret) = if is_focused {
+                (
+                    self.visual_selection_segments(pane_visible_lines + 1),
+                    self.pulse_overlay(pane_visible_lines + 1),
+                    hl_row.map(|row| (row, col)),
+                )
+            } else {
+                (Segments::new(), None, None)
+            };
+
+            panes_render.push(PaneRender {
+                pane,
+                rect,
+                spans,
+                hl_row,
+                marked_rows: Vec::new(),
+                selection_segments,
+                pulse_overlay,
+                caret,
+                content_frac: render_frac,
+                gutter_px,
+            });
+        }
 
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text = if let Some(query) = &self.pending_grep_query {
@@ -1721,9 +1809,13 @@ impl App {
             return;
         };
 
-        let content_refs: Vec<(&str, glyphon::Color, bool)> =
-            content_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-        text.set_content_rich(&content_refs);
+        let live_panes: Vec<fenix_window::WindowId> = panes_render.iter().map(|p| p.pane).collect();
+        for pane in &panes_render {
+            let content_refs: Vec<(&str, glyphon::Color, bool)> =
+                pane.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs);
+        }
+        text.retain_panes(&live_panes);
         if let Some((sidebar_spans, _, _)) = &sidebar_render {
             let sidebar_refs: Vec<(&str, glyphon::Color, bool)> =
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -1740,7 +1832,6 @@ impl App {
             }
         }
 
-        let modeline_top = gpu.size.height as f32 - text::MODELINE_HEIGHT;
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
         // (bottom) -- least likely to sit under whatever they're looking at.
@@ -1749,35 +1840,51 @@ impl App {
         } else {
             let panel_height = which_key_lines.len() as f32 * text::LINE_HEIGHT + 8.0;
             text.set_which_key_text(&which_key_lines.join("\n"));
-            let left = gpu.size.width as f32 - text::WHICH_KEY_WIDTH - text::WHICH_KEY_MARGIN;
+            let left = window_width - text::WHICH_KEY_WIDTH - text::WHICH_KEY_MARGIN;
             Some((left, text::WHICH_KEY_MARGIN, panel_height))
         };
 
-        // Every content-row rect shares this: row index (relative to
-        // render_base_line, or to the explorer listing's own scroll) ->
-        // pixel y, shifted up by the mid-scroll fractional offset so it
-        // pans in step with the text (always 0 in Explorer mode, which
-        // doesn't animate its scroll).
-        let row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT - content_frac * text::LINE_HEIGHT;
         let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
-        // Column-math x-offset for caret/selection/pulse rects: PAD_LEFT
-        // plus however far right the content itself starts (sidebar
-        // width, when shown) plus the line-number gutter -- has to match
-        // exactly where `text.prepare`'s content `TextArea` actually
-        // renders the text, or these rects drift out of alignment with
-        // what's under them.
-        let content_x = text::PAD_LEFT + sidebar_px + gutter_px;
 
         bg_rect.clear();
-        if let Some(row) = hl_row {
-            let hl_line_y = row_y(row);
-            bg_rect.push_rect(gpu, sidebar_px, hl_line_y, gpu.size.width as f32 - sidebar_px, text::LINE_HEIGHT, theme.hl_line);
+        for pane in &panes_render {
+            // Row index (relative to that pane's own render_base_line, or
+            // its explorer/picker listing's own scroll) -> pixel y within
+            // the pane, shifted up by its own mid-scroll fractional
+            // offset so it pans in step with its text (always 0 outside
+            // the focused pane's Editor-mode smooth scroll).
+            let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * text::LINE_HEIGHT - pane.content_frac * text::LINE_HEIGHT;
+            if let Some(row) = pane.hl_row {
+                let y = row_y(row);
+                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, text::LINE_HEIGHT, theme.hl_line);
+            }
+            for row in &pane.marked_rows {
+                let y = row_y(*row);
+                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, text::LINE_HEIGHT, theme.selection);
+            }
+            // Column-math x-offset for this pane's caret/selection/pulse
+            // rects: its own left edge, plus `PAD_LEFT`, plus its own
+            // line-number gutter -- has to match exactly where `text.
+            // prepare`'s `TextArea` for this pane actually renders the
+            // text, or these rects drift out of alignment with it.
+            let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            for &(row, col_start, col_end) in &pane.selection_segments {
+                let x = content_x + col_start as f32 * char_width;
+                let y = row_y(row);
+                let w = (col_end - col_start) as f32 * char_width;
+                bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
+            }
+            if let Some((segments, alpha)) = &pane.pulse_overlay {
+                let [r, g, b, _] = theme.caret;
+                for &(row, col_start, col_end) in segments {
+                    let x = content_x + col_start as f32 * char_width;
+                    let y = row_y(row);
+                    let w = (col_end - col_start) as f32 * char_width;
+                    bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, *alpha]);
+                }
+            }
         }
-        for row in &marked_rows {
-            let y = row_y(*row);
-            bg_rect.push_rect(gpu, sidebar_px, y, gpu.size.width as f32 - sidebar_px, text::LINE_HEIGHT, theme.selection);
-        }
-        bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
+        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, text::MODELINE_HEIGHT, theme.bg_modeline);
         if modeline_pieces.is_some() {
             // Starts at PAD_LEFT, matching where the badge text itself
             // starts rendering (`text.rs`'s modeline TextArea uses the same
@@ -1797,19 +1904,17 @@ impl App {
                 bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, text::LINE_HEIGHT, theme.hl_line);
             }
         }
-        for (row, col_start, col_end) in selection_segments {
-            let x = content_x + col_start as f32 * char_width;
-            let y = row_y(row);
-            let w = (col_end - col_start) as f32 * char_width;
-            bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
-        }
-        if let Some((segments, alpha)) = pulse_overlay {
-            let [r, g, b, _] = theme.caret;
-            for (row, col_start, col_end) in segments {
-                let x = content_x + col_start as f32 * char_width;
-                let y = row_y(row);
-                let w = (col_end - col_start) as f32 * char_width;
-                bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
+        // Divider lines along every split boundary the layout computed --
+        // drawn from each pane's own right/bottom edge, so two adjacent
+        // panes each contribute one line and they land on top of each
+        // other exactly on the boundary. Skipped for the last column/row
+        // (nothing to divide from past the window edge).
+        for pane in &panes_render {
+            if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
+                bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, pane.rect.y, 2.0, pane.rect.h, theme.divider);
+            }
+            if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
+                bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
             }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
@@ -1819,36 +1924,41 @@ impl App {
         // `BORDER_WIDTH` sits comfortably inside `PAD_TOP`/`PAD_LEFT`, so
         // it can't clip into body text.
         if let Some(border) = theme.border {
-            let (w, h) = (gpu.size.width as f32, gpu.size.height as f32);
-            bg_rect.push_rect(gpu, 0.0, 0.0, w, BORDER_WIDTH, border);
-            bg_rect.push_rect(gpu, 0.0, h - BORDER_WIDTH, w, BORDER_WIDTH, border);
-            bg_rect.push_rect(gpu, 0.0, 0.0, BORDER_WIDTH, h, border);
-            bg_rect.push_rect(gpu, w - BORDER_WIDTH, 0.0, BORDER_WIDTH, h, border);
+            bg_rect.push_rect(gpu, 0.0, 0.0, window_width, BORDER_WIDTH, border);
+            bg_rect.push_rect(gpu, 0.0, window_height - BORDER_WIDTH, window_width, BORDER_WIDTH, border);
+            bg_rect.push_rect(gpu, 0.0, 0.0, BORDER_WIDTH, window_height, border);
+            bg_rect.push_rect(gpu, window_width - BORDER_WIDTH, 0.0, BORDER_WIDTH, window_height, border);
         }
         bg_rect.flush(gpu);
 
         caret_rect.clear();
-        if let Some((row, col)) = caret {
-            if caret_alpha > 0.0 {
-                let caret_x = content_x + col as f32 * char_width;
-                let caret_y = row_y(row);
-                let [r, g, b, a] = theme.caret;
-                // Insert keeps the thin bar (an I-beam-style "about to
-                // type here" marker); every other mode (Normal, Visual,
-                // Replace, Command) gets a full-cell block, matching real
-                // Vim's own cursor-shape convention. The block is drawn
-                // at reduced opacity -- caret_rect is composited *after*
-                // text (so the caret always shows on top, no glyph-recolor
-                // trick needed), and a fully opaque block would otherwise
-                // completely hide the character underneath it instead of
-                // just marking its position.
-                let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
-                caret_rect.push_rect(gpu, caret_x, caret_y, width, text::LINE_HEIGHT, [r, g, b, a * caret_alpha * block_alpha]);
+        if let Some(focused) = panes_render.iter().find(|p| p.pane == focused_pane) {
+            if let Some((row, col)) = focused.caret {
+                if caret_alpha > 0.0 {
+                    let content_x = focused.rect.x + text::PAD_LEFT + focused.gutter_px;
+                    let caret_x = content_x + col as f32 * char_width;
+                    let caret_y = focused.rect.y + text::PAD_TOP + row as f32 * text::LINE_HEIGHT
+                        - focused.content_frac * text::LINE_HEIGHT;
+                    let [r, g, b, a] = theme.caret;
+                    // Insert keeps the thin bar (an I-beam-style "about to
+                    // type here" marker); every other mode (Normal, Visual,
+                    // Replace, Command) gets a full-cell block, matching real
+                    // Vim's own cursor-shape convention. The block is drawn
+                    // at reduced opacity -- caret_rect is composited *after*
+                    // text (so the caret always shows on top, no glyph-recolor
+                    // trick needed), and a fully opaque block would otherwise
+                    // completely hide the character underneath it instead of
+                    // just marking its position.
+                    let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
+                    caret_rect.push_rect(gpu, caret_x, caret_y, width, text::LINE_HEIGHT, [r, g, b, a * caret_alpha * block_alpha]);
+                }
             }
         }
         caret_rect.flush(gpu);
 
-        text.prepare(gpu, theme, content_frac * text::LINE_HEIGHT, sidebar_px, which_key_panel, show_sidebar);
+        let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
+            panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
+        text.prepare(gpu, theme, &prepare_panes, which_key_panel, show_sidebar);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1913,8 +2023,11 @@ impl ApplicationHandler for App {
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
         let gpu = pollster::block_on(GpuState::new(window.clone()));
-        let mut text = TextPipeline::new(&gpu);
-        text.set_text(&self.open().buffer.visible_text(0, text::visible_line_count(gpu.size.height as f32)));
+        // No priming call needed for pane content -- `redraw()` populates
+        // every visible pane's `GlyphBuffer` fresh (creating it lazily)
+        // on the first real frame, which winit already requests
+        // immediately after this.
+        let text = TextPipeline::new(&gpu);
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
 
@@ -2113,11 +2226,11 @@ mod tests {
     }
 
     #[test]
-    fn render_base_line_and_frac_split_a_fractional_scroll_position() {
+    fn render_base_line_splits_a_fractional_scroll_position() {
         let mut app = App::with_file(None);
         app.open_mut().rendered_scroll = 4.25;
         assert_eq!(app.render_base_line(), 4);
-        assert!((app.render_frac() - 0.25).abs() < f32::EPSILON);
+        assert!((app.open().rendered_scroll.fract() - 0.25).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -2326,20 +2439,20 @@ mod tests {
     fn gutter_chars_zero_when_off() {
         let mut app = App::with_file(None);
         app.line_number_mode = LineNumberMode::Off;
-        assert_eq!(app.gutter_chars(), 0);
+        assert_eq!(app.gutter_chars(app.open()), 0);
     }
 
     #[test]
     fn gutter_chars_defaults_to_absolute_and_sizes_for_line_count() {
         let app = App::with_file(None); // empty buffer: one visual line
-        assert_eq!(app.gutter_chars(), 2); // 1-digit number + 1 padding column
+        assert_eq!(app.gutter_chars(app.open()), 2); // 1-digit number + 1 padding column
     }
 
     #[test]
     fn content_spans_marks_rows_past_buffer_end_with_tilde() {
         let app = App::with_file(None); // single empty line, cursor on it
-        let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 3, gutter, &[]);
+        let gutter = app.gutter_chars(app.open());
+        let spans = app.content_spans(app.open(), 0, 3, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -2348,7 +2461,8 @@ mod tests {
     fn content_spans_off_mode_still_shows_tilde_for_rows_past_end() {
         let mut app = App::with_file(None);
         app.line_number_mode = LineNumberMode::Off;
-        let spans = app.content_spans(0, 2, app.gutter_chars(), &[]);
+        let gutter = app.gutter_chars(app.open());
+        let spans = app.content_spans(app.open(), 0, 2, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -2359,8 +2473,8 @@ mod tests {
         app.line_number_mode = LineNumberMode::Relative;
         app.test_insert_str("a\nb\nc\nd");
         app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
-        let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 4, gutter, &[]);
+        let gutter = app.gutter_chars(app.open());
+        let spans = app.content_spans(app.open(), 0, 4, gutter, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -2370,8 +2484,8 @@ mod tests {
         let mut app = App::with_file(None);
         app.test_insert_str("a\nb");
         app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
-        let gutter = app.gutter_chars();
-        let spans = app.content_spans(0, 2, gutter, &[]);
+        let gutter = app.gutter_chars(app.open());
+        let spans = app.content_spans(app.open(), 0, 2, gutter, &[]);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
     }
@@ -2442,10 +2556,11 @@ mod tests {
         app.open_mut().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, ""));
         app.test_insert_str("fn main() {}");
 
-        let highlights = app.syntax_highlights_for_visible_range(0, 1);
+        let id = app.focused_buffer_id();
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
 
-        let spans = app.content_spans(0, 1, 0, &highlights);
+        let spans = app.content_spans(app.open(), 0, 1, 0, &highlights);
         let fn_span = spans.iter().find(|(s, _)| s == "fn");
         assert_eq!(
             fn_span.map(|(_, c)| *c),
@@ -2459,7 +2574,8 @@ mod tests {
         let mut app = App::with_file(None);
         assert!(app.open().syntax.is_none());
         app.test_insert_str("hello");
-        assert!(app.syntax_highlights_for_visible_range(0, 1).is_empty());
+        let id = app.focused_buffer_id();
+        assert!(app.syntax_highlights_for_visible_range(id, 0, 1).is_empty());
         // The edit log should have been drained regardless, not left to grow.
         assert!(app.open_mut().buffer.drain_edits().is_empty());
     }
