@@ -114,6 +114,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "switch project",
             "project.switch_project",
         );
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
 
         t.label_group(&[spc, KeyPress::char('w')], "window");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
@@ -260,6 +262,22 @@ mod tests {
         match m.feed(KeyPress::char('p')) {
             fenix_keymap::Step::Matched(&"project.switch_project") => {}
             _ => panic!("expected SPC p p to resolve to project.switch_project"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('a')) {
+            fenix_keymap::Step::Matched(&"project.add") => {}
+            _ => panic!("expected SPC p a to resolve to project.add"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('d')) {
+            fenix_keymap::Step::Matched(&"project.delete") => {}
+            _ => panic!("expected SPC p d to resolve to project.delete"),
         }
     }
 

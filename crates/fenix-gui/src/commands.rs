@@ -48,6 +48,8 @@ impl CommandRegistry {
         registry.register("project.find_file", "Fuzzy-find a file in the current project", cmd_project_find_file);
         registry.register("project.grep", "Search the current project (ripgrep)", cmd_project_grep);
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
+        registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
+        registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -134,6 +136,14 @@ fn cmd_project_grep(ctx: &mut CommandCtx) {
 
 fn cmd_project_switch(ctx: &mut CommandCtx) {
     ctx.app.picker_switch_project();
+}
+
+fn cmd_project_add(ctx: &mut CommandCtx) {
+    ctx.app.picker_add_project_prompt();
+}
+
+fn cmd_project_delete(ctx: &mut CommandCtx) {
+    ctx.app.picker_delete_project();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {

@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A remembered, most-recently-used-ordered list of project roots --
 /// persisted as a plain newline-separated path list. Not TOML/JSON: a
@@ -44,11 +44,25 @@ impl KnownProjects {
     }
 
     /// Adds `root` to the front of the list, or moves it there if it's
-    /// already known -- most-recently-used first, matching Projectile's
-    /// own auto-registration of every project you visit a file in.
+    /// already known -- most-recently-used first. Callers decide when
+    /// this fires: explicit registration (`SPC p a`) and re-selecting an
+    /// already-known project from the switch-project picker both call
+    /// this, but opening an arbitrary file no longer does (see the
+    /// project-management plan's own note on why auto-registration was
+    /// dropped in favor of an explicitly curated list).
     pub fn add(&mut self, root: PathBuf) {
         self.roots.retain(|r| r != &root);
         self.roots.insert(0, root);
+    }
+
+    /// Removes `root` from the list if present. Returns whether it
+    /// actually was -- lets a caller distinguish "removed" from "wasn't
+    /// there to begin with," though most callers (picking `root` from a
+    /// picker built off `roots()` itself) can only ever hit the former.
+    pub fn remove(&mut self, root: &Path) -> bool {
+        let before = self.roots.len();
+        self.roots.retain(|r| r != root);
+        self.roots.len() != before
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -109,6 +123,27 @@ mod tests {
         known.add(PathBuf::from("/repo/one")); // re-visit -- should move, not duplicate
 
         assert_eq!(known.roots(), &[PathBuf::from("/repo/one"), PathBuf::from("/repo/two")]);
+    }
+
+    #[test]
+    fn remove_drops_the_matching_entry_and_reports_it_was_there() {
+        let dir = TempDir::new("known_remove");
+        let mut known = KnownProjects::load(dir.path().join("does-not-exist.txt")).unwrap();
+        known.add(PathBuf::from("/repo/one"));
+        known.add(PathBuf::from("/repo/two"));
+
+        assert!(known.remove(&PathBuf::from("/repo/one")));
+        assert_eq!(known.roots(), &[PathBuf::from("/repo/two")]);
+    }
+
+    #[test]
+    fn remove_of_an_unknown_root_is_a_no_op_and_reports_it_was_not_there() {
+        let dir = TempDir::new("known_remove_unknown");
+        let mut known = KnownProjects::load(dir.path().join("does-not-exist.txt")).unwrap();
+        known.add(PathBuf::from("/repo/one"));
+
+        assert!(!known.remove(&PathBuf::from("/repo/nonexistent")));
+        assert_eq!(known.roots(), &[PathBuf::from("/repo/one")]);
     }
 
     #[test]

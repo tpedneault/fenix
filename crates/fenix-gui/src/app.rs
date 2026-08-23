@@ -123,6 +123,10 @@ enum ActivePicker {
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
     SwitchBuffer(fenix_picker::PickerState<BufferId>),
+    /// `SPC p d`: same candidate list as `SwitchProject`, but confirming
+    /// removes the selected root from `known_projects` instead of
+    /// switching to it.
+    DeleteProject(fenix_picker::PickerState<PathBuf>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -135,6 +139,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Grep(s) => s.push_char(c),
         ActivePicker::SwitchProject(s) => s.push_char(c),
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
+        ActivePicker::DeleteProject(s) => s.push_char(c),
     }
 }
 
@@ -144,6 +149,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Grep(s) => s.backspace(),
         ActivePicker::SwitchProject(s) => s.backspace(),
         ActivePicker::SwitchBuffer(s) => s.backspace(),
+        ActivePicker::DeleteProject(s) => s.backspace(),
     }
 }
 
@@ -153,6 +159,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Grep(s) => s.move_selection(delta),
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
+        ActivePicker::DeleteProject(s) => s.move_selection(delta),
     }
 }
 
@@ -162,6 +169,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Grep(s) => s.query(),
         ActivePicker::SwitchProject(s) => s.query(),
         ActivePicker::SwitchBuffer(s) => s.query(),
+        ActivePicker::DeleteProject(s) => s.query(),
     }
 }
 
@@ -171,6 +179,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Grep(s) => s.len(),
         ActivePicker::SwitchProject(s) => s.len(),
         ActivePicker::SwitchBuffer(s) => s.len(),
+        ActivePicker::DeleteProject(s) => s.len(),
     }
 }
 
@@ -180,6 +189,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Grep(s) => s.selected_row(),
         ActivePicker::SwitchProject(s) => s.selected_row(),
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
+        ActivePicker::DeleteProject(s) => s.selected_row(),
     }
 }
 
@@ -193,6 +203,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Grep(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -493,11 +504,18 @@ pub struct App {
     /// between `SPC p s` and the term being submitted (or cancelled),
     /// not while an `ActivePicker::Grep` is already showing results.
     pending_grep_query: Option<String>,
-    /// Loaded once at startup; saved back to disk every time a new
-    /// project root is visited. Empty (silently) on a platform with no
-    /// config-directory concept, or if the file can't be read for some
-    /// other reason -- a picker just starting with no history isn't
-    /// worth failing over.
+    /// The add-project prompt, when in progress -- `Some` only between
+    /// `SPC p a` and the path being confirmed (or cancelled). Same shape
+    /// as `pending_grep_query`.
+    pending_add_project_path: Option<String>,
+    /// Loaded once at startup; saved back to disk whenever `SPC p a`/
+    /// `SPC p d` change it, or the switch-project picker re-selects an
+    /// already-known root (an MRU bump, not a new registration -- see
+    /// `refresh_project_root`'s doc comment for why opening a file no
+    /// longer registers its project automatically). Empty (silently) on
+    /// a platform with no config-directory concept, or if the file can't
+    /// be read for some other reason -- a picker just starting with no
+    /// history isn't worth failing over.
     known_projects: fenix_project::KnownProjects,
 
     vim: VimState,
@@ -553,15 +571,20 @@ impl App {
         };
         let workspaces = WorkspaceList::new(WindowTree::new(initial_id));
 
+        // `project_root` (used to scope `SPC p f`/`SPC p s`) is still
+        // auto-detected from whatever file is open -- only the *known-
+        // projects* list (the `SPC p p`/`SPC p d` switch/delete registry)
+        // is no longer auto-populated from it. That list is explicitly
+        // curated via `SPC p a` now (see `picker_add_project_prompt`'s own
+        // doc comment for why): every file ever opened auto-registering
+        // its project made the switch-project list an unfiltered history
+        // of everywhere you'd been, not a deliberately kept list of
+        // projects worth switching between.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
         let known_projects_path =
             fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
-        let mut known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
-        if let Some(root) = &project_root {
-            known_projects.add(root.clone());
-            let _ = known_projects.save();
-        }
+        let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
         let theme_path = theme::default_path().unwrap_or_else(|| PathBuf::from("fenix-theme.txt"));
         let theme = theme::load_from(&theme_path);
         let font_size_path = text::font_size_default_path().unwrap_or_else(|| PathBuf::from("fenix-font-size.txt"));
@@ -593,6 +616,7 @@ impl App {
             active_picker: None,
             known_projects,
             pending_grep_query: None,
+            pending_add_project_path: None,
             vim,
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
@@ -638,19 +662,15 @@ impl App {
         self.buffers.get_mut(id).expect("focused window always has an open buffer")
     }
 
-    /// Re-derives `project_root` for the focused buffer and registers it
-    /// in `known_projects` (auto-add-on-visit, matching Projectile's own
-    /// behavior) -- called every time a pane's buffer changes, not just
-    /// at startup (`with_file` does the equivalent inline before `self`
-    /// exists to call this on).
+    /// Re-derives `project_root` for the focused buffer -- called every
+    /// time a pane's buffer changes, not just at startup (`with_file`
+    /// does the equivalent inline before `self` exists to call this on).
+    /// Deliberately does *not* register the result in `known_projects`:
+    /// that list is explicitly curated via `SPC p a`/`SPC p d` now, not
+    /// auto-populated from wherever you happen to open a file -- see
+    /// `picker_add_project_prompt`'s own doc comment for why.
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
-        if let Some(root) = self.project_root.clone() {
-            self.known_projects.add(root);
-            if let Err(err) = self.known_projects.save() {
-                eprintln!("fenix: couldn't save project history: {err}");
-            }
-        }
     }
 
     pub(crate) fn save(&mut self) {
@@ -743,16 +763,88 @@ impl App {
         self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
 
-    /// `SPC p p`: a fuzzy picker over the persisted, MRU-ordered known-
-    /// projects list.
-    pub(crate) fn picker_switch_project(&mut self) {
-        let candidates = self
-            .known_projects
+    /// Candidates for both the switch-project (`SPC p p`) and delete-
+    /// project (`SPC p d`) pickers -- same list, same label, just a
+    /// different picker variant so `picker_confirm` dispatches to a
+    /// different action.
+    fn known_project_candidates(&self) -> Vec<fenix_picker::Candidate<PathBuf>> {
+        self.known_projects
             .roots()
             .iter()
             .map(|root| fenix_picker::Candidate::new(root.to_string_lossy().into_owned(), root.clone()))
-            .collect();
+            .collect()
+    }
+
+    /// `SPC p p`: a fuzzy picker over the persisted, MRU-ordered known-
+    /// projects list.
+    pub(crate) fn picker_switch_project(&mut self) {
+        let candidates = self.known_project_candidates();
         self.enter_picker(ActivePicker::SwitchProject(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC p d`: same list as `SPC p p`, but confirming a selection
+    /// removes it from `known_projects` instead of switching to it (see
+    /// `ActivePicker::DeleteProject`/`picker_confirm`).
+    pub(crate) fn picker_delete_project(&mut self) {
+        let candidates = self.known_project_candidates();
+        self.enter_picker(ActivePicker::DeleteProject(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC p a`: prompts for a directory to explicitly register in
+    /// `known_projects` -- the *only* way a project gets into the switch-
+    /// project list now (see `refresh_project_root`'s own doc comment for
+    /// why auto-registration-on-visit was dropped: it made "switch
+    /// project" list every project you'd ever opened a file in, not a
+    /// deliberately curated set worth switching between). Pre-filled with
+    /// the current project root (or the process's cwd, if none detected)
+    /// as a sensible default -- editable, or just confirm as-is.
+    pub(crate) fn picker_add_project_prompt(&mut self) {
+        let default_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        self.pending_add_project_path = Some(default_root.to_string_lossy().into_owned());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress add-project prompt -- same
+    /// "next keystrokes are special" shape as `grep_query_key`.
+    fn add_project_query_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.pending_add_project_path else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pending_add_project_path = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.pending_add_project_path.take().unwrap_or_default();
+                self.confirm_add_project(&input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// Resolves the typed path (`~` expansion, then canonicalized if it
+    /// actually exists -- falls back to the raw path otherwise, same
+    /// "never hard-fail on user input" posture as every other prompt
+    /// here) and registers it. Blank input (after trimming) cancels
+    /// silently, same as Escape -- there's nothing sensible to add.
+    fn confirm_add_project(&mut self, input: &str) {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+            dirs::home_dir().map(|home| home.join(rest)).unwrap_or_else(|| PathBuf::from(trimmed))
+        } else if trimmed == "~" {
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed))
+        } else {
+            PathBuf::from(trimmed)
+        };
+        let root = std::fs::canonicalize(&expanded).unwrap_or(expanded);
+        self.known_projects.add(root);
+        if let Err(err) = self.known_projects.save() {
+            eprintln!("fenix: couldn't save project history: {err}");
+        }
     }
 
     /// `SPC p s`: unlike find-file/switch-project (which already have a
@@ -927,6 +1019,15 @@ impl App {
                 let Some(id) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.switch_focused_to_buffer(id);
+            }
+            Some(ActivePicker::DeleteProject(state)) => {
+                let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.known_projects.remove(&root);
+                if let Err(err) = self.known_projects.save() {
+                    eprintln!("fenix: couldn't save project history: {err}");
+                }
             }
             None => {}
         }
@@ -1438,12 +1539,17 @@ impl App {
             return;
         }
 
-        // The grep search-term prompt and an open picker both capture all
-        // input the same way -- checked ahead of the explorer/sidebar-focus
-        // check below since a picker can be opened while the sidebar is
-        // focused (switch-project's find-file chain, for instance).
+        // The grep search-term prompt, the add-project prompt, and an
+        // open picker all capture input the same way -- checked ahead of
+        // the explorer/sidebar-focus check below since a picker can be
+        // opened while the sidebar is focused (switch-project's find-file
+        // chain, for instance).
         if self.pending_grep_query.is_some() {
             self.grep_query_key(keypress);
+            return;
+        }
+        if self.pending_add_project_path.is_some() {
+            self.add_project_query_key(keypress);
             return;
         }
         if self.active_picker.is_some() {
@@ -1648,6 +1754,7 @@ impl App {
         if self.vim.mode() == Mode::Command
             || self.vim.mode() == Mode::Search
             || self.pending_grep_query.is_some()
+            || self.pending_add_project_path.is_some()
             || self.explorer_prompt.is_some()
         {
             return None;
@@ -1669,6 +1776,7 @@ impl App {
                 Some(picker @ ActivePicker::Grep(_)) => ("GREP", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
+                Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return Some((label, format!("│ {count} matches ")));
@@ -1709,6 +1817,9 @@ impl App {
         }
         if let Some(query) = &self.pending_grep_query {
             return format!("rg: {query}");
+        }
+        if let Some(path) = &self.pending_add_project_path {
+            return format!("add project: {path}");
         }
         if let Some(prompt_text) = self.explorer_prompt_text() {
             return prompt_text;
@@ -2337,6 +2448,8 @@ impl App {
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text = if let Some(query) = &self.pending_grep_query {
             Some(format!("rg: {query}"))
+        } else if let Some(path) = &self.pending_add_project_path {
+            Some(format!("add project: {path}"))
         } else if self.vim.mode() == Mode::Search {
             let prefix = if self.vim.search_forward() { "/" } else { "?" };
             Some(format!("{prefix}{}", self.vim.search_query()))
@@ -4101,6 +4214,141 @@ mod tests {
             }
             _ => panic!("expected switch_to_project to chain into a FindFile picker"),
         }
+    }
+
+    #[test]
+    fn opening_a_file_does_not_auto_register_its_project() {
+        // Regression test: known_projects used to auto-populate from
+        // every project you ever opened a file in, which is exactly what
+        // SPC p a/SPC p d exist to replace with an explicitly curated
+        // list. Opening a file under a real project root must leave
+        // known_projects untouched.
+        let known_dir = TempDir::new("no_auto_register_known");
+        let project_dir = TempDir::new("no_auto_register_target");
+        project_dir.touch(".git"); // a real, detectable project marker
+        let file = project_dir.write("main.rs", "fn main() {}");
+
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.test_open_path(&file);
+        app.refresh_project_root(); // what the real open-file paths call after test_open_path's equivalent
+
+        assert!(app.project_root.is_some(), "project_root itself should still auto-detect");
+        assert!(app.known_projects.roots().is_empty(), "known_projects should stay empty until SPC p a");
+    }
+
+    #[test]
+    fn picker_add_project_prompt_prefills_with_the_current_project_root() {
+        let mut app = App::with_file(None);
+        let root = PathBuf::from("/some/project");
+        app.project_root = Some(root.clone());
+
+        app.picker_add_project_prompt();
+
+        assert_eq!(app.pending_add_project_path.as_deref(), Some(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn add_project_query_key_enter_registers_and_saves_the_typed_path() {
+        let known_dir = TempDir::new("add_project_enter");
+        let project_dir = TempDir::new("add_project_target");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+
+        app.pending_add_project_path = Some(String::new());
+        for ch in project_dir.path().to_string_lossy().chars() {
+            app.add_project_query_key(KeyPress::char(ch));
+        }
+        app.add_project_query_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.pending_add_project_path.is_none());
+        let canonical = std::fs::canonicalize(project_dir.path()).unwrap();
+        assert_eq!(app.known_projects.roots(), std::slice::from_ref(&canonical));
+        // Persisted, not just held in memory.
+        let reloaded = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        assert_eq!(reloaded.roots(), &[canonical]);
+    }
+
+    #[test]
+    fn add_project_query_key_escape_cancels_without_registering() {
+        let known_dir = TempDir::new("add_project_escape");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.pending_add_project_path = Some("/some/path".to_string());
+
+        app.add_project_query_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.pending_add_project_path.is_none());
+        assert!(app.known_projects.roots().is_empty());
+    }
+
+    #[test]
+    fn add_project_query_key_backspace_edits_the_typed_path() {
+        let mut app = App::with_file(None);
+        app.pending_add_project_path = Some("/foo".to_string());
+        app.add_project_query_key(KeyPress::named(FenixNamedKey::Backspace));
+        assert_eq!(app.pending_add_project_path.as_deref(), Some("/fo"));
+    }
+
+    #[test]
+    fn confirm_add_project_ignores_blank_input() {
+        let known_dir = TempDir::new("add_project_blank");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+
+        app.confirm_add_project("   ");
+
+        assert!(app.known_projects.roots().is_empty());
+    }
+
+    #[test]
+    fn confirm_add_project_expands_a_leading_tilde() {
+        let known_dir = TempDir::new("add_project_tilde");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+
+        app.confirm_add_project("~");
+
+        let home = dirs::home_dir().expect("test environment should have a home dir");
+        // `~` alone may or may not canonicalize (depends on the real
+        // filesystem), so just check it expanded away from a literal "~".
+        assert_eq!(app.known_projects.roots().len(), 1);
+        assert_ne!(app.known_projects.roots()[0], PathBuf::from("~"));
+        assert!(app.known_projects.roots()[0].starts_with(&home) || app.known_projects.roots()[0] == home);
+    }
+
+    #[test]
+    fn picker_delete_project_lists_the_known_projects() {
+        let known_dir = TempDir::new("delete_project_list");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.known_projects.add(PathBuf::from("/repo/one"));
+
+        app.picker_delete_project();
+
+        match &app.active_picker {
+            Some(ActivePicker::DeleteProject(state)) => assert_eq!(state.len(), 1),
+            other => panic!("expected an open DeleteProject picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_delete_project_removes_it_and_returns_to_the_editor() {
+        let known_dir = TempDir::new("delete_project_confirm");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.known_projects.add(PathBuf::from("/repo/one"));
+        app.known_projects.add(PathBuf::from("/repo/two"));
+
+        app.picker_delete_project();
+        app.picker_confirm(); // deletes whatever's selected -- MRU-first, so "/repo/two"
+
+        assert_eq!(app.known_projects.roots(), &[PathBuf::from("/repo/one")]);
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+
+        let reloaded = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        assert_eq!(reloaded.roots(), &[PathBuf::from("/repo/one")]);
     }
 
     #[test]
