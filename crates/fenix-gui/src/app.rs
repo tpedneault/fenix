@@ -1543,7 +1543,18 @@ impl App {
         let target = scroll_to_include(scroll_line, line, visible_lines);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
-            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) {
+            // A jump bigger than a few screens (`G`, a search landing far
+            // away) snaps instantly rather than blurring through an ease.
+            // A target arriving while the *previous* ease for this buffer
+            // hasn't finished yet snaps too: that only happens when scroll
+            // targets are coming in faster than SCROLL_DURATION can settle
+            // (held-key repeat, e.g. holding `j`), and re-triggering a
+            // fresh 150ms ease on every one of those keystrokes would
+            // otherwise make `rendered_scroll` perpetually chase a few
+            // lines behind the cursor instead of ever catching up -- the
+            // opposite of the "never sits between a keypress and its
+            // effect" goal this animation was built for.
+            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.scroll_anims.contains_key(&id) {
                 self.scroll_anims.remove(&id);
                 self.buffers.get_mut(id).unwrap().rendered_scroll = target as f32;
             } else {
@@ -2703,6 +2714,40 @@ mod tests {
         assert!(app.scroll_anims.contains_key(&app.focused_buffer_id()));
         let ob = app.open();
         assert_ne!(ob.rendered_scroll, ob.scroll_line as f32); // still mid-ease, not snapped
+    }
+
+    #[test]
+    fn a_new_scroll_target_while_easing_snaps_instead_of_re_easing() {
+        // Simulates holding `j`: a new scroll target can arrive before the
+        // previous 150ms ease has settled. It must snap to the new target
+        // immediately rather than restarting another ease from an
+        // already-stale position -- otherwise `rendered_scroll` would keep
+        // chasing a few lines behind the cursor for as long as the key
+        // stays held, instead of ever catching up.
+        let mut app = App::with_file(None);
+        for _ in 0..30 {
+            app.test_insert('\n');
+        }
+        app.open_mut().cursor = Cursor::at_start();
+        for _ in 0..15 {
+            let ob = app.open_mut();
+            ob.buffer.move_down(&mut ob.cursor);
+        }
+        // Cursor now on line 15; a 10-line viewport wants scroll_line = 6.
+        app.ensure_cursor_visible(10);
+        let id = app.focused_buffer_id();
+        assert!(app.scroll_anims.contains_key(&id)); // mid-ease from that first scroll
+
+        // One more line down before the ease had a chance to settle -- the
+        // exact shape of holding `j`.
+        {
+            let ob = app.open_mut();
+            ob.buffer.move_down(&mut ob.cursor);
+        }
+        app.ensure_cursor_visible(10);
+        let ob = app.open();
+        assert_eq!(ob.rendered_scroll, ob.scroll_line as f32, "must snap, not compound the lag from the still-active ease");
+        assert!(!app.scroll_anims.contains_key(&id));
     }
 
     #[test]
