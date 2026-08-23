@@ -475,6 +475,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-buffers"
+version = "0.0.1"
+dependencies = [
+ "fenix-core",
+ "fenix-syntax",
+]
+
+[[package]]
 name = "fenix-core"
 version = "0.0.1"
 dependencies = [
@@ -549,6 +557,10 @@ dependencies = [
  "fenix-core",
  "fenix-keymap",
 ]
+
+[[package]]
+name = "fenix-window"
+version = "0.0.1"
 
 [[package]]
 name = "find-msvc-tools"

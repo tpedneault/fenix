@@ -1,0 +1,6 @@
+[package]
+name = "fenix-window"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
