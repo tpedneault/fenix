@@ -95,6 +95,9 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "view.cycle_line_numbers",
         );
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('t')], "theme", "view.cycle_theme");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('=')], "font size +", "view.increase_font_size");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
 
         t.label_group(&[spc, KeyPress::char('e')], "explorer");
         t.insert(
@@ -192,6 +195,22 @@ mod tests {
             fenix_keymap::Step::Matched(&"view.cycle_theme") => {}
             _ => panic!("expected SPC t t to resolve to view.cycle_theme"),
         }
+    }
+
+    #[test]
+    fn leader_trie_resolves_font_size_adjustments() {
+        let trie = leader_trie();
+
+        let resolve = |key: char| {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('t'));
+            m.feed(KeyPress::char(key))
+        };
+
+        assert!(matches!(resolve('='), fenix_keymap::Step::Matched(&"view.increase_font_size")));
+        assert!(matches!(resolve('-'), fenix_keymap::Step::Matched(&"view.decrease_font_size")));
+        assert!(matches!(resolve('0'), fenix_keymap::Step::Matched(&"view.reset_font_size")));
     }
 
     #[test]

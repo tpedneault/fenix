@@ -63,6 +63,10 @@ const BORDER_WIDTH: f32 = 3.0;
 /// consistent with each other.
 const WHICH_KEY_PADDING: f32 = 8.0;
 
+/// How much `SPC t =`/`Ctrl-=` and `SPC t -`/`Ctrl--` change the font
+/// size by per press.
+const FONT_SIZE_STEP: f32 = 2.0;
+
 /// An active yank/paste highlight, fading out over `PULSE_DURATION`.
 struct Pulse {
     range: std::ops::Range<usize>,
@@ -485,6 +489,9 @@ pub struct App {
     /// fallback `known_projects_path` already uses) and reused by every
     /// `cycle_theme` save.
     theme_path: PathBuf,
+    /// Same reasoning as `theme_path`, for the persisted font-size choice
+    /// (`SPC t =`/`-`/`0`) -- see `text::font_size_default_path`.
+    font_size_path: PathBuf,
 
     modifiers: ModifiersState,
     /// Whether the caret is fading toward visible or toward hidden --
@@ -521,6 +528,7 @@ impl App {
         }
         let theme_path = theme::default_path().unwrap_or_else(|| PathBuf::from("fenix-theme.txt"));
         let theme = theme::load_from(&theme_path);
+        let font_size_path = text::font_size_default_path().unwrap_or_else(|| PathBuf::from("fenix-font-size.txt"));
 
         Self {
             window: None,
@@ -550,6 +558,7 @@ impl App {
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             theme_path,
+            font_size_path,
             modifiers: ModifiersState::empty(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
@@ -1288,6 +1297,37 @@ impl App {
         }
     }
 
+    /// `SPC t =`/`Ctrl-=`/`SPC t -`/`Ctrl--`/`SPC t 0`/`Ctrl-0`: grows,
+    /// shrinks, or resets the body text size at runtime and persists the
+    /// choice, same posture as `cycle_theme`. A no-op (nothing to resize,
+    /// nothing to persist) before the GPU/`TextPipeline` exist yet --
+    /// can't happen for a keybinding a running window is dispatching,
+    /// but `App::new`/headless tests can call these before `resumed()`.
+    fn adjust_font_size(&mut self, size: f32) {
+        let Some(text) = &mut self.text else { return };
+        text.set_font_size(size);
+        if let Err(err) = text::save_font_size(text.font_size(), &self.font_size_path) {
+            eprintln!("fenix: couldn't save font size: {err}");
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    pub(crate) fn increase_font_size(&mut self) {
+        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
+        self.adjust_font_size(current + FONT_SIZE_STEP);
+    }
+
+    pub(crate) fn decrease_font_size(&mut self) {
+        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
+        self.adjust_font_size(current - FONT_SIZE_STEP);
+    }
+
+    pub(crate) fn reset_font_size(&mut self) {
+        self.adjust_font_size(text::FONT_SIZE);
+    }
+
     /// Resets the caret blink timer so an edit or navigation always leaves
     /// the caret visible instead of possibly mid-blink.
     fn wake_caret(&mut self) {
@@ -1366,6 +1406,12 @@ impl App {
                     Some("edit.redo")
                 } else if s.eq_ignore_ascii_case("q") {
                     Some("app.quit")
+                } else if s == "=" || s == "+" {
+                    Some("view.increase_font_size")
+                } else if s == "-" {
+                    Some("view.decrease_font_size")
+                } else if s == "0" {
+                    Some("view.reset_font_size")
                 } else {
                     None
                 };
@@ -1387,11 +1433,13 @@ impl App {
         if keypress == KeyPress::named(FenixNamedKey::PageUp)
             || keypress == KeyPress::named(FenixNamedKey::PageDown)
         {
-            let page_size = self
-                .gpu
-                .as_ref()
-                .map(|gpu| text::visible_line_count(gpu.size.height as f32))
-                .unwrap_or(20);
+            let page_size = match (&self.gpu, &self.text) {
+                (Some(gpu), Some(text)) => {
+                    text::visible_line_count(gpu.size.height as f32, text.modeline_height(), text.line_height())
+                }
+                (Some(gpu), None) => text::visible_line_count(gpu.size.height as f32, text::LINE_HEIGHT + 8.0, text::LINE_HEIGHT),
+                (None, _) => 20,
+            };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
             let ob = self.open_mut();
             ob.buffer.move_page(&mut ob.cursor, page_size, down);
@@ -1819,12 +1867,18 @@ impl App {
     /// The which-key popup's rich-text spans (key column in the theme's
     /// accent color, label in the modeline's own text color, sorted
     /// alphabetically by label for scannability) and its resolved
-    /// on-screen rect, or `None` when nothing is pending. Truncates to
-    /// whatever `popup::max_rows` says actually fits above the modeline,
-    /// with a trailing "+N more" summary row instead of letting the
-    /// panel run under it -- previously unbounded, this is what could
-    /// make the popup draw over/past the modeline once enough leader
-    /// groups existed to make its content taller than the window.
+    /// on-screen rect, or `None` when nothing is pending. Two things
+    /// that could previously make the panel not actually fit its own
+    /// content, both fixed here: its *width* is now sized to the
+    /// longest visible label at the font's real measured `char_width`
+    /// (clamped to `[WHICH_KEY_MIN_WIDTH, WHICH_KEY_MAX_WIDTH]` and to
+    /// what the window can hold) instead of a fixed 260px that didn't
+    /// scale with font size or label length -- a big font or a long
+    /// label (real examples: "insert at line start", "WORD backward")
+    /// used to just get cut off; and its *height* truncates to whatever
+    /// `popup::max_rows` says actually fits above the modeline, with a
+    /// trailing "+N more" summary row instead of letting the panel run
+    /// under it.
     fn which_key_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
         let mut hints = self.pending_hints();
         if hints.is_empty() {
@@ -1832,9 +1886,21 @@ impl App {
         }
         hints.sort_by(|a, b| a.1.cmp(b.1));
 
-        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, text::LINE_HEIGHT, WHICH_KEY_PADDING);
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+
+        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING);
         let shown_count = if hints.len() > max_rows { max_rows.saturating_sub(1).max(1) } else { hints.len() };
         let truncated = hints.len() - shown_count;
+
+        const KEY_COLUMN_CHARS: usize = 6;
+        let longest_label = hints[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
+        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
+        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
 
         let theme = self.theme;
         let mut spans = Vec::new();
@@ -1842,7 +1908,7 @@ impl App {
             if i > 0 {
                 spans.push(("\n".to_string(), theme.fg_modeline, false));
             }
-            spans.push((format!("{:<6}", keymap::describe_keypress(key)), theme.syntax_keyword, false));
+            spans.push((format!("{:<KEY_COLUMN_CHARS$}", keymap::describe_keypress(key)), theme.syntax_keyword, false));
             spans.push(((*label).to_string(), theme.fg_modeline, false));
         }
         if truncated > 0 {
@@ -1851,9 +1917,8 @@ impl App {
         }
 
         let row_count = shown_count + usize::from(truncated > 0);
-        let height = row_count as f32 * text::LINE_HEIGHT + WHICH_KEY_PADDING;
-        let rect =
-            popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, text::WHICH_KEY_WIDTH, height, window_width, modeline_top);
+        let height = row_count as f32 * line_height + WHICH_KEY_PADDING;
+        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
         Some((rect, spans))
     }
 
@@ -1941,23 +2006,27 @@ impl App {
         else {
             return;
         };
-        let visible_lines = text::visible_line_count(window_height);
 
         // Resolved once, up front: the active theme's font (so
-        // `char_width` below reflects it) and the real measured advance
-        // width for that font, used for every per-column pixel
+        // `char_width` below reflects it), the real measured advance
+        // width for that font (used for every per-column pixel
         // computation below instead of the fixed-ratio `text::
-        // CHAR_WIDTH` constant, which broke the moment a second font
-        // (the bundled TempleOS bitmap font, a ~1.0x-em advance vs. the
-        // constant's assumed ~0.6x) entered the mix.
+        // CHAR_WIDTH` constant, which broke the moment a second font --
+        // the bundled TempleOS bitmap font, a ~1.0x-em advance vs. the
+        // constant's assumed ~0.6x -- entered the mix), and the live
+        // `line_height`/`modeline_height` (same reasoning: fixed once,
+        // now adjustable at runtime via `SPC t =`/`-`/`0`, so every
+        // consumer needs the *current* value, not the `text::LINE_HEIGHT`/
+        // `MODELINE_HEIGHT` constants those used to be).
         let theme = self.theme;
-        let char_width = match &mut self.text {
+        let (char_width, line_height, modeline_height) = match &mut self.text {
             Some(text) => {
                 text.set_theme(theme);
-                text.char_width()
+                (text.char_width(), text.line_height(), text.modeline_height())
             }
-            None => text::CHAR_WIDTH,
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT, text::LINE_HEIGHT + 8.0),
         };
+        let visible_lines = text::visible_line_count(window_height, modeline_height, line_height);
         let caret_is_block = self.caret_is_block();
 
         // Sidebar is independent of window splits *and* `main_view` --
@@ -1978,7 +2047,7 @@ impl App {
             None
         };
 
-        let modeline_top = window_height - text::MODELINE_HEIGHT;
+        let modeline_top = window_height - modeline_height;
         let pane_area =
             fenix_window::Rect { x: sidebar_px, y: 0.0, w: (window_width - sidebar_px).max(0.0), h: modeline_top.max(0.0) };
         let layout = self.windows().layout(pane_area);
@@ -2013,7 +2082,7 @@ impl App {
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             let is_focused = pane == focused_pane;
-            let pane_visible_lines = text::lines_that_fit(rect.h);
+            let pane_visible_lines = text::lines_that_fit(rect.h, line_height);
 
             if is_focused && self.main_view == MainView::Explorer {
                 let rows = pane_visible_lines + 1;
@@ -2165,14 +2234,14 @@ impl App {
 
         let popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = if let Some((rect, spans)) = &which_key_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::WhichKey, text::WHICH_KEY_WIDTH, &refs);
+            text.set_popup_rich(popup::PopupId::WhichKey, rect.w, &refs);
             vec![(popup::PopupId::WhichKey, *rect)]
         } else {
             Vec::new()
         };
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
-        let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+        let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * line_height;
 
         bg_rect.clear();
         for pane in &panes_render {
@@ -2181,14 +2250,14 @@ impl App {
             // the pane, shifted up by its own mid-scroll fractional
             // offset so it pans in step with its text (always 0 outside
             // the focused pane's Editor-mode smooth scroll).
-            let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * text::LINE_HEIGHT - pane.content_frac * text::LINE_HEIGHT;
+            let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
             if let Some(row) = pane.hl_row {
                 let y = row_y(row);
-                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, text::LINE_HEIGHT, theme.hl_line);
+                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, line_height, theme.hl_line);
             }
             for row in &pane.marked_rows {
                 let y = row_y(*row);
-                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, text::LINE_HEIGHT, theme.selection);
+                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, line_height, theme.selection);
             }
             // Column-math x-offset for this pane's caret/selection/pulse
             // rects: its own left edge, plus `PAD_LEFT`, plus its own
@@ -2200,7 +2269,7 @@ impl App {
                 let x = content_x + col_start as f32 * char_width;
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
-                bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
+                bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection);
             }
             if let Some((segments, alpha)) = &pane.pulse_overlay {
                 let [r, g, b, _] = theme.caret;
@@ -2208,11 +2277,11 @@ impl App {
                     let x = content_x + col_start as f32 * char_width;
                     let y = row_y(row);
                     let w = (col_end - col_start) as f32 * char_width;
-                    bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, *alpha]);
+                    bg_rect.push_rect(gpu, x, y, w, line_height, [r, g, b, *alpha]);
                 }
             }
         }
-        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, text::MODELINE_HEIGHT, theme.bg_modeline);
+        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
         if modeline_pieces.is_some() {
             // Starts at PAD_LEFT, matching where the badge text itself
             // starts rendering (`text.rs`'s modeline TextArea uses the same
@@ -2220,7 +2289,7 @@ impl App {
             // the rendered label overflowing past the badge's right edge,
             // throwing off how centered it looked inside the colored badge.
             let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
-            bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, text::MODELINE_HEIGHT, badge_bg);
+            bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, modeline_height, badge_bg);
         }
         for &(_, rect) in &popup_rects {
             bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
@@ -2229,7 +2298,7 @@ impl App {
             bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg_modeline);
             if let Some((_, Some(selected_row), _)) = &sidebar_render {
                 let y = sidebar_row_y(*selected_row);
-                bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, text::LINE_HEIGHT, theme.hl_line);
+                bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, line_height, theme.hl_line);
             }
         }
         // Divider lines along every split boundary the layout computed --
@@ -2265,8 +2334,8 @@ impl App {
                 if caret_alpha > 0.0 {
                     let content_x = focused.rect.x + text::PAD_LEFT + focused.gutter_px;
                     let caret_x = content_x + col as f32 * char_width;
-                    let caret_y = focused.rect.y + text::PAD_TOP + row as f32 * text::LINE_HEIGHT
-                        - focused.content_frac * text::LINE_HEIGHT;
+                    let caret_y = focused.rect.y + text::PAD_TOP + row as f32 * line_height
+                        - focused.content_frac * line_height;
                     let [r, g, b, a] = theme.caret;
                     // Insert keeps the thin bar (an I-beam-style "about to
                     // type here" marker); every other mode (Normal, Visual,
@@ -2278,7 +2347,7 @@ impl App {
                     // completely hide the character underneath it instead of
                     // just marking its position.
                     let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
-                    caret_rect.push_rect(gpu, caret_x, caret_y, width, text::LINE_HEIGHT, [r, g, b, a * caret_alpha * block_alpha]);
+                    caret_rect.push_rect(gpu, caret_x, caret_y, width, line_height, [r, g, b, a * caret_alpha * block_alpha]);
                 }
             }
         }
@@ -2355,7 +2424,8 @@ impl ApplicationHandler for App {
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
         // immediately after this.
-        let text = TextPipeline::new(&gpu);
+        let mut text = TextPipeline::new(&gpu);
+        text.set_font_size(text::load_font_size(&self.font_size_path));
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
 
@@ -2847,6 +2917,22 @@ mod tests {
         app.cycle_theme();
         assert_eq!(app.theme.name, "Orbit Dark"); // wrapped back around
         assert_eq!(theme::load_from(&app.theme_path).name, "Orbit Dark");
+    }
+
+    // `increase_font_size`/`decrease_font_size`/`reset_font_size`
+    // themselves need a real `TextPipeline`, which needs a real GPU
+    // device to construct -- not something a headless test builds (same
+    // reason `resolve_font_size`/persistence are tested directly at the
+    // `text` module level instead). What a headless `App::with_file`
+    // *can* verify is that these are safe no-ops before `resumed()` has
+    // run (`self.text` is `None` at that point) rather than panicking.
+    #[test]
+    fn font_size_adjustments_are_safe_no_ops_before_the_gpu_exists() {
+        let mut app = App::with_file(None);
+        assert!(app.text.is_none());
+        app.increase_font_size();
+        app.decrease_font_size();
+        app.reset_font_size();
     }
 
     #[test]

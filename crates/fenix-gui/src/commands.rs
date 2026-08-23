@@ -67,6 +67,9 @@ impl CommandRegistry {
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
         registry.register("workspace.prev", "Switch to the previous workspace", cmd_prev_workspace);
         registry.register("workspace.remove", "Remove the active workspace", cmd_remove_workspace);
+        registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
+        registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
+        registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
         registry
     }
 
@@ -207,4 +210,16 @@ fn cmd_prev_workspace(ctx: &mut CommandCtx) {
 
 fn cmd_remove_workspace(ctx: &mut CommandCtx) {
     ctx.app.remove_workspace();
+}
+
+fn cmd_increase_font_size(ctx: &mut CommandCtx) {
+    ctx.app.increase_font_size();
+}
+
+fn cmd_decrease_font_size(ctx: &mut CommandCtx) {
+    ctx.app.decrease_font_size();
+}
+
+fn cmd_reset_font_size(ctx: &mut CommandCtx) {
+    ctx.app.reset_font_size();
 }

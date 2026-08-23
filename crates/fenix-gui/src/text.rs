@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -12,8 +14,17 @@ use crate::icon::ICON_FONT_FAMILY;
 use crate::popup::PopupId;
 use crate::theme::Theme;
 
+/// Default/starting font size -- also the fallback used wherever a real
+/// `TextPipeline` isn't available (headless tests, a `redraw()` called
+/// before the GPU is ready). The actual live size the user sees is
+/// `TextPipeline::font_size()`, adjustable at runtime via `SPC t =`/`SPC
+/// t -`/`SPC t 0` -- see `TextPipeline::set_font_size`.
 pub const FONT_SIZE: f32 = 16.0;
+/// Default/starting line height, and the ratio (`LINE_HEIGHT /
+/// FONT_SIZE` = 1.25) every runtime font-size change preserves.
 pub const LINE_HEIGHT: f32 = 20.0;
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 40.0;
 /// A rough monospace advance-width fallback -- used only by
 /// `TextPipeline::measure_char_width` if shaping ever somehow fails to
 /// produce usable glyphs. Real per-column pixel math (caret, selection,
@@ -24,9 +35,12 @@ pub const LINE_HEIGHT: f32 = 20.0;
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
-pub const MODELINE_HEIGHT: f32 = LINE_HEIGHT + 8.0;
-/// Width of the which-key popup panel.
-pub const WHICH_KEY_WIDTH: f32 = 260.0;
+/// Smallest and largest a popup like which-key is allowed to size itself
+/// to its own content (see `App::which_key_popup`) -- always at least
+/// this wide even for a short list, never wider than this even for a
+/// long label, regardless of the active font's real measured width.
+pub const WHICH_KEY_MIN_WIDTH: f32 = 220.0;
+pub const WHICH_KEY_MAX_WIDTH: f32 = 480.0;
 /// Gap between the which-key panel and the window's top/right edges.
 pub const WHICH_KEY_MARGIN: f32 = 12.0;
 /// Width (in chars) of the modeline's mode badge, centered within it.
@@ -76,16 +90,22 @@ pub struct TextPipeline {
     /// always `ICON_FONT_FAMILY` regardless of this.
     content_family: Option<&'static str>,
     /// The active font's real, measured monospace advance width in
-    /// pixels at `FONT_SIZE` -- recomputed only when `content_family`
-    /// actually changes (see `set_theme`), not every frame. Different
-    /// fonts have very different advance-to-em ratios (the bundled
-    /// TempleOS bitmap font is a full square cell, ~1.0x its em size,
-    /// vastly wider than a typical outline monospace font's ~0.6x), so
-    /// a single hardcoded ratio (`CHAR_WIDTH`) breaks caret/column
-    /// alignment the moment a second font enters the mix -- callers
-    /// needing per-column pixel math should use `char_width()`, not
-    /// the `CHAR_WIDTH` constant.
+    /// pixels at the current `font_size` -- recomputed whenever
+    /// `content_family` (`set_theme`) or `font_size` (`set_font_size`)
+    /// actually changes, not every frame. Different fonts have very
+    /// different advance-to-em ratios (the bundled TempleOS bitmap font
+    /// is a full square cell, ~1.0x its em size, vastly wider than a
+    /// typical outline monospace font's ~0.6x), so a single hardcoded
+    /// ratio (`CHAR_WIDTH`) breaks caret/column alignment the moment a
+    /// second font enters the mix -- callers needing per-column pixel
+    /// math should use `char_width()`, not the `CHAR_WIDTH` constant.
     char_width: f32,
+    /// Live font size/line height -- start at `FONT_SIZE`/`LINE_HEIGHT`,
+    /// adjustable at runtime via `set_font_size` (`SPC t =`/`-`/`0`).
+    /// `line_height` always preserves the original `LINE_HEIGHT /
+    /// FONT_SIZE` ratio; see `set_font_size`'s own doc comment.
+    font_size: f32,
+    line_height: f32,
 }
 
 impl TextPipeline {
@@ -101,13 +121,13 @@ impl TextPipeline {
 
         let mut modeline = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
-        modeline.set_size(Some(gpu.size.width as f32), Some(MODELINE_HEIGHT));
+        modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
         let mut sidebar = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
-        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32)));
+        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
 
-        let char_width = Self::measure_char_width(&mut font_system, Family::Monospace);
+        let char_width = Self::measure_char_width(&mut font_system, Family::Monospace, FONT_SIZE, LINE_HEIGHT);
 
         Self {
             font_system,
@@ -121,6 +141,8 @@ impl TextPipeline {
             sidebar,
             content_family: None,
             char_width,
+            font_size: FONT_SIZE,
+            line_height: LINE_HEIGHT,
         }
     }
 
@@ -142,7 +164,7 @@ impl TextPipeline {
         }
         self.content_family = theme.font_family;
         let family = self.content_family();
-        self.char_width = Self::measure_char_width(&mut self.font_system, family);
+        self.char_width = Self::measure_char_width(&mut self.font_system, family, self.font_size, self.line_height);
     }
 
     /// The active font's real monospace advance width in pixels --
@@ -152,18 +174,72 @@ impl TextPipeline {
         self.char_width
     }
 
-    /// Measures `family`'s real advance width by shaping two characters
-    /// and taking the pixel distance between them, rather than assuming
-    /// a fixed ratio of `FONT_SIZE` -- see the `char_width` field's doc
-    /// comment for why a single hardcoded ratio doesn't hold across
-    /// fonts. Falls back to the old assumed `FONT_SIZE * 0.6` ratio only
-    /// if shaping somehow produces fewer than two glyphs (should not
-    /// happen for two ordinary ASCII letters, but a shaping failure
-    /// shouldn't be able to divide-by-zero or panic downstream).
-    fn measure_char_width(font_system: &mut FontSystem, family: Family<'static>) -> f32 {
-        let mut probe = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.line_height
+    }
+
+    /// The modeline bar's own height -- `line_height` plus a little
+    /// breathing room, tracking font size the same way every other
+    /// line-height-derived measurement now does.
+    pub fn modeline_height(&self) -> f32 {
+        self.line_height + 8.0
+    }
+
+    /// `SPC t =`/`SPC t -`/`SPC t 0`: grows, shrinks, or resets the body
+    /// text size at runtime, clamped to `[MIN_FONT_SIZE, MAX_FONT_SIZE]`.
+    /// `line_height` always scales with it, preserving the original
+    /// `LINE_HEIGHT / FONT_SIZE` ratio (1.25) rather than staying fixed
+    /// -- a bigger font with unchanged line spacing would visually
+    /// crowd lines together instead of scaling proportionally. Updates
+    /// every glyph buffer that currently exists immediately (not just
+    /// ones re-rendered this frame): panes and the modeline get a fresh
+    /// `set_*_rich`/`set_modeline_text` call every redraw regardless and
+    /// would self-correct anyway, but the sidebar and any popup only get
+    /// re-rendered while actually visible, so without this a
+    /// currently-hidden one could stay stale until its next content
+    /// change.
+    pub fn set_font_size(&mut self, size: f32) {
+        let (font_size, line_height) = resolve_font_size(size);
+        if font_size == self.font_size {
+            return;
+        }
+        self.font_size = font_size;
+        self.line_height = line_height;
+        let metrics = Metrics::new(self.font_size, self.line_height);
+
+        self.modeline.set_metrics(metrics);
+        self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.sidebar.set_metrics(metrics);
+        self.sidebar.shape_until_scroll(&mut self.font_system, false);
+        for buf in self.content_buffers.values_mut() {
+            buf.set_metrics(metrics);
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+        for buf in self.popups.values_mut() {
+            buf.set_metrics(metrics);
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        let family = self.content_family();
+        self.char_width = Self::measure_char_width(&mut self.font_system, family, self.font_size, self.line_height);
+    }
+
+    /// Measures `family`'s real advance width at `font_size`/`line_height`
+    /// by shaping two characters and taking the pixel distance between
+    /// them, rather than assuming a fixed ratio of `font_size` -- see the
+    /// `char_width` field's doc comment for why a single hardcoded ratio
+    /// doesn't hold across fonts. Falls back to the old assumed `0.6`
+    /// ratio only if shaping somehow produces fewer than two glyphs
+    /// (should not happen for two ordinary ASCII letters, but a shaping
+    /// failure shouldn't be able to divide-by-zero or panic downstream).
+    fn measure_char_width(font_system: &mut FontSystem, family: Family<'static>, font_size: f32, line_height: f32) -> f32 {
+        let mut probe = GlyphBuffer::new(font_system, Metrics::new(font_size, line_height));
         probe.set_wrap(Wrap::None);
-        probe.set_size(Some(1000.0), Some(LINE_HEIGHT));
+        probe.set_size(Some(1000.0), Some(line_height));
         probe.set_text("MM", &Attrs::new().family(family), Shaping::Advanced, None);
         probe.shape_until_scroll(font_system, false);
         probe
@@ -176,7 +252,7 @@ impl TextPipeline {
                 Some(b.x - a.x)
             })
             .filter(|w| *w > 0.0)
-            .unwrap_or(FONT_SIZE * 0.6)
+            .unwrap_or(font_size * 0.6)
     }
 
     /// Builds rich-text spans from `(text, color, use_icon_font)` triples --
@@ -209,7 +285,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.content_buffers.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.content_buffers.insert(pane, buf);
         }
@@ -252,7 +328,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.popups.contains_key(&id) {
-            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.popups.insert(id, buf);
         }
@@ -286,9 +362,9 @@ impl TextPipeline {
         // rect comes from `WindowTree::layout`, recomputed each redraw
         // regardless of whether the window itself just resized), so only
         // the three fixed panels need handling here.
-        self.modeline.set_size(Some(width), Some(MODELINE_HEIGHT));
+        self.modeline.set_size(Some(width), Some(self.modeline_height()));
         self.modeline.shape_until_scroll(&mut self.font_system, false);
-        self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height)));
+        self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height, self.modeline_height())));
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -313,7 +389,7 @@ impl TextPipeline {
             Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
-        let modeline_top = gpu.size.height as f32 - MODELINE_HEIGHT;
+        let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
         let mut areas = Vec::with_capacity(panes.len() + popups.len() + 2);
         for &(pane, rect, content_frac) in panes {
@@ -321,7 +397,7 @@ impl TextPipeline {
             areas.push(TextArea {
                 buffer,
                 left: rect.x + PAD_LEFT,
-                top: rect.y + PAD_TOP - content_frac * LINE_HEIGHT,
+                top: rect.y + PAD_TOP - content_frac * self.line_height,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
@@ -401,22 +477,57 @@ impl TextPipeline {
     }
 }
 
-fn content_height(window_height: f32) -> f32 {
-    (window_height - MODELINE_HEIGHT).max(0.0)
+/// Clamps a requested font size to `[MIN_FONT_SIZE, MAX_FONT_SIZE]` and
+/// derives the paired line height that preserves the original
+/// `LINE_HEIGHT / FONT_SIZE` ratio -- pulled out of `TextPipeline::
+/// set_font_size` as a pure function so it's directly unit-testable
+/// without needing a real GPU-backed `TextPipeline` to construct.
+fn resolve_font_size(requested: f32) -> (f32, f32) {
+    let font_size = requested.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+    let line_height = font_size * (LINE_HEIGHT / FONT_SIZE);
+    (font_size, line_height)
+}
+
+/// Persisted font-size choice, mirroring `theme::default_path`/
+/// `load_from`/`save_to`'s exact shape -- same convenience-preference
+/// posture (never fails outright, falls back to `FONT_SIZE` on any
+/// missing/unreadable/unparsable file).
+pub fn font_size_default_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("fenix").join("font_size.txt"))
+}
+
+pub fn load_font_size(path: &Path) -> f32 {
+    std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<f32>().ok()).map(|s| resolve_font_size(s).0).unwrap_or(FONT_SIZE)
+}
+
+pub fn save_font_size(size: f32, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, size.to_string())
+}
+
+fn content_height(window_height: f32, modeline_height: f32) -> f32 {
+    (window_height - modeline_height).max(0.0)
 }
 
 /// How many full text lines fit in a content area of the given pixel
 /// height (already excluding the modeline, e.g. a pane's own rect
-/// height) -- used both for the whole-window case (`content_height`
-/// applied first) and per-pane.
-pub fn lines_that_fit(height: f32) -> usize {
-    (height / LINE_HEIGHT).floor().max(1.0) as usize
+/// height) at the given `line_height` -- used both for the whole-window
+/// case (`content_height` applied first) and per-pane. Takes
+/// `line_height` explicitly (rather than being a `TextPipeline` method)
+/// so it stays a pure, headlessly-testable function -- callers pass
+/// `TextPipeline::line_height()` (or `text::LINE_HEIGHT` as a fallback
+/// when no pipeline exists yet, e.g. a `redraw()` before the GPU is
+/// ready).
+pub fn lines_that_fit(height: f32, line_height: f32) -> usize {
+    (height / line_height).floor().max(1.0) as usize
 }
 
 /// How many full text lines fit in the content area above the modeline,
 /// for the single-pane/whole-window case.
-pub fn visible_line_count(window_height: f32) -> usize {
-    lines_that_fit(content_height(window_height))
+pub fn visible_line_count(window_height: f32, modeline_height: f32, line_height: f32) -> usize {
+    lines_that_fit(content_height(window_height, modeline_height), line_height)
 }
 
 #[cfg(test)]
@@ -450,16 +561,17 @@ mod tests {
         // font shared that ~0.6 ratio.
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        let width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"));
+        let width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"), FONT_SIZE, LINE_HEIGHT);
         assert!((width - FONT_SIZE).abs() < 0.5, "expected ~{FONT_SIZE}px (1:1 ratio), got {width}px");
     }
 
     #[test]
     fn measured_char_width_for_the_default_family_is_narrower_than_the_bitmap_font() {
         let mut font_system = FontSystem::new();
-        let default_width = TextPipeline::measure_char_width(&mut font_system, Family::Monospace);
+        let default_width = TextPipeline::measure_char_width(&mut font_system, Family::Monospace, FONT_SIZE, LINE_HEIGHT);
         font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        let templeos_width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"));
+        let templeos_width =
+            TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"), FONT_SIZE, LINE_HEIGHT);
         assert!(
             default_width < templeos_width,
             "expected the system default monospace font ({default_width}px) to be narrower \
@@ -470,6 +582,95 @@ mod tests {
     #[test]
     fn lines_that_fit_matches_visible_line_count_when_modeline_already_excluded() {
         let window_height = 500.0;
-        assert_eq!(lines_that_fit(content_height(window_height)), visible_line_count(window_height));
+        let modeline_height = LINE_HEIGHT + 8.0;
+        assert_eq!(
+            lines_that_fit(content_height(window_height, modeline_height), LINE_HEIGHT),
+            visible_line_count(window_height, modeline_height, LINE_HEIGHT)
+        );
+    }
+
+    // `set_font_size` itself needs a real `TextPipeline`, which needs a
+    // real GPU device to construct (`GpuState::new` is async and opens
+    // an actual window) -- not something a headless unit test can do,
+    // the same reason no other GPU-backed rendering in this file has
+    // direct test coverage. `resolve_font_size` pulls out its one
+    // genuinely pure piece (clamping + ratio-preserving line-height
+    // derivation) so that much stays testable the same way everything
+    // else here is; the buffer-reshaping side of `set_font_size` is
+    // covered by code review instead, same posture as `prepare`/`render`.
+    #[test]
+    fn resolve_font_size_clamps_to_the_allowed_range() {
+        assert_eq!(resolve_font_size(1000.0).0, MAX_FONT_SIZE);
+        assert_eq!(resolve_font_size(0.0).0, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn resolve_font_size_preserves_the_line_height_ratio() {
+        let (font_size, line_height) = resolve_font_size(24.0);
+        assert_eq!(font_size, 24.0);
+        assert_eq!(line_height, 24.0 * (LINE_HEIGHT / FONT_SIZE));
+    }
+
+    #[test]
+    fn resolve_font_size_at_the_default_matches_the_default_constants() {
+        assert_eq!(resolve_font_size(FONT_SIZE), (FONT_SIZE, LINE_HEIGHT));
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("fenix-gui-text-test-{name}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_font_size_from_a_missing_file_falls_back_to_the_default() {
+        let dir = TempDir::new("load_missing");
+        assert_eq!(load_font_size(&dir.path().join("does-not-exist.txt")), FONT_SIZE);
+    }
+
+    #[test]
+    fn load_font_size_from_an_unparsable_file_falls_back_to_the_default() {
+        let dir = TempDir::new("load_unparsable");
+        let path = dir.path().join("font_size.txt");
+        std::fs::write(&path, "not-a-number").unwrap();
+        assert_eq!(load_font_size(&path), FONT_SIZE);
+    }
+
+    #[test]
+    fn save_font_size_then_load_font_size_round_trips() {
+        let dir = TempDir::new("round_trip");
+        let path = dir.path().join("font_size.txt");
+        save_font_size(24.0, &path).unwrap();
+        assert_eq!(load_font_size(&path), 24.0);
+    }
+
+    #[test]
+    fn load_font_size_clamps_an_out_of_range_persisted_value() {
+        let dir = TempDir::new("load_clamps");
+        let path = dir.path().join("font_size.txt");
+        std::fs::write(&path, "9999").unwrap();
+        assert_eq!(load_font_size(&path), MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn save_font_size_creates_missing_parent_directories() {
+        let dir = TempDir::new("save_creates_parents");
+        let path = dir.path().join("nested").join("config").join("font_size.txt");
+        save_font_size(18.0, &path).unwrap();
+        assert!(path.exists());
     }
 }
