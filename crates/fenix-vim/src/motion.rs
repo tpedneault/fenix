@@ -113,6 +113,31 @@ fn classify_big(c: char) -> CharClass {
     }
 }
 
+/// Where `{count}gg`/`{count}G` land: the first non-blank of absolute
+/// line `count` (1-indexed, clamped to the buffer's real last line --
+/// `500gg` in a 10-line file lands on line 10, not past the end) when a
+/// count was actually typed, or `motion`'s own bottom/top-of-buffer
+/// default otherwise. Takes `Option<u32>` rather than the already-
+/// defaulted-to-1 `u32` every other motion's count uses, since `gg`
+/// (no count) and `1gg` happen to coincide but bare `G` (last line) and
+/// `1G` (line 1) very much don't -- `apply_motion`'s generic repeat-N-
+/// times loop can't express "target is a line number, not a repeat
+/// count" at all, which is why this is a separate function instead of
+/// another case inside `target`.
+pub fn buffer_line_target(buffer: &Buffer, motion: Motion, count: Option<u32>) -> usize {
+    match count {
+        Some(n) => {
+            let line = (n.max(1) as usize - 1).min(last_line(buffer));
+            line_first_non_blank(buffer, line)
+        }
+        None => match motion {
+            Motion::BufferTop => line_first_non_blank(buffer, 0),
+            Motion::BufferBottom => line_first_non_blank(buffer, last_line(buffer)),
+            _ => unreachable!("buffer_line_target is only ever called with BufferTop/BufferBottom"),
+        },
+    }
+}
+
 /// Ropey counts a phantom empty final line after a trailing `\n` (a file
 /// "a\nb\n" reports 3 lines: "a\n", "b\n", ""). Vim's `G`/`j` shouldn't be
 /// able to land the cursor there -- it isn't a line the file actually has.
@@ -256,6 +281,33 @@ mod tests {
         let b = buf("a\n  b\nc\n");
         assert_eq!(target(&b, &cur(0), Motion::BufferTop), 0);
         assert_eq!(target(&b, &cur(0), Motion::BufferBottom), 6);
+    }
+
+    #[test]
+    fn buffer_line_target_with_no_count_falls_back_to_the_motions_own_default() {
+        let b = buf("a\n  b\nc\n");
+        assert_eq!(buffer_line_target(&b, Motion::BufferTop, None), 0);
+        assert_eq!(buffer_line_target(&b, Motion::BufferBottom, None), 6); // "c", not top
+    }
+
+    #[test]
+    fn buffer_line_target_with_a_count_lands_on_that_1_indexed_lines_first_non_blank() {
+        let b = buf("a\n  b\nc\n");
+        // Line 2 (1-indexed) is "  b" -- first non-blank is at offset 2 within it.
+        assert_eq!(buffer_line_target(&b, Motion::BufferTop, Some(2)), 4);
+        assert_eq!(buffer_line_target(&b, Motion::BufferBottom, Some(2)), 4); // motion doesn't matter once a count is given
+    }
+
+    #[test]
+    fn buffer_line_target_clamps_a_count_past_the_last_real_line() {
+        let b = buf("a\nb\nc");
+        assert_eq!(buffer_line_target(&b, Motion::BufferBottom, Some(500)), 4); // "c", not past it
+    }
+
+    #[test]
+    fn buffer_line_target_treats_a_zero_count_as_line_one() {
+        let b = buf("a\nb\nc");
+        assert_eq!(buffer_line_target(&b, Motion::BufferTop, Some(0)), 0);
     }
 
     #[test]

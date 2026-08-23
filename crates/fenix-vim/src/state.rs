@@ -387,8 +387,8 @@ impl VimState {
 
         match self.normal_matcher.feed(key) {
             Step::Matched(action) => {
-                let count = self.count.take().unwrap_or(1).max(1);
-                self.apply_normal_action(buffer, cursor, *action, count);
+                let raw_count = self.count.take();
+                self.apply_normal_action(buffer, cursor, *action, raw_count);
             }
             Step::NoMatch => self.count = None,
             Step::Pending(_) => {}
@@ -396,8 +396,21 @@ impl VimState {
         VimEvent::None
     }
 
-    fn apply_normal_action(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, action: VimAction, count: u32) {
+    /// `raw_count` is the count exactly as typed (`None` if no digits
+    /// preceded the key) -- most actions below just want it defaulted to
+    /// 1 (`count`, computed once up front), but `gg`/`G` need to know
+    /// whether a count was typed at all, not just its resolved value:
+    /// `1gg` and bare `gg` happen to coincide (both mean "line 1"), but
+    /// bare `G` (last line) and `1G` (line 1) very much don't -- see
+    /// `motion::buffer_line_target`'s own doc comment.
+    fn apply_normal_action(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, action: VimAction, raw_count: Option<u32>) {
+        let count = raw_count.unwrap_or(1).max(1);
         match action {
+            VimAction::Motion(m @ (Motion::BufferTop | Motion::BufferBottom)) => {
+                cursor.char_idx = motion::buffer_line_target(buffer, m, raw_count);
+                let (_, col) = buffer.line_col(cursor);
+                cursor.sticky_col = col;
+            }
             VimAction::Motion(m) => apply_motion(buffer, cursor, m, count),
             VimAction::Operator(op) => {
                 self.pending_op = Some(op);
@@ -658,8 +671,23 @@ impl VimState {
             Step::Matched(target) => {
                 let target = *target;
                 self.pending_op = None;
-                let total_count = self.pending_op_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
+                let raw_count = self.count.take();
+                let total_count = self.pending_op_count.saturating_mul(raw_count.unwrap_or(1).max(1));
                 let (range, linewise) = match target {
+                    PendingTarget::Motion(m @ (Motion::BufferTop | Motion::BufferBottom)) => {
+                        // `d5G`/`5dG`: the count targets an absolute
+                        // line, not a repeat count (meaningless for a
+                        // jump-to-line motion) -- same distinction
+                        // `apply_normal_action` makes for the standalone
+                        // form. Prefers a count typed between the
+                        // operator and motion (`d5G`) over one typed
+                        // before the operator (`5dG`) if both are given.
+                        let line_count = raw_count.or((self.pending_op_count != 1).then_some(self.pending_op_count));
+                        let dest = motion::buffer_line_target(buffer, m, line_count);
+                        let (cur_line, _) = buffer.line_col(cursor);
+                        let (dest_line, _) = buffer.line_col(&Cursor { char_idx: dest, sticky_col: 0 });
+                        (linewise_range(buffer, cur_line, dest_line), true)
+                    }
                     PendingTarget::Motion(m) => {
                         let m = adjust_for_change_word(op, m, buffer, cursor);
                         (range_for_motion(buffer, cursor, m, total_count), m.is_linewise())
@@ -1789,11 +1817,68 @@ mod tests {
         let mut b = buf("a\nb\nc\nd\ne");
         let mut c = Cursor { char_idx: 8, sticky_col: 0 }; // on "e"
         let mut vim = VimState::new();
-        // 3gg isn't "repeat gg 3 times" (idempotent) but this exercises
-        // that the count typed before a two-key sequence isn't dropped
-        // partway through -- gg still resolves to line 0 either way.
+        // Exercises that the count typed before a two-key sequence isn't
+        // dropped partway through the "g" then "g" feed -- 3gg goes to
+        // line 3 (index 2, "c"), not line 0 (bare gg's default).
         keys(&mut vim, &mut b, &mut c, "3gg");
+        assert_eq!(b.line_col(&c).0, 2);
+    }
+
+    #[test]
+    fn gg_with_no_count_goes_to_the_first_line() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // on "c"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "gg");
         assert_eq!(b.line_col(&c).0, 0);
+    }
+
+    #[test]
+    fn g_with_a_count_goes_to_that_line_but_bare_g_goes_to_the_last_line() {
+        let mut b = buf("a\nb\nc\nd\ne");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2G");
+        assert_eq!(b.line_col(&c).0, 1); // line 2, index 1
+
+        keys(&mut vim, &mut b, &mut c, "G"); // no count -- last line, not line 1
+        assert_eq!(b.line_col(&c).0, 4);
+    }
+
+    #[test]
+    fn a_count_past_the_last_line_clamps_to_it() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "500gg");
+        assert_eq!(b.line_col(&c).0, 2);
+    }
+
+    #[test]
+    fn dg_with_a_count_deletes_linewise_up_to_that_line() {
+        let mut b = buf("a\nb\nc\nd\ne");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "d3G"); // delete lines 1-3
+        assert_eq!(b.text(), "d\ne");
+    }
+
+    #[test]
+    fn dg_with_no_count_deletes_linewise_to_the_last_line() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "dG");
+        assert_eq!(b.text(), "");
+    }
+
+    #[test]
+    fn count_before_the_operator_also_targets_an_absolute_line_for_g() {
+        let mut b = buf("a\nb\nc\nd\ne");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3dG"); // 3dG, not d3G -- count before the operator
+        assert_eq!(b.text(), "d\ne");
     }
 
     #[test]
