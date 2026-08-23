@@ -1,4 +1,5 @@
 mod charclass;
+mod indent;
 mod keymaps;
 mod mode;
 mod motion;

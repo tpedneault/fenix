@@ -42,6 +42,14 @@ pub enum VimAction {
     DeleteCharBefore,
     PasteAfter,
     PasteBefore,
+    /// `>>`: indent the current (or, with a count, the next N) line(s)
+    /// by one level. Doubled-key form only, mirroring `dd`/`cc`/`yy` --
+    /// bound as a direct two-key trie leaf rather than going through
+    /// `Operator`/`pending_op`, since indent doesn't fit that machinery's
+    /// "compute a range, then delete/yank/change it" shape.
+    IndentLine,
+    /// `<<`: the dedent counterpart of `IndentLine`.
+    DedentLine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,11 @@ pub enum VisualAction {
     /// outside Block mode (bound unconditionally since the trie is shared
     /// across all three Visual kinds).
     BlockInsertLeft,
+    /// `>`/`<`: indent/dedent every line the selection touches, always
+    /// linewise regardless of `visual_kind` -- matches real Vim, which
+    /// never restricts Visual indent to the selected columns.
+    Indent,
+    Dedent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +140,9 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('~')], "toggle case", VimAction::ToggleCase);
     t.insert(&[KeyPress::char('r')], "replace char", VimAction::ReplaceChar);
 
+    t.insert(&[KeyPress::char('>'), KeyPress::char('>')], "indent line", VimAction::IndentLine);
+    t.insert(&[KeyPress::char('<'), KeyPress::char('<')], "dedent line", VimAction::DedentLine);
+
     t
 }
 
@@ -140,6 +156,8 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('V')], "visual (line)", VisualAction::SetKind(VisualKind::Line));
     t.insert(&[KeyPress::char('v').with_ctrl()], "visual (block)", VisualAction::SetKind(VisualKind::Block));
     t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
+    t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
+    t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
     t
 }
 

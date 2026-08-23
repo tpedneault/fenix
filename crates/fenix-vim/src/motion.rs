@@ -134,7 +134,7 @@ fn vertical(buffer: &Buffer, cursor: &Cursor, delta: isize) -> usize {
     buffer.line_start_char(target_line) + col
 }
 
-fn line_first_non_blank(buffer: &Buffer, line: usize) -> usize {
+pub(crate) fn line_first_non_blank(buffer: &Buffer, line: usize) -> usize {
     let start = buffer.line_start_char(line);
     let end = start + buffer.line_len(line);
     let mut i = start;

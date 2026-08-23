@@ -3,6 +3,7 @@ use std::ops::Range;
 use fenix_core::{Buffer, Cursor};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
+use crate::indent;
 use crate::keymaps::{self, InsertEntry, PendingTarget, VimAction, VisualAction};
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
@@ -184,8 +185,36 @@ impl VimState {
                 }
             }
             KeyCode::Named(NamedKey::Delete) => buffer.delete_forward(cursor),
-            KeyCode::Named(NamedKey::Enter) => buffer.insert_char(cursor, '\n'),
-            KeyCode::Named(NamedKey::Tab) => buffer.insert_char(cursor, '\t'),
+            KeyCode::Named(NamedKey::Enter) => {
+                // Carries over the current line's leading whitespace onto
+                // the new line, plus one extra indent level if the char
+                // right before the cursor opens a bracket -- inserted as
+                // a run of `insert_char` calls (not `insert_str`) so it
+                // coalesces into the same undo step as the surrounding
+                // Insert-mode session, same as ordinary typed chars do.
+                let (line, _) = buffer.line_col(cursor);
+                let mut new_indent = indent::leading_whitespace(buffer, line);
+                let bumps = cursor.char_idx > 0
+                    && buffer.char_at(cursor.char_idx - 1).is_some_and(indent::is_opening_bracket);
+                if bumps {
+                    new_indent.push_str(&" ".repeat(indent::INDENT_WIDTH));
+                }
+                buffer.insert_char(cursor, '\n');
+                for ch in new_indent.chars() {
+                    buffer.insert_char(cursor, ch);
+                }
+            }
+            KeyCode::Named(NamedKey::Tab) => {
+                // Soft-tab: spaces up to the next stop, not a literal
+                // '\t' -- the render pipeline has no tab-stop logic (see
+                // `indent.rs`'s doc comment), so a raw tab wouldn't align
+                // to anything. A char-at-a-time loop, not `insert_str`,
+                // so it coalesces with the surrounding Insert-mode run.
+                let (_, col) = buffer.line_col(cursor);
+                for _ in 0..indent::spaces_to_next_stop(col) {
+                    buffer.insert_char(cursor, ' ');
+                }
+            }
             KeyCode::Named(NamedKey::Left) => buffer.move_left(cursor),
             KeyCode::Named(NamedKey::Right) => buffer.move_right(cursor),
             KeyCode::Named(NamedKey::Up) => buffer.move_up(cursor),
@@ -195,6 +224,27 @@ impl VimState {
             KeyCode::Char(c) if key.mods == Mods::default() => {
                 if replace && buffer.char_at(cursor.char_idx).is_some() {
                     buffer.delete_forward(cursor);
+                }
+                // Electric dedent: typing a closing bracket as the first
+                // non-whitespace char on the line snaps it one indent
+                // level shallower first, the common "type `}` and watch
+                // it jump left" habit. A fixed one-level heuristic, not
+                // real bracket matching -- its own undo step (dedent_line
+                // uses delete_range, which doesn't coalesce), separate
+                // from whatever's typed next.
+                if !replace && indent::is_closing_bracket(c) && indent::line_blank_before_cursor(buffer, cursor) {
+                    let (line, _) = buffer.line_col(cursor);
+                    indent::dedent_line(buffer, cursor, line);
+                    // Not `line_first_non_blank` -- the line is entirely
+                    // whitespace (that's the trigger condition), so
+                    // "first non-blank" degenerates to the line start,
+                    // not where the bracket should land. The line's
+                    // remaining content is exactly the un-removed
+                    // leading whitespace, so its own end is the right
+                    // spot to type into.
+                    cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
+                    let (_, col) = buffer.line_col(cursor);
+                    cursor.sticky_col = col;
                 }
                 buffer.insert_char(cursor, c);
                 if let Some(bi) = &mut self.block_insert {
@@ -342,6 +392,20 @@ impl VimState {
             }
             VimAction::PasteAfter => self.paste(buffer, cursor, true, count),
             VimAction::PasteBefore => self.paste(buffer, cursor, false, count),
+            VimAction::IndentLine | VimAction::DedentLine => {
+                let (line, _) = buffer.line_col(cursor);
+                let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
+                for l in line..=end_line {
+                    if action == VimAction::IndentLine {
+                        indent::indent_line(buffer, cursor, l);
+                    } else {
+                        indent::dedent_line(buffer, cursor, l);
+                    }
+                }
+                cursor.char_idx = motion::line_first_non_blank(buffer, line);
+                let (_, col) = buffer.line_col(cursor);
+                cursor.sticky_col = col;
+            }
             VimAction::OperatorToLineEnd(op) => {
                 // Count support skipped here (real Vim's "3D" also pulls in
                 // the next 2 full lines, a nuance not worth the complexity
@@ -456,14 +520,22 @@ impl VimState {
             }
             InsertEntry::NewlineBelow => {
                 let (line, _) = buffer.line_col(cursor);
+                let new_indent = indent::leading_whitespace(buffer, line);
                 cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
                 buffer.insert_char(cursor, '\n');
+                for ch in new_indent.chars() {
+                    buffer.insert_char(cursor, ch);
+                }
             }
             InsertEntry::NewlineAbove => {
                 let (line, _) = buffer.line_col(cursor);
+                let new_indent = indent::leading_whitespace(buffer, line);
                 cursor.char_idx = buffer.line_start_char(line);
                 buffer.insert_char(cursor, '\n');
                 cursor.char_idx -= 1;
+                for ch in new_indent.chars() {
+                    buffer.insert_char(cursor, ch);
+                }
             }
         }
         self.mode = Mode::Insert;
@@ -642,6 +714,28 @@ impl VimState {
                     } else {
                         self.visual_kind = kind; // different kind: switch, keep anchor
                     }
+                }
+                VisualAction::Indent | VisualAction::Dedent => {
+                    self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                    // Always linewise, regardless of `visual_kind` --
+                    // real Vim's `>`/`<` never restrict to the selected
+                    // columns, even in Block mode.
+                    let anchor_cursor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
+                    let (anchor_line, _) = buffer.line_col(&anchor_cursor);
+                    let (cursor_line, _) = buffer.line_col(cursor);
+                    let (line_lo, line_hi) =
+                        if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
+                    for l in line_lo..=line_hi {
+                        if *action == VisualAction::Indent {
+                            indent::indent_line(buffer, cursor, l);
+                        } else {
+                            indent::dedent_line(buffer, cursor, l);
+                        }
+                    }
+                    cursor.char_idx = motion::line_first_non_blank(buffer, line_lo);
+                    let (_, col) = buffer.line_col(cursor);
+                    cursor.sticky_col = col;
+                    self.mode = Mode::Normal;
                 }
                 VisualAction::BlockInsertLeft => {
                     if self.visual_kind == VisualKind::Block {
@@ -889,6 +983,90 @@ mod tests {
     }
 
     #[test]
+    fn tab_in_insert_mode_inserts_spaces_to_the_next_stop() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        assert_eq!(b.text(), "    "); // column 0 -> full 4 spaces
+        keys(&mut vim, &mut b, &mut c, "xy"); // now at column 6
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        assert_eq!(b.text(), "    xy  "); // column 6 -> 2 spaces to reach 8
+    }
+
+    #[test]
+    fn enter_in_insert_mode_carries_over_the_previous_lines_indentation() {
+        let mut b = buf("    foo");
+        let mut c = Cursor { char_idx: 7, sticky_col: 7 }; // end of "foo"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "    foo\n    ");
+        keys(&mut vim, &mut b, &mut c, "bar");
+        assert_eq!(b.text(), "    foo\n    bar");
+    }
+
+    #[test]
+    fn enter_after_an_opening_brace_bumps_indent_one_level() {
+        let mut b = buf("fn main() {");
+        let mut c = Cursor { char_idx: 11, sticky_col: 11 }; // right after "{"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "fn main() {\n    ");
+    }
+
+    #[test]
+    fn enter_after_an_indented_opening_brace_bumps_one_level_further() {
+        let mut b = buf("    if x {");
+        let mut c = Cursor { char_idx: 10, sticky_col: 10 }; // right after "{"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "    if x {\n        "); // 4 carried + 4 bumped
+    }
+
+    #[test]
+    fn o_and_shift_o_carry_over_indentation() {
+        let mut b = buf("    foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "o");
+        assert_eq!(vim.mode(), Mode::Insert);
+        keys(&mut vim, &mut b, &mut c, "bar");
+        assert_eq!(b.text(), "    foo\n    bar");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+
+        let mut b2 = buf("    foo");
+        let mut c2 = Cursor::at_start();
+        let mut vim2 = VimState::new();
+        keys(&mut vim2, &mut b2, &mut c2, "O");
+        keys(&mut vim2, &mut b2, &mut c2, "baz");
+        assert_eq!(b2.text(), "    baz\n    foo");
+    }
+
+    #[test]
+    fn typing_a_closing_brace_as_first_char_dedents_the_line() {
+        let mut b = buf("fn main() {\n        ");
+        let mut c = Cursor { char_idx: 20, sticky_col: 8 }; // end of the indented blank line
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, "}");
+        assert_eq!(b.text(), "fn main() {\n    }");
+    }
+
+    #[test]
+    fn typing_a_closing_brace_mid_line_does_not_dedent() {
+        let mut b = buf("    foo");
+        let mut c = Cursor { char_idx: 7, sticky_col: 7 }; // end of "foo", real content precedes it
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        keys(&mut vim, &mut b, &mut c, ")");
+        assert_eq!(b.text(), "    foo)");
+    }
+
+    #[test]
     fn dw_deletes_word_forward() {
         let mut b = buf("foo bar baz");
         let mut c = Cursor::at_start();
@@ -1102,6 +1280,39 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "d");
         assert_eq!(b.text(), "one\nthree");
         assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn visual_char_indent_acts_linewise_despite_the_selection_being_charwise() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two", charwise selection
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v");
+        keys(&mut vim, &mut b, &mut c, ">");
+        assert_eq!(b.text(), "one\n    two\nthree");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn visual_indent_spans_every_line_the_selection_touches() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "j");
+        keys(&mut vim, &mut b, &mut c, ">");
+        assert_eq!(b.text(), "    one\n    two\nthree\nfour");
+    }
+
+    #[test]
+    fn visual_dedent_removes_a_level_from_every_selected_line() {
+        let mut b = buf("    one\n    two\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "j");
+        keys(&mut vim, &mut b, &mut c, "<");
+        assert_eq!(b.text(), "one\ntwo\nthree");
     }
 
     #[test]
@@ -1370,6 +1581,51 @@ mod tests {
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "d2d");
         assert_eq!(b.text(), "three\nfour");
+    }
+
+    #[test]
+    fn greater_greater_indents_the_current_line() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // on "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, ">>");
+        assert_eq!(b.text(), "one\n    two\nthree");
+    }
+
+    #[test]
+    fn less_less_dedents_the_current_line() {
+        let mut b = buf("one\n        two\nthree");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // on "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "<<");
+        assert_eq!(b.text(), "one\n    two\nthree");
+    }
+
+    #[test]
+    fn less_less_removes_only_whats_there_when_less_than_indent_width() {
+        let mut b = buf("  two");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "<<");
+        assert_eq!(b.text(), "two");
+    }
+
+    #[test]
+    fn count_before_greater_greater_indents_n_lines() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3>>");
+        assert_eq!(b.text(), "    one\n    two\n    three\nfour");
+    }
+
+    #[test]
+    fn indent_dedent_move_cursor_to_the_first_non_blank() {
+        let mut b = buf("foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, ">>");
+        assert_eq!(c.char_idx, 4); // right after the 4 inserted spaces, on "f"
     }
 
     #[test]
