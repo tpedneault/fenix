@@ -82,13 +82,90 @@ enum LineNumberMode {
     Relative,
 }
 
-/// What occupies the main content area: the editor buffer, or a
-/// full-buffer directory listing (dired-jump-style -- "visiting a
-/// directory" the way visiting a file replaces the buffer).
+/// What occupies the main content area: the editor buffer, a full-buffer
+/// directory listing, or a fuzzy-filtered picker (find-file/grep/switch-
+/// project) -- all three "visit something else instead of the buffer for
+/// a moment," the same reasoning that lets `Picker` reuse `Explorer`'s
+/// stash/restore machinery unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainView {
     Editor,
     Explorer,
+    Picker,
+}
+
+/// A picker's payload type varies by what it's picking between, but
+/// `App` only ever has one active at a time -- an enum, not three
+/// separate `Option` fields, the same reasoning `ExplorerPrompt` already
+/// uses for "one thing, a few kinds."
+enum ActivePicker {
+    FindFile(fenix_picker::PickerState<PathBuf>),
+    Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    SwitchProject(fenix_picker::PickerState<PathBuf>),
+}
+
+// The three `ActivePicker` variants wrap `PickerState<T>` for different
+// `T`, so there's no single method call that works across all of them --
+// these free functions do the one-line match each caller would otherwise
+// repeat.
+fn picker_push_char(picker: &mut ActivePicker, c: char) {
+    match picker {
+        ActivePicker::FindFile(s) => s.push_char(c),
+        ActivePicker::Grep(s) => s.push_char(c),
+        ActivePicker::SwitchProject(s) => s.push_char(c),
+    }
+}
+
+fn picker_backspace(picker: &mut ActivePicker) {
+    match picker {
+        ActivePicker::FindFile(s) => s.backspace(),
+        ActivePicker::Grep(s) => s.backspace(),
+        ActivePicker::SwitchProject(s) => s.backspace(),
+    }
+}
+
+fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
+    match picker {
+        ActivePicker::FindFile(s) => s.move_selection(delta),
+        ActivePicker::Grep(s) => s.move_selection(delta),
+        ActivePicker::SwitchProject(s) => s.move_selection(delta),
+    }
+}
+
+fn picker_query(picker: &ActivePicker) -> &str {
+    match picker {
+        ActivePicker::FindFile(s) => s.query(),
+        ActivePicker::Grep(s) => s.query(),
+        ActivePicker::SwitchProject(s) => s.query(),
+    }
+}
+
+fn picker_len(picker: &ActivePicker) -> usize {
+    match picker {
+        ActivePicker::FindFile(s) => s.len(),
+        ActivePicker::Grep(s) => s.len(),
+        ActivePicker::SwitchProject(s) => s.len(),
+    }
+}
+
+fn picker_selected_row(picker: &ActivePicker) -> usize {
+    match picker {
+        ActivePicker::FindFile(s) => s.selected_row(),
+        ActivePicker::Grep(s) => s.selected_row(),
+        ActivePicker::SwitchProject(s) => s.selected_row(),
+    }
+}
+
+/// Labels only (rendering doesn't need the payload) for the windowed
+/// slice `[offset, offset + count)`, paired with whether each is the
+/// current selection -- same windowing shape `ExplorerState`'s rendering
+/// already uses for a directory listing.
+fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> Vec<(bool, String)> {
+    match picker {
+        ActivePicker::FindFile(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Grep(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+    }
 }
 
 /// Which explorer-mode prompt (if any) is capturing the next keystrokes --
@@ -272,6 +349,26 @@ pub struct App {
     /// just enough to keep the selection on screen.
     explorer_scroll: usize,
     sidebar_scroll: usize,
+    /// Same role as `explorer_scroll`, for the picker's candidate list.
+    /// Reset to 0 whenever a new picker is entered.
+    picker_scroll: usize,
+
+    /// The current buffer's project root (re-derived whenever a file is
+    /// opened -- same "always fresh, never stale" posture as everything
+    /// else computed from buffer state). `None` outside any recognized
+    /// project.
+    project_root: Option<PathBuf>,
+    active_picker: Option<ActivePicker>,
+    /// The grep search-term prompt, when in progress -- `Some` only
+    /// between `SPC p s` and the term being submitted (or cancelled),
+    /// not while an `ActivePicker::Grep` is already showing results.
+    pending_grep_query: Option<String>,
+    /// Loaded once at startup; saved back to disk every time a new
+    /// project root is visited. Empty (silently) on a platform with no
+    /// config-directory concept, or if the file can't be read for some
+    /// other reason -- a picker just starting with no history isn't
+    /// worth failing over.
+    known_projects: fenix_project::KnownProjects,
 
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
@@ -306,6 +403,14 @@ impl App {
             Some(path) => Self::buffer_and_syntax_for_path(Path::new(&path)),
             None => (Buffer::empty(), None),
         };
+        let project_root = buffer.path().and_then(fenix_project::find_project_root);
+        let known_projects_path =
+            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
+        let mut known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
+        if let Some(root) = &project_root {
+            known_projects.add(root.clone());
+            let _ = known_projects.save();
+        }
 
         Self {
             window: None,
@@ -329,6 +434,11 @@ impl App {
             explorer_prompt: None,
             explorer_scroll: 0,
             sidebar_scroll: 0,
+            picker_scroll: 0,
+            project_root,
+            active_picker: None,
+            known_projects,
+            pending_grep_query: None,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
@@ -357,6 +467,21 @@ impl App {
             .and_then(fenix_syntax::detect_language)
             .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
         (buffer, syntax)
+    }
+
+    /// Re-derives `project_root` for the current buffer and registers it
+    /// in `known_projects` (auto-add-on-visit, matching Projectile's own
+    /// behavior) -- called every time the buffer is replaced with a new
+    /// file, not just at startup (`with_file` does the equivalent inline
+    /// before `self` exists to call this on).
+    fn refresh_project_root(&mut self) {
+        self.project_root = self.buffer.path().and_then(fenix_project::find_project_root);
+        if let Some(root) = self.project_root.clone() {
+            self.known_projects.add(root);
+            if let Err(err) = self.known_projects.save() {
+                eprintln!("fenix: couldn't save project history: {err}");
+            }
+        }
     }
 
     pub(crate) fn save(&mut self) {
@@ -422,6 +547,204 @@ impl App {
                 }
                 Err(err) => eprintln!("fenix: couldn't list {} ({err})", dir.display()),
             }
+        }
+        self.wake_caret();
+    }
+
+    /// Builds fuzzy-picker candidates for every file in `root` --
+    /// relative path as the label (fuzzy-matched and displayed),
+    /// absolute path as the payload (what actually gets opened).
+    fn find_file_candidates(root: &Path) -> Vec<fenix_picker::Candidate<PathBuf>> {
+        fenix_project::list_project_files(root)
+            .into_iter()
+            .map(|path| {
+                let label = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                fenix_picker::Candidate::new(label, path)
+            })
+            .collect()
+    }
+
+    /// `SPC p f`: a fuzzy file picker scoped to the current project (or
+    /// the process's cwd, if no project was detected -- still useful,
+    /// just not project-scoped).
+    pub(crate) fn picker_find_file(&mut self) {
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let candidates = Self::find_file_candidates(&root);
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC p p`: a fuzzy picker over the persisted, MRU-ordered known-
+    /// projects list.
+    pub(crate) fn picker_switch_project(&mut self) {
+        let candidates = self
+            .known_projects
+            .roots()
+            .iter()
+            .map(|root| fenix_picker::Candidate::new(root.to_string_lossy().into_owned(), root.clone()))
+            .collect();
+        self.enter_picker(ActivePicker::SwitchProject(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC p s`: unlike find-file/switch-project (which already have a
+    /// full candidate list to fuzzy-filter locally), grep needs a search
+    /// term *before* there's anything to show -- this starts a short
+    /// modeline-level prompt for it (mirroring Vim's own `:` command
+    /// line), not the full picker view yet. `run_grep` opens the actual
+    /// picker once results come back.
+    pub(crate) fn picker_grep_prompt(&mut self) {
+        self.pending_grep_query = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress grep search-term prompt --
+    /// the same "next keystrokes are special" shape as `explorer_prompt_key`,
+    /// scoped to this one always-plain-text case.
+    fn grep_query_key(&mut self, key: KeyPress) {
+        let Some(query) = &mut self.pending_grep_query else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pending_grep_query = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let query = self.pending_grep_query.take().unwrap_or_default();
+                self.run_grep(&query);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                query.pop();
+            }
+            KeyCode::Char(c) => query.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    fn run_grep(&mut self, query: &str) {
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        match fenix_project::grep_project(&root, query) {
+            Ok(matches) => {
+                let candidates = matches
+                    .into_iter()
+                    .map(|m| {
+                        let rel = m.path.strip_prefix(&root).unwrap_or(&m.path).to_string_lossy().into_owned();
+                        let label = format!("{rel}:{}: {}", m.line, m.text.trim());
+                        fenix_picker::Candidate::new(label, m)
+                    })
+                    .collect();
+                self.enter_picker(ActivePicker::Grep(fenix_picker::PickerState::new(candidates)));
+            }
+            Err(err) => eprintln!("fenix: search failed: {err}"),
+        }
+    }
+
+    /// Stashes the editor exactly like `explorer_jump` already does --
+    /// reused as-is, since it was never Explorer-specific, just "what to
+    /// restore when leaving the main content area."
+    fn enter_picker(&mut self, picker: ActivePicker) {
+        let old_buffer = std::mem::replace(&mut self.buffer, Buffer::empty());
+        let old_cursor = std::mem::replace(&mut self.cursor, Cursor::at_start());
+        let old_syntax = self.syntax.take();
+        self.stashed_editor = Some((old_buffer, old_cursor, old_syntax));
+        self.active_picker = Some(picker);
+        self.picker_scroll = 0;
+        self.main_view = MainView::Picker;
+        self.wake_caret();
+    }
+
+    /// `Escape`: cancels the active picker and restores whatever was
+    /// stashed on entry -- no file/project opened.
+    fn picker_cancel(&mut self) {
+        self.active_picker = None;
+        if let Some((buffer, cursor, syntax)) = self.stashed_editor.take() {
+            self.buffer = buffer;
+            self.cursor = cursor;
+            self.syntax = syntax;
+        }
+        self.main_view = MainView::Editor;
+    }
+
+    /// `Enter`: confirms the selected candidate, dispatching differently
+    /// per picker kind. A no-op (stays open) if the filtered list is
+    /// currently empty -- nothing to confirm.
+    fn picker_confirm(&mut self) {
+        match &self.active_picker {
+            Some(ActivePicker::FindFile(state)) => {
+                let Some(path) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.open_file_from_picker(&path);
+            }
+            Some(ActivePicker::SwitchProject(state)) => {
+                let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.switch_to_project(root);
+            }
+            Some(ActivePicker::Grep(state)) => {
+                let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.open_file_from_picker(&m.path);
+                self.jump_to_grep_match(&m);
+            }
+            None => {}
+        }
+        self.wake_caret();
+    }
+
+    /// Replaces the editor buffer with `path`, exactly like opening a
+    /// file from the explorer -- a picker always fully took over
+    /// `main_view` to get here (unlike the explorer's sidebar case), so
+    /// confirming always means "drop the stash, this is current now,
+    /// back to the editor."
+    fn open_file_from_picker(&mut self, path: &Path) {
+        let (buffer, syntax) = Self::buffer_and_syntax_for_path(path);
+        self.buffer = buffer;
+        self.cursor = Cursor::at_start();
+        self.syntax = syntax;
+        self.refresh_project_root();
+        self.stashed_editor = None;
+        self.main_view = MainView::Editor;
+    }
+
+    fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
+        let target_line = m.line.saturating_sub(1).min(self.buffer.visual_line_count().saturating_sub(1));
+        let start = self.buffer.line_start_char(target_line);
+        let col = m.col.saturating_sub(1).min(self.buffer.line_len(target_line));
+        self.cursor.char_idx = start + col;
+        let (_, sticky) = self.buffer.line_col(&self.cursor);
+        self.cursor.sticky_col = sticky;
+    }
+
+    /// Registers `root` as the current project and immediately chains
+    /// into a find-file picker scoped to it -- matches Projectile's own
+    /// default "switch project" action rather than leaving you with
+    /// nothing to do next. `main_view`/the stash are untouched: we're
+    /// already mid-picker (this runs from `picker_confirm`), just
+    /// swapping which picker is active.
+    fn switch_to_project(&mut self, root: PathBuf) {
+        self.project_root = Some(root.clone());
+        self.known_projects.add(root.clone());
+        if let Err(err) = self.known_projects.save() {
+            eprintln!("fenix: couldn't save project history: {err}");
+        }
+        let candidates = Self::find_file_candidates(&root);
+        self.active_picker = Some(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        self.picker_scroll = 0;
+    }
+
+    /// Routes one keypress to the active picker: plain characters edit
+    /// the query and re-filter, Up/Down or Ctrl-N/Ctrl-P move the
+    /// selection, Enter confirms, Escape cancels -- everything else is
+    /// ignored (the picker is a text-input mode, not an action trie like
+    /// the explorer's, so unrecognized keys just don't do anything
+    /// rather than falling through to something else).
+    fn picker_key(&mut self, key: KeyPress) {
+        let Some(picker) = &mut self.active_picker else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
+            KeyCode::Named(FenixNamedKey::Enter) => self.picker_confirm(),
+            KeyCode::Named(FenixNamedKey::Backspace) => picker_backspace(picker),
+            KeyCode::Named(FenixNamedKey::Down) => picker_move_selection(picker, 1),
+            KeyCode::Named(FenixNamedKey::Up) => picker_move_selection(picker, -1),
+            KeyCode::Char('n') if key.mods.ctrl => picker_move_selection(picker, 1),
+            KeyCode::Char('p') if key.mods.ctrl => picker_move_selection(picker, -1),
+            KeyCode::Char(c) if !key.mods.ctrl => picker_push_char(picker, c),
+            _ => {}
         }
         self.wake_caret();
     }
@@ -561,6 +884,7 @@ impl App {
         self.buffer = buffer;
         self.cursor = Cursor::at_start();
         self.syntax = syntax;
+        self.refresh_project_root();
 
         if self.main_view == MainView::Explorer {
             self.stashed_editor = None;
@@ -709,6 +1033,19 @@ impl App {
             return;
         }
 
+        // The grep search-term prompt and an open picker both capture all
+        // input the same way -- checked ahead of the explorer/sidebar-focus
+        // check below since a picker can be opened while the sidebar is
+        // focused (switch-project's find-file chain, for instance).
+        if self.pending_grep_query.is_some() {
+            self.grep_query_key(keypress);
+            return;
+        }
+        if self.active_picker.is_some() {
+            self.picker_key(keypress);
+            return;
+        }
+
         // The explorer (full-buffer or a focused sidebar) owns all input
         // while it has focus -- its own trie, not Vim's, and not the
         // global Ctrl-chords below (browsing is a distinct modal UI, the
@@ -852,7 +1189,7 @@ impl App {
     /// command, since that replaces the whole modeline with raw command
     /// text instead of the usual badge + filename + position layout.
     fn modeline_pieces(&self) -> Option<(&'static str, String)> {
-        if self.vim.mode() == Mode::Command {
+        if self.vim.mode() == Mode::Command || self.pending_grep_query.is_some() {
             return None;
         }
         if self.main_view == MainView::Explorer {
@@ -865,6 +1202,15 @@ impl App {
                 None => String::new(),
             };
             return Some(("EXPLORE", suffix));
+        }
+        if self.main_view == MainView::Picker {
+            let (label, count) = match &self.active_picker {
+                Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
+                Some(picker @ ActivePicker::Grep(_)) => ("GREP", picker_len(picker)),
+                Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
+                None => ("PICKER", 0),
+            };
+            return Some((label, format!("│ {count} matches ")));
         }
         let filename = self
             .buffer
@@ -888,6 +1234,9 @@ impl App {
         if self.vim.mode() == Mode::Command {
             return format!(":{}", self.vim.command_line());
         }
+        if let Some(query) = &self.pending_grep_query {
+            return format!("rg: {query}");
+        }
         let (mode_label, suffix) = self.modeline_pieces().unwrap();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
     }
@@ -900,6 +1249,9 @@ impl App {
         let theme = self.theme;
         if self.main_view == MainView::Explorer {
             return (theme.mode_explorer, theme.mode_text_dark);
+        }
+        if self.main_view == MainView::Picker {
+            return (theme.mode_picker, theme.mode_text_dark);
         }
         match self.vim.mode() {
             Mode::Normal => (theme.mode_normal, theme.mode_text_dark),
@@ -1188,6 +1540,36 @@ impl App {
         (spans, selected_row, marked_rows)
     }
 
+    /// Builds the picker's visible rows as rich-text spans: row 0 is the
+    /// query prompt (`"> {query}"`), the rows below are the filtered/
+    /// ranked candidates windowed by `self.picker_scroll` -- same shape
+    /// `explorer_row_spans` builds for a directory listing, so both flow
+    /// through the same `set_content_rich` pipeline. Returns the spans
+    /// plus which rendered row (if any) is the current selection, for
+    /// the caller to draw a highlight rect over.
+    fn picker_row_spans(&self, picker: &ActivePicker, rows: usize) -> (RowSpans, Option<usize>) {
+        let theme = self.theme;
+        let mut spans: RowSpans = vec![(format!("> {}", picker_query(picker)), theme.fg, false)];
+
+        let candidate_rows = rows.saturating_sub(1);
+        let visible = picker_visible_labels(picker, self.picker_scroll, candidate_rows);
+        if !visible.is_empty() {
+            spans.push(("\n".to_string(), theme.fg, false));
+        }
+        let count = visible.len();
+        let mut hl_row = None;
+        for (i, (is_selected, label)) in visible.into_iter().enumerate() {
+            if is_selected {
+                hl_row = Some(i + 1);
+            }
+            spans.push((label, theme.fg, false));
+            if i + 1 < count {
+                spans.push(("\n".to_string(), theme.fg, false));
+            }
+        }
+        (spans, hl_row)
+    }
+
     fn redraw(&mut self) {
         let Some(window_height) = self.gpu.as_ref().map(|gpu| gpu.size.height as f32) else {
             return;
@@ -1229,6 +1611,16 @@ impl App {
                     None => (Vec::new(), None, Vec::new()),
                 };
                 (spans, selected_row, marks, Segments::new(), None, None, 0.0f32, 0.0f32)
+            } else if self.main_view == MainView::Picker {
+                let rows = visible_lines + 1;
+                if let Some(picker) = &self.active_picker {
+                    self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), visible_lines);
+                }
+                let (spans, selected_row) = match &self.active_picker {
+                    Some(picker) => self.picker_row_spans(picker, rows),
+                    None => (Vec::new(), None),
+                };
+                (spans, selected_row, Vec::new(), Segments::new(), None, None, 0.0f32, 0.0f32)
             } else {
                 self.ensure_cursor_visible(visible_lines);
                 // Fetch one extra line beyond what's strictly visible:
@@ -1257,8 +1649,13 @@ impl App {
             };
 
         let modeline_pieces = self.modeline_pieces();
-        let modeline_command_text =
-            if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
+        let modeline_command_text = if let Some(query) = &self.pending_grep_query {
+            Some(format!("rg: {query}"))
+        } else if modeline_pieces.is_none() {
+            Some(format!(":{}", self.vim.command_line()))
+        } else {
+            None
+        };
         let (badge_bg, badge_fg) = self.mode_colors();
         let which_key_lines = self.which_key_lines();
         let caret_alpha = self.caret_alpha();
@@ -1937,6 +2334,11 @@ mod tests {
             std::fs::write(&path, b"hello\n").unwrap();
             path
         }
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
     }
     impl Drop for TempDir {
         fn drop(&mut self) {
@@ -2190,5 +2592,229 @@ mod tests {
         app.explorer_prompt_key(KeyPress::char('y'));
         assert!(app.explorer_prompt.is_none());
         assert!(!dir.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn find_file_candidates_labels_are_relative_to_root() {
+        let dir = TempDir::new("find_file_candidates");
+        dir.touch("a.txt");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        dir.write("sub/b.txt", "hello\n");
+
+        let mut labels: Vec<String> =
+            App::find_file_candidates(dir.path()).into_iter().map(|c| c.label).collect();
+        labels.sort();
+        assert_eq!(labels, vec!["a.txt".to_string(), "sub/b.txt".to_string()]);
+    }
+
+    #[test]
+    fn enter_picker_stashes_and_picker_cancel_restores() {
+        let dir = TempDir::new("picker_enter_cancel");
+        let file = dir.touch("a.txt");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.buffer.insert_str(&mut app.cursor, " extra");
+        let dirty_text = app.buffer.text();
+
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(Vec::new())));
+        assert_eq!(app.main_view, MainView::Picker);
+        assert!(app.active_picker.is_some());
+        assert!(app.stashed_editor.is_some());
+
+        app.picker_cancel();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+        assert!(app.stashed_editor.is_none());
+        assert_eq!(app.buffer.text(), dirty_text);
+    }
+
+    #[test]
+    fn picker_confirm_on_find_file_opens_the_selected_path_and_returns_to_editor() {
+        let dir = TempDir::new("picker_confirm_find_file");
+        let target = dir.write("target.txt", "picked contents\n");
+        let mut app = App::with_file(None);
+
+        let candidates = vec![fenix_picker::Candidate::new("target.txt", target.clone())];
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+        assert!(app.stashed_editor.is_none());
+        assert_eq!(app.buffer.path(), Some(target.as_path()));
+        assert_eq!(app.buffer.text(), "picked contents\n");
+    }
+
+    #[test]
+    fn picker_confirm_with_no_matches_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let candidates: Vec<fenix_picker::Candidate<PathBuf>> =
+            vec![fenix_picker::Candidate::new("only.txt", PathBuf::from("only.txt"))];
+        let mut state = fenix_picker::PickerState::new(candidates);
+        state.push_char('z'); // no match against "only.txt"
+        assert!(state.selected().is_none());
+        app.enter_picker(ActivePicker::FindFile(state));
+
+        app.picker_confirm();
+
+        // Nothing to confirm -- still open, nothing stashed/opened changed.
+        assert_eq!(app.main_view, MainView::Picker);
+        assert!(app.active_picker.is_some());
+    }
+
+    #[test]
+    fn run_grep_and_jump_to_grep_match_moves_the_cursor_to_the_match() {
+        let dir = TempDir::new("run_grep");
+        dir.write("a.txt", "line one\nneedle here\nline three\n");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.run_grep("needle");
+
+        match &app.active_picker {
+            Some(ActivePicker::Grep(state)) => assert_eq!(state.len(), 1),
+            other => panic!("expected an open Grep picker with one match, got is_some={}", other.is_some()),
+        }
+        app.picker_confirm();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        let (line, _) = app.buffer.line_col(&app.cursor);
+        assert_eq!(line, 1); // "needle here" is the second line (index 1)
+    }
+
+    #[test]
+    fn run_grep_with_no_matches_still_opens_an_empty_picker() {
+        // `grep_project` treats "no matches" as `Ok(empty)`, not an error
+        // -- `run_grep` still opens the (now-empty) Grep picker rather
+        // than silently doing nothing, so the user sees "no results"
+        // instead of a keypress with no visible effect.
+        let dir = TempDir::new("run_grep_no_matches");
+        dir.write("a.txt", "nothing interesting\n");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.run_grep("needle");
+        assert_eq!(app.main_view, MainView::Picker);
+        match &app.active_picker {
+            Some(ActivePicker::Grep(state)) => assert!(state.is_empty()),
+            _ => panic!("expected an open (empty) Grep picker"),
+        }
+    }
+
+    #[test]
+    fn grep_query_key_routes_chars_backspace_and_enter() {
+        let dir = TempDir::new("grep_query_key");
+        dir.write("a.txt", "target line\n");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.pending_grep_query = Some(String::new());
+
+        for c in "targetx".chars() {
+            app.grep_query_key(KeyPress::char(c));
+        }
+        app.grep_query_key(KeyPress::named(FenixNamedKey::Backspace)); // drop the trailing 'x'
+        assert_eq!(app.pending_grep_query.as_deref(), Some("target"));
+
+        app.grep_query_key(KeyPress::named(FenixNamedKey::Enter));
+        assert!(app.pending_grep_query.is_none()); // submitted, no longer pending
+        assert!(app.active_picker.is_some()); // run_grep found a match and opened a picker
+    }
+
+    #[test]
+    fn grep_query_key_escape_cancels_without_searching() {
+        let mut app = App::with_file(None);
+        app.pending_grep_query = Some("some query".to_string());
+        app.grep_query_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.pending_grep_query.is_none());
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn switch_to_project_registers_the_root_and_chains_into_find_file() {
+        let known_dir = TempDir::new("switch_known");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+
+        let project_dir = TempDir::new("switch_target");
+        project_dir.touch("main.rs");
+
+        // Already mid-picker (as `picker_confirm` would leave it before
+        // dispatching to `switch_to_project`) -- switch shouldn't stash
+        // a second time or touch `main_view`, just swap the active picker.
+        app.enter_picker(ActivePicker::SwitchProject(fenix_picker::PickerState::new(Vec::new())));
+        assert!(app.stashed_editor.is_some());
+
+        app.switch_to_project(project_dir.path().to_path_buf());
+
+        assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
+        assert_eq!(app.known_projects.roots(), &[project_dir.path().to_path_buf()]);
+        assert_eq!(app.main_view, MainView::Picker);
+        assert!(app.stashed_editor.is_some());
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => {
+                assert_eq!(state.selected().map(|c| c.label.as_str()), Some("main.rs"))
+            }
+            _ => panic!("expected switch_to_project to chain into a FindFile picker"),
+        }
+    }
+
+    #[test]
+    fn picker_key_routes_typing_navigation_and_escape() {
+        let candidates = vec![
+            fenix_picker::Candidate::new("apple", PathBuf::from("apple")),
+            fenix_picker::Candidate::new("banana", PathBuf::from("banana")),
+        ];
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+
+        app.picker_key(KeyPress::char('b'));
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => assert_eq!(state.query(), "b"),
+            _ => panic!("expected an active FindFile picker"),
+        }
+
+        app.picker_key(KeyPress::named(FenixNamedKey::Backspace));
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => assert_eq!(state.query(), ""),
+            _ => panic!("expected an active FindFile picker"),
+        }
+
+        app.picker_key(KeyPress::named(FenixNamedKey::Down));
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => assert_eq!(state.selected_row(), 1),
+            _ => panic!("expected an active FindFile picker"),
+        }
+
+        app.picker_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+    }
+
+    #[test]
+    fn picker_key_enter_confirms_the_selection() {
+        let dir = TempDir::new("picker_key_enter");
+        let target = dir.write("only.txt", "confirmed\n");
+        let mut app = App::with_file(None);
+        let candidates = vec![fenix_picker::Candidate::new("only.txt", target.clone())];
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+
+        app.picker_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.buffer.path(), Some(target.as_path()));
+    }
+
+    #[test]
+    fn picker_row_spans_shows_the_query_prompt_and_flags_the_selected_row() {
+        let candidates =
+            vec![fenix_picker::Candidate::new("a.txt", PathBuf::from("a.txt")), fenix_picker::Candidate::new("b.txt", PathBuf::from("b.txt"))];
+        let app = App::with_file(None);
+        let picker = ActivePicker::FindFile(fenix_picker::PickerState::new(candidates));
+
+        let (spans, selected_row) = app.picker_row_spans(&picker, 5);
+        assert_eq!(selected_row, Some(1)); // row 0 is the prompt, row 1 the first candidate
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.starts_with("> "));
+        assert!(joined.contains("a.txt"));
+        assert!(joined.contains("b.txt"));
     }
 }

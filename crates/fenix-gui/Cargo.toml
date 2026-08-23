@@ -9,6 +9,8 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 fenix-core = { path = "../fenix-core" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-keymap = { path = "../fenix-keymap" }
+fenix-picker = { path = "../fenix-picker" }
+fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-vim = { path = "../fenix-vim" }
 glyphon = "0.12.0"

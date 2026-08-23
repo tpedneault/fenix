@@ -497,6 +497,8 @@ dependencies = [
  "fenix-core",
  "fenix-explorer",
  "fenix-keymap",
+ "fenix-picker",
+ "fenix-project",
  "fenix-syntax",
  "fenix-vim",
  "glyphon",

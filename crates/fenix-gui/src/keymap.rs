@@ -105,6 +105,15 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "explorer.toggle_sidebar",
         );
 
+        t.label_group(&[spc, KeyPress::char('p')], "project");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('f')], "find file", "project.find_file");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('s')], "search", "project.grep");
+        t.insert(
+            &[spc, KeyPress::char('p'), KeyPress::char('p')],
+            "switch project",
+            "project.switch_project",
+        );
+
         t
     })
 }
@@ -167,6 +176,35 @@ mod tests {
         match m.feed(KeyPress::char('t')) {
             fenix_keymap::Step::Matched(&"explorer.toggle_sidebar") => {}
             _ => panic!("expected SPC e t to resolve to explorer.toggle_sidebar"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_project_find_file_grep_and_switch_project() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('f')) {
+            fenix_keymap::Step::Matched(&"project.find_file") => {}
+            _ => panic!("expected SPC p f to resolve to project.find_file"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('s')) {
+            fenix_keymap::Step::Matched(&"project.grep") => {}
+            _ => panic!("expected SPC p s to resolve to project.grep"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('p')) {
+            fenix_keymap::Step::Matched(&"project.switch_project") => {}
+            _ => panic!("expected SPC p p to resolve to project.switch_project"),
         }
     }
 }

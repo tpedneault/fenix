@@ -44,6 +44,9 @@ impl CommandRegistry {
             cmd_explorer_jump,
         );
         registry.register("explorer.toggle_sidebar", "Toggle the file explorer sidebar", cmd_toggle_sidebar);
+        registry.register("project.find_file", "Fuzzy-find a file in the current project", cmd_project_find_file);
+        registry.register("project.grep", "Search the current project (ripgrep)", cmd_project_grep);
+        registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
         registry
     }
 
@@ -92,4 +95,16 @@ fn cmd_explorer_jump(ctx: &mut CommandCtx) {
 
 fn cmd_toggle_sidebar(ctx: &mut CommandCtx) {
     ctx.app.toggle_sidebar();
+}
+
+fn cmd_project_find_file(ctx: &mut CommandCtx) {
+    ctx.app.picker_find_file();
+}
+
+fn cmd_project_grep(ctx: &mut CommandCtx) {
+    ctx.app.picker_grep_prompt();
+}
+
+fn cmd_project_switch(ctx: &mut CommandCtx) {
+    ctx.app.picker_switch_project();
 }
