@@ -197,12 +197,17 @@ pub struct App {
     line_number_mode: LineNumberMode,
 
     main_view: MainView,
-    /// The active listing: the full-buffer explorer's when `main_view ==
-    /// Explorer`, the sidebar's when it's open instead. Never both at
-    /// once -- one explorer state at a time keeps the model simple, and
-    /// there's no real use case for both a full-buffer listing and a
-    /// sidebar simultaneously.
+    /// The full-buffer listing (`main_view == Explorer`). A separate
+    /// field from `sidebar` -- they were one shared `Option` early on,
+    /// but that aliased the two uses together: jumping to a full-buffer
+    /// listing while a sidebar was already open would silently clobber
+    /// the sidebar's state out from under it. Independent fields mean
+    /// each mode's state survives the other being invoked.
     explorer: Option<ExplorerState>,
+    /// The sidebar's own listing, independent of `explorer`. `Some` for
+    /// as long as the sidebar is open, regardless of whether it's
+    /// currently focused.
+    sidebar: Option<ExplorerState>,
     sidebar_open: bool,
     /// Whether keys currently route to the sidebar's trie instead of Vim
     /// -- only meaningful while `sidebar_open`. The sidebar stays visible
@@ -260,6 +265,7 @@ impl App {
             line_number_mode: LineNumberMode::Absolute,
             main_view: MainView::Editor,
             explorer: None,
+            sidebar: None,
             sidebar_open: false,
             sidebar_focused: false,
             stashed_editor: None,
@@ -345,12 +351,12 @@ impl App {
         if self.sidebar_open {
             self.sidebar_open = false;
             self.sidebar_focused = false;
-            self.explorer = None;
+            self.sidebar = None;
         } else {
             let dir = self.explorer_start_dir();
             match ExplorerState::open(&dir) {
                 Ok(explorer) => {
-                    self.explorer = Some(explorer);
+                    self.sidebar = Some(explorer);
                     self.sidebar_open = true;
                     self.sidebar_focused = true;
                 }
@@ -360,58 +366,93 @@ impl App {
         self.wake_caret();
     }
 
-    /// Dispatches one explorer command. Each arm takes its own short-lived
-    /// borrow of `self.explorer` rather than one shared across the whole
-    /// match, since a few arms (`Open`, `ParentDir`, `Quit`) need to touch
-    /// other `self` fields too (replacing the buffer, restoring the
-    /// stash) and can't do that while still holding it borrowed.
+    /// The explorer currently receiving input: the full-buffer listing
+    /// when `main_view == Explorer`, else the sidebar's when it's
+    /// focused, else `None` (keys go to Vim instead).
+    fn active_explorer(&self) -> Option<&ExplorerState> {
+        if self.main_view == MainView::Explorer {
+            self.explorer.as_ref()
+        } else if self.sidebar_focused {
+            self.sidebar.as_ref()
+        } else {
+            None
+        }
+    }
+
+    fn active_explorer_mut(&mut self) -> Option<&mut ExplorerState> {
+        if self.main_view == MainView::Explorer {
+            self.explorer.as_mut()
+        } else if self.sidebar_focused {
+            self.sidebar.as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Stores a freshly re-opened `ExplorerState` back into whichever
+    /// slot is currently active -- used after navigating into a
+    /// directory or up to a parent, which replace the whole listing.
+    fn set_active_explorer(&mut self, state: ExplorerState) {
+        if self.main_view == MainView::Explorer {
+            self.explorer = Some(state);
+        } else {
+            self.sidebar = Some(state);
+        }
+    }
+
+    /// Dispatches one explorer command against whichever listing is
+    /// active. Re-fetches `active_explorer_mut()` fresh per arm rather
+    /// than binding it once, since a few arms (`Open`, `ParentDir`,
+    /// `Quit`) need to touch other `self` fields too (replacing the
+    /// buffer, restoring the stash) and can't do that while still
+    /// holding it borrowed.
     fn explorer_handle_action(&mut self, action: ExplorerAction) {
-        if self.explorer.is_none() {
+        if self.active_explorer().is_none() {
             return;
         }
         match action {
             ExplorerAction::Down => {
-                self.explorer.as_mut().unwrap().move_selection(1);
+                self.active_explorer_mut().unwrap().move_selection(1);
             }
             ExplorerAction::Up => {
-                self.explorer.as_mut().unwrap().move_selection(-1);
+                self.active_explorer_mut().unwrap().move_selection(-1);
             }
             ExplorerAction::ToggleExpand => {
-                if let Err(err) = self.explorer.as_mut().unwrap().toggle_expand() {
+                if let Err(err) = self.active_explorer_mut().unwrap().toggle_expand() {
                     eprintln!("fenix: couldn't expand ({err})");
                 }
             }
-            ExplorerAction::ToggleMark => self.explorer.as_mut().unwrap().toggle_mark(),
-            ExplorerAction::MarkAll => self.explorer.as_mut().unwrap().mark_all(),
-            ExplorerAction::UnmarkAll => self.explorer.as_mut().unwrap().unmark_all(),
-            ExplorerAction::ToggleAllMarks => self.explorer.as_mut().unwrap().toggle_all_marks(),
+            ExplorerAction::ToggleMark => self.active_explorer_mut().unwrap().toggle_mark(),
+            ExplorerAction::MarkAll => self.active_explorer_mut().unwrap().mark_all(),
+            ExplorerAction::UnmarkAll => self.active_explorer_mut().unwrap().unmark_all(),
+            ExplorerAction::ToggleAllMarks => self.active_explorer_mut().unwrap().toggle_all_marks(),
             ExplorerAction::ToggleHidden => {
-                if let Err(err) = self.explorer.as_mut().unwrap().toggle_hidden() {
+                if let Err(err) = self.active_explorer_mut().unwrap().toggle_hidden() {
                     eprintln!("fenix: couldn't refresh ({err})");
                 }
             }
             ExplorerAction::Refresh => {
-                if let Err(err) = self.explorer.as_mut().unwrap().refresh() {
+                if let Err(err) = self.active_explorer_mut().unwrap().refresh() {
                     eprintln!("fenix: couldn't refresh ({err})");
                 }
             }
             ExplorerAction::ParentDir => {
-                let parent = self.explorer.as_ref().unwrap().cwd.parent().map(Path::to_path_buf);
+                let parent = self.active_explorer().unwrap().cwd.parent().map(Path::to_path_buf);
                 if let Some(parent) = parent {
                     match ExplorerState::open(&parent) {
-                        Ok(new_state) => self.explorer = Some(new_state),
+                        Ok(new_state) => self.set_active_explorer(new_state),
                         Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
                     }
                 }
             }
             ExplorerAction::Open => self.explorer_open_selected(),
             ExplorerAction::BeginDelete => {
-                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                if !self.active_explorer().unwrap().targets().is_empty() {
                     self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::ConfirmDelete, input: String::new() });
                 }
             }
             ExplorerAction::BeginRename => {
-                if let Some(name) = self.explorer.as_ref().unwrap().selected_entry().map(|e| e.name.clone()) {
+                if let Some(name) = self.active_explorer().unwrap().selected_entry().map(|e| e.name.clone()) {
                     self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::Rename, input: name });
                 }
             }
@@ -422,12 +463,12 @@ impl App {
                 self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CreateDir, input: String::new() });
             }
             ExplorerAction::BeginCopy => {
-                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                if !self.active_explorer().unwrap().targets().is_empty() {
                     self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CopyTo, input: String::new() });
                 }
             }
             ExplorerAction::BeginMove => {
-                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                if !self.active_explorer().unwrap().targets().is_empty() {
                     self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::MoveTo, input: String::new() });
                 }
             }
@@ -443,14 +484,14 @@ impl App {
     /// the new file is now current) or just handing focus back to it
     /// (sidebar mode, which stays open).
     fn explorer_open_selected(&mut self) {
-        let Some(explorer) = &self.explorer else { return };
+        let Some(explorer) = self.active_explorer() else { return };
         let Some(entry) = explorer.selected_entry() else { return };
         let path = entry.path.clone();
         let is_dir = entry.is_dir;
 
         if is_dir {
             match ExplorerState::open(&path) {
-                Ok(new_state) => self.explorer = Some(new_state),
+                Ok(new_state) => self.set_active_explorer(new_state),
                 Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
             }
             return;
@@ -501,7 +542,7 @@ impl App {
         if prompt.kind == PromptKind::ConfirmDelete {
             if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
                 self.explorer_prompt = None;
-                if let Some(explorer) = &mut self.explorer {
+                if let Some(explorer) = self.active_explorer_mut() {
                     if let Err(err) = explorer.delete_targets() {
                         eprintln!("fenix: delete failed: {err}");
                     }
@@ -529,7 +570,7 @@ impl App {
     }
 
     fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
-        let Some(explorer) = &mut self.explorer else { return };
+        let Some(explorer) = self.active_explorer_mut() else { return };
         let result = match kind {
             PromptKind::Rename => explorer.rename_selected(input),
             PromptKind::CreateFile => explorer.create_file(input),
@@ -1704,6 +1745,30 @@ mod tests {
     }
 
     #[test]
+    fn full_buffer_jump_does_not_clobber_an_already_open_sidebar() {
+        // Regression test: `explorer` and `sidebar` used to be one shared
+        // field, which meant jumping to a full-buffer listing while a
+        // sidebar was open silently overwrote the sidebar's state.
+        let sidebar_dir = TempDir::new("jump_no_clobber_sidebar");
+        let jump_dir = TempDir::new("jump_no_clobber_jump");
+        let file = jump_dir.touch("a.txt");
+
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(sidebar_dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.sidebar_focused = false;
+
+        app.buffer = Buffer::from_path(&file).unwrap();
+        app.explorer_jump();
+
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer.as_ref().unwrap().cwd, jump_dir.path());
+        // The sidebar's own listing must be untouched by the jump.
+        assert!(app.sidebar_open);
+        assert_eq!(app.sidebar.as_ref().unwrap().cwd, sidebar_dir.path());
+    }
+
+    #[test]
     fn quitting_full_buffer_explorer_restores_the_stashed_editor() {
         let dir = TempDir::new("jump_quit_restores");
         let file = dir.touch("a.txt");
@@ -1730,12 +1795,12 @@ mod tests {
         app.toggle_sidebar();
         assert!(app.sidebar_open);
         assert!(app.sidebar_focused);
-        assert!(app.explorer.is_some());
+        assert!(app.sidebar.is_some());
 
         app.toggle_sidebar();
         assert!(!app.sidebar_open);
         assert!(!app.sidebar_focused);
-        assert!(app.explorer.is_none());
+        assert!(app.sidebar.is_none());
     }
 
     #[test]
@@ -1772,14 +1837,14 @@ mod tests {
         let dir = TempDir::new("open_file_sidebar");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
         app.sidebar_open = true;
         app.sidebar_focused = true;
 
         app.explorer_open_selected();
         assert!(app.sidebar_open); // sidebar persists
         assert!(!app.sidebar_focused); // focus returns to the editor
-        assert!(app.explorer.is_some());
+        assert!(app.sidebar.is_some());
         assert_eq!(app.buffer.text(), "hello\n");
     }
 
@@ -1790,6 +1855,7 @@ mod tests {
         dir.touch("b");
         let mut app = App::with_file(None);
         app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::Down);
         assert_eq!(app.explorer.as_ref().unwrap().selected, 1);
@@ -1803,6 +1869,7 @@ mod tests {
         dir.touch("old.txt");
         let mut app = App::with_file(None);
         app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginRename);
         assert!(app.explorer_prompt.is_some());
@@ -1826,6 +1893,7 @@ mod tests {
         dir.touch("keep.txt");
         let mut app = App::with_file(None);
         app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
         app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Escape)); // any non-'y' key cancels
@@ -1839,6 +1907,7 @@ mod tests {
         dir.touch("gone.txt");
         let mut app = App::with_file(None);
         app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
         app.explorer_prompt_key(KeyPress::char('y'));
