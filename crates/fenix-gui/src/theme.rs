@@ -215,30 +215,35 @@ pub const ORBIT_DARK: Theme = Theme {
 
 /// A recreation of TempleOS's look, built entirely from the standard
 /// 16-color CGA/EGA palette (the same fixed, well-established set
-/// TempleOS itself is restricted to) -- classic DOS blue background,
-/// bright white text, a yellow blinking-cursor accent, and a white
-/// window frame evoking its text-mode box-drawing borders.
+/// TempleOS itself is restricted to). TempleOS's actual desktop/DolDoc
+/// look (confirmed against real screenshots, not the classic-Borland-
+/// IDE "blue screen" look this theme originally, incorrectly, assumed)
+/// is a **white** page background with black body text, a solid blue
+/// window-chrome/status-bar color, and red/purple/green accent text for
+/// headings, links, and directives -- much closer to a print/document
+/// editor than a dark-background terminal IDE.
 ///
 /// Two disclosed simplifications, not oversights: TempleOS's own HolyC
 /// IDE colors identifiers quasi-randomly per token, which isn't
 /// replicated here (`syntax_color` resolves a fixed color per capture
 /// name everywhere in Fenix, same as every other theme); and
 /// `font_family` is `None` -- TempleOS's look depends heavily on its
-/// bitmap 8x16 VGA-style font, and nothing matching that (Terminus,
-/// Perfect DOS VGA 437, etc.) is installed on this machine to point at,
-/// so body text falls back to the ordinary system monospace font.
+/// bitmap 8x8 VGA-style font, and nothing matching that is installed on
+/// this machine to point at, so body text falls back to the ordinary
+/// system monospace font (see the plan file for the font-bundling
+/// follow-up, pending a licensing decision).
 pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
     font_family: None,
-    border: Some(rgba(0xffffff)),
+    border: Some(rgba(0x0000aa)),
 
-    bg: rgba(0x0000aa),
-    bg_modeline: rgba(0x000000),
-    fg: text_color(0xffffff),
+    bg: rgba(0xffffff),
+    bg_modeline: rgba(0x0000aa),
+    fg: text_color(0x000000),
     fg_modeline: text_color(0xffffff),
     caret: rgba(0xffff55),
-    hl_line: rgba_alpha(0x5555ff, 0.35),
-    selection: rgba_alpha(0xffff55, 0.35),
+    hl_line: rgba_alpha(0x5555ff, 0.15),
+    selection: rgba_alpha(0xffff55, 0.45),
 
     mode_normal: rgba(0x55ff55),
     mode_insert: rgba(0x55ffff),
@@ -250,27 +255,31 @@ pub const TEMPLEOS: Theme = Theme {
     mode_text_dark: text_color(0x000000),
     mode_text_light: text_color(0xffffff),
 
-    gutter_fg: text_color(0xaaaaaa),
+    gutter_fg: text_color(0x555555),
 
-    syntax_keyword: text_color(0xffff55),
-    syntax_string: text_color(0x55ff55),
-    syntax_comment: text_color(0xaaaaaa),
-    syntax_function: text_color(0x55ffff),
-    syntax_type: text_color(0xff55ff),
-    syntax_number: text_color(0xff5555),
+    // Dark/saturated (not the pastel "Light*") variants throughout --
+    // body text sits on the white page background now, where the pastel
+    // half of the 16-color set reads as barely-there instead of a
+    // bright accent.
+    syntax_keyword: text_color(0x0000aa),
+    syntax_string: text_color(0x00aa00),
+    syntax_comment: text_color(0x555555),
+    syntax_function: text_color(0xaa00aa),
+    syntax_type: text_color(0x00aaaa),
+    syntax_number: text_color(0xaa0000),
     syntax_constant: text_color(0xaa5500),
-    syntax_variable: text_color(0xffffff),
-    syntax_operator: text_color(0x5555ff),
-    syntax_punctuation: text_color(0xaaaaaa),
+    syntax_variable: text_color(0x000000),
+    syntax_operator: text_color(0x000000),
+    syntax_punctuation: text_color(0x555555),
     syntax_attribute: text_color(0x00aaaa),
 
-    icon_folder: text_color(0xffff55),
-    icon_file: text_color(0xffffff),
+    icon_folder: text_color(0x0000aa),
+    icon_file: text_color(0x000000),
     git_modified: text_color(0xaa5500),
-    git_staged: text_color(0x55ff55),
-    git_untracked: text_color(0x55ffff),
-    git_ignored: text_color(0x555555),
-    git_conflicted: text_color(0xff5555),
+    git_staged: text_color(0x00aa00),
+    git_untracked: text_color(0x00aaaa),
+    git_ignored: text_color(0xaaaaaa),
+    git_conflicted: text_color(0xaa0000),
 };
 
 /// Every theme Fenix ships, in cycling order. `App::cycle_theme` and
