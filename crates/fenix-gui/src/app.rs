@@ -1148,6 +1148,27 @@ impl App {
         self.wake_caret();
     }
 
+    /// What to show in place of the modeline while `explorer_prompt` is
+    /// active -- previously nothing rendered it at all, so typing a
+    /// rename/create/copy/move was invisible (the state was captured
+    /// correctly, there was just no on-screen feedback that a prompt was
+    /// even open). Mirrors `:`/`/`'s own "the modeline becomes the
+    /// prompt" convention.
+    fn explorer_prompt_text(&self) -> Option<String> {
+        let prompt = self.explorer_prompt.as_ref()?;
+        Some(match prompt.kind {
+            PromptKind::ConfirmDelete => {
+                let n = self.active_explorer().map(|e| e.targets().len()).unwrap_or(0);
+                format!("Delete {n} item{}? (y/n)", if n == 1 { "" } else { "s" })
+            }
+            PromptKind::Rename => format!("Rename to: {}", prompt.input),
+            PromptKind::CreateFile => format!("Create file: {}", prompt.input),
+            PromptKind::CreateDir => format!("Create directory: {}", prompt.input),
+            PromptKind::CopyTo => format!("Copy to: {}", prompt.input),
+            PromptKind::MoveTo => format!("Move to: {}", prompt.input),
+        })
+    }
+
     fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
         let Some(explorer) = self.active_explorer_mut() else { return };
         let result = match kind {
@@ -1541,7 +1562,11 @@ impl App {
     /// whole modeline with raw prompt text instead of the usual badge +
     /// filename + position layout.
     fn modeline_pieces(&self) -> Option<(&'static str, String)> {
-        if self.vim.mode() == Mode::Command || self.vim.mode() == Mode::Search || self.pending_grep_query.is_some() {
+        if self.vim.mode() == Mode::Command
+            || self.vim.mode() == Mode::Search
+            || self.pending_grep_query.is_some()
+            || self.explorer_prompt.is_some()
+        {
             return None;
         }
         if self.main_view == MainView::Explorer {
@@ -1601,6 +1626,9 @@ impl App {
         }
         if let Some(query) = &self.pending_grep_query {
             return format!("rg: {query}");
+        }
+        if let Some(prompt_text) = self.explorer_prompt_text() {
+            return prompt_text;
         }
         let (mode_label, suffix) = self.modeline_pieces().unwrap();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
@@ -2220,6 +2248,8 @@ impl App {
         } else if self.vim.mode() == Mode::Search {
             let prefix = if self.vim.search_forward() { "/" } else { "?" };
             Some(format!("{prefix}{}", self.vim.search_query()))
+        } else if let Some(prompt_text) = self.explorer_prompt_text() {
+            Some(prompt_text)
         } else if modeline_pieces.is_none() {
             Some(format!(":{}", self.vim.command_line()))
         } else {
@@ -2333,11 +2363,25 @@ impl App {
             bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
         }
         if show_sidebar {
-            bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg_modeline);
+            // `theme.bg`, not `theme.bg_modeline` -- the sidebar shows
+            // file/directory names with the same icon/syntax-adjacent
+            // colors the main content area uses (dark, saturated colors
+            // meant to read on `theme.bg`, per `TEMPLEOS`'s own doc
+            // comment), so it needs the *content* background, not the
+            // modeline's. The previous `bg_modeline` choice produced an
+            // unreadable blue-background/black-text combination on the
+            // TempleOS theme specifically (ORBIT_DARK's own bg/bg_modeline
+            // are close enough in value that this went unnoticed there).
+            bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg);
             if let Some((_, Some(selected_row), _)) = &sidebar_render {
                 let y = sidebar_row_y(*selected_row);
                 bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, line_height, theme.hl_line);
             }
+            // A thin divider along the sidebar's own right edge, same
+            // color/weight as the ones between split panes, so there's a
+            // visible seam now that it's no longer a different color
+            // from the content area next to it.
+            bg_rect.push_rect(gpu, text::SIDEBAR_WIDTH - 1.0, 0.0, 2.0, modeline_top, theme.divider);
         }
         // Divider lines along every split boundary the layout computed --
         // drawn from each pane's own right/bottom edge, so two adjacent
@@ -3571,6 +3615,48 @@ mod tests {
         app.explorer_prompt_key(KeyPress::char('y'));
         assert!(app.explorer_prompt.is_none());
         assert!(!dir.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn modeline_shows_the_rename_prompt_as_it_is_typed() {
+        // Previously nothing rendered `explorer_prompt` at all -- typing
+        // a rename/create/copy/move was silently invisible even though
+        // the state was captured correctly.
+        let dir = TempDir::new("rename_prompt_modeline");
+        dir.touch("old.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
+
+        app.explorer_handle_action(ExplorerAction::BeginRename);
+        assert_eq!(app.modeline_text(), "Rename to: old.txt");
+        app.explorer_prompt_key(KeyPress::char('x'));
+        assert_eq!(app.modeline_text(), "Rename to: old.txtx");
+    }
+
+    #[test]
+    fn modeline_shows_the_delete_confirmation_with_the_target_count() {
+        let dir = TempDir::new("delete_prompt_modeline");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
+
+        app.explorer_handle_action(ExplorerAction::BeginDelete);
+        assert_eq!(app.modeline_text(), "Delete 1 item? (y/n)");
+    }
+
+    #[test]
+    fn modeline_shows_the_create_file_prompt_from_the_sidebar_too() {
+        let dir = TempDir::new("create_prompt_sidebar");
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_focused = true;
+
+        app.explorer_handle_action(ExplorerAction::BeginCreateFile);
+        assert_eq!(app.modeline_text(), "Create file: ");
+        app.explorer_prompt_key(KeyPress::char('x'));
+        assert_eq!(app.modeline_text(), "Create file: x");
     }
 
     #[test]
