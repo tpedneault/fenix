@@ -36,10 +36,15 @@ pub struct Theme {
     /// Current-line highlight -- orbit-dark's own "bg-hl", the shade its
     /// palette table names for exactly this purpose.
     pub hl_line: [f32; 4],
-    /// Visual-mode selection: the caret's amber hue at low alpha, drawn
-    /// over text. A solid dark shade close to `bg` (the original choice
-    /// here, before `hl_line` existed to actually use that color) wasn't
-    /// visibly distinguishable from the background.
+    /// Visual-mode selection, and the "this row is the one selected"
+    /// highlight for the sidebar/explorer/picker lists. Needs real
+    /// contrast against `bg` on its own -- unlike `hl_line`, nothing else
+    /// (no caret) backs it up in the sidebar, so a hue too close to `bg`
+    /// reads as barely-there regardless of alpha (a light hue like yellow
+    /// blended over a light `bg` moves least in the channels that already
+    /// matched, which is what made TempleOS's original choice here hard to
+    /// see -- picking a hue further from `bg` fixes that, not just a
+    /// bigger alpha).
     pub selection: [f32; 4],
     /// Backdrop drawn behind a bracket and its match when the cursor
     /// sits on one of `(){}[]` -- a distinct color from `selection`/
@@ -254,7 +259,12 @@ pub const TEMPLEOS: Theme = Theme {
     fg_modeline: text_color(0xffffff),
     caret: rgba(0xffff55),
     hl_line: rgba_alpha(0x5555ff, 0.15),
-    selection: rgba_alpha(0xffff55, 0.45),
+    // Blue, not yellow: yellow's R/G channels already match the white
+    // `bg`, so blending only ever moves the B channel -- no alpha gets it
+    // past a barely-there pale tint. Blue's channels are all far from
+    // white's, so the same "moderate alpha overlay" approach every other
+    // theme/highlight here uses actually produces visible contrast.
+    selection: rgba_alpha(0x0000aa, 0.45),
     bracket_match: rgba_alpha(0x00aa00, 0.35),
 
     mode_normal: rgba(0x55ff55),

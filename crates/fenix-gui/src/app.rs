@@ -1208,7 +1208,15 @@ impl App {
     /// by real layout geometry, not tree adjacency -- a no-op at the
     /// grid's edge (`WindowTree::navigate`'s own contract).
     pub(crate) fn navigate_window(&mut self, dir: NavDirection) {
-        self.windows_mut().navigate(dir);
+        let moved = self.windows_mut().navigate(dir);
+        // The sidebar isn't a leaf in `WindowTree` -- it's a separate panel
+        // drawn to the left of it -- so plain `navigate(Left)` has no way to
+        // reach it. Treat it as one more step further left: only when
+        // ordinary window navigation can't move any further (already at the
+        // leftmost pane) does `Left` hand focus to an open sidebar instead.
+        if dir == NavDirection::Left && !moved && self.sidebar_open && !self.sidebar_focused {
+            self.sidebar_focused = true;
+        }
         self.wake_caret();
     }
 
@@ -3372,6 +3380,32 @@ mod tests {
 
         app.navigate_window(fenix_window::NavDirection::Left);
         assert_eq!(app.windows().focused_id(), left);
+    }
+
+    #[test]
+    fn navigate_window_left_from_the_leftmost_pane_focuses_an_open_sidebar() {
+        let dir = TempDir::new("nav_left_into_sidebar");
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        assert!(!app.sidebar_focused);
+
+        app.navigate_window(fenix_window::NavDirection::Left);
+        assert!(app.sidebar_focused);
+    }
+
+    #[test]
+    fn navigate_window_left_prefers_an_actual_pane_over_the_sidebar() {
+        let dir = TempDir::new("nav_left_prefers_pane");
+        let mut app = App::with_file(None);
+        let left = app.windows().focused_id();
+        app.split_vertical(); // new pane to the right, becomes focused
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+
+        app.navigate_window(fenix_window::NavDirection::Left);
+        assert_eq!(app.windows().focused_id(), left);
+        assert!(!app.sidebar_focused);
     }
 
     #[test]
