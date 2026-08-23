@@ -3358,6 +3358,23 @@ mod tests {
     }
 
     #[test]
+    fn which_key_popup_widens_to_fit_a_longer_label_than_the_minimum() {
+        let mut app = App::with_file(None);
+        app.leader_matcher.feed(KeyPress::char(' '));
+        let (root_rect, _) = app.which_key_popup(800.0, 580.0).unwrap(); // short group labels only
+
+        app.leader_matcher = keymap::leader_trie().matcher();
+        app.leader_matcher.feed(KeyPress::char(' '));
+        app.leader_matcher.feed(KeyPress::named(FenixNamedKey::Tab)); // "remove workspace" (16 chars) lives here
+        let (workspace_rect, spans) = app.which_key_popup(800.0, 580.0).unwrap();
+
+        assert_eq!(root_rect.w, text::WHICH_KEY_MIN_WIDTH); // short labels clamp to the floor
+        assert!(workspace_rect.w > root_rect.w); // longer label pushes the panel wider
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("remove workspace")); // never character-truncated
+    }
+
+    #[test]
     fn which_key_popup_truncates_and_reports_how_many_more_when_content_overflows() {
         let mut app = App::with_file(None);
         app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups, more than fit below
