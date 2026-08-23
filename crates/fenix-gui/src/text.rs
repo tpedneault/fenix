@@ -44,6 +44,11 @@ pub struct TextPipeline {
     modeline: GlyphBuffer,
     which_key: GlyphBuffer,
     sidebar: GlyphBuffer,
+    /// Body-text font family for the active theme -- `None` resolves to
+    /// `Family::Monospace` (see `content_family`), `Some(name)` to
+    /// `Family::Name(name)`. Icon spans in `rich_spans` are unaffected,
+    /// always `ICON_FONT_FAMILY` regardless of this.
+    content_family: Option<&'static str>,
 }
 
 impl TextPipeline {
@@ -72,27 +77,42 @@ impl TextPipeline {
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32)));
 
-        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key, sidebar }
+        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key, sidebar, content_family: None }
+    }
+
+    /// Resolves the active theme's body-text font: `Family::Name(_)` when
+    /// `Theme::font_family` names one, else the generic `Family::Monospace`
+    /// fallback every theme used before this existed.
+    fn content_family(&self) -> Family<'static> {
+        self.content_family.map(Family::Name).unwrap_or(Family::Monospace)
+    }
+
+    /// Adopts `theme`'s font choice for all subsequent `set_*` calls --
+    /// called once per `redraw()`, before them. Cheap (just a field copy)
+    /// even called unconditionally every frame.
+    pub fn set_theme(&mut self, theme: &Theme) {
+        self.content_family = theme.font_family;
     }
 
     /// Plain, single-color content text -- used only for the very first
     /// frame's priming call in `App::resumed`, before the first real
     /// `redraw()` (which always uses `set_content_rich` instead) runs.
     pub fn set_text(&mut self, text: &str) {
-        self.buffer.set_text(text, &Attrs::new().family(Family::Monospace), Shaping::Advanced, None);
+        self.buffer.set_text(text, &Attrs::new().family(self.content_family()), Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Builds rich-text spans from `(text, color, use_icon_font)` triples --
     /// the icon flag switches that one span to `ICON_FONT_FAMILY` instead
-    /// of the body monospace font, letting an icon glyph and ordinary text
-    /// sit in the same row (same mechanism `content_spans`/explorer row
-    /// building already mix gutter numbers and line text with).
-    fn rich_spans<'a>(segments: &'a [(&'a str, Color, bool)]) -> Vec<(&'a str, Attrs<'a>)> {
+    /// of the body font, letting an icon glyph and ordinary text sit in
+    /// the same row (same mechanism `content_spans`/explorer row building
+    /// already mix gutter numbers and line text with).
+    fn rich_spans<'a>(&self, segments: &'a [(&'a str, Color, bool)]) -> Vec<(&'a str, Attrs<'a>)> {
+        let body_family = self.content_family();
         segments
             .iter()
             .map(|(text, color, is_icon)| {
-                let family = if *is_icon { Family::Name(ICON_FONT_FAMILY) } else { Family::Monospace };
+                let family = if *is_icon { Family::Name(ICON_FONT_FAMILY) } else { body_family };
                 (*text, Attrs::new().family(family).color(*color))
             })
             .collect()
@@ -104,8 +124,9 @@ impl TextPipeline {
     /// full-buffer explorer mode) a directory listing's icon/name/
     /// attribute columns.
     pub fn set_content_rich(&mut self, segments: &[(&str, Color, bool)]) {
-        let default_attrs = Attrs::new().family(Family::Monospace);
-        self.buffer.set_rich_text(Self::rich_spans(segments), &default_attrs, Shaping::Advanced, None);
+        let default_attrs = Attrs::new().family(self.content_family());
+        let spans = self.rich_spans(segments);
+        self.buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -115,22 +136,16 @@ impl TextPipeline {
     /// takes rich text instead of a plain string like `set_text`/
     /// `set_which_key_text`.
     pub fn set_modeline_text(&mut self, segments: &[(&str, Color)]) {
-        let default_attrs = Attrs::new().family(Family::Monospace);
-        let spans: Vec<(&str, Attrs)> = segments
-            .iter()
-            .map(|(text, color)| (*text, Attrs::new().family(Family::Monospace).color(*color)))
-            .collect();
+        let body_family = self.content_family();
+        let default_attrs = Attrs::new().family(body_family);
+        let spans: Vec<(&str, Attrs)> =
+            segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
         self.modeline.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
     pub fn set_which_key_text(&mut self, text: &str) {
-        self.which_key.set_text(
-            text,
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
+        self.which_key.set_text(text, &Attrs::new().family(self.content_family()), Shaping::Advanced, None);
         self.which_key.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -139,8 +154,9 @@ impl TextPipeline {
     /// sidebar renders alongside the editor content, not interleaved
     /// with it.
     pub fn set_sidebar_rich(&mut self, segments: &[(&str, Color, bool)]) {
-        let default_attrs = Attrs::new().family(Family::Monospace);
-        self.sidebar.set_rich_text(Self::rich_spans(segments), &default_attrs, Shaping::Advanced, None);
+        let default_attrs = Attrs::new().family(self.content_family());
+        let spans = self.rich_spans(segments);
+        self.sidebar.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
 

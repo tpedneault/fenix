@@ -38,6 +38,7 @@ impl CommandRegistry {
             "Cycle the line-number gutter: off, absolute, relative",
             cmd_cycle_line_numbers,
         );
+        registry.register("view.cycle_theme", "Cycle to the next theme", cmd_cycle_theme);
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",
@@ -87,6 +88,10 @@ fn cmd_quit(ctx: &mut CommandCtx) {
 
 fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
     ctx.app.cycle_line_number_mode();
+}
+
+fn cmd_cycle_theme(ctx: &mut CommandCtx) {
+    ctx.app.cycle_theme();
 }
 
 fn cmd_explorer_jump(ctx: &mut CommandCtx) {

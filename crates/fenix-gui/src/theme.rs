@@ -1,7 +1,30 @@
-/// Hardcoded color palette, borrowed from `orbit-emacs`'s `orbit-dark` theme
-/// for visual continuity. A generalized/swappable theme system is Phase 5
-/// work; for now this is a single fixed set of colors.
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// A named, swappable color palette (plus a couple of non-color style
+/// knobs -- font family, window border). Every field is consumed
+/// generically by rendering code (`syntax_color`, `git_status_color`,
+/// `App::mode_colors`, every `theme.SOMETHING` read in `App::redraw`) --
+/// adding a second `Theme` value and pointing `App` at it is the entire
+/// integration surface, no per-theme special-casing elsewhere.
 pub struct Theme {
+    /// Display/persistence identity -- also used for `by_name` lookup
+    /// and cycling, since two separate `&SOME_CONST` expressions aren't
+    /// guaranteed by Rust to share an address (no pointer-identity
+    /// bookkeeping here).
+    pub name: &'static str,
+    /// Body-text font family. `None` falls back to the generic
+    /// `Family::Monospace` (today's only behavior); `Some(family)` asks
+    /// `cosmic-text`'s system font database for that family by name,
+    /// same mechanism already proven for the file explorer's Nerd Font
+    /// icons (`icon::ICON_FONT_FAMILY`). Not a guarantee the font is
+    /// actually installed -- an unresolvable name falls back to
+    /// `fontdb`'s own default substitution.
+    pub font_family: Option<&'static str>,
+    /// Thin colored frame drawn around the whole window when `Some`.
+    /// `None` (today's only behavior) draws nothing.
+    pub border: Option<[f32; 4]>,
+
     pub bg: [f32; 4],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
@@ -145,6 +168,10 @@ const fn text_color(hex: u32) -> glyphon::Color {
 }
 
 pub const ORBIT_DARK: Theme = Theme {
+    name: "Orbit Dark",
+    font_family: None,
+    border: None,
+
     bg: rgba(0x1a1b26),
     bg_modeline: rgba(0x24283b),
     fg: text_color(0xc0caf5),
@@ -186,6 +213,108 @@ pub const ORBIT_DARK: Theme = Theme {
     git_conflicted: text_color(0xf7768e),
 };
 
+/// A recreation of TempleOS's look, built entirely from the standard
+/// 16-color CGA/EGA palette (the same fixed, well-established set
+/// TempleOS itself is restricted to) -- classic DOS blue background,
+/// bright white text, a yellow blinking-cursor accent, and a white
+/// window frame evoking its text-mode box-drawing borders.
+///
+/// Two disclosed simplifications, not oversights: TempleOS's own HolyC
+/// IDE colors identifiers quasi-randomly per token, which isn't
+/// replicated here (`syntax_color` resolves a fixed color per capture
+/// name everywhere in Fenix, same as every other theme); and
+/// `font_family` is `None` -- TempleOS's look depends heavily on its
+/// bitmap 8x16 VGA-style font, and nothing matching that (Terminus,
+/// Perfect DOS VGA 437, etc.) is installed on this machine to point at,
+/// so body text falls back to the ordinary system monospace font.
+pub const TEMPLEOS: Theme = Theme {
+    name: "TempleOS",
+    font_family: None,
+    border: Some(rgba(0xffffff)),
+
+    bg: rgba(0x0000aa),
+    bg_modeline: rgba(0x000000),
+    fg: text_color(0xffffff),
+    fg_modeline: text_color(0xffffff),
+    caret: rgba(0xffff55),
+    hl_line: rgba_alpha(0x5555ff, 0.35),
+    selection: rgba_alpha(0xffff55, 0.35),
+
+    mode_normal: rgba(0x55ff55),
+    mode_insert: rgba(0x55ffff),
+    mode_visual: rgba(0xff5555),
+    mode_replace: rgba(0xaa5500),
+    mode_command: rgba(0x5555ff),
+    mode_explorer: rgba(0x00aaaa),
+    mode_picker: rgba(0xff55ff),
+    mode_text_dark: text_color(0x000000),
+    mode_text_light: text_color(0xffffff),
+
+    gutter_fg: text_color(0xaaaaaa),
+
+    syntax_keyword: text_color(0xffff55),
+    syntax_string: text_color(0x55ff55),
+    syntax_comment: text_color(0xaaaaaa),
+    syntax_function: text_color(0x55ffff),
+    syntax_type: text_color(0xff55ff),
+    syntax_number: text_color(0xff5555),
+    syntax_constant: text_color(0xaa5500),
+    syntax_variable: text_color(0xffffff),
+    syntax_operator: text_color(0x5555ff),
+    syntax_punctuation: text_color(0xaaaaaa),
+    syntax_attribute: text_color(0x00aaaa),
+
+    icon_folder: text_color(0xffff55),
+    icon_file: text_color(0xffffff),
+    git_modified: text_color(0xaa5500),
+    git_staged: text_color(0x55ff55),
+    git_untracked: text_color(0x55ffff),
+    git_ignored: text_color(0x555555),
+    git_conflicted: text_color(0xff5555),
+};
+
+/// Every theme Fenix ships, in cycling order. `App::cycle_theme` and
+/// `by_name` both work off this.
+pub const ALL: &[&Theme] = &[&ORBIT_DARK, &TEMPLEOS];
+
+/// Case-insensitive lookup by `Theme::name` -- used for persistence
+/// (the saved file just holds a name) and is the reason `name` exists
+/// as a field at all rather than relying on pointer identity, which
+/// Rust doesn't guarantee is stable across separate `&SOME_CONST`
+/// expressions.
+pub fn by_name(name: &str) -> Option<&'static Theme> {
+    ALL.iter().find(|t| t.name.eq_ignore_ascii_case(name)).copied()
+}
+
+/// `dirs::config_dir()/fenix/theme.txt` -- same location convention
+/// `fenix_project::KnownProjects::default_path` already established,
+/// just a different file. `None` only on a platform with no notion of
+/// a config directory at all.
+pub fn default_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("fenix").join("theme.txt"))
+}
+
+/// Loads the persisted theme choice from `path`, falling back to
+/// `ORBIT_DARK` on any failure -- missing file, unreadable file, or a
+/// name that doesn't match any known theme. This is a convenience
+/// preference, not critical data, so it never fails outright -- same
+/// posture as `fenix_project::KnownProjects::load_or_default`.
+pub fn load_from(path: &Path) -> &'static Theme {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => by_name(contents.trim()).unwrap_or(&ORBIT_DARK),
+        Err(_) => &ORBIT_DARK,
+    }
+}
+
+/// Persists `theme`'s name to `path`, creating parent directories as
+/// needed -- mirrors `KnownProjects::save`'s shape exactly.
+pub fn save_to(theme: &Theme, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, theme.name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +352,86 @@ mod tests {
         assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Untracked), ORBIT_DARK.git_untracked);
         assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Ignored), ORBIT_DARK.git_ignored);
         assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Conflicted), ORBIT_DARK.git_conflicted);
+    }
+
+    #[test]
+    fn templeos_syntax_and_git_colors_resolve_the_same_generic_way() {
+        // TEMPLEOS is a plain data value like ORBIT_DARK -- no special
+        // casing anywhere in `syntax_color`/`git_status_color`, so this
+        // is really a check that the const itself is well-formed.
+        assert_eq!(TEMPLEOS.syntax_color("keyword"), TEMPLEOS.syntax_keyword);
+        assert_eq!(TEMPLEOS.syntax_color("function.method"), TEMPLEOS.syntax_function);
+        assert_eq!(TEMPLEOS.syntax_color("some.unknown.capture"), TEMPLEOS.fg);
+        use fenix_explorer::GitStatus;
+        assert_eq!(TEMPLEOS.git_status_color(GitStatus::Staged), TEMPLEOS.git_staged);
+    }
+
+    #[test]
+    fn all_contains_exactly_orbit_dark_and_templeos_by_name() {
+        let names: Vec<&str> = ALL.iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["Orbit Dark", "TempleOS"]);
+    }
+
+    #[test]
+    fn by_name_is_case_insensitive_and_none_for_unknown() {
+        assert_eq!(by_name("templeos").map(|t| t.name), Some("TempleOS"));
+        assert_eq!(by_name("TEMPLEOS").map(|t| t.name), Some("TempleOS"));
+        assert_eq!(by_name("orbit dark").map(|t| t.name), Some("Orbit Dark"));
+        assert!(by_name("nonexistent-theme").is_none());
+    }
+
+    /// A real, uniquely-named temp directory, removed on drop -- same
+    /// reasoning as every other crate's own `TempDir`: persistence here
+    /// is real filesystem I/O, tested against a real filesystem.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("fenix-gui-theme-test-{name}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_from_a_missing_file_falls_back_to_orbit_dark() {
+        let dir = TempDir::new("load_missing");
+        let theme = load_from(&dir.path().join("does-not-exist.txt"));
+        assert_eq!(theme.name, "Orbit Dark");
+    }
+
+    #[test]
+    fn load_from_an_unrecognized_name_falls_back_to_orbit_dark() {
+        let dir = TempDir::new("load_unrecognized");
+        let path = dir.path().join("theme.txt");
+        std::fs::write(&path, "not-a-real-theme").unwrap();
+        let theme = load_from(&path);
+        assert_eq!(theme.name, "Orbit Dark");
+    }
+
+    #[test]
+    fn save_to_then_load_from_round_trips() {
+        let dir = TempDir::new("save_round_trip");
+        let path = dir.path().join("theme.txt");
+        save_to(&TEMPLEOS, &path).unwrap();
+        assert_eq!(load_from(&path).name, "TempleOS");
+    }
+
+    #[test]
+    fn save_to_creates_missing_parent_directories() {
+        let dir = TempDir::new("save_creates_parents");
+        let path = dir.path().join("nested").join("config").join("theme.txt");
+        save_to(&ORBIT_DARK, &path).unwrap();
+        assert!(path.exists());
     }
 }

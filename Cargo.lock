@@ -494,6 +494,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "dirs",
  "fenix-core",
  "fenix-explorer",
  "fenix-keymap",

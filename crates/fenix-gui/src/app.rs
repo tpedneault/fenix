@@ -48,6 +48,11 @@ const SCROLL_DURATION: Duration = Duration::from_millis(150);
 /// on screen).
 const SCROLL_SNAP_SCREENS: usize = 3;
 
+/// Thickness of a themed window border (`Theme::border`), when the
+/// active theme draws one. Comfortably inside `text::PAD_TOP` (4px) and
+/// `text::PAD_LEFT` (8px) so it can never clip into body text.
+const BORDER_WIDTH: f32 = 3.0;
+
 /// An active yank/paste highlight, fading out over `PULSE_DURATION`.
 struct Pulse {
     range: std::ops::Range<usize>,
@@ -381,6 +386,12 @@ pub struct App {
     explorer_matcher: Matcher<'static, ExplorerAction>,
 
     theme: &'static Theme,
+    /// Where the current theme choice is persisted -- resolved once at
+    /// startup (`theme::default_path()`, falling back to a relative path
+    /// on the rare platform with no config-directory concept, same
+    /// fallback `known_projects_path` already uses) and reused by every
+    /// `cycle_theme` save.
+    theme_path: PathBuf,
 
     modifiers: ModifiersState,
     /// Whether the caret is fading toward visible or toward hidden --
@@ -411,6 +422,8 @@ impl App {
             known_projects.add(root.clone());
             let _ = known_projects.save();
         }
+        let theme_path = theme::default_path().unwrap_or_else(|| PathBuf::from("fenix-theme.txt"));
+        let theme = theme::load_from(&theme_path);
 
         Self {
             window: None,
@@ -442,7 +455,8 @@ impl App {
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
-            theme: &theme::ORBIT_DARK,
+            theme,
+            theme_path,
             modifiers: ModifiersState::empty(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
@@ -988,6 +1002,23 @@ impl App {
             LineNumberMode::Absolute => LineNumberMode::Relative,
             LineNumberMode::Relative => LineNumberMode::Off,
         };
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// `SPC t t`: cycles to the next theme in `theme::ALL` (wrapping) and
+    /// persists the choice -- matched by `name`, not pointer identity,
+    /// which Rust doesn't guarantee is stable across separate `&SOME_CONST`
+    /// expressions. Save failure is non-fatal, same posture as
+    /// `refresh_project_root`'s `known_projects.save()`.
+    pub(crate) fn cycle_theme(&mut self) {
+        let current = theme::ALL.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
+        let next = (current + 1) % theme::ALL.len();
+        self.theme = theme::ALL[next];
+        if let Err(err) = theme::save_to(self.theme, &self.theme_path) {
+            eprintln!("fenix: couldn't save theme choice: {err}");
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -1667,6 +1698,7 @@ impl App {
             return;
         };
 
+        text.set_theme(theme);
         let content_refs: Vec<(&str, glyphon::Color, bool)> =
             content_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
         text.set_content_rich(&content_refs);
@@ -1757,6 +1789,19 @@ impl App {
                 let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
                 bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
             }
+        }
+        // Layered last -- on top of everything else pushed to `bg_rect`
+        // this frame (modeline bar, hl-line, selection, which-key/sidebar
+        // backgrounds) -- so a themed border reads as the outermost frame
+        // around the whole window rather than something those cover.
+        // `BORDER_WIDTH` sits comfortably inside `PAD_TOP`/`PAD_LEFT`, so
+        // it can't clip into body text.
+        if let Some(border) = theme.border {
+            let (w, h) = (gpu.size.width as f32, gpu.size.height as f32);
+            bg_rect.push_rect(gpu, 0.0, 0.0, w, BORDER_WIDTH, border);
+            bg_rect.push_rect(gpu, 0.0, h - BORDER_WIDTH, w, BORDER_WIDTH, border);
+            bg_rect.push_rect(gpu, 0.0, 0.0, BORDER_WIDTH, h, border);
+            bg_rect.push_rect(gpu, w - BORDER_WIDTH, 0.0, BORDER_WIDTH, h, border);
         }
         bg_rect.flush(gpu);
 
@@ -2254,6 +2299,25 @@ mod tests {
         assert_eq!(app.line_number_mode, LineNumberMode::Relative);
         app.cycle_line_number_mode();
         assert_eq!(app.line_number_mode, LineNumberMode::Off);
+    }
+
+    #[test]
+    fn cycle_theme_wraps_through_all_themes_and_persists() {
+        let dir = TempDir::new("cycle_theme");
+        let mut app = App::with_file(None);
+        app.theme_path = dir.path().join("theme.txt");
+        // Fixed starting point -- not asserted from `with_file`'s own
+        // load, since that reads the *real* config path and would be
+        // flaky against whatever's actually persisted on this machine.
+        app.theme = &theme::ORBIT_DARK;
+
+        app.cycle_theme();
+        assert_eq!(app.theme.name, "TempleOS");
+        assert_eq!(theme::load_from(&app.theme_path).name, "TempleOS"); // persisted
+
+        app.cycle_theme();
+        assert_eq!(app.theme.name, "Orbit Dark"); // wrapped back around
+        assert_eq!(theme::load_from(&app.theme_path).name, "Orbit Dark");
     }
 
     #[test]

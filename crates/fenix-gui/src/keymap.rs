@@ -97,6 +97,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "line numbers",
             "view.cycle_line_numbers",
         );
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('t')], "theme", "view.cycle_theme");
 
         t.label_group(&[spc, KeyPress::char('e')], "explorer");
         t.insert(
@@ -155,6 +156,18 @@ mod tests {
         match m.feed(KeyPress::char('n')) {
             fenix_keymap::Step::Matched(&"view.cycle_line_numbers") => {}
             _ => panic!("expected SPC t n to resolve to view.cycle_line_numbers"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_theme_cycle() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('t'));
+        match m.feed(KeyPress::char('t')) {
+            fenix_keymap::Step::Matched(&"view.cycle_theme") => {}
+            _ => panic!("expected SPC t t to resolve to view.cycle_theme"),
         }
     }
 
