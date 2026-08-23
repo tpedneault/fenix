@@ -1,8 +1,10 @@
 use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fenix_keymap::{KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
+use fenix_explorer::{ExplorerAction, ExplorerState};
+use fenix_keymap::{KeyCode, KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -71,6 +73,34 @@ enum LineNumberMode {
     Off,
     Absolute,
     Relative,
+}
+
+/// What occupies the main content area: the editor buffer, or a
+/// full-buffer directory listing (dired-jump-style -- "visiting a
+/// directory" the way visiting a file replaces the buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Editor,
+    Explorer,
+}
+
+/// Which explorer-mode prompt (if any) is capturing the next keystrokes --
+/// same "next key(s) mean something special" pattern `fenix-vim`'s
+/// `Mode::Command`/`pending_replace` already use, applied to file-manager
+/// text input instead of Vim's own command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptKind {
+    ConfirmDelete,
+    Rename,
+    CreateFile,
+    CreateDir,
+    CopyTo,
+    MoveTo,
+}
+
+struct ExplorerPrompt {
+    kind: PromptKind,
+    input: String,
 }
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
@@ -166,6 +196,24 @@ pub struct App {
     /// See `LineNumberMode` doc comment -- hardcoded for now.
     line_number_mode: LineNumberMode,
 
+    main_view: MainView,
+    /// The active listing: the full-buffer explorer's when `main_view ==
+    /// Explorer`, the sidebar's when it's open instead. Never both at
+    /// once -- one explorer state at a time keeps the model simple, and
+    /// there's no real use case for both a full-buffer listing and a
+    /// sidebar simultaneously.
+    explorer: Option<ExplorerState>,
+    sidebar_open: bool,
+    /// Whether keys currently route to the sidebar's trie instead of Vim
+    /// -- only meaningful while `sidebar_open`. The sidebar stays visible
+    /// but unfocused while editing, like a persistent project tree.
+    sidebar_focused: bool,
+    /// The editor state stashed when entering full-buffer explorer mode,
+    /// restored if the explorer is quit without opening a file, dropped
+    /// if a file *is* opened (the new file becomes current).
+    stashed_editor: Option<(Buffer, Cursor, Option<fenix_syntax::SyntaxState>)>,
+    explorer_prompt: Option<ExplorerPrompt>,
+
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
     /// `handle_key` calls; `'static` because the leader trie is a global
@@ -192,19 +240,10 @@ impl App {
     }
 
     fn with_file(file_arg: Option<String>) -> Self {
-        let buffer = match file_arg.as_deref() {
-            Some(path) => Buffer::from_path(path).unwrap_or_else(|err| {
-                eprintln!("fenix: couldn't open {path} ({err}), starting empty buffer");
-                Buffer::empty()
-            }),
-            None => Buffer::empty(),
+        let (buffer, syntax) = match file_arg {
+            Some(path) => Self::buffer_and_syntax_for_path(Path::new(&path)),
+            None => (Buffer::empty(), None),
         };
-        let syntax = buffer
-            .path()
-            .and_then(|p| p.extension())
-            .and_then(|ext| ext.to_str())
-            .and_then(fenix_syntax::detect_language)
-            .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
 
         Self {
             window: None,
@@ -219,6 +258,12 @@ impl App {
             rendered_scroll: 0.0,
             scroll_anim: None,
             line_number_mode: LineNumberMode::Absolute,
+            main_view: MainView::Editor,
+            explorer: None,
+            sidebar_open: false,
+            sidebar_focused: false,
+            stashed_editor: None,
+            explorer_prompt: None,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
@@ -228,6 +273,24 @@ impl App {
             next_blink: Instant::now() + BLINK_INTERVAL,
             pulse: None,
         }
+    }
+
+    /// Opens `path` as a buffer plus whatever syntax highlighting its
+    /// extension resolves to (or none) -- the same logic `with_file` uses
+    /// at startup, shared with opening a file from the explorer so
+    /// there's one "visit this path" implementation, not two.
+    fn buffer_and_syntax_for_path(path: &Path) -> (Buffer, Option<fenix_syntax::SyntaxState>) {
+        let buffer = Buffer::from_path(path).unwrap_or_else(|err| {
+            eprintln!("fenix: couldn't open {} ({err}), starting empty buffer", path.display());
+            Buffer::empty()
+        });
+        let syntax = buffer
+            .path()
+            .and_then(|p| p.extension())
+            .and_then(|ext| ext.to_str())
+            .and_then(fenix_syntax::detect_language)
+            .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
+        (buffer, syntax)
     }
 
     pub(crate) fn save(&mut self) {
@@ -240,6 +303,244 @@ impl App {
             Err(err) => eprintln!("fenix: save failed: {err}"),
         }
         self.wake_caret();
+    }
+
+    /// Directory the explorer opens in when asked to "start somewhere
+    /// sensible": the current buffer's own directory if it has a path,
+    /// else the process's cwd.
+    fn explorer_start_dir(&self) -> PathBuf {
+        self.buffer
+            .path()
+            .and_then(|p| p.parent())
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// `SPC f j` (dired-jump): replaces the main view with a full-buffer
+    /// directory listing at the current file's directory, stashing the
+    /// editor state so quitting without opening anything restores it.
+    pub(crate) fn explorer_jump(&mut self) {
+        let dir = self.explorer_start_dir();
+        let explorer = match ExplorerState::open(&dir) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("fenix: couldn't list {} ({err})", dir.display());
+                return;
+            }
+        };
+        let old_buffer = std::mem::replace(&mut self.buffer, Buffer::empty());
+        let old_cursor = std::mem::replace(&mut self.cursor, Cursor::at_start());
+        let old_syntax = self.syntax.take();
+        self.stashed_editor = Some((old_buffer, old_cursor, old_syntax));
+        self.explorer = Some(explorer);
+        self.main_view = MainView::Explorer;
+        self.wake_caret();
+    }
+
+    /// `SPC e t`: toggles the sidebar open/closed. Opening focuses it
+    /// immediately (you just asked to browse); closing always returns
+    /// focus to the editor.
+    pub(crate) fn toggle_sidebar(&mut self) {
+        if self.sidebar_open {
+            self.sidebar_open = false;
+            self.sidebar_focused = false;
+            self.explorer = None;
+        } else {
+            let dir = self.explorer_start_dir();
+            match ExplorerState::open(&dir) {
+                Ok(explorer) => {
+                    self.explorer = Some(explorer);
+                    self.sidebar_open = true;
+                    self.sidebar_focused = true;
+                }
+                Err(err) => eprintln!("fenix: couldn't list {} ({err})", dir.display()),
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// Dispatches one explorer command. Each arm takes its own short-lived
+    /// borrow of `self.explorer` rather than one shared across the whole
+    /// match, since a few arms (`Open`, `ParentDir`, `Quit`) need to touch
+    /// other `self` fields too (replacing the buffer, restoring the
+    /// stash) and can't do that while still holding it borrowed.
+    fn explorer_handle_action(&mut self, action: ExplorerAction) {
+        if self.explorer.is_none() {
+            return;
+        }
+        match action {
+            ExplorerAction::Down => {
+                self.explorer.as_mut().unwrap().move_selection(1);
+            }
+            ExplorerAction::Up => {
+                self.explorer.as_mut().unwrap().move_selection(-1);
+            }
+            ExplorerAction::ToggleExpand => {
+                if let Err(err) = self.explorer.as_mut().unwrap().toggle_expand() {
+                    eprintln!("fenix: couldn't expand ({err})");
+                }
+            }
+            ExplorerAction::ToggleMark => self.explorer.as_mut().unwrap().toggle_mark(),
+            ExplorerAction::MarkAll => self.explorer.as_mut().unwrap().mark_all(),
+            ExplorerAction::UnmarkAll => self.explorer.as_mut().unwrap().unmark_all(),
+            ExplorerAction::ToggleAllMarks => self.explorer.as_mut().unwrap().toggle_all_marks(),
+            ExplorerAction::ToggleHidden => {
+                if let Err(err) = self.explorer.as_mut().unwrap().toggle_hidden() {
+                    eprintln!("fenix: couldn't refresh ({err})");
+                }
+            }
+            ExplorerAction::Refresh => {
+                if let Err(err) = self.explorer.as_mut().unwrap().refresh() {
+                    eprintln!("fenix: couldn't refresh ({err})");
+                }
+            }
+            ExplorerAction::ParentDir => {
+                let parent = self.explorer.as_ref().unwrap().cwd.parent().map(Path::to_path_buf);
+                if let Some(parent) = parent {
+                    match ExplorerState::open(&parent) {
+                        Ok(new_state) => self.explorer = Some(new_state),
+                        Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
+                    }
+                }
+            }
+            ExplorerAction::Open => self.explorer_open_selected(),
+            ExplorerAction::BeginDelete => {
+                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                    self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::ConfirmDelete, input: String::new() });
+                }
+            }
+            ExplorerAction::BeginRename => {
+                if let Some(name) = self.explorer.as_ref().unwrap().selected_entry().map(|e| e.name.clone()) {
+                    self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::Rename, input: name });
+                }
+            }
+            ExplorerAction::BeginCreateFile => {
+                self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CreateFile, input: String::new() });
+            }
+            ExplorerAction::BeginCreateDir => {
+                self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CreateDir, input: String::new() });
+            }
+            ExplorerAction::BeginCopy => {
+                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                    self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CopyTo, input: String::new() });
+                }
+            }
+            ExplorerAction::BeginMove => {
+                if !self.explorer.as_ref().unwrap().targets().is_empty() {
+                    self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::MoveTo, input: String::new() });
+                }
+            }
+            ExplorerAction::Quit => self.explorer_quit(),
+        }
+        self.wake_caret();
+    }
+
+    /// `Enter`/`l` on the entry at point: navigates into a directory
+    /// (replacing the listing), or visits a file -- replacing the editor
+    /// buffer and, depending on how the explorer got here, either
+    /// returning to the editor (full-buffer mode, dropping the stash --
+    /// the new file is now current) or just handing focus back to it
+    /// (sidebar mode, which stays open).
+    fn explorer_open_selected(&mut self) {
+        let Some(explorer) = &self.explorer else { return };
+        let Some(entry) = explorer.selected_entry() else { return };
+        let path = entry.path.clone();
+        let is_dir = entry.is_dir;
+
+        if is_dir {
+            match ExplorerState::open(&path) {
+                Ok(new_state) => self.explorer = Some(new_state),
+                Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
+            }
+            return;
+        }
+
+        let (buffer, syntax) = Self::buffer_and_syntax_for_path(&path);
+        self.buffer = buffer;
+        self.cursor = Cursor::at_start();
+        self.syntax = syntax;
+
+        if self.main_view == MainView::Explorer {
+            self.stashed_editor = None;
+            self.main_view = MainView::Editor;
+            self.explorer = None;
+        } else {
+            self.sidebar_focused = false;
+        }
+    }
+
+    /// `q`/`Escape`: in full-buffer mode, restores the stashed editor (or
+    /// falls back to an empty buffer if there wasn't one) and leaves the
+    /// explorer entirely; in the sidebar, just hands focus back to the
+    /// editor without closing it.
+    fn explorer_quit(&mut self) {
+        if self.main_view == MainView::Explorer {
+            if let Some((buffer, cursor, syntax)) = self.stashed_editor.take() {
+                self.buffer = buffer;
+                self.cursor = cursor;
+                self.syntax = syntax;
+            } else {
+                self.buffer = Buffer::empty();
+                self.cursor = Cursor::at_start();
+                self.syntax = None;
+            }
+            self.main_view = MainView::Editor;
+            self.explorer = None;
+        } else if self.sidebar_focused {
+            self.sidebar_focused = false;
+        }
+    }
+
+    /// Routes one keypress to whichever explorer prompt is active: a
+    /// bare y/n for delete confirmation, or free-text input (with
+    /// Backspace/Enter/Escape) for rename/create/copy/move.
+    fn explorer_prompt_key(&mut self, key: KeyPress) {
+        let Some(prompt) = &mut self.explorer_prompt else { return };
+
+        if prompt.kind == PromptKind::ConfirmDelete {
+            if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
+                self.explorer_prompt = None;
+                if let Some(explorer) = &mut self.explorer {
+                    if let Err(err) = explorer.delete_targets() {
+                        eprintln!("fenix: delete failed: {err}");
+                    }
+                }
+            } else {
+                self.explorer_prompt = None;
+            }
+            self.wake_caret();
+            return;
+        }
+
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.explorer_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let ExplorerPrompt { kind, input } = self.explorer_prompt.take().unwrap();
+                self.explorer_prompt_submit(kind, &input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
+        let Some(explorer) = &mut self.explorer else { return };
+        let result = match kind {
+            PromptKind::Rename => explorer.rename_selected(input),
+            PromptKind::CreateFile => explorer.create_file(input),
+            PromptKind::CreateDir => explorer.create_dir(input),
+            PromptKind::CopyTo => explorer.copy_targets_to(Path::new(input)),
+            PromptKind::MoveTo => explorer.move_targets_to(Path::new(input)),
+            PromptKind::ConfirmDelete => return, // handled in explorer_prompt_key via y/n, not Enter
+        };
+        if let Err(err) = result {
+            eprintln!("fenix: operation failed: {err}");
+        }
     }
 
     pub(crate) fn undo(&mut self) {
@@ -1358,5 +1659,190 @@ mod tests {
         assert!(app.syntax_highlights_for_visible_range(0, 1).is_empty());
         // The edit log should have been drained regardless, not left to grow.
         assert!(app.buffer.drain_edits().is_empty());
+    }
+
+    /// A real, uniquely-named temp directory, removed on drop -- these
+    /// tests exercise the real filesystem via `fenix_explorer::
+    /// ExplorerState`, same reasoning as that crate's own `TempDir`.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("fenix-gui-test-{name}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn touch(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, b"hello\n").unwrap();
+            path
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn explorer_jump_stashes_the_editor_and_switches_to_explorer_view() {
+        let dir = TempDir::new("jump_stashes");
+        let file = dir.touch("a.txt");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.buffer.insert_str(&mut app.cursor, " extra"); // dirty the buffer so the stash is checkable
+
+        app.explorer_jump();
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert!(app.explorer.is_some());
+        assert!(app.stashed_editor.is_some());
+        assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.path());
+    }
+
+    #[test]
+    fn quitting_full_buffer_explorer_restores_the_stashed_editor() {
+        let dir = TempDir::new("jump_quit_restores");
+        let file = dir.touch("a.txt");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.buffer.insert_str(&mut app.cursor, " extra");
+        let dirty_text = app.buffer.text();
+
+        app.explorer_jump();
+        app.explorer_quit();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.explorer.is_none());
+        assert!(app.stashed_editor.is_none());
+        assert_eq!(app.buffer.text(), dirty_text);
+    }
+
+    #[test]
+    fn toggle_sidebar_opens_then_closes() {
+        let dir = TempDir::new("toggle_sidebar");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.buffer = fenix_core::Buffer::from_path(dir.path().join("a.txt")).unwrap();
+
+        app.toggle_sidebar();
+        assert!(app.sidebar_open);
+        assert!(app.sidebar_focused);
+        assert!(app.explorer.is_some());
+
+        app.toggle_sidebar();
+        assert!(!app.sidebar_open);
+        assert!(!app.sidebar_focused);
+        assert!(app.explorer.is_none());
+    }
+
+    #[test]
+    fn explorer_open_selected_on_a_directory_navigates_into_it() {
+        let dir = TempDir::new("open_dir");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
+
+        app.explorer_open_selected(); // selected = "sub" (only entry)
+        assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.path().join("sub"));
+        assert_eq!(app.main_view, MainView::Explorer); // still in the explorer, just deeper
+    }
+
+    #[test]
+    fn explorer_open_selected_on_a_file_in_full_buffer_mode_returns_to_editor() {
+        let dir = TempDir::new("open_file_full");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
+        app.stashed_editor = Some((Buffer::empty(), Cursor::at_start(), None));
+
+        app.explorer_open_selected();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.explorer.is_none());
+        assert!(app.stashed_editor.is_none()); // dropped, not restored -- the opened file is current
+        assert_eq!(app.buffer.text(), "hello\n");
+    }
+
+    #[test]
+    fn explorer_open_selected_on_a_file_in_sidebar_mode_keeps_the_sidebar() {
+        let dir = TempDir::new("open_file_sidebar");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.sidebar_focused = true;
+
+        app.explorer_open_selected();
+        assert!(app.sidebar_open); // sidebar persists
+        assert!(!app.sidebar_focused); // focus returns to the editor
+        assert!(app.explorer.is_some());
+        assert_eq!(app.buffer.text(), "hello\n");
+    }
+
+    #[test]
+    fn explorer_handle_action_down_and_up_move_selection() {
+        let dir = TempDir::new("action_down_up");
+        dir.touch("a");
+        dir.touch("b");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+
+        app.explorer_handle_action(ExplorerAction::Down);
+        assert_eq!(app.explorer.as_ref().unwrap().selected, 1);
+        app.explorer_handle_action(ExplorerAction::Up);
+        assert_eq!(app.explorer.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn rename_prompt_flow_types_a_name_and_submits_on_enter() {
+        let dir = TempDir::new("rename_prompt_flow");
+        dir.touch("old.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+
+        app.explorer_handle_action(ExplorerAction::BeginRename);
+        assert!(app.explorer_prompt.is_some());
+        assert_eq!(app.explorer_prompt.as_ref().unwrap().input, "old.txt"); // pre-filled with the current name
+        for _ in 0.."old.txt".len() {
+            app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
+        }
+        for c in "new.txt".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.explorer_prompt.is_none());
+        assert!(dir.path().join("new.txt").exists());
+        assert!(!dir.path().join("old.txt").exists());
+    }
+
+    #[test]
+    fn delete_prompt_confirms_on_y_and_cancels_on_anything_else() {
+        let dir = TempDir::new("delete_prompt_cancel");
+        dir.touch("keep.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+
+        app.explorer_handle_action(ExplorerAction::BeginDelete);
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Escape)); // any non-'y' key cancels
+        assert!(app.explorer_prompt.is_none());
+        assert!(dir.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn delete_prompt_deletes_on_y() {
+        let dir = TempDir::new("delete_prompt_confirm");
+        dir.touch("gone.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+
+        app.explorer_handle_action(ExplorerAction::BeginDelete);
+        app.explorer_prompt_key(KeyPress::char('y'));
+        assert!(app.explorer_prompt.is_none());
+        assert!(!dir.path().join("gone.txt").exists());
     }
 }

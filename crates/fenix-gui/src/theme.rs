@@ -52,6 +52,21 @@ pub struct Theme {
     pub syntax_operator: glyphon::Color,
     pub syntax_punctuation: glyphon::Color,
     pub syntax_attribute: glyphon::Color,
+
+    /// File explorer: icon tint. Two-tone for v1 -- folders get their own
+    /// accent since they're usually the most useful thing to spot at a
+    /// glance in a listing; every file icon (regardless of which glyph)
+    /// shares one color. Per-language icon tinting (Rust's real brand
+    /// orange, Python's blue, etc.) is a natural next increment, not done
+    /// here -- the icon *shape* already carries the file-type signal.
+    pub icon_folder: glyphon::Color,
+    pub icon_file: glyphon::Color,
+    /// Git status badges in the explorer listing.
+    pub git_modified: glyphon::Color,
+    pub git_staged: glyphon::Color,
+    pub git_untracked: glyphon::Color,
+    pub git_ignored: glyphon::Color,
+    pub git_conflicted: glyphon::Color,
 }
 
 impl Theme {
@@ -85,6 +100,16 @@ impl Theme {
             "punctuation" => self.syntax_punctuation,
             "attribute" | "constructor" => self.syntax_attribute,
             _ => self.fg,
+        }
+    }
+
+    pub fn git_status_color(&self, status: fenix_explorer::GitStatus) -> glyphon::Color {
+        match status {
+            fenix_explorer::GitStatus::Modified => self.git_modified,
+            fenix_explorer::GitStatus::Staged => self.git_staged,
+            fenix_explorer::GitStatus::Untracked => self.git_untracked,
+            fenix_explorer::GitStatus::Ignored => self.git_ignored,
+            fenix_explorer::GitStatus::Conflicted => self.git_conflicted,
         }
     }
 }
@@ -140,6 +165,14 @@ pub const ORBIT_DARK: Theme = Theme {
     syntax_operator: text_color(0x89ddff),
     syntax_punctuation: text_color(0xc0caf5),
     syntax_attribute: text_color(0xe0af68),
+
+    icon_folder: text_color(0x7aa2f7),
+    icon_file: text_color(0xc0caf5),
+    git_modified: text_color(0xff9e64),
+    git_staged: text_color(0x9ece6a),
+    git_untracked: text_color(0x7aa2f7),
+    git_ignored: text_color(0x565f89),
+    git_conflicted: text_color(0xf7768e),
 };
 
 #[cfg(test)]
@@ -169,5 +202,15 @@ mod tests {
         assert_eq!(ORBIT_DARK.syntax_color("repeat"), ORBIT_DARK.syntax_keyword);
         assert_eq!(ORBIT_DARK.syntax_color("conditional"), ORBIT_DARK.syntax_keyword);
         assert_eq!(ORBIT_DARK.syntax_color("spell"), ORBIT_DARK.syntax_comment);
+    }
+
+    #[test]
+    fn git_status_color_covers_every_status() {
+        use fenix_explorer::GitStatus;
+        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Modified), ORBIT_DARK.git_modified);
+        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Staged), ORBIT_DARK.git_staged);
+        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Untracked), ORBIT_DARK.git_untracked);
+        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Ignored), ORBIT_DARK.git_ignored);
+        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Conflicted), ORBIT_DARK.git_conflicted);
     }
 }

@@ -474,6 +474,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "fenix-core",
+ "fenix-explorer",
  "fenix-keymap",
  "fenix-syntax",
  "fenix-vim",
