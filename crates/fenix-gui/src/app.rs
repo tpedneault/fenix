@@ -16,6 +16,7 @@ use fenix_core::{Buffer, Cursor};
 
 use crate::commands::CommandRegistry;
 use crate::gpu::GpuState;
+use crate::icon;
 use crate::keymap;
 use crate::rect::RectRenderer;
 use crate::text::{self, TextPipeline};
@@ -63,6 +64,12 @@ struct ScrollAnim {
 
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
+
+/// A content or sidebar row's rich-text spans: (text, color, use_icon_font).
+type RowSpans = Vec<(String, glyphon::Color, bool)>;
+/// `explorer_row_spans`'s result: the spans, which rendered row (if any)
+/// is the selected entry, and which rows are marked.
+type ExplorerRowsResult = (RowSpans, Option<usize>, Vec<usize>);
 
 /// Line-number gutter display. Not wired to a config file yet -- there
 /// isn't one yet (`App::with_file` just picks a hardcoded default) -- but
@@ -161,6 +168,47 @@ fn split_line_by_highlights(
     spans
 }
 
+/// One-letter badge for an explorer row's git status.
+fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
+    match status {
+        fenix_explorer::GitStatus::Modified => "M",
+        fenix_explorer::GitStatus::Staged => "S",
+        fenix_explorer::GitStatus::Untracked => "?",
+        fenix_explorer::GitStatus::Ignored => "I",
+        fenix_explorer::GitStatus::Conflicted => "U",
+    }
+}
+
+/// Human-readable file size (`"1.2K"`, `"340B"`) -- no crate for this,
+/// just repeated division, so no new dependency for one small column.
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes}B") } else { format!("{size:.1}{}", UNITS[unit]) }
+}
+
+/// Coarse relative age (`"3m"`, `"5h"`, `"2d"`) since `modified` --
+/// avoids pulling in a date/time crate just to show a calendar date;
+/// elapsed-duration bucketing needs no calendar math at all.
+fn format_age(modified: std::time::SystemTime) -> String {
+    let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified) else { return "now".to_string() };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -218,6 +266,12 @@ pub struct App {
     /// if a file *is* opened (the new file becomes current).
     stashed_editor: Option<(Buffer, Cursor, Option<fenix_syntax::SyntaxState>)>,
     explorer_prompt: Option<ExplorerPrompt>,
+    /// Topmost visible row of the full-buffer/sidebar listings. Plain
+    /// integers, not eased like `rendered_scroll` -- a directory listing
+    /// doesn't get the smooth-scroll treatment the editor buffer does,
+    /// just enough to keep the selection on screen.
+    explorer_scroll: usize,
+    sidebar_scroll: usize,
 
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
@@ -270,6 +324,8 @@ impl App {
             sidebar_focused: false,
             stashed_editor: None,
             explorer_prompt: None,
+            explorer_scroll: 0,
+            sidebar_scroll: 0,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             theme: &theme::ORBIT_DARK,
@@ -773,6 +829,17 @@ impl App {
         if self.vim.mode() == Mode::Command {
             return None;
         }
+        if self.main_view == MainView::Explorer {
+            let suffix = match &self.explorer {
+                Some(explorer) => {
+                    let marked =
+                        if explorer.marks.is_empty() { String::new() } else { format!(" [{} marked]", explorer.marks.len()) };
+                    format!("│ {}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                }
+                None => String::new(),
+            };
+            return Some(("EXPLORE", suffix));
+        }
         let filename = self
             .buffer
             .path()
@@ -805,6 +872,9 @@ impl App {
     /// badge's label text differs between them.
     fn mode_colors(&self) -> ([f32; 4], glyphon::Color) {
         let theme = self.theme;
+        if self.main_view == MainView::Explorer {
+            return (theme.mode_explorer, theme.mode_text_dark);
+        }
         match self.vim.mode() {
             Mode::Normal => (theme.mode_normal, theme.mode_text_dark),
             Mode::Insert => (theme.mode_insert, theme.mode_text_dark),
@@ -1043,35 +1113,127 @@ impl App {
         hints.iter().map(|(k, label)| format!("{:<6}{}", keymap::describe_keypress(k), label)).collect()
     }
 
+    /// Builds the visible rows of a directory listing as rich-text spans
+    /// (indent, icon glyph, name, git-status marker, and -- for the
+    /// full-width explorer only, not the narrow sidebar -- size/age
+    /// attributes), the same shape `content_spans` builds for editor
+    /// text so both flow through the same `set_*_rich` machinery.
+    /// Returns the spans plus which rendered row (if any) is the
+    /// selected entry and which rows are marked, for the caller to draw
+    /// highlight rects for.
+    fn explorer_row_spans(&self, explorer: &ExplorerState, scroll: usize, rows: usize, show_attrs: bool) -> ExplorerRowsResult {
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        let mut selected_row = None;
+        let mut marked_rows = Vec::new();
+
+        let end = (scroll + rows).min(explorer.entries.len());
+        let visible_count = end.saturating_sub(scroll);
+        for (i, idx) in (scroll..end).enumerate() {
+            let entry = &explorer.entries[idx];
+            if idx == explorer.selected {
+                selected_row = Some(i);
+            }
+            if explorer.marks.contains(&entry.path) {
+                marked_rows.push(i);
+            }
+
+            if entry.depth > 0 {
+                spans.push(("  ".repeat(entry.depth), theme.fg, false));
+            }
+
+            let expanded =
+                entry.is_dir && explorer.entries.get(idx + 1).is_some_and(|next| next.depth > entry.depth);
+            let icon_color = if entry.is_dir { theme.icon_folder } else { theme.icon_file };
+            spans.push((icon::icon_for(&entry.name, entry.is_dir, expanded).to_string(), icon_color, true));
+            spans.push((format!(" {}", entry.name), theme.fg, false));
+
+            if let Some(status) = entry.git_status {
+                spans.push((format!("  {}", git_status_marker(status)), theme.git_status_color(status), false));
+            }
+            if show_attrs && !entry.is_dir {
+                spans.push((format!("  {}  {}", format_size(entry.size), format_age(entry.modified)), theme.gutter_fg, false));
+            }
+
+            if i + 1 < visible_count {
+                spans.push(("\n".to_string(), theme.fg, false));
+            }
+        }
+        (spans, selected_row, marked_rows)
+    }
+
     fn redraw(&mut self) {
         let Some(window_height) = self.gpu.as_ref().map(|gpu| gpu.size.height as f32) else {
             return;
         };
         let visible_lines = text::visible_line_count(window_height);
-        self.ensure_cursor_visible(visible_lines);
 
-        // Fetch one extra line beyond what's strictly visible: mid-scroll,
-        // render_frac() shifts everything up by a partial line, so the
-        // trailing edge needs one more line of content to reveal.
-        let render_base_line = self.render_base_line();
-        let render_frac = self.render_frac();
-        let gutter_chars = self.gutter_chars();
-        let gutter_px = gutter_chars as f32 * text::CHAR_WIDTH;
-        let syntax_highlights = self.syntax_highlights_for_visible_range(render_base_line, visible_lines + 1);
-        let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
+        // Sidebar is independent of `main_view` -- kept alive (and its
+        // own scroll adjusted) even while a full-buffer explorer is
+        // showing, but only actually rendered in Editor mode (see
+        // `show_sidebar` below); two file listings on screen at once
+        // would just be confusing.
+        if let Some(sidebar) = &self.sidebar {
+            self.sidebar_scroll = scroll_to_include(self.sidebar_scroll, sidebar.selected, visible_lines);
+        }
+        let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
+        let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
+        let sidebar_render = if show_sidebar {
+            self.sidebar.as_ref().map(|s| self.explorer_row_spans(s, self.sidebar_scroll, visible_lines, false))
+        } else {
+            None
+        };
+
+        // Main content: either the editor buffer (as always) or, in
+        // full-buffer explorer mode, a directory listing rendered through
+        // the exact same rich-text/windowing machinery. `hl_row` is the
+        // row to give a current-line-style highlight (the cursor's row in
+        // Editor mode, the selected entry's row in Explorer mode);
+        // `marked_rows` (Explorer only) and `selection_segments`/
+        // `pulse_overlay`/`caret` (Editor only) are empty/`None` in
+        // whichever mode they don't apply to.
+        let (content_spans, hl_row, marked_rows, selection_segments, pulse_overlay, caret, content_frac, gutter_px) =
+            if self.main_view == MainView::Explorer {
+                let rows = visible_lines + 1;
+                if let Some(explorer) = &self.explorer {
+                    self.explorer_scroll = scroll_to_include(self.explorer_scroll, explorer.selected, visible_lines);
+                }
+                let (spans, selected_row, marks) = match &self.explorer {
+                    Some(explorer) => self.explorer_row_spans(explorer, self.explorer_scroll, rows, true),
+                    None => (Vec::new(), None, Vec::new()),
+                };
+                (spans, selected_row, marks, Segments::new(), None, None, 0.0f32, 0.0f32)
+            } else {
+                self.ensure_cursor_visible(visible_lines);
+                // Fetch one extra line beyond what's strictly visible:
+                // mid-scroll, render_frac() shifts everything up by a
+                // partial line, so the trailing edge needs one more line
+                // of content to reveal.
+                let render_base_line = self.render_base_line();
+                let render_frac = self.render_frac();
+                let gutter_chars = self.gutter_chars();
+                let gutter_px = gutter_chars as f32 * text::CHAR_WIDTH;
+                let syntax_highlights = self.syntax_highlights_for_visible_range(render_base_line, visible_lines + 1);
+                let content_spans = self.content_spans(render_base_line, visible_lines + 1, gutter_chars, &syntax_highlights);
+                let content_spans: Vec<(String, glyphon::Color, bool)> =
+                    content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
+                let (line, col) = self.buffer.line_col(&self.cursor);
+                // During a large animated pan the cursor's actual line can
+                // legitimately be outside the currently-fetched window for
+                // part of the transition (it hasn't panned into view yet)
+                // -- None means "don't draw the caret/hl-line this frame",
+                // not a bug.
+                let caret_row_in_view = line.checked_sub(render_base_line).filter(|&row| row <= visible_lines);
+                let selection_segments = self.visual_selection_segments(visible_lines + 1);
+                let pulse_overlay = self.pulse_overlay(visible_lines + 1);
+                let caret = caret_row_in_view.map(|row| (row, col));
+                (content_spans, caret_row_in_view, Vec::new(), selection_segments, pulse_overlay, caret, render_frac, gutter_px)
+            };
+
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text =
             if modeline_pieces.is_none() { Some(format!(":{}", self.vim.command_line())) } else { None };
         let (badge_bg, badge_fg) = self.mode_colors();
-        let (line, col) = self.buffer.line_col(&self.cursor);
-        // During a large animated pan the cursor's actual line can
-        // legitimately be outside the currently-fetched window for part
-        // of the transition (it hasn't panned into view yet) -- None
-        // means "don't draw the caret/hl-line this frame", not a bug.
-        let caret_row_in_view =
-            line.checked_sub(render_base_line).filter(|&row| row <= visible_lines);
-        let selection_segments = self.visual_selection_segments(visible_lines + 1);
-        let pulse_overlay = self.pulse_overlay(visible_lines + 1);
         let which_key_lines = self.which_key_lines();
         let caret_alpha = self.caret_alpha();
         let theme = self.theme;
@@ -1082,9 +1244,14 @@ impl App {
             return;
         };
 
-        let content_refs: Vec<(&str, glyphon::Color)> =
-            content_spans.iter().map(|(s, c)| (s.as_str(), *c)).collect();
+        let content_refs: Vec<(&str, glyphon::Color, bool)> =
+            content_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
         text.set_content_rich(&content_refs);
+        if let Some((sidebar_spans, _, _)) = &sidebar_render {
+            let sidebar_refs: Vec<(&str, glyphon::Color, bool)> =
+                sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_sidebar_rich(&sidebar_refs);
+        }
         match &modeline_pieces {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
@@ -1110,14 +1277,28 @@ impl App {
         };
 
         // Every content-row rect shares this: row index (relative to
-        // render_base_line) -> pixel y, shifted up by the mid-scroll
-        // fractional offset so it pans in step with the text.
-        let row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT - render_frac * text::LINE_HEIGHT;
+        // render_base_line, or to the explorer listing's own scroll) ->
+        // pixel y, shifted up by the mid-scroll fractional offset so it
+        // pans in step with the text (always 0 in Explorer mode, which
+        // doesn't animate its scroll).
+        let row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT - content_frac * text::LINE_HEIGHT;
+        let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * text::LINE_HEIGHT;
+        // Column-math x-offset for caret/selection/pulse rects: PAD_LEFT
+        // plus however far right the content itself starts (sidebar
+        // width, when shown) plus the line-number gutter -- has to match
+        // exactly where `text.prepare`'s content `TextArea` actually
+        // renders the text, or these rects drift out of alignment with
+        // what's under them.
+        let content_x = text::PAD_LEFT + sidebar_px + gutter_px;
 
         bg_rect.clear();
-        if let Some(row) = caret_row_in_view {
+        if let Some(row) = hl_row {
             let hl_line_y = row_y(row);
-            bg_rect.push_rect(gpu, 0.0, hl_line_y, gpu.size.width as f32, text::LINE_HEIGHT, theme.hl_line);
+            bg_rect.push_rect(gpu, sidebar_px, hl_line_y, gpu.size.width as f32 - sidebar_px, text::LINE_HEIGHT, theme.hl_line);
+        }
+        for row in &marked_rows {
+            let y = row_y(*row);
+            bg_rect.push_rect(gpu, sidebar_px, y, gpu.size.width as f32 - sidebar_px, text::LINE_HEIGHT, theme.selection);
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, gpu.size.width as f32, text::MODELINE_HEIGHT, theme.bg_modeline);
         if modeline_pieces.is_some() {
@@ -1132,8 +1313,15 @@ impl App {
         if let Some((left, top, height)) = which_key_panel {
             bg_rect.push_rect(gpu, left, top, text::WHICH_KEY_WIDTH, height, theme.bg_modeline);
         }
+        if show_sidebar {
+            bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg_modeline);
+            if let Some((_, Some(selected_row), _)) = &sidebar_render {
+                let y = sidebar_row_y(*selected_row);
+                bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, text::LINE_HEIGHT, theme.hl_line);
+            }
+        }
         for (row, col_start, col_end) in selection_segments {
-            let x = text::PAD_LEFT + gutter_px + col_start as f32 * text::CHAR_WIDTH;
+            let x = content_x + col_start as f32 * text::CHAR_WIDTH;
             let y = row_y(row);
             let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
             bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, theme.selection);
@@ -1141,7 +1329,7 @@ impl App {
         if let Some((segments, alpha)) = pulse_overlay {
             let [r, g, b, _] = theme.caret;
             for (row, col_start, col_end) in segments {
-                let x = text::PAD_LEFT + gutter_px + col_start as f32 * text::CHAR_WIDTH;
+                let x = content_x + col_start as f32 * text::CHAR_WIDTH;
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * text::CHAR_WIDTH;
                 bg_rect.push_rect(gpu, x, y, w, text::LINE_HEIGHT, [r, g, b, alpha]);
@@ -1150,9 +1338,9 @@ impl App {
         bg_rect.flush(gpu);
 
         caret_rect.clear();
-        if let Some(row) = caret_row_in_view {
+        if let Some((row, col)) = caret {
             if caret_alpha > 0.0 {
-                let caret_x = text::PAD_LEFT + gutter_px + col as f32 * text::CHAR_WIDTH;
+                let caret_x = content_x + col as f32 * text::CHAR_WIDTH;
                 let caret_y = row_y(row);
                 let [r, g, b, a] = theme.caret;
                 caret_rect.push_rect(gpu, caret_x, caret_y, 2.0, text::LINE_HEIGHT, [r, g, b, a * caret_alpha]);
@@ -1160,7 +1348,7 @@ impl App {
         }
         caret_rect.flush(gpu);
 
-        text.prepare(gpu, theme, render_frac * text::LINE_HEIGHT, which_key_panel);
+        text.prepare(gpu, theme, content_frac * text::LINE_HEIGHT, sidebar_px, which_key_panel, show_sidebar);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1766,6 +1954,69 @@ mod tests {
         // The sidebar's own listing must be untouched by the jump.
         assert!(app.sidebar_open);
         assert_eq!(app.sidebar.as_ref().unwrap().cwd, sidebar_dir.path());
+    }
+
+    #[test]
+    fn explorer_row_spans_marks_the_icon_span_and_flags_the_selected_row() {
+        let dir = TempDir::new("row_spans_icon_selected");
+        dir.touch("main.rs");
+        let app = App::with_file(None);
+        let explorer = ExplorerState::open(dir.path()).unwrap(); // selected = "main.rs" (only entry)
+
+        let (spans, selected_row, marked_rows) = app.explorer_row_spans(&explorer, 0, 5, true);
+        assert_eq!(selected_row, Some(0));
+        assert!(marked_rows.is_empty());
+
+        // First span is the icon glyph, flagged to render in the icon font.
+        assert!(spans[0].2, "expected the icon span to be flagged is_icon, got {spans:?}");
+        // Somewhere in the row, the plain filename shows up in the body font.
+        assert!(spans.iter().any(|(s, _, is_icon)| !is_icon && s.contains("main.rs")));
+    }
+
+    #[test]
+    fn explorer_row_spans_includes_marked_rows() {
+        let dir = TempDir::new("row_spans_marked");
+        dir.touch("a");
+        dir.touch("b");
+        let app = App::with_file(None);
+        let mut explorer = ExplorerState::open(dir.path()).unwrap();
+        explorer.marks.insert(dir.path().join("b"));
+
+        let (_, _, marked_rows) = app.explorer_row_spans(&explorer, 0, 5, true);
+        assert_eq!(marked_rows, vec![1]); // "b" sorts second, alphabetically after "a"
+    }
+
+    #[test]
+    fn explorer_row_spans_respects_the_scroll_window() {
+        let dir = TempDir::new("row_spans_scroll");
+        for name in ["a", "b", "c", "d"] {
+            dir.touch(name);
+        }
+        let app = App::with_file(None);
+        let explorer = ExplorerState::open(dir.path()).unwrap();
+
+        // Scrolled to start at index 2 ("c"), showing only 2 rows.
+        let (spans, _, _) = app.explorer_row_spans(&explorer, 2, 2, true);
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains('c'));
+        assert!(joined.contains('d'));
+        assert!(!joined.contains('a'));
+        assert!(!joined.contains('b'));
+    }
+
+    #[test]
+    fn explorer_row_spans_shows_attrs_only_when_requested() {
+        let dir = TempDir::new("row_spans_attrs");
+        dir.touch("a.txt");
+        let app = App::with_file(None);
+        let explorer = ExplorerState::open(dir.path()).unwrap();
+
+        let (with_attrs, _, _) = app.explorer_row_spans(&explorer, 0, 5, true);
+        let (without_attrs, _, _) = app.explorer_row_spans(&explorer, 0, 5, false);
+        let joined_with: String = with_attrs.iter().map(|(s, _, _)| s.as_str()).collect();
+        let joined_without: String = without_attrs.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined_with.contains('B') || joined_with.contains('K')); // size suffix present
+        assert!(!joined_without.contains('B') && !joined_without.contains('K'));
     }
 
     #[test]

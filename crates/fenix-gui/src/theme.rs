@@ -25,6 +25,10 @@ pub struct Theme {
     pub mode_visual: [f32; 4],
     pub mode_replace: [f32; 4],
     pub mode_command: [f32; 4],
+    /// Badge accent for the file explorer, not a real Vim mode -- reuses
+    /// the same blue as `icon_folder`/`git_untracked`, just in the rect-
+    /// fill `[f32; 4]` representation those need.
+    pub mode_explorer: [f32; 4],
     /// Badge text color for the light-background modes (amber/cyan/orange/blue).
     pub mode_text_dark: glyphon::Color,
     /// Badge text color for the one mode whose accent is too dark for that (red).
@@ -149,6 +153,7 @@ pub const ORBIT_DARK: Theme = Theme {
     mode_visual: rgba(0xf7768e),
     mode_replace: rgba(0xff9e64),
     mode_command: rgba(0x7aa2f7),
+    mode_explorer: rgba(0x7aa2f7),
     mode_text_dark: text_color(0x1a1b26),
     mode_text_light: text_color(0xffffff),
 

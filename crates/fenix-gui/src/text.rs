@@ -4,6 +4,7 @@ use glyphon::{
 };
 
 use crate::gpu::GpuState;
+use crate::icon::ICON_FONT_FAMILY;
 use crate::theme::Theme;
 
 pub const FONT_SIZE: f32 = 16.0;
@@ -22,14 +23,17 @@ pub const WHICH_KEY_MARGIN: f32 = 12.0;
 /// Fits the longest label ("V-BLOCK"/"REPLACE"/"COMMAND", 7 chars) with a
 /// little breathing room.
 pub const MODE_BADGE_CHARS: usize = 8;
+/// Width of the file-explorer sidebar panel.
+pub const SIDEBAR_WIDTH: f32 = 240.0;
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
-/// Holds three independent glyph buffers sharing one atlas/renderer:
-/// `buffer` for the windowed slice of editor content currently on screen,
-/// `modeline` for the single-line status bar, and `which_key` for the
-/// popup listing a pending key sequence's continuations (only shown while
-/// one is in progress).
+/// Holds four independent glyph buffers sharing one atlas/renderer:
+/// `buffer` for the windowed slice of editor content (or, in full-buffer
+/// explorer mode, the directory listing) currently on screen, `modeline`
+/// for the single-line status bar, `which_key` for the popup listing a
+/// pending key sequence's continuations, and `sidebar` for the file
+/// explorer's persistent side panel.
 pub struct TextPipeline {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -39,6 +43,7 @@ pub struct TextPipeline {
     buffer: GlyphBuffer,
     modeline: GlyphBuffer,
     which_key: GlyphBuffer,
+    sidebar: GlyphBuffer,
 }
 
 impl TextPipeline {
@@ -63,26 +68,44 @@ impl TextPipeline {
         which_key.set_wrap(Wrap::None);
         which_key.set_size(Some(WHICH_KEY_WIDTH), None);
 
-        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key }
+        let mut sidebar = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        sidebar.set_wrap(Wrap::None);
+        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32)));
+
+        Self { font_system, swash_cache, viewport, atlas, renderer, buffer, modeline, which_key, sidebar }
     }
 
+    /// Plain, single-color content text -- used only for the very first
+    /// frame's priming call in `App::resumed`, before the first real
+    /// `redraw()` (which always uses `set_content_rich` instead) runs.
     pub fn set_text(&mut self, text: &str) {
         self.buffer.set_text(text, &Attrs::new().family(Family::Monospace), Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
-    /// Sets the buffer-content text as differently-colored spans -- the
-    /// line-number gutter prefix (or `~` for past-end-of-buffer rows) in
-    /// one color per span, the actual line content in another. Same
-    /// rich-text mechanism as `set_modeline_text`, applied per source line
-    /// instead of once for the whole area.
-    pub fn set_content_rich(&mut self, segments: &[(&str, Color)]) {
-        let default_attrs = Attrs::new().family(Family::Monospace);
-        let spans: Vec<(&str, Attrs)> = segments
+    /// Builds rich-text spans from `(text, color, use_icon_font)` triples --
+    /// the icon flag switches that one span to `ICON_FONT_FAMILY` instead
+    /// of the body monospace font, letting an icon glyph and ordinary text
+    /// sit in the same row (same mechanism `content_spans`/explorer row
+    /// building already mix gutter numbers and line text with).
+    fn rich_spans<'a>(segments: &'a [(&'a str, Color, bool)]) -> Vec<(&'a str, Attrs<'a>)> {
+        segments
             .iter()
-            .map(|(text, color)| (*text, Attrs::new().family(Family::Monospace).color(*color)))
-            .collect();
-        self.buffer.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+            .map(|(text, color, is_icon)| {
+                let family = if *is_icon { Family::Name(ICON_FONT_FAMILY) } else { Family::Monospace };
+                (*text, Attrs::new().family(family).color(*color))
+            })
+            .collect()
+    }
+
+    /// Sets the buffer-content text as differently-colored, optionally
+    /// icon-font spans -- the line-number gutter prefix (or `~` for
+    /// past-end-of-buffer rows), syntax-highlighted line content, or (in
+    /// full-buffer explorer mode) a directory listing's icon/name/
+    /// attribute columns.
+    pub fn set_content_rich(&mut self, segments: &[(&str, Color, bool)]) {
+        let default_attrs = Attrs::new().family(Family::Monospace);
+        self.buffer.set_rich_text(Self::rich_spans(segments), &default_attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -111,11 +134,23 @@ impl TextPipeline {
         self.which_key.shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Sets the sidebar's rows -- same icon/color rich-text mechanism as
+    /// `set_content_rich`, into its own independent glyph buffer since the
+    /// sidebar renders alongside the editor content, not interleaved
+    /// with it.
+    pub fn set_sidebar_rich(&mut self, segments: &[(&str, Color, bool)]) {
+        let default_attrs = Attrs::new().family(Family::Monospace);
+        self.sidebar.set_rich_text(Self::rich_spans(segments), &default_attrs, Shaping::Advanced, None);
+        self.sidebar.shape_until_scroll(&mut self.font_system, false);
+    }
+
     pub fn resize(&mut self, width: f32, height: f32) {
         self.buffer.set_size(Some(width), Some(content_height(height)));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.modeline.set_size(Some(width), Some(MODELINE_HEIGHT));
         self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height)));
+        self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// `content_top_offset` shifts the buffer-content text up by that many
@@ -124,32 +159,44 @@ impl TextPipeline {
     /// integer line the transition has reached and shifts it up by the
     /// fractional remainder so it pans instead of jumping.
     ///
+    /// `content_left_offset` shifts the content area right by that many
+    /// pixels -- `SIDEBAR_WIDTH` when the sidebar is open (so editor text
+    /// starts after it instead of underneath it), `0.0` otherwise.
+    ///
     /// `which_key_panel`, when present, is the (left, top, height) box to
     /// render the pending-sequence popup in -- top-right corner of the
     /// window, clear of both the content being edited and the modeline.
     /// The caller (App) already knows this from the hint count it built
     /// the text from, and draws the panel's background rect itself.
+    ///
+    /// `sidebar_open` toggles whether the sidebar's own `TextArea` is
+    /// included at all -- its content only needs setting via
+    /// `set_sidebar_rich` while it's actually visible.
     pub fn prepare(
         &mut self,
         gpu: &GpuState,
         theme: &Theme,
         content_top_offset: f32,
+        content_left_offset: f32,
         which_key_panel: Option<(f32, f32, f32)>,
+        sidebar_open: bool,
     ) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
+        let modeline_top = gpu.size.height as f32 - MODELINE_HEIGHT;
+
         let content_bounds = TextBounds {
-            left: 0,
+            left: content_left_offset as i32,
             top: 0,
             right: gpu.config.width as i32,
-            bottom: (gpu.size.height as f32 - MODELINE_HEIGHT) as i32,
+            bottom: modeline_top as i32,
         };
         let content_area = TextArea {
             buffer: &self.buffer,
-            left: PAD_LEFT,
+            left: PAD_LEFT + content_left_offset,
             top: PAD_TOP - content_top_offset,
             scale: 1.0,
             bounds: content_bounds,
@@ -157,7 +204,6 @@ impl TextPipeline {
             custom_glyphs: &[],
         };
 
-        let modeline_top = gpu.size.height as f32 - MODELINE_HEIGHT;
         let modeline_bounds = TextBounds {
             left: 0,
             top: modeline_top as i32,
@@ -188,6 +234,17 @@ impl TextPipeline {
                     bottom: (top + height) as i32,
                 },
                 default_color: theme.fg_modeline,
+                custom_glyphs: &[],
+            });
+        }
+        if sidebar_open {
+            areas.push(TextArea {
+                buffer: &self.sidebar,
+                left: PAD_LEFT,
+                top: PAD_TOP,
+                scale: 1.0,
+                bounds: TextBounds { left: 0, top: 0, right: SIDEBAR_WIDTH as i32, bottom: modeline_top as i32 },
+                default_color: theme.fg,
                 custom_glyphs: &[],
             });
         }
