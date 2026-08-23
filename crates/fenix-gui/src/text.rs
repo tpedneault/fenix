@@ -26,6 +26,16 @@ pub const MODE_BADGE_CHARS: usize = 8;
 /// Width of the file-explorer sidebar panel.
 pub const SIDEBAR_WIDTH: f32 = 240.0;
 
+/// A community TTF conversion (github.com/rendello/templeos_font) of
+/// TempleOS's actual 8x8 bitmap font, embedded so the TempleOS theme
+/// looks right on any machine without needing the font installed --
+/// same reasoning as bundling any other asset the app depends on.
+/// Registered into `FontSystem`'s font database at `TextPipeline::new`
+/// time via `load_font_data`; its family name (confirmed with
+/// `fc-scan`, not guessed) is `"TempleOS"`, matching `Theme::
+/// font_family` on the `TEMPLEOS` theme.
+static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_font.ttf");
+
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
 /// Holds four independent glyph buffers sharing one atlas/renderer:
@@ -54,6 +64,7 @@ pub struct TextPipeline {
 impl TextPipeline {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&gpu.device);
         let viewport = Viewport::new(&gpu.device, &cache);
@@ -294,4 +305,25 @@ fn content_height(window_height: f32) -> f32 {
 /// How many full text lines fit in the content area above the modeline.
 pub fn visible_line_count(window_height: f32) -> usize {
     (content_height(window_height) / LINE_HEIGHT).floor().max(1.0) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_templeos_font_loads_and_resolves_by_the_expected_family_name() {
+        // No GPU needed for this -- `FontSystem`/`fontdb` are pure font
+        // data structures; only `TextPipeline` itself needs a `GpuState`.
+        // This guards against the embedded bytes going stale/corrupt, or
+        // the family name (`Theme::font_family` on `TEMPLEOS`, confirmed
+        // with `fc-scan` at the time this was bundled) silently drifting.
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        let found = font_system
+            .db_mut()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == "TempleOS"));
+        assert!(found, "expected the embedded font to register under the family name \"TempleOS\"");
+    }
 }

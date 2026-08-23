@@ -223,18 +223,18 @@ pub const ORBIT_DARK: Theme = Theme {
 /// headings, links, and directives -- much closer to a print/document
 /// editor than a dark-background terminal IDE.
 ///
-/// Two disclosed simplifications, not oversights: TempleOS's own HolyC
-/// IDE colors identifiers quasi-randomly per token, which isn't
-/// replicated here (`syntax_color` resolves a fixed color per capture
-/// name everywhere in Fenix, same as every other theme); and
-/// `font_family` is `None` -- TempleOS's look depends heavily on its
-/// bitmap 8x8 VGA-style font, and nothing matching that is installed on
-/// this machine to point at, so body text falls back to the ordinary
-/// system monospace font (see the plan file for the font-bundling
-/// follow-up, pending a licensing decision).
+/// `font_family` names the real 8x8 TempleOS bitmap font, embedded into
+/// the binary (`text::TEMPLEOS_FONT_BYTES`, a community TTF conversion
+/// of the original) rather than depending on it being installed --
+/// works on any machine.
+///
+/// One remaining disclosed simplification: TempleOS's own HolyC IDE
+/// colors identifiers quasi-randomly per token, which isn't replicated
+/// here (`syntax_color` resolves a fixed color per capture name
+/// everywhere in Fenix, same as every other theme).
 pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
-    font_family: None,
+    font_family: Some("TempleOS"),
     border: Some(rgba(0x0000aa)),
 
     bg: rgba(0xffffff),
