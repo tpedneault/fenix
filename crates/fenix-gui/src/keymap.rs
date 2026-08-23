@@ -74,9 +74,9 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
 ///
 /// Deliberately sparse: only wires groups that have a real command behind
 /// them today (`file.save`, `app.quit`, the `SPC t` toggle group's line-
-/// number cycle). Orbit-emacs's `SPC w`/`SPC b` groups have nothing to
-/// bind to yet -- no splits or multi-buffer exist until later phases -- so
-/// they're not stubbed in here.
+/// number cycle, `SPC f j`/`SPC e t` for the file explorer). Orbit-emacs's
+/// `SPC w`/`SPC b` groups have nothing to bind to yet -- no splits or
+/// multi-buffer exist until later phases -- so they're not stubbed in here.
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -86,6 +86,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         t.label_group(&[spc, KeyPress::char('f')], "files");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
 
         t.label_group(&[spc, KeyPress::char('q')], "quit");
         t.insert(&[spc, KeyPress::char('q'), KeyPress::char('q')], "quit", "app.quit");
@@ -95,6 +96,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             &[spc, KeyPress::char('t'), KeyPress::char('n')],
             "line numbers",
             "view.cycle_line_numbers",
+        );
+
+        t.label_group(&[spc, KeyPress::char('e')], "explorer");
+        t.insert(
+            &[spc, KeyPress::char('e'), KeyPress::char('t')],
+            "toggle sidebar",
+            "explorer.toggle_sidebar",
         );
 
         t
@@ -138,6 +146,27 @@ mod tests {
         match m.feed(KeyPress::char('n')) {
             fenix_keymap::Step::Matched(&"view.cycle_line_numbers") => {}
             _ => panic!("expected SPC t n to resolve to view.cycle_line_numbers"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_explorer_jump_and_sidebar_toggle() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('f'));
+        match m.feed(KeyPress::char('j')) {
+            fenix_keymap::Step::Matched(&"explorer.jump") => {}
+            _ => panic!("expected SPC f j to resolve to explorer.jump"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('e'));
+        match m.feed(KeyPress::char('t')) {
+            fenix_keymap::Step::Matched(&"explorer.toggle_sidebar") => {}
+            _ => panic!("expected SPC e t to resolve to explorer.toggle_sidebar"),
         }
     }
 }

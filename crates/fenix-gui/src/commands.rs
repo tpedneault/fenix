@@ -38,6 +38,12 @@ impl CommandRegistry {
             "Cycle the line-number gutter: off, absolute, relative",
             cmd_cycle_line_numbers,
         );
+        registry.register(
+            "explorer.jump",
+            "Open a full-buffer directory listing at the current file's directory",
+            cmd_explorer_jump,
+        );
+        registry.register("explorer.toggle_sidebar", "Toggle the file explorer sidebar", cmd_toggle_sidebar);
         registry
     }
 
@@ -78,4 +84,12 @@ fn cmd_quit(ctx: &mut CommandCtx) {
 
 fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
     ctx.app.cycle_line_number_mode();
+}
+
+fn cmd_explorer_jump(ctx: &mut CommandCtx) {
+    ctx.app.explorer_jump();
+}
+
+fn cmd_toggle_sidebar(ctx: &mut CommandCtx) {
+    ctx.app.toggle_sidebar();
 }

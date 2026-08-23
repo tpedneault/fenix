@@ -279,6 +279,9 @@ pub struct App {
     /// singleton (see `keymap::leader_trie`), which sidesteps
     /// `Matcher` borrowing from a trie `App` would otherwise also own.
     leader_matcher: Matcher<'static, &'static str>,
+    /// Same reasoning as `leader_matcher`, for the explorer's own trie --
+    /// persists across keystrokes for its one multi-key sequence (`g r`).
+    explorer_matcher: Matcher<'static, ExplorerAction>,
 
     theme: &'static Theme,
 
@@ -328,6 +331,7 @@ impl App {
             sidebar_scroll: 0,
             vim: VimState::new(),
             leader_matcher: keymap::leader_trie().matcher(),
+            explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme: &theme::ORBIT_DARK,
             modifiers: ModifiersState::empty(),
             blink_visible: true,
@@ -694,6 +698,30 @@ impl App {
             return;
         }
 
+        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+
+        // An active prompt (rename/create-name/confirm-delete) captures
+        // every keystroke until it resolves -- takes priority over
+        // everything else, including global Ctrl-chords, so e.g. Ctrl-S
+        // can't accidentally interrupt an in-progress rename.
+        if self.explorer_prompt.is_some() {
+            self.explorer_prompt_key(keypress);
+            return;
+        }
+
+        // The explorer (full-buffer or a focused sidebar) owns all input
+        // while it has focus -- its own trie, not Vim's, and not the
+        // global Ctrl-chords below (browsing is a distinct modal UI, the
+        // same reasoning that already keeps Insert/Command mode out of
+        // Normal's trie).
+        if self.active_explorer().is_some() {
+            if let Step::Matched(&action) = self.explorer_matcher.feed(keypress) {
+                self.explorer_handle_action(action);
+            }
+            self.wake_caret();
+            return;
+        }
+
         if self.modifiers.control_key() {
             if let Key::Character(s) = &event.logical_key {
                 let id = if s.eq_ignore_ascii_case("s") {
@@ -721,8 +749,6 @@ impl App {
             // Not a recognized global chord (e.g. Ctrl-r is Vim's redo):
             // fall through instead of swallowing it.
         }
-
-        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
 
         // Window-size-aware paging is a GUI concern, handled the same way
         // regardless of Vim mode -- fenix-vim doesn't know about viewport size.
