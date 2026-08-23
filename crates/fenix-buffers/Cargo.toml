@@ -1,0 +1,8 @@
+[package]
+name = "fenix-buffers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-core = { path = "../fenix-core" }
+fenix-syntax = { path = "../fenix-syntax" }
