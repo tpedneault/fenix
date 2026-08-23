@@ -30,6 +30,15 @@ impl KnownProjects {
         Ok(Self { path, roots })
     }
 
+    /// Same as `load`, but never fails -- any read error (not just a
+    /// missing file) just starts with an empty list. This is a
+    /// convenience cache, not critical data; a caller starting up
+    /// shouldn't have to special-case "couldn't read my project
+    /// history" as a hard error.
+    pub fn load_or_default(path: PathBuf) -> Self {
+        Self::load(path.clone()).unwrap_or_else(|_| Self { path, roots: Vec::new() })
+    }
+
     pub fn roots(&self) -> &[PathBuf] {
         &self.roots
     }
@@ -60,6 +69,20 @@ mod tests {
     fn loading_a_missing_file_yields_an_empty_list_not_an_error() {
         let dir = TempDir::new("known_missing_file");
         let known = KnownProjects::load(dir.path().join("does-not-exist.txt")).unwrap();
+        assert!(known.roots().is_empty());
+    }
+
+    #[test]
+    fn load_or_default_never_fails_even_when_the_path_is_unreadable() {
+        // A directory (not a file) at the target path makes `read_to_string`
+        // fail with something other than `NotFound` -- `load` would
+        // propagate that; `load_or_default` should just start empty.
+        let dir = TempDir::new("known_load_or_default_unreadable");
+        let path = dir.path().join("actually-a-directory");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(KnownProjects::load(path.clone()).is_err());
+        let known = KnownProjects::load_or_default(path);
         assert!(known.roots().is_empty());
     }
 
