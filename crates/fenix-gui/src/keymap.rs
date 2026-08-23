@@ -73,10 +73,9 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
 /// through to a resolved command -- is just one uniform walk of this trie.
 ///
 /// Deliberately sparse: only wires groups that have a real command behind
-/// them today (`file.save`, `app.quit`, the `SPC t` toggle group's line-
-/// number cycle, `SPC f j`/`SPC e t` for the file explorer). Orbit-emacs's
-/// `SPC w`/`SPC b` groups have nothing to bind to yet -- no splits or
-/// multi-buffer exist until later phases -- so they're not stubbed in here.
+/// them today. `SPC b` (buffers) and `SPC TAB` (workspaces) have nothing
+/// to bind to yet -- no multi-buffer switcher or workspace list exist
+/// until later phases -- so they're not stubbed in here.
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -114,6 +113,18 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "switch project",
             "project.switch_project",
         );
+
+        t.label_group(&[spc, KeyPress::char('w')], "window");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('s')], "split horizontal", "window.split_horizontal");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('h')], "focus left", "window.navigate_left");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('l')], "focus right", "window.navigate_right");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('k')], "focus up", "window.navigate_up");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('j')], "focus down", "window.navigate_down");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('w')], "cycle window", "window.cycle");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('q')], "close window", "window.close");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('o')], "only", "window.only");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('=')], "balance", "window.balance");
 
         t
     })
@@ -219,5 +230,32 @@ mod tests {
             fenix_keymap::Step::Matched(&"project.switch_project") => {}
             _ => panic!("expected SPC p p to resolve to project.switch_project"),
         }
+    }
+
+    #[test]
+    fn leader_trie_resolves_window_split_navigate_and_close_commands() {
+        let trie = leader_trie();
+
+        let resolve = |keys: &[char]| {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('w'));
+            let mut last = None;
+            for &k in keys {
+                last = Some(m.feed(KeyPress::char(k)));
+            }
+            last.unwrap()
+        };
+
+        assert!(matches!(resolve(&['v']), fenix_keymap::Step::Matched(&"window.split_vertical")));
+        assert!(matches!(resolve(&['s']), fenix_keymap::Step::Matched(&"window.split_horizontal")));
+        assert!(matches!(resolve(&['h']), fenix_keymap::Step::Matched(&"window.navigate_left")));
+        assert!(matches!(resolve(&['l']), fenix_keymap::Step::Matched(&"window.navigate_right")));
+        assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"window.navigate_up")));
+        assert!(matches!(resolve(&['j']), fenix_keymap::Step::Matched(&"window.navigate_down")));
+        assert!(matches!(resolve(&['w']), fenix_keymap::Step::Matched(&"window.cycle")));
+        assert!(matches!(resolve(&['q']), fenix_keymap::Step::Matched(&"window.close")));
+        assert!(matches!(resolve(&['o']), fenix_keymap::Step::Matched(&"window.only")));
+        assert!(matches!(resolve(&['=']), fenix_keymap::Step::Matched(&"window.balance")));
     }
 }

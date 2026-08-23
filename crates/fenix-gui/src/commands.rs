@@ -48,6 +48,16 @@ impl CommandRegistry {
         registry.register("project.find_file", "Fuzzy-find a file in the current project", cmd_project_find_file);
         registry.register("project.grep", "Search the current project (ripgrep)", cmd_project_grep);
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
+        registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
+        registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
+        registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
+        registry.register("window.navigate_right", "Move focus to the window on the right", cmd_navigate_right);
+        registry.register("window.navigate_up", "Move focus to the window above", cmd_navigate_up);
+        registry.register("window.navigate_down", "Move focus to the window below", cmd_navigate_down);
+        registry.register("window.cycle", "Cycle focus to the next window", cmd_cycle_window);
+        registry.register("window.close", "Close the focused window", cmd_close_window);
+        registry.register("window.only", "Close every window except the focused one", cmd_only_window);
+        registry.register("window.balance", "Reset every split ratio to 0.5", cmd_balance_windows);
         registry
     }
 
@@ -112,4 +122,44 @@ fn cmd_project_grep(ctx: &mut CommandCtx) {
 
 fn cmd_project_switch(ctx: &mut CommandCtx) {
     ctx.app.picker_switch_project();
+}
+
+fn cmd_split_vertical(ctx: &mut CommandCtx) {
+    ctx.app.split_vertical();
+}
+
+fn cmd_split_horizontal(ctx: &mut CommandCtx) {
+    ctx.app.split_horizontal();
+}
+
+fn cmd_navigate_left(ctx: &mut CommandCtx) {
+    ctx.app.navigate_window(fenix_window::NavDirection::Left);
+}
+
+fn cmd_navigate_right(ctx: &mut CommandCtx) {
+    ctx.app.navigate_window(fenix_window::NavDirection::Right);
+}
+
+fn cmd_navigate_up(ctx: &mut CommandCtx) {
+    ctx.app.navigate_window(fenix_window::NavDirection::Up);
+}
+
+fn cmd_navigate_down(ctx: &mut CommandCtx) {
+    ctx.app.navigate_window(fenix_window::NavDirection::Down);
+}
+
+fn cmd_cycle_window(ctx: &mut CommandCtx) {
+    ctx.app.cycle_window();
+}
+
+fn cmd_close_window(ctx: &mut CommandCtx) {
+    ctx.app.close_window();
+}
+
+fn cmd_only_window(ctx: &mut CommandCtx) {
+    ctx.app.only_window();
+}
+
+fn cmd_balance_windows(ctx: &mut CommandCtx) {
+    ctx.app.balance_windows();
 }

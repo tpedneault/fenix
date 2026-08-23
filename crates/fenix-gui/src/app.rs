@@ -8,7 +8,7 @@ use fenix_buffers::{BufferId, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
-use fenix_window::WindowTree;
+use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -958,6 +958,68 @@ impl App {
         if let Err(err) = result {
             eprintln!("fenix: operation failed: {err}");
         }
+    }
+
+    /// `SPC w v`/`SPC w s`: splits the focused window vertically (side by
+    /// side) or horizontally (stacked), Doom's own `splitright`/
+    /// `splitbelow` default -- the new pane shows the *same* buffer as the
+    /// one it split from (matching Vim's own `:vsplit`/`:split`), not a
+    /// blank scratch buffer, so it starts as a second view of what you
+    /// were already looking at.
+    fn split_window(&mut self, kind: SplitKind) {
+        let id = self.focused_buffer_id();
+        self.windows.split(kind, id);
+        self.wake_caret();
+    }
+
+    pub(crate) fn split_vertical(&mut self) {
+        self.split_window(SplitKind::Vertical);
+    }
+
+    pub(crate) fn split_horizontal(&mut self) {
+        self.split_window(SplitKind::Horizontal);
+    }
+
+    /// `SPC w hjkl`: moves focus to the nearest window in that direction
+    /// by real layout geometry, not tree adjacency -- a no-op at the
+    /// grid's edge (`WindowTree::navigate`'s own contract).
+    pub(crate) fn navigate_window(&mut self, dir: NavDirection) {
+        self.windows.navigate(dir);
+        self.wake_caret();
+    }
+
+    /// `SPC w w`: cycles focus to the next window in a stable pre-order
+    /// traversal, wrapping around.
+    pub(crate) fn cycle_window(&mut self) {
+        self.windows.cycle_next();
+        self.wake_caret();
+    }
+
+    /// `SPC w q`: closes the focused window. Refuses (no-op) on the last
+    /// window rather than quitting the editor -- silently losing your
+    /// only view on a stray keypress is a real data-loss risk this
+    /// project has consistently avoided elsewhere, a disclosed deviation
+    /// from Doom's own "closes Emacs" behavior. The buffer itself is
+    /// never closed here, only the pane showing it -- other panes may
+    /// still reference the same `BufferId`.
+    pub(crate) fn close_window(&mut self) {
+        self.windows.close_focused();
+        self.wake_caret();
+    }
+
+    /// `SPC w o`: closes every window except the focused one. A permanent
+    /// `only`, not Doom's reversible temporary "enlarge" -- restoring the
+    /// closed panes would need layout history this tree doesn't keep yet
+    /// (a disclosed cut, see `WindowTree::only`'s own doc comment).
+    pub(crate) fn only_window(&mut self) {
+        self.windows.only();
+        self.wake_caret();
+    }
+
+    /// `SPC w =`: resets every split's ratio back to an even 0.5.
+    pub(crate) fn balance_windows(&mut self) {
+        self.windows.balance();
+        self.wake_caret();
     }
 
     pub(crate) fn undo(&mut self) {
@@ -2750,6 +2812,90 @@ mod tests {
         assert!(!app.sidebar_open);
         assert!(!app.sidebar_focused);
         assert!(app.sidebar.is_none());
+    }
+
+    #[test]
+    fn split_vertical_adds_a_focused_pane_showing_the_same_buffer() {
+        let mut app = App::with_file(None);
+        let original = app.windows.focused_id();
+        let buffer_id = app.focused_buffer_id();
+
+        app.split_vertical();
+
+        assert_eq!(app.windows.window_count(), 2);
+        assert_ne!(app.windows.focused_id(), original);
+        assert_eq!(app.focused_buffer_id(), buffer_id); // new pane shows the same buffer
+    }
+
+    #[test]
+    fn split_horizontal_also_adds_a_focused_pane() {
+        let mut app = App::with_file(None);
+        app.split_horizontal();
+        assert_eq!(app.windows.window_count(), 2);
+    }
+
+    #[test]
+    fn close_window_is_a_no_op_on_the_last_window() {
+        let mut app = App::with_file(None);
+        app.close_window();
+        assert_eq!(app.windows.window_count(), 1);
+    }
+
+    #[test]
+    fn close_window_collapses_back_to_one_pane() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.close_window();
+        assert_eq!(app.windows.window_count(), 1);
+    }
+
+    #[test]
+    fn cycle_window_wraps_between_the_two_panes() {
+        let mut app = App::with_file(None);
+        let first = app.windows.focused_id();
+        app.split_vertical();
+        let second = app.windows.focused_id();
+        assert_ne!(first, second);
+
+        app.cycle_window();
+        assert_eq!(app.windows.focused_id(), first);
+        app.cycle_window();
+        assert_eq!(app.windows.focused_id(), second);
+    }
+
+    #[test]
+    fn navigate_window_moves_focus_left_to_the_original_pane() {
+        let mut app = App::with_file(None);
+        let left = app.windows.focused_id();
+        app.split_vertical(); // new pane appears to the right, becomes focused
+        assert_ne!(app.windows.focused_id(), left);
+
+        app.navigate_window(fenix_window::NavDirection::Left);
+        assert_eq!(app.windows.focused_id(), left);
+    }
+
+    #[test]
+    fn only_window_closes_every_other_pane() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.split_horizontal();
+        assert_eq!(app.windows.window_count(), 3);
+
+        app.only_window();
+        assert_eq!(app.windows.window_count(), 1);
+    }
+
+    #[test]
+    fn balance_windows_resets_a_skewed_ratio_back_to_half() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.windows.resize_focused(0.3); // skew away from 0.5
+        app.balance_windows();
+
+        let rects = app.windows.layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
+        for (_, r) in rects {
+            assert!((r.w - 100.0).abs() < 0.01);
+        }
     }
 
     #[test]
