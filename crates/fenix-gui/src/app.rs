@@ -1402,17 +1402,35 @@ impl App {
             return;
         }
 
-        // The explorer (full-buffer or a focused sidebar) owns all input
-        // while it has focus -- its own trie, not Vim's, and not the
-        // global Ctrl-chords below (browsing is a distinct modal UI, the
-        // same reasoning that already keeps Insert/Command mode out of
-        // Normal's trie).
-        if self.active_explorer().is_some() {
+        // The full-buffer explorer (dired-style, replacing the whole
+        // editing view) owns all input unconditionally -- its own trie,
+        // not Vim's, and not the global Ctrl-chords below (browsing is a
+        // distinct modal UI, the same reasoning that already keeps
+        // Insert/Command mode out of Normal's trie).
+        if self.main_view == MainView::Explorer {
             if let Step::Matched(&action) = self.explorer_matcher.feed(keypress) {
                 self.explorer_handle_action(action);
             }
             self.wake_caret();
             return;
+        }
+
+        // The sidebar is different: a persistent panel meant to coexist
+        // with active editing, not a modal takeover, so SPC still reaches
+        // the leader menu below (e.g. `SPC w l` to jump back to another
+        // window) instead of being swallowed. Pressing it also hands focus
+        // back to the editor, since leader commands act on the window/
+        // buffer layer, not the sidebar.
+        if self.sidebar_focused {
+            if keypress == KeyPress::char(' ') && self.vim.mode() == Mode::Normal {
+                self.sidebar_focused = false;
+            } else {
+                if let Step::Matched(&action) = self.explorer_matcher.feed(keypress) {
+                    self.explorer_handle_action(action);
+                }
+                self.wake_caret();
+                return;
+            }
         }
 
         if self.modifiers.control_key() {
@@ -2374,8 +2392,15 @@ impl App {
             // are close enough in value that this went unnoticed there).
             bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg);
             if let Some((_, Some(selected_row), _)) = &sidebar_render {
+                // `theme.selection`, not `theme.hl_line`: the sidebar has no
+                // caret of its own, so this highlight is the *only* cue for
+                // which entry is selected and needs to actually stand out --
+                // matches the full-buffer explorer/picker's own selected-row
+                // highlight (both already use `theme.selection` above) rather
+                // than the subtle current-line tint meant to be a secondary
+                // cue alongside a visible caret.
                 let y = sidebar_row_y(*selected_row);
-                bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, line_height, theme.hl_line);
+                bg_rect.push_rect(gpu, 0.0, y, text::SIDEBAR_WIDTH, line_height, theme.selection);
             }
             // A thin divider along the sidebar's own right edge, same
             // color/weight as the ones between split panes, so there's a
