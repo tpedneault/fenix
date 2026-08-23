@@ -489,6 +489,17 @@ name = "fenix-keymap"
 version = "0.0.1"
 
 [[package]]
+name = "fenix-picker"
+version = "0.0.1"
+
+[[package]]
+name = "fenix-project"
+version = "0.0.1"
+dependencies = [
+ "fenix-picker",
+]
+
+[[package]]
 name = "fenix-syntax"
 version = "0.0.1"
 dependencies = [

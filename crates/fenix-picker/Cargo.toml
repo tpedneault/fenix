@@ -1,0 +1,6 @@
+[package]
+name = "fenix-picker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

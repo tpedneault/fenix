@@ -1,0 +1,7 @@
+[package]
+name = "fenix-project"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-picker = { path = "../fenix-picker" }
