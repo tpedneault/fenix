@@ -2,18 +2,22 @@ use fenix_core::{Buffer, Cursor};
 
 use crate::motion;
 
-/// Spaces per indent level. A single hardcoded constant, not a
-/// configurable setting -- matches how `fenix-gui`'s `FONT_SIZE`/
-/// `CHAR_WIDTH` etc. are hardcoded today; no settings system exists yet
-/// for this to plug into.
-pub const INDENT_WIDTH: usize = 4;
+/// The default spaces-per-indent-level, before any `:set shiftwidth=N`
+/// (`VimState::indent_width`, runtime-configurable -- see `state.rs` and
+/// `substitute.rs`'s `:set` handling). Tabs are always inserted as
+/// spaces, not a literal `'\t'`: the render pipeline has no tab-stop
+/// logic (every character occupies exactly one fixed-width column), so
+/// a real tab character would render as a single narrow column instead
+/// of expanding to the configured width -- a disclosed scope cut, not
+/// an oversight.
+pub const DEFAULT_INDENT_WIDTH: usize = 4;
 
 /// How many spaces a Tab press at column `col` should insert to reach
-/// the next multiple of `INDENT_WIDTH` (soft-tab / tab-stop behavior),
-/// rather than always inserting a flat `INDENT_WIDTH` regardless of
-/// where the cursor already is.
-pub fn spaces_to_next_stop(col: usize) -> usize {
-    INDENT_WIDTH - (col % INDENT_WIDTH)
+/// the next multiple of `width` (soft-tab / tab-stop behavior), rather
+/// than always inserting a flat `width` regardless of where the cursor
+/// already is.
+pub fn spaces_to_next_stop(col: usize, width: usize) -> usize {
+    width - (col % width)
 }
 
 /// The exact leading-whitespace substring of `line` (spaces and/or
@@ -24,24 +28,24 @@ pub fn leading_whitespace(buffer: &Buffer, line: usize) -> String {
     buffer.text_range(start, first)
 }
 
-/// `>>`: prepends `INDENT_WIDTH` spaces at the start of `line`. Its own
-/// atomic undo step, same as `finish_operator`'s delete/yank calls --
-/// `>>`/`<<` are stand-alone Normal-mode actions, not part of an active
+/// `>>`: prepends `width` spaces at the start of `line`. Its own atomic
+/// undo step, same as `finish_operator`'s delete/yank calls -- `>>`/`<<`
+/// are stand-alone Normal-mode actions, not part of an active
 /// Insert-mode coalescing run.
-pub fn indent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize) {
+pub fn indent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, width: usize) {
     let at = buffer.line_start_char(line);
     cursor.char_idx = at;
-    buffer.insert_str(cursor, &" ".repeat(INDENT_WIDTH));
+    buffer.insert_str(cursor, &" ".repeat(width));
 }
 
-/// `<<`: removes up to `INDENT_WIDTH` leading whitespace chars (spaces
-/// or tabs) from the start of `line` -- fewer if the line has less,
+/// `<<`: removes up to `width` leading whitespace chars (spaces or
+/// tabs) from the start of `line` -- fewer if the line has less,
 /// stopping at the first non-space/tab char either way.
-pub fn dedent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize) {
+pub fn dedent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, width: usize) {
     let start = buffer.line_start_char(line);
     let end_of_line = start + buffer.line_len(line);
     let mut end = start;
-    while end < end_of_line && end - start < INDENT_WIDTH && matches!(buffer.char_at(end), Some(' ') | Some('\t')) {
+    while end < end_of_line && end - start < width && matches!(buffer.char_at(end), Some(' ') | Some('\t')) {
         end += 1;
     }
     buffer.delete_range(cursor, start, end);
@@ -84,10 +88,17 @@ mod tests {
 
     #[test]
     fn spaces_to_next_stop_lands_on_the_next_multiple_of_indent_width() {
-        assert_eq!(spaces_to_next_stop(0), 4);
-        assert_eq!(spaces_to_next_stop(2), 2);
-        assert_eq!(spaces_to_next_stop(4), 4);
-        assert_eq!(spaces_to_next_stop(5), 3);
+        assert_eq!(spaces_to_next_stop(0, 4), 4);
+        assert_eq!(spaces_to_next_stop(2, 4), 2);
+        assert_eq!(spaces_to_next_stop(4, 4), 4);
+        assert_eq!(spaces_to_next_stop(5, 4), 3);
+    }
+
+    #[test]
+    fn spaces_to_next_stop_honors_a_non_default_width() {
+        assert_eq!(spaces_to_next_stop(0, 3), 3);
+        assert_eq!(spaces_to_next_stop(2, 3), 1);
+        assert_eq!(spaces_to_next_stop(3, 3), 3);
     }
 
     #[test]
@@ -102,15 +113,23 @@ mod tests {
     fn indent_line_prepends_a_level_and_moves_cursor_to_line_start() {
         let mut b = buf("foo\nbar");
         let mut c = Cursor::at_start();
-        indent_line(&mut b, &mut c, 1);
+        indent_line(&mut b, &mut c, 1, 4);
         assert_eq!(b.text(), "foo\n    bar");
+    }
+
+    #[test]
+    fn indent_line_honors_a_non_default_width() {
+        let mut b = buf("foo\nbar");
+        let mut c = Cursor::at_start();
+        indent_line(&mut b, &mut c, 1, 3);
+        assert_eq!(b.text(), "foo\n   bar");
     }
 
     #[test]
     fn dedent_line_removes_up_to_indent_width_leading_chars() {
         let mut b = buf("        deeply indented");
         let mut c = Cursor::at_start();
-        dedent_line(&mut b, &mut c, 0);
+        dedent_line(&mut b, &mut c, 0, 4);
         assert_eq!(b.text(), "    deeply indented");
     }
 
@@ -118,7 +137,7 @@ mod tests {
     fn dedent_line_removes_only_whats_there_when_less_than_indent_width() {
         let mut b = buf("  two spaces");
         let mut c = Cursor::at_start();
-        dedent_line(&mut b, &mut c, 0);
+        dedent_line(&mut b, &mut c, 0, 4);
         assert_eq!(b.text(), "two spaces");
     }
 
@@ -126,7 +145,7 @@ mod tests {
     fn dedent_line_on_unindented_text_is_a_no_op() {
         let mut b = buf("no indent here");
         let mut c = Cursor::at_start();
-        dedent_line(&mut b, &mut c, 0);
+        dedent_line(&mut b, &mut c, 0, 4);
         assert_eq!(b.text(), "no indent here");
     }
 
@@ -136,8 +155,16 @@ mod tests {
         // should be removed, not eat into "x".
         let mut b = buf("\tx");
         let mut c = Cursor::at_start();
-        dedent_line(&mut b, &mut c, 0);
+        dedent_line(&mut b, &mut c, 0, 4);
         assert_eq!(b.text(), "x");
+    }
+
+    #[test]
+    fn dedent_line_honors_a_non_default_width() {
+        let mut b = buf("   three spaces");
+        let mut c = Cursor::at_start();
+        dedent_line(&mut b, &mut c, 0, 3);
+        assert_eq!(b.text(), "three spaces");
     }
 
     #[test]

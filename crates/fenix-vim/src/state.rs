@@ -26,6 +26,10 @@ pub enum VimEvent {
     /// briefly highlight and fade. Not raised for Block-mode yank/paste
     /// (no single contiguous range to pulse cleanly) or delete.
     Pulse(Range<usize>),
+    /// `:set shiftwidth=N`/`:set sw=N` just changed the indent width to
+    /// this value -- a hint for the host app to persist it, the same
+    /// "escape hatch" role `RequestSave` plays for `:w`.
+    IndentWidthChanged(usize),
 }
 
 struct Register {
@@ -90,6 +94,11 @@ pub struct VimState {
     /// Pattern + direction of the most recently *confirmed* search (via
     /// Enter, or `*`/`#`), for `n`/`N` to repeat.
     last_search: Option<(String, bool)>,
+    /// Spaces per indent level for Tab, `>>`/`<<`, and the bracket-bump
+    /// on Enter -- runtime-configurable via `:set shiftwidth=N`/`:set
+    /// sw=N` (see `substitute::run_ex_command`), persisted by the host
+    /// app the same way it already persists the theme/font size.
+    indent_width: usize,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -116,6 +125,7 @@ impl VimState {
             search_query: String::new(),
             search_forward: true,
             last_search: None,
+            indent_width: indent::DEFAULT_INDENT_WIDTH,
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -124,6 +134,23 @@ impl VimState {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Current spaces-per-indent-level, for the host app to seed from a
+    /// persisted setting at startup and to re-persist after `:set
+    /// shiftwidth=N` changes it (see `VimEvent::IndentWidthChanged`).
+    pub fn indent_width(&self) -> usize {
+        self.indent_width
+    }
+
+    /// Sets the indent width directly -- used by the host app to apply a
+    /// persisted setting at startup, mirroring `:set shiftwidth=N`'s own
+    /// effect. Zero is rejected (a no-op) since every indent computation
+    /// divides by it.
+    pub fn set_indent_width(&mut self, width: usize) {
+        if width > 0 {
+            self.indent_width = width;
+        }
     }
 
     /// Which kind of selection Visual mode is making. Only meaningful
@@ -251,7 +278,7 @@ impl VimState {
                 let bumps = cursor.char_idx > 0
                     && buffer.char_at(cursor.char_idx - 1).is_some_and(indent::is_opening_bracket);
                 if bumps {
-                    new_indent.push_str(&" ".repeat(indent::INDENT_WIDTH));
+                    new_indent.push_str(&" ".repeat(self.indent_width));
                 }
                 buffer.insert_char(cursor, '\n');
                 for ch in new_indent.chars() {
@@ -265,7 +292,7 @@ impl VimState {
                 // to anything. A char-at-a-time loop, not `insert_str`,
                 // so it coalesces with the surrounding Insert-mode run.
                 let (_, col) = buffer.line_col(cursor);
-                for _ in 0..indent::spaces_to_next_stop(col) {
+                for _ in 0..indent::spaces_to_next_stop(col, self.indent_width) {
                     buffer.insert_char(cursor, ' ');
                 }
             }
@@ -302,7 +329,7 @@ impl VimState {
                     // next.
                     if !replace && indent::is_closing_bracket(c) && indent::line_blank_before_cursor(buffer, cursor) {
                         let (line, _) = buffer.line_col(cursor);
-                        indent::dedent_line(buffer, cursor, line);
+                        indent::dedent_line(buffer, cursor, line, self.indent_width);
                         // Not `line_first_non_blank` -- the line is
                         // entirely whitespace (that's the trigger
                         // condition), so "first non-blank" degenerates to
@@ -374,7 +401,7 @@ impl VimState {
             KeyCode::Named(NamedKey::Enter) => {
                 let cmd = std::mem::take(&mut self.command_line);
                 self.mode = Mode::Normal;
-                return crate::substitute::run_ex_command(&cmd, buffer, cursor);
+                return crate::substitute::run_ex_command(&cmd, buffer, cursor, &mut self.indent_width);
             }
             KeyCode::Named(NamedKey::Backspace) => {
                 self.command_line.pop();
@@ -570,9 +597,9 @@ impl VimState {
                 let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
                 for l in line..=end_line {
                     if action == VimAction::IndentLine {
-                        indent::indent_line(buffer, cursor, l);
+                        indent::indent_line(buffer, cursor, l, self.indent_width);
                     } else {
-                        indent::dedent_line(buffer, cursor, l);
+                        indent::dedent_line(buffer, cursor, l, self.indent_width);
                     }
                 }
                 cursor.char_idx = motion::line_first_non_blank(buffer, line);
@@ -993,9 +1020,9 @@ impl VimState {
                         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
                     for l in line_lo..=line_hi {
                         if *action == VisualAction::Indent {
-                            indent::indent_line(buffer, cursor, l);
+                            indent::indent_line(buffer, cursor, l, self.indent_width);
                         } else {
-                            indent::dedent_line(buffer, cursor, l);
+                            indent::dedent_line(buffer, cursor, l, self.indent_width);
                         }
                     }
                     cursor.char_idx = motion::line_first_non_blank(buffer, line_lo);
@@ -1924,6 +1951,40 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, ":wq");
         let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
         assert_eq!(ev, VimEvent::RequestSaveAndQuit);
+    }
+
+    #[test]
+    fn set_shiftwidth_reconfigures_tab_and_gtgt_ltlt() {
+        let mut b = buf("foo\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.indent_width(), 4);
+
+        keys(&mut vim, &mut b, &mut c, ":set shiftwidth=3");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::IndentWidthChanged(3));
+        assert_eq!(vim.indent_width(), 3);
+        assert_eq!(vim.mode(), Mode::Normal);
+
+        // Tab now inserts 3 spaces, not 4.
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        assert_eq!(b.text(), "   foo\n");
+
+        // >> now indents by 3 spaces too.
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        keys(&mut vim, &mut b, &mut c, "0");
+        keys(&mut vim, &mut b, &mut c, ">>");
+        assert_eq!(b.text(), "      foo\n");
+    }
+
+    #[test]
+    fn set_indent_width_applies_a_persisted_setting_directly() {
+        let mut vim = VimState::new();
+        vim.set_indent_width(2);
+        assert_eq!(vim.indent_width(), 2);
+        vim.set_indent_width(0); // rejected, division-by-zero guard
+        assert_eq!(vim.indent_width(), 2);
     }
 
     #[test]

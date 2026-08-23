@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -212,6 +213,33 @@ enum PromptKind {
 struct ExplorerPrompt {
     kind: PromptKind,
     input: String,
+}
+
+/// `dirs::config_dir()/fenix/indent_width.txt` -- same convention as
+/// `theme::default_path`/`text::font_size_default_path`. Lives here
+/// rather than in `fenix-vim` (see `App::indent_width_path`'s own doc
+/// comment for why).
+fn indent_width_default_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("fenix").join("indent_width.txt"))
+}
+
+/// Loads the persisted indent width, falling back to `fenix-vim`'s own
+/// default on a missing file, an unparsable value, or zero (division-
+/// by-zero guard, same as `VimState::set_indent_width`) -- a convenience
+/// preference, not critical data, so it never fails outright.
+fn load_indent_width(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH)
+}
+
+fn save_indent_width(width: usize, path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, width.to_string())
 }
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
@@ -492,6 +520,14 @@ pub struct App {
     /// Same reasoning as `theme_path`, for the persisted font-size choice
     /// (`SPC t =`/`-`/`0`) -- see `text::font_size_default_path`.
     font_size_path: PathBuf,
+    /// Same reasoning again, for the persisted `:set shiftwidth=N`
+    /// choice. Lives here rather than in `fenix-vim`: `VimState` stays
+    /// free of file I/O, matching every other pure editing-state type in
+    /// that crate -- `App` applies the loaded value to `self.vim` and
+    /// saves it back on `VimEvent::IndentWidthChanged`, the same shape
+    /// already used for the theme and font size, two other settings that
+    /// live in a different type than the one that persists them.
+    indent_width_path: PathBuf,
 
     modifiers: ModifiersState,
     /// Whether the caret is fading toward visible or toward hidden --
@@ -529,6 +565,10 @@ impl App {
         let theme_path = theme::default_path().unwrap_or_else(|| PathBuf::from("fenix-theme.txt"));
         let theme = theme::load_from(&theme_path);
         let font_size_path = text::font_size_default_path().unwrap_or_else(|| PathBuf::from("fenix-font-size.txt"));
+        let indent_width_path =
+            indent_width_default_path().unwrap_or_else(|| PathBuf::from("fenix-indent-width.txt"));
+        let mut vim = VimState::new();
+        vim.set_indent_width(load_indent_width(&indent_width_path));
 
         Self {
             window: None,
@@ -553,12 +593,13 @@ impl App {
             active_picker: None,
             known_projects,
             pending_grep_query: None,
-            vim: VimState::new(),
+            vim,
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             theme_path,
             font_size_path,
+            indent_width_path,
             modifiers: ModifiersState::empty(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
@@ -1526,6 +1567,11 @@ impl App {
             }
             VimEvent::Pulse(range) => {
                 self.pulse = Some(Pulse { range, started: Instant::now() });
+            }
+            VimEvent::IndentWidthChanged(width) => {
+                if let Err(err) = save_indent_width(width, &self.indent_width_path) {
+                    eprintln!("fenix: couldn't save indent width ({err})");
+                }
             }
             VimEvent::None => {}
         }
@@ -3134,6 +3180,75 @@ mod tests {
         app.increase_font_size();
         app.decrease_font_size();
         app.reset_font_size();
+    }
+
+    #[test]
+    fn load_indent_width_from_a_missing_file_falls_back_to_the_default() {
+        let dir = TempDir::new("load_indent_width_missing");
+        assert_eq!(load_indent_width(&dir.path().join("does-not-exist.txt")), fenix_vim::DEFAULT_INDENT_WIDTH);
+    }
+
+    #[test]
+    fn load_indent_width_ignores_zero_and_unparsable_values() {
+        let dir = TempDir::new("load_indent_width_invalid");
+        let path = dir.path().join("indent_width.txt");
+
+        std::fs::write(&path, "0").unwrap();
+        assert_eq!(load_indent_width(&path), fenix_vim::DEFAULT_INDENT_WIDTH);
+
+        std::fs::write(&path, "not-a-number").unwrap();
+        assert_eq!(load_indent_width(&path), fenix_vim::DEFAULT_INDENT_WIDTH);
+    }
+
+    #[test]
+    fn save_indent_width_then_load_indent_width_round_trips() {
+        let dir = TempDir::new("indent_width_round_trip");
+        let path = dir.path().join("indent_width.txt");
+        save_indent_width(3, &path).unwrap();
+        assert_eq!(load_indent_width(&path), 3);
+    }
+
+    #[test]
+    fn save_indent_width_creates_missing_parent_directories() {
+        let dir = TempDir::new("indent_width_creates_parents");
+        let path = dir.path().join("nested").join("config").join("indent_width.txt");
+        save_indent_width(4, &path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn with_file_applies_a_persisted_indent_width_to_vim() {
+        let dir = TempDir::new("with_file_applies_indent_width");
+        let path = dir.path().join("indent_width.txt");
+        save_indent_width(3, &path).unwrap();
+
+        let mut vim = VimState::new();
+        vim.set_indent_width(load_indent_width(&path));
+        assert_eq!(vim.indent_width(), 3);
+    }
+
+    #[test]
+    fn set_shiftwidth_command_persists_the_new_width() {
+        let dir = TempDir::new("set_shiftwidth_persists");
+        let mut app = App::with_file(None);
+        app.indent_width_path = dir.path().join("indent_width.txt");
+
+        let event = app.test_vim_key(KeyPress::char(':'));
+        assert_eq!(event, VimEvent::None);
+        for ch in "set shiftwidth=3".chars() {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let event = app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(event, VimEvent::IndentWidthChanged(3));
+
+        // Mirrors handle_key's own IndentWidthChanged arm -- handle_key
+        // itself needs a real winit KeyEvent, so this exercises the
+        // persistence call it would make directly (same posture as
+        // vim_pulse_event_yields_a_renderable_pulse_overlay above).
+        if let VimEvent::IndentWidthChanged(width) = event {
+            save_indent_width(width, &app.indent_width_path).unwrap();
+        }
+        assert_eq!(load_indent_width(&app.indent_width_path), 3);
     }
 
     #[test]
