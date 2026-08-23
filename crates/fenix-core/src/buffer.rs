@@ -381,6 +381,41 @@ impl Buffer {
         });
     }
 
+    /// Replaces `start..end` with `text` as a single atomic edit (one
+    /// undo step, not a delete followed by a separate insert) --
+    /// combines what `delete_range`/`insert_str` each do individually
+    /// into one `Edit` carrying both a `removed` and an `inserted`
+    /// string, since chaining those two would split what should be one
+    /// undo-able change (e.g. Vim's `:s` substitute) into two, requiring
+    /// two presses of `u` to fully revert. Returns the removed text.
+    pub fn replace_range(&mut self, cursor: &mut Cursor, start: usize, end: usize, text: &str) -> String {
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed = self.rope.slice(start..end).to_string();
+
+        if start < end {
+            self.rope.remove(start..end);
+        }
+        if !text.is_empty() {
+            self.rope.insert(start, text);
+        }
+        cursor.char_idx = start + text.chars().count();
+        self.dirty = true;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(start, removed.clone(), cursor.char_idx);
+
+        self.undo_stack.push(Edit {
+            at: start,
+            removed: removed.clone(),
+            inserted: text.to_string(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
+        removed
+    }
+
     /// Commits the in-progress coalesced edit run (if any) to the undo
     /// stack, ending it as an undo boundary. Movement calls this so undo
     /// removes one "run" of typing/deleting at a time, not one char.
@@ -630,6 +665,46 @@ mod tests {
         assert!(buf.undo(&mut cur));
         assert_eq!(buf.text(), "hello");
         assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn replace_range_swaps_text_in_and_positions_the_cursor_after_it() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 0, 5, "goodbye");
+        assert_eq!(removed, "hello");
+        assert_eq!(buf.text(), "goodbye world");
+        assert_eq!(cur.char_idx, 7);
+    }
+
+    #[test]
+    fn replace_range_is_a_single_undo_step() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.replace_range(&mut cur, 0, 5, "goodbye");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello world"); // fully restored in one `u`
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn replace_range_with_empty_text_behaves_like_a_pure_delete() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 5, 11, "");
+        assert_eq!(removed, " world");
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
+    }
+
+    #[test]
+    fn replace_range_with_an_empty_span_behaves_like_a_pure_insert() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 5, 5, " world");
+        assert_eq!(removed, "");
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
     }
 
     #[test]
