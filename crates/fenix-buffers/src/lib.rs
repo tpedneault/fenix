@@ -7,6 +7,21 @@ use fenix_core::{Buffer, Cursor};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferId(u32);
 
+/// What a buffer's content actually is, beyond "it wraps a `Buffer`" --
+/// every `OpenBuffer` still always has a real `buffer`/`cursor` (see
+/// `OpenBuffer`'s own doc comment for why this is a tag, not a wrapping
+/// enum), but the host uses this to tell an ordinary text buffer apart
+/// from one whose content is generated/informational rather than
+/// something the user is editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferKind {
+    Text,
+    /// The startup dashboard (`fenix-gui`'s `SPC d d`) -- a real buffer
+    /// like any other, just tagged so the host can special-case what
+    /// `Enter` does on it and how it's colored.
+    Dashboard,
+}
+
 /// One open buffer's full state. Cursor and scroll position are kept
 /// buffer-local (not per-window) -- a deliberate v1 simplification: if the
 /// same buffer is shown in two panes at once, they show the same cursor/
@@ -14,12 +29,20 @@ pub struct BufferId(u32);
 /// simpler (panes just reference a `BufferId`, no shared-mutable-state
 /// design needed) and still covers the common case of different buffers in
 /// different panes.
+///
+/// `buffer: Buffer` is unconditional, not wrapped in a content enum --
+/// dozens of call sites across `fenix-vim`/`fenix-gui` (every motion,
+/// every render, save, undo/redo) already assume `buffer`/`cursor` exist
+/// directly. `kind` is an additive tag instead: every `OpenBuffer` is
+/// still a real, navigable, undoable rope buffer; `kind` only changes
+/// what the host layer does with it beyond that (see `BufferKind`).
 pub struct OpenBuffer {
     pub buffer: Buffer,
     pub cursor: Cursor,
     pub syntax: Option<fenix_syntax::SyntaxState>,
     pub scroll_line: usize,
     pub rendered_scroll: f32,
+    pub kind: BufferKind,
     // Deliberately no `scroll_anim` field here -- that needs `Instant`, an
     // animation/rendering-layer concern kept in fenix-gui (keyed by
     // `BufferId` there), not something this host-agnostic registry needs.
@@ -48,7 +71,7 @@ impl BufferList {
         Self { buffers: BTreeMap::new(), path_index: HashMap::new(), mru: Vec::new(), next_id: 0 }
     }
 
-    fn insert(&mut self, buffer: Buffer, syntax: Option<fenix_syntax::SyntaxState>) -> BufferId {
+    fn insert(&mut self, buffer: Buffer, syntax: Option<fenix_syntax::SyntaxState>, kind: BufferKind) -> BufferId {
         let id = BufferId(self.next_id);
         self.next_id += 1;
         if let Some(path) = buffer.path() {
@@ -56,7 +79,7 @@ impl BufferList {
         }
         self.buffers.insert(
             id,
-            OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, scroll_line: 0, rendered_scroll: 0.0 },
+            OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, scroll_line: 0, rendered_scroll: 0.0, kind },
         );
         self.touch(id);
         id
@@ -64,7 +87,18 @@ impl BufferList {
 
     /// An empty, unnamed buffer -- `SPC b X`.
     pub fn open_scratch(&mut self) -> BufferId {
-        self.insert(Buffer::empty(), None)
+        self.insert(Buffer::empty(), None, BufferKind::Text)
+    }
+
+    /// A real buffer seeded with `text` up front (no undo history, via
+    /// `Buffer::from_text`) and tagged `Dashboard` -- the startup
+    /// dashboard, `SPC d d`. A real buffer like any other: splittable,
+    /// closable via `SPC b k`, listed in the buffer switcher. The host
+    /// uses `kind` to special-case what Enter does and how it's colored;
+    /// nothing about storage/navigation/undo differs from an ordinary
+    /// buffer.
+    pub fn open_dashboard(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Dashboard)
     }
 
     /// Opens `path`, reusing an already-open buffer for that exact path
@@ -91,7 +125,7 @@ impl BufferList {
             .and_then(|ext| ext.to_str())
             .and_then(fenix_syntax::detect_language)
             .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
-        self.insert(buffer, syntax)
+        self.insert(buffer, syntax, BufferKind::Text)
     }
 
     pub fn get(&self, id: BufferId) -> Option<&OpenBuffer> {
@@ -184,6 +218,30 @@ mod tests {
         let ob = list.get(id).unwrap();
         assert_eq!(ob.buffer.text(), "");
         assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Text);
+    }
+
+    #[test]
+    fn open_dashboard_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_dashboard("hello dashboard\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "hello dashboard\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Dashboard);
+    }
+
+    #[test]
+    fn open_dashboard_is_a_real_buffer_reachable_through_the_registry_like_any_other() {
+        // The whole point of the tag-not-wrap design: no special lookup
+        // path, no separate registry -- `get`/`get_mut`/`mru`/`close` all
+        // just work.
+        let mut list = BufferList::new();
+        let id = list.open_dashboard("dashboard\n");
+        assert_eq!(list.mru(), &[id]);
+        assert_eq!(list.len(), 1);
+        list.close(id);
+        assert!(list.get(id).is_none());
     }
 
     #[test]
@@ -193,6 +251,7 @@ mod tests {
         let mut list = BufferList::new();
         let id = list.open_path(&path);
         assert_eq!(list.get(id).unwrap().buffer.text(), "hello\n");
+        assert_eq!(list.get(id).unwrap().kind, BufferKind::Text);
     }
 
     #[test]

@@ -117,6 +117,16 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
 
+        t.label_group(&[spc, KeyPress::char('d')], "dashboard");
+        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('d')], "open dashboard", "dashboard.open");
+
+        t.label_group(&[spc, KeyPress::char('c')], "completion");
+        t.insert(
+            &[spc, KeyPress::char('c'), KeyPress::char('r')],
+            "refresh tags",
+            "completion.refresh_tags",
+        );
+
         t.label_group(&[spc, KeyPress::char('w')], "window");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('s')], "split horizontal", "window.split_horizontal");
@@ -278,6 +288,30 @@ mod tests {
         match m.feed(KeyPress::char('d')) {
             fenix_keymap::Step::Matched(&"project.delete") => {}
             _ => panic!("expected SPC p d to resolve to project.delete"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_dashboard_open() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('d'));
+        match m.feed(KeyPress::char('d')) {
+            fenix_keymap::Step::Matched(&"dashboard.open") => {}
+            _ => panic!("expected SPC d d to resolve to dashboard.open"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_completion_refresh_tags() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('r')) {
+            fenix_keymap::Step::Matched(&"completion.refresh_tags") => {}
+            _ => panic!("expected SPC c r to resolve to completion.refresh_tags"),
         }
     }
 

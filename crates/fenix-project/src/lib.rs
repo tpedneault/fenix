@@ -6,8 +6,10 @@ mod root;
 mod test_util;
 
 mod known;
+mod recent;
 
 pub use files::list_project_files;
 pub use grep::{grep_project, GrepMatch};
 pub use known::KnownProjects;
+pub use recent::RecentFiles;
 pub use root::find_project_root;

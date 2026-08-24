@@ -483,6 +483,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-completion"
+version = "0.0.1"
+
+[[package]]
+name = "fenix-config"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
 name = "fenix-core"
 version = "0.0.1"
 dependencies = [
@@ -504,6 +515,8 @@ dependencies = [
  "bytemuck",
  "dirs",
  "fenix-buffers",
+ "fenix-completion",
+ "fenix-config",
  "fenix-core",
  "fenix-explorer",
  "fenix-keymap",

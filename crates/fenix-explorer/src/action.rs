@@ -34,6 +34,16 @@ pub enum ExplorerAction {
     ToggleHidden,
     Refresh,
     Quit,
+    /// Confirm the directory currently being browsed (`cwd`, not the
+    /// entry at point) as the thing this listing was opened to pick --
+    /// meaningless during ordinary browsing (`SPC f j`/the sidebar), only
+    /// acted on by a host that opened the explorer in a directory-picking
+    /// mode (e.g. Fenix's `SPC p a`). Deliberately a different key from
+    /// `Open`/`l`/`Enter`, which keeps navigating *into* directories --
+    /// mirrors a standard "choose folder" dialog, where you browse deeper
+    /// with one action and confirm the folder you're currently in with a
+    /// separate one.
+    SelectCwd,
 }
 
 /// Bindings chosen to match evil-collection's real dired keymap (what
@@ -66,6 +76,7 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "refresh", ExplorerAction::Refresh);
         t.insert(&[KeyPress::char('q')], "quit", ExplorerAction::Quit);
         t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Escape)], "quit", ExplorerAction::Quit);
+        t.insert(&[KeyPress::char('S')], "select this directory", ExplorerAction::SelectCwd);
 
         t
     })
@@ -109,6 +120,16 @@ mod tests {
         match m.feed(KeyPress::char('r')) {
             Step::Matched(ExplorerAction::Refresh) => {}
             _ => panic!("expected Refresh"),
+        }
+    }
+
+    #[test]
+    fn shift_s_selects_the_current_directory() {
+        let trie = explorer_trie();
+        let mut m = trie.matcher();
+        match m.feed(KeyPress::char('S')) {
+            Step::Matched(ExplorerAction::SelectCwd) => {}
+            _ => panic!("expected SelectCwd"),
         }
     }
 

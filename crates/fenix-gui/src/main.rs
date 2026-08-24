@@ -1,5 +1,7 @@
 mod app;
 mod commands;
+mod completion;
+mod dashboard;
 mod gpu;
 mod icon;
 mod keymap;

@@ -1,7 +1,7 @@
 //! Generic anchored-popup positioning, shared by every floating panel the
-//! editor draws on top of its content -- today just the which-key hint
-//! popup, with a completion-candidate popup expected to be the next thing
-//! built on this. The only two things every one of these needs in common:
+//! editor draws on top of its content -- the which-key hint popup and the
+//! autocompletion candidate popup. The only two things every one of these
+//! needs in common:
 //! an identity (so `TextPipeline` can keep a persistent glyph buffer per
 //! popup, the same way it already does per split pane) and a resolved,
 //! on-screen `Rect` that never runs off the window -- what's actually
@@ -17,6 +17,12 @@ use fenix_window::Rect;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PopupId {
     WhichKey,
+    /// The autocompletion candidate popup, anchored under the caret via
+    /// `Anchor::BelowPoint`. Never coexists with `WhichKey` -- one only
+    /// appears mid-Normal/-pending-sequence, the other only in Insert
+    /// mode -- so no popup-overlap handling is needed anywhere this id
+    /// is used.
+    Completion,
 }
 
 /// Where a popup wants to appear, before clamping to the window.
@@ -27,9 +33,8 @@ pub enum Anchor {
     /// placement.
     TopRight { margin: f32 },
     /// Just below a point in window coordinates (e.g. the caret's current
-    /// screen position) -- for a future popup that should track where
-    /// you're typing, like completion candidates.
-    #[allow(dead_code)] // not consumed until a point-anchored popup (e.g. completion) exists
+    /// screen position) -- the completion popup's own placement, tracking
+    /// where you're typing.
     BelowPoint { x: f32, y: f32 },
 }
 

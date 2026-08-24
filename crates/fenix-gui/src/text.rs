@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::io;
-use std::path::{Path, PathBuf};
 
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -80,6 +78,21 @@ pub struct TextPipeline {
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: TextRenderer,
+    /// A second, independent renderer for the popup overlay pass, sharing
+    /// `atlas`/`viewport` but owning its own vertex buffer. Necessary
+    /// because glyphon's `TextRenderer::prepare` calls `vertex_buffer.
+    /// destroy()` before replacing it whenever new content needs more
+    /// capacity than currently allocated (see `text_render.rs` in the
+    /// vendored glyphon source) -- an *immediate* GPU-side destroy, not a
+    /// deferred one. With one shared renderer, `prepare()` (base layer) +
+    /// `render()` (pass one) + `prepare_popups()` (popups) + `render()`
+    /// (pass two) all in the same frame meant `prepare_popups` could
+    /// destroy the very vertex buffer pass one's draw call had already
+    /// been recorded against, in the same not-yet-submitted command
+    /// encoder -- `queue.submit` then failed validation with "Buffer ...
+    /// has been destroyed". Two renderers means a popup-triggered resize
+    /// only ever touches `popup_renderer`'s own buffer.
+    popup_renderer: TextRenderer,
     content_buffers: HashMap<PaneId, GlyphBuffer>,
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
@@ -118,6 +131,8 @@ impl TextPipeline {
         let mut atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
         let renderer =
             TextRenderer::new(&mut atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+        let popup_renderer =
+            TextRenderer::new(&mut atlas, &gpu.device, wgpu::MultisampleState::default(), None);
 
         let mut modeline = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
@@ -135,6 +150,7 @@ impl TextPipeline {
             viewport,
             atlas,
             renderer,
+            popup_renderer,
             content_buffers: HashMap::new(),
             popups: HashMap::new(),
             modeline,
@@ -480,7 +496,7 @@ impl TextPipeline {
             });
         }
 
-        self.renderer
+        self.popup_renderer
             .prepare(
                 &gpu.device,
                 &gpu.queue,
@@ -497,6 +513,14 @@ impl TextPipeline {
         self.renderer.render(&self.atlas, &self.viewport, pass).expect("glyphon render failed");
     }
 
+    /// Draws whatever `prepare_popups` most recently prepared -- the
+    /// second pass's counterpart to `render`, using the separate
+    /// `popup_renderer` (see its field doc comment for why this can't
+    /// just be another call to `render`).
+    pub fn render_popups<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
+        self.popup_renderer.render(&self.atlas, &self.viewport, pass).expect("glyphon render failed");
+    }
+
     pub fn trim(&mut self) {
         self.atlas.trim();
     }
@@ -511,25 +535,6 @@ fn resolve_font_size(requested: f32) -> (f32, f32) {
     let font_size = requested.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
     let line_height = font_size * (LINE_HEIGHT / FONT_SIZE);
     (font_size, line_height)
-}
-
-/// Persisted font-size choice, mirroring `theme::default_path`/
-/// `load_from`/`save_to`'s exact shape -- same convenience-preference
-/// posture (never fails outright, falls back to `FONT_SIZE` on any
-/// missing/unreadable/unparsable file).
-pub fn font_size_default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("font_size.txt"))
-}
-
-pub fn load_font_size(path: &Path) -> f32 {
-    std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<f32>().ok()).map(|s| resolve_font_size(s).0).unwrap_or(FONT_SIZE)
-}
-
-pub fn save_font_size(size: f32, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, size.to_string())
 }
 
 fn content_height(window_height: f32, modeline_height: f32) -> f32 {
@@ -641,61 +646,4 @@ mod tests {
         assert_eq!(resolve_font_size(FONT_SIZE), (FONT_SIZE, LINE_HEIGHT));
     }
 
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("fenix-gui-text-test-{name}-{}-{n}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn load_font_size_from_a_missing_file_falls_back_to_the_default() {
-        let dir = TempDir::new("load_missing");
-        assert_eq!(load_font_size(&dir.path().join("does-not-exist.txt")), FONT_SIZE);
-    }
-
-    #[test]
-    fn load_font_size_from_an_unparsable_file_falls_back_to_the_default() {
-        let dir = TempDir::new("load_unparsable");
-        let path = dir.path().join("font_size.txt");
-        std::fs::write(&path, "not-a-number").unwrap();
-        assert_eq!(load_font_size(&path), FONT_SIZE);
-    }
-
-    #[test]
-    fn save_font_size_then_load_font_size_round_trips() {
-        let dir = TempDir::new("round_trip");
-        let path = dir.path().join("font_size.txt");
-        save_font_size(24.0, &path).unwrap();
-        assert_eq!(load_font_size(&path), 24.0);
-    }
-
-    #[test]
-    fn load_font_size_clamps_an_out_of_range_persisted_value() {
-        let dir = TempDir::new("load_clamps");
-        let path = dir.path().join("font_size.txt");
-        std::fs::write(&path, "9999").unwrap();
-        assert_eq!(load_font_size(&path), MAX_FONT_SIZE);
-    }
-
-    #[test]
-    fn save_font_size_creates_missing_parent_directories() {
-        let dir = TempDir::new("save_creates_parents");
-        let path = dir.path().join("nested").join("config").join("font_size.txt");
-        save_font_size(18.0, &path).unwrap();
-        assert!(path.exists());
-    }
 }

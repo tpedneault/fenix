@@ -50,6 +50,7 @@ impl CommandRegistry {
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
+        registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -69,6 +70,11 @@ impl CommandRegistry {
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
         registry.register("workspace.prev", "Switch to the previous workspace", cmd_prev_workspace);
         registry.register("workspace.remove", "Remove the active workspace", cmd_remove_workspace);
+        registry.register(
+            "completion.refresh_tags",
+            "Refresh Tcl completion tags (re-scans the project with ctags)",
+            cmd_completion_refresh_tags,
+        );
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -146,6 +152,10 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
     ctx.app.picker_delete_project();
 }
 
+fn cmd_dashboard_open(ctx: &mut CommandCtx) {
+    ctx.app.open_dashboard();
+}
+
 fn cmd_split_vertical(ctx: &mut CommandCtx) {
     ctx.app.split_vertical();
 }
@@ -220,6 +230,10 @@ fn cmd_prev_workspace(ctx: &mut CommandCtx) {
 
 fn cmd_remove_workspace(ctx: &mut CommandCtx) {
     ctx.app.remove_workspace();
+}
+
+fn cmd_completion_refresh_tags(ctx: &mut CommandCtx) {
+    ctx.app.refresh_completion_tags();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {

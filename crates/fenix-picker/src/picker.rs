@@ -5,6 +5,7 @@ use crate::fuzzy::fuzzy_match;
 /// entry is chosen (a `PathBuf` for find-file, a `GrepMatch` for search
 /// results, etc.) -- kept separate so the picker never needs to know
 /// anything about what it's picking between.
+#[derive(Clone)]
 pub struct Candidate<T> {
     pub label: String,
     pub payload: T,
@@ -52,6 +53,15 @@ impl<T> PickerState<T> {
 
     pub fn backspace(&mut self) {
         self.query.pop();
+        self.refilter();
+    }
+
+    /// Replaces the whole query at once and refilters -- for callers that
+    /// already know the exact new query string (e.g. a prefix re-derived
+    /// fresh from a text buffer each keystroke) rather than editing it one
+    /// character at a time via `push_char`/`backspace`.
+    pub fn set_query(&mut self, query: &str) {
+        self.query = query.to_string();
         self.refilter();
     }
 
@@ -184,5 +194,28 @@ mod tests {
     fn payload_is_returned_alongside_the_label() {
         let picker = PickerState::new(candidates(&["only"]));
         assert_eq!(picker.selected().unwrap().payload, 0);
+    }
+
+    #[test]
+    fn set_query_replaces_the_whole_query_and_refilters() {
+        let mut picker = PickerState::new(candidates(&["apple", "banana", "apricot"]));
+        picker.set_query("ap");
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert!(labels.contains(&"apple"));
+        assert!(labels.contains(&"apricot"));
+        assert!(!labels.contains(&"banana"));
+        assert_eq!(picker.query(), "ap");
+
+        picker.set_query("ban");
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["banana"]);
+    }
+
+    #[test]
+    fn set_query_resets_selection_like_push_char_does() {
+        let mut picker = PickerState::new(candidates(&["a", "b", "c"]));
+        picker.move_selection(2);
+        picker.set_query("");
+        assert_eq!(picker.selected_row(), 0);
     }
 }

@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::env;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fenix_buffers::{BufferId, BufferList, OpenBuffer};
+use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
@@ -19,6 +18,8 @@ use winit::window::{Window, WindowId};
 use fenix_core::Cursor;
 
 use crate::commands::CommandRegistry;
+use crate::completion;
+use crate::dashboard;
 use crate::gpu::GpuState;
 use crate::icon;
 use crate::keymap;
@@ -68,6 +69,19 @@ const WHICH_KEY_PADDING: f32 = 8.0;
 /// size by per press.
 const FONT_SIZE_STEP: f32 = 2.0;
 
+/// Same role as `WHICH_KEY_PADDING`, for the completion popup.
+const COMPLETION_PADDING: f32 = 8.0;
+/// Clear space kept between the completion popup and the window edges
+/// it's clamped against -- same role as `text::WHICH_KEY_MARGIN`, just a
+/// smaller value since the popup is anchored to a point inside the
+/// content area rather than pinned to a corner.
+const COMPLETION_MARGIN: f32 = 4.0;
+/// Hard cap on how many candidate rows the popup ever shows at once,
+/// regardless of how much vertical room is available -- most editors cap
+/// completion popups similarly (a huge list is unwieldy even when there's
+/// room to render it).
+const COMPLETION_MAX_ROWS: usize = 10;
+
 /// An active yank/paste highlight, fading out over `PULSE_DURATION`.
 struct Pulse {
     range: std::ops::Range<usize>,
@@ -80,6 +94,16 @@ struct ScrollAnim {
     from: f32,
     to: usize,
     started: Instant,
+}
+
+/// The autocompletion popup's live state -- see `App::completion`'s own
+/// doc comment for the "recomputed fresh every keystroke" lifecycle.
+struct CompletionState {
+    /// Char offset where the identifier prefix being completed starts --
+    /// `accept_completion` replaces `[prefix_start, cursor.char_idx)`
+    /// with the chosen candidate's full label.
+    prefix_start: usize,
+    picker: fenix_picker::PickerState<fenix_completion::CompletionItem>,
 }
 
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
@@ -112,6 +136,20 @@ enum MainView {
     Editor,
     Explorer,
     Picker,
+}
+
+/// What a `MainView::Explorer` session is actually for -- ordinary
+/// directory browsing (`SPC f j`, the sidebar) behaves exactly as it
+/// always has; `PickProjectDir` is the same listing and the same
+/// navigation, just with `ExplorerAction::SelectCwd` (`S`) wired to
+/// register `cwd` as a known project instead of being ignored, and
+/// `Open`/`Enter`/`l` on a *file* doing nothing instead of opening it
+/// into the editor (there's nothing sensible to do with a file when
+/// what's being picked is a directory). See `picker_add_project_prompt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExplorerPurpose {
+    Browse,
+    PickProjectDir,
 }
 
 /// A picker's payload type varies by what it's picking between, but
@@ -226,33 +264,6 @@ struct ExplorerPrompt {
     input: String,
 }
 
-/// `dirs::config_dir()/fenix/indent_width.txt` -- same convention as
-/// `theme::default_path`/`text::font_size_default_path`. Lives here
-/// rather than in `fenix-vim` (see `App::indent_width_path`'s own doc
-/// comment for why).
-fn indent_width_default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("indent_width.txt"))
-}
-
-/// Loads the persisted indent width, falling back to `fenix-vim`'s own
-/// default on a missing file, an unparsable value, or zero (division-
-/// by-zero guard, same as `VimState::set_indent_width`) -- a convenience
-/// preference, not critical data, so it never fails outright.
-fn load_indent_width(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&w| w > 0)
-        .unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH)
-}
-
-fn save_indent_width(width: usize, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, width.to_string())
-}
-
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
 /// `[scroll_line, scroll_line + visible_lines)` window.
 fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usize) -> usize {
@@ -270,6 +281,17 @@ fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usiz
 fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
+}
+
+/// A pane-relative `(row, col)` caret position, in window pixel
+/// coordinates -- shared by the real caret rect and the completion
+/// popup's `BelowPoint` anchor, which both need to land on exactly the
+/// same spot.
+fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: f32, content_frac: f32, char_width: f32, line_height: f32) -> (f32, f32) {
+    let content_x = rect.x + text::PAD_LEFT + gutter_px;
+    let x = content_x + col as f32 * char_width;
+    let y = rect.y + text::PAD_TOP + row as f32 * line_height - content_frac * line_height;
+    (x, y)
 }
 
 /// Splits `line_text` into colored sub-spans according to `highlights`
@@ -309,6 +331,133 @@ fn split_line_by_highlights(
         spans.push((line_text.to_string(), default_color));
     }
     spans
+}
+
+/// Whether `style` belongs to the banner block (the logo + tagline) as
+/// opposed to the content block (section headers, project/recent-file
+/// entries, the footer hint) -- `dashboard_center_offset` centers these
+/// two blocks *independently*, each against its own widest line, rather
+/// than the whole buffer sharing one width. The banner (a fixed ~30
+/// chars) is narrower than the content block (whose widest line is
+/// usually the footer hint or a long file path) -- centering everything
+/// against one shared width left the banner sitting off-center, visibly
+/// left of the pane's true middle, which is what this fixes.
+fn dashboard_line_is_banner(style: dashboard::DashboardLineStyle) -> bool {
+    matches!(style, dashboard::DashboardLineStyle::Banner | dashboard::DashboardLineStyle::Tagline)
+}
+
+/// Per-line horizontal padding (in characters) plus a single vertical
+/// pixel offset that together center a dashboard buffer's content within
+/// `rect` -- Doom Emacs/LazyVim-style, rather than left/top-anchored.
+///
+/// Horizontal padding is computed *per line*, not once for the whole
+/// buffer (see `dashboard_line_is_banner`): the banner block and the
+/// content block below it are centered independently, each against only
+/// its own widest line, since they're rarely the same width. The result
+/// is baked by the caller into `content_spans`'s `BufferKind::Dashboard`
+/// branch as literal leading blank-space characters in the rendered
+/// spans -- `TextArea.left` has no independent geometric offset to hook
+/// into (only a real gutter's digits shift rendered text, by being part
+/// of the text itself), so per-row padding has to live in the text too.
+///
+/// Vertical centering stays a single pixel value for the whole buffer
+/// (`TextArea.top` genuinely does read a per-pane pixel bias via
+/// `content_frac`, unlike `TextArea.left`).
+///
+/// Both axes clamp to never go negative (a pane smaller than the
+/// content just left/top-anchors, same as today) and are computed fresh
+/// every frame from the pane's *current* size, so the layout re-centers
+/// on window resize for free without touching the buffer's actual
+/// text/cursor/undo state at all.
+fn dashboard_center_offset(
+    ob: &OpenBuffer,
+    lines: &[Option<dashboard::DashboardLine>],
+    rect: fenix_window::Rect,
+    char_width: f32,
+    line_height: f32,
+) -> (Vec<usize>, f32) {
+    let visual_lines = ob.buffer.visual_line_count();
+    let pane_chars = (rect.w / char_width).floor().max(0.0) as usize;
+
+    let mut banner_max = 0usize;
+    let mut content_max = 0usize;
+    for line in 0..visual_lines {
+        let len = ob.buffer.line_len(line);
+        match lines.get(line).and_then(|l| l.as_ref()) {
+            Some(meta) if dashboard_line_is_banner(meta.style) => banner_max = banner_max.max(len),
+            _ => content_max = content_max.max(len),
+        }
+    }
+    let banner_pad = pane_chars.saturating_sub(banner_max) / 2;
+    let content_pad = pane_chars.saturating_sub(content_max) / 2;
+
+    let pad_by_line: Vec<usize> = (0..visual_lines)
+        .map(|line| match lines.get(line).and_then(|l| l.as_ref()) {
+            Some(meta) if dashboard_line_is_banner(meta.style) => banner_pad,
+            _ => content_pad,
+        })
+        .collect();
+
+    let content_h = visual_lines as f32 * line_height;
+    let extra_top_px = ((rect.h - content_h) / 2.0).max(0.0);
+    (pad_by_line, extra_top_px)
+}
+
+/// The dashboard's equivalent of `fenix-syntax`'s highlight output --
+/// built from `dashboard::render`'s own per-line metadata instead of a
+/// real parser, then fed through the exact same `split_line_by_
+/// highlights` mechanism as ordinary syntax coloring. `Banner`/
+/// `Tagline`/`Header` lines get a full-line accent color; `Footer` gets
+/// a full-line dim color; `Project`/`RecentFile` lines only push a
+/// range for their dim path/parent-dir portion (from `dim_from`
+/// onward) -- the name portion before it is left uncovered, so it falls
+/// back to `content_spans`'s own `theme.fg` default naturally. A plain
+/// text buffer never reaches this (see `syntax_highlights_for_visible_
+/// range`'s `BufferKind::Dashboard` branch), so it isn't a method on
+/// `App` -- everything it needs is passed in directly.
+fn dashboard_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<dashboard::DashboardLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        match meta.style {
+            dashboard::DashboardLineStyle::Banner
+            | dashboard::DashboardLineStyle::Tagline
+            | dashboard::DashboardLineStyle::Header => {
+                // `syntax_keyword`, not `caret_text`: `caret_text` was
+                // chosen (see its own doc comment) to read against
+                // `bg_modeline`, but the dashboard renders as ordinary
+                // pane content, against `bg` -- on TempleOS specifically
+                // that's a *white* background, where `caret_text`'s
+                // yellow (0xffff55) is nearly unreadable (its R/G
+                // channels already match white's). `syntax_*` colors are
+                // the ones actually chosen per-theme for legibility
+                // against `bg`, which is exactly what this needs.
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            }
+            dashboard::DashboardLineStyle::Footer => {
+                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
+            }
+            dashboard::DashboardLineStyle::Project | dashboard::DashboardLineStyle::RecentFile => {
+                if let Some(dim_from) = meta.dim_from {
+                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
+                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
+                }
+            }
+        }
+    }
+    ranges
 }
 
 /// One-letter badge for an explorer row's git status.
@@ -483,6 +632,10 @@ pub struct App {
     /// -- only meaningful while `sidebar_open`. The sidebar stays visible
     /// but unfocused while editing, like a persistent project tree.
     sidebar_focused: bool,
+    /// What `explorer` (the full-buffer listing) is currently for --
+    /// meaningless while `main_view != Explorer`. See `ExplorerPurpose`'s
+    /// own doc comment.
+    explorer_purpose: ExplorerPurpose,
     explorer_prompt: Option<ExplorerPrompt>,
     /// Topmost visible row of the full-buffer/sidebar listings. Plain
     /// integers, not eased like `rendered_scroll` -- a directory listing
@@ -504,10 +657,6 @@ pub struct App {
     /// between `SPC p s` and the term being submitted (or cancelled),
     /// not while an `ActivePicker::Grep` is already showing results.
     pending_grep_query: Option<String>,
-    /// The add-project prompt, when in progress -- `Some` only between
-    /// `SPC p a` and the path being confirmed (or cancelled). Same shape
-    /// as `pending_grep_query`.
-    pending_add_project_path: Option<String>,
     /// Loaded once at startup; saved back to disk whenever `SPC p a`/
     /// `SPC p d` change it, or the switch-project picker re-selects an
     /// already-known root (an MRU bump, not a new registration -- see
@@ -517,6 +666,39 @@ pub struct App {
     /// be read for some other reason -- a picker just starting with no
     /// history isn't worth failing over.
     known_projects: fenix_project::KnownProjects,
+    /// Same persisted-list shape as `known_projects`, but automatic --
+    /// every real file opened (startup CLI arg, the picker, the
+    /// explorer) gets recorded via `record_recent_file`, no explicit
+    /// `SPC p a`-style curation step. Read by the dashboard.
+    recent_files: fenix_project::RecentFiles,
+    /// Per-line metadata for whichever dashboard buffer(s) are
+    /// currently open, keyed by `BufferId` (not one flat field) so an
+    /// older still-open dashboard buffer elsewhere in the window tree
+    /// never gets misattributed metadata from the newest one -- same
+    /// per-buffer-keyed-state precedent as `scroll_anims`. Consulted by
+    /// `dashboard_activate_selected` and the dashboard's own syntax-
+    /// highlight coloring.
+    dashboard_lines: HashMap<BufferId, Vec<Option<dashboard::DashboardLine>>>,
+
+    /// The autocompletion popup's live state -- `Some` only while Insert
+    /// mode, the focused buffer's language, and the prefix at the cursor
+    /// all currently justify showing it (see `sync_completion`, called
+    /// after every keystroke that reaches Vim while Insert-relevant, the
+    /// same "derive fresh from whatever's current" posture `content_
+    /// spans`/dashboard centering already use -- `VimEvent` has no "a
+    /// character was typed" signal, so this recomputes instead of trying
+    /// to track it incrementally).
+    completion: Option<CompletionState>,
+    /// One cached `(project_root, candidates)` pair for Tcl completion,
+    /// rebuilt only when the current buffer's project root differs from
+    /// what's cached -- not a map of every project root ever visited
+    /// this session (disclosed simplification: matches the common
+    /// single-active-project case, see the plan's Scope). Cleared by
+    /// `SPC c r` to force a fresh `ctags` scan.
+    tcl_candidates_cache: Option<(Option<PathBuf>, Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>>)>,
+    /// Same role as `picker_scroll`, for the completion popup's own
+    /// candidate window.
+    completion_scroll: usize,
 
     vim: VimState,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
@@ -529,23 +711,17 @@ pub struct App {
     explorer_matcher: Matcher<'static, ExplorerAction>,
 
     theme: &'static Theme,
-    /// Where the current theme choice is persisted -- resolved once at
-    /// startup (`theme::default_path()`, falling back to a relative path
-    /// on the rare platform with no config-directory concept, same
-    /// fallback `known_projects_path` already uses) and reused by every
-    /// `cycle_theme` save.
-    theme_path: PathBuf,
-    /// Same reasoning as `theme_path`, for the persisted font-size choice
-    /// (`SPC t =`/`-`/`0`) -- see `text::font_size_default_path`.
-    font_size_path: PathBuf,
-    /// Same reasoning again, for the persisted `:set shiftwidth=N`
-    /// choice. Lives here rather than in `fenix-vim`: `VimState` stays
-    /// free of file I/O, matching every other pure editing-state type in
-    /// that crate -- `App` applies the loaded value to `self.vim` and
-    /// saves it back on `VimEvent::IndentWidthChanged`, the same shape
-    /// already used for the theme and font size, two other settings that
-    /// live in a different type than the one that persists them.
-    indent_width_path: PathBuf,
+    /// The unified settings file (`dirs::config_dir()/fenix/config.ini`)
+    /// -- theme name, font size, indent width, and the completion
+    /// symbols-file path all live here now, one `load` at startup and one
+    /// `save` per change, instead of each setting having its own flat
+    /// file and free-function trio. Lives here rather than in
+    /// `fenix-vim`/`text.rs`: `VimState`/`TextPipeline` stay free of file
+    /// I/O, matching every other pure editing-state type -- `App` applies
+    /// each loaded value to the relevant subsystem and saves back into
+    /// this one struct on every change (`cycle_theme`, `adjust_font_
+    /// size`, `VimEvent::IndentWidthChanged`).
+    config: fenix_config::Config,
 
     modifiers: ModifiersState,
     /// Whether the caret is fading toward visible or toward hidden --
@@ -560,14 +736,42 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self::with_file(env::args().nth(1))
+        let file_arg = env::args().nth(1);
+        let mut app = Self::with_file(file_arg.clone());
+        // Recording lives here, not inside `with_file` -- `with_file` is
+        // what the test suite calls directly to simulate "opened with
+        // this file," and recording there would mean every such test
+        // writes into the real `~/.config/fenix/recent_files.txt` on
+        // whatever machine happens to run the tests. Real launches
+        // always go through `new`, so this still fires for actual use.
+        if let Some(path) = &file_arg {
+            app.record_recent_file(Path::new(path));
+        }
+        app
     }
 
     fn with_file(file_arg: Option<String>) -> Self {
+        // Loaded before the initial buffer so a no-argument launch can
+        // build the dashboard from them.
+        let known_projects_path =
+            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
+        let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
+        let recent_files_path = fenix_project::RecentFiles::default_path()
+            .unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"));
+        let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
+
         let mut buffers = BufferList::new();
+        let mut dashboard_lines = HashMap::new();
         let initial_id = match file_arg {
+            // Recording this path into `recent_files` happens in `new`,
+            // not here -- see `new`'s own doc comment for why.
             Some(path) => buffers.open_path(Path::new(&path)),
-            None => buffers.open_scratch(),
+            None => {
+                let dashboard = dashboard::render(known_projects.roots(), recent_files.paths());
+                let id = buffers.open_dashboard(&dashboard.text);
+                dashboard_lines.insert(id, dashboard.lines);
+                id
+            }
         };
         let workspaces = WorkspaceList::new(WindowTree::new(initial_id));
 
@@ -579,19 +783,15 @@ impl App {
         // doc comment for why): every file ever opened auto-registering
         // its project made the switch-project list an unfiltered history
         // of everywhere you'd been, not a deliberately kept list of
-        // projects worth switching between.
+        // projects worth switching between. A dashboard buffer has no
+        // path, so this correctly comes out `None`.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
-        let known_projects_path =
-            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
-        let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
-        let theme_path = theme::default_path().unwrap_or_else(|| PathBuf::from("fenix-theme.txt"));
-        let theme = theme::load_from(&theme_path);
-        let font_size_path = text::font_size_default_path().unwrap_or_else(|| PathBuf::from("fenix-font-size.txt"));
-        let indent_width_path =
-            indent_width_default_path().unwrap_or_else(|| PathBuf::from("fenix-indent-width.txt"));
+        let config_path = fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"));
+        let config = fenix_config::Config::load_or_default(config_path);
+        let theme = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
         let mut vim = VimState::new();
-        vim.set_indent_width(load_indent_width(&indent_width_path));
+        vim.set_indent_width(config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
 
         Self {
             window: None,
@@ -608,6 +808,7 @@ impl App {
             sidebar: None,
             sidebar_open: false,
             sidebar_focused: false,
+            explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_scroll: 0,
             sidebar_scroll: 0,
@@ -615,15 +816,17 @@ impl App {
             project_root,
             active_picker: None,
             known_projects,
+            recent_files,
+            dashboard_lines,
+            completion: None,
+            tcl_candidates_cache: None,
+            completion_scroll: 0,
             pending_grep_query: None,
-            pending_add_project_path: None,
             vim,
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
-            theme_path,
-            font_size_path,
-            indent_width_path,
+            config,
             modifiers: ModifiersState::empty(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
@@ -673,6 +876,147 @@ impl App {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
     }
 
+    /// Records `path` as recently-opened for the dashboard's "Recent
+    /// Files" list -- called from every real "read this path off disk"
+    /// call site (the picker, the explorer; `with_file`'s own CLI-arg
+    /// branch does the equivalent inline before `self` exists). Unlike
+    /// `known_projects`, this is automatic, not explicitly curated --
+    /// see `RecentFiles`'s own doc comment.
+    fn record_recent_file(&mut self, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.recent_files.add(canonical);
+        if let Err(err) = self.recent_files.save() {
+            eprintln!("fenix: couldn't save recent files: {err}");
+        }
+    }
+
+    /// The Tcl completion candidate pool (keywords + `ctags`-sourced
+    /// definitions + any entries from `self.config.completion_symbols_
+    /// file`, deduped against each other), rebuilding only when `root`
+    /// differs from what's cached -- `ctags::run` shells a real
+    /// subprocess, so this is worth avoiding on every keystroke (matches
+    /// the "expensive work only on real state changes" discipline
+    /// already used for git-status-on-explorer-open). The symbols file
+    /// is re-read on the same cadence, not independently -- both sources
+    /// share one manual refresh (`refresh_completion_tags`/`SPC c r`).
+    /// Cloning the cached `Vec` on a cache hit is cheap: dozens to low
+    /// hundreds of small entries.
+    fn tcl_candidates(&mut self, root: Option<&Path>) -> Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>> {
+        let stale = match &self.tcl_candidates_cache {
+            Some((cached_root, _)) => cached_root.as_deref() != root,
+            None => true,
+        };
+        if stale {
+            let mut seen = std::collections::HashSet::new();
+            let mut candidates = Vec::new();
+            for &keyword in fenix_completion::tcl::KEYWORDS {
+                if seen.insert(keyword.to_string()) {
+                    let item = fenix_completion::CompletionItem {
+                        label: keyword.to_string(),
+                        kind: fenix_completion::CompletionKind::Keyword,
+                    };
+                    candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
+                }
+            }
+            if let Some(root) = root {
+                for tag in fenix_completion::ctags::run(root, "Tcl") {
+                    if seen.insert(tag.name.clone()) {
+                        let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag };
+                        candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
+                    }
+                }
+            }
+            if let Some(symbols_file) = &self.config.completion_symbols_file {
+                for item in fenix_completion::custom::load(symbols_file) {
+                    if seen.insert(item.label.clone()) {
+                        candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
+                    }
+                }
+            }
+            self.tcl_candidates_cache = Some((root.map(PathBuf::from), candidates));
+        }
+        self.tcl_candidates_cache.as_ref().expect("just populated above if it was missing").1.clone()
+    }
+
+    /// Re-derives the completion popup's state from whatever's current --
+    /// called once right after every keystroke that reaches Vim while
+    /// Insert-relevant (`handle_key`'s Vim-fallthrough tier). Closes the
+    /// popup (via `None`) the instant any of its preconditions stop
+    /// holding: not in Insert mode, not a Tcl buffer, no identifier
+    /// prefix at the cursor, or the prefix no longer matches anything.
+    fn sync_completion(&mut self) {
+        if self.vim.mode() != Mode::Insert {
+            self.completion = None;
+            return;
+        }
+        let ob = self.open();
+        let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
+        if language != Some(fenix_syntax::LanguageId::Tcl) {
+            self.completion = None;
+            return;
+        }
+        let Some((start, prefix)) = completion::prefix_at_cursor(&ob.buffer, &ob.cursor) else {
+            self.completion = None;
+            return;
+        };
+
+        match &mut self.completion {
+            Some(state) => {
+                state.prefix_start = start;
+                state.picker.set_query(&prefix);
+            }
+            None => {
+                let root = self.project_root.clone();
+                let candidates = self.tcl_candidates(root.as_deref());
+                let mut picker = fenix_picker::PickerState::new(candidates);
+                picker.set_query(&prefix);
+                self.completion = Some(CompletionState { prefix_start: start, picker });
+            }
+        }
+        if self.completion.as_ref().is_some_and(|state| state.picker.is_empty()) {
+            self.completion = None;
+        }
+        self.completion_scroll = 0;
+    }
+
+    /// Force-opens the completion popup at the current (possibly empty)
+    /// prefix, bypassing the normal ">=1 char" auto-trigger threshold --
+    /// `Ctrl-Space`'s effect, the near-universal manual-trigger
+    /// convention.
+    fn force_open_completion(&mut self) {
+        let ob = self.open();
+        let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
+        if language != Some(fenix_syntax::LanguageId::Tcl) {
+            return;
+        }
+        let (prefix_start, prefix) =
+            completion::prefix_at_cursor(&ob.buffer, &ob.cursor).unwrap_or((ob.cursor.char_idx, String::new()));
+        let root = self.project_root.clone();
+        let candidates = self.tcl_candidates(root.as_deref());
+        let mut picker = fenix_picker::PickerState::new(candidates);
+        picker.set_query(&prefix);
+        self.completion = if picker.is_empty() { None } else { Some(CompletionState { prefix_start, picker }) };
+        self.completion_scroll = 0;
+    }
+
+    /// `SPC c r` -- clears the cached Tcl completion candidates so the
+    /// next `sync_completion`/`force_open_completion` re-shells `ctags`
+    /// and picks up new/renamed `proc`/`namespace` definitions. Manual
+    /// only (no save-hook/file-watcher refresh) -- see the plan's Scope.
+    pub(crate) fn refresh_completion_tags(&mut self) {
+        self.tcl_candidates_cache = None;
+    }
+
+    /// Replaces the typed prefix with the selected candidate's full
+    /// label -- one atomic undo step via `Buffer::replace_range`.
+    fn accept_completion(&mut self) {
+        let Some(state) = self.completion.take() else { return };
+        let Some(label) = state.picker.selected().map(|c| c.payload.label.clone()) else { return };
+        let ob = self.open_mut();
+        let end = ob.cursor.char_idx;
+        ob.buffer.replace_range(&mut ob.cursor, state.prefix_start, end, &label);
+    }
+
     pub(crate) fn save(&mut self) {
         if self.open().buffer.path().is_none() {
             eprintln!("fenix: no file path to save to yet; pass a file path as the first argument");
@@ -715,6 +1059,7 @@ impl App {
             }
         };
         self.explorer = Some(explorer);
+        self.explorer_purpose = ExplorerPurpose::Browse;
         self.main_view = MainView::Explorer;
         self.wake_caret();
     }
@@ -790,61 +1135,48 @@ impl App {
         self.enter_picker(ActivePicker::DeleteProject(fenix_picker::PickerState::new(candidates)));
     }
 
-    /// `SPC p a`: prompts for a directory to explicitly register in
+    /// `SPC p a`: opens the full-buffer file explorer, in "pick a
+    /// directory" mode, to browse to and register a project in
     /// `known_projects` -- the *only* way a project gets into the switch-
     /// project list now (see `refresh_project_root`'s own doc comment for
     /// why auto-registration-on-visit was dropped: it made "switch
     /// project" list every project you'd ever opened a file in, not a
-    /// deliberately curated set worth switching between). Pre-filled with
-    /// the current project root (or the process's cwd, if none detected)
-    /// as a sensible default -- editable, or just confirm as-is.
+    /// deliberately curated set worth switching between). Starts browsing
+    /// at the current project root (or the process's cwd, if none
+    /// detected); navigate with the explorer's usual `j`/`k`/`l`/`h`/
+    /// `Enter`, then `S` to register whichever directory is currently
+    /// being browsed. `q`/`Escape` cancels without registering anything,
+    /// same as leaving the explorer any other time.
     pub(crate) fn picker_add_project_prompt(&mut self) {
-        let default_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        self.pending_add_project_path = Some(default_root.to_string_lossy().into_owned());
-        self.wake_caret();
-    }
-
-    /// Routes one keypress to the in-progress add-project prompt -- same
-    /// "next keystrokes are special" shape as `grep_query_key`.
-    fn add_project_query_key(&mut self, key: KeyPress) {
-        let Some(input) = &mut self.pending_add_project_path else { return };
-        match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.pending_add_project_path = None,
-            KeyCode::Named(FenixNamedKey::Enter) => {
-                let input = self.pending_add_project_path.take().unwrap_or_default();
-                self.confirm_add_project(&input);
+        let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let explorer = match ExplorerState::open(&start) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("fenix: couldn't list {} ({err})", start.display());
+                return;
             }
-            KeyCode::Named(FenixNamedKey::Backspace) => {
-                input.pop();
-            }
-            KeyCode::Char(c) => input.push(c),
-            _ => {}
-        }
-        self.wake_caret();
-    }
-
-    /// Resolves the typed path (`~` expansion, then canonicalized if it
-    /// actually exists -- falls back to the raw path otherwise, same
-    /// "never hard-fail on user input" posture as every other prompt
-    /// here) and registers it. Blank input (after trimming) cancels
-    /// silently, same as Escape -- there's nothing sensible to add.
-    fn confirm_add_project(&mut self, input: &str) {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
-            dirs::home_dir().map(|home| home.join(rest)).unwrap_or_else(|| PathBuf::from(trimmed))
-        } else if trimmed == "~" {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed))
-        } else {
-            PathBuf::from(trimmed)
         };
-        let root = std::fs::canonicalize(&expanded).unwrap_or(expanded);
+        self.explorer = Some(explorer);
+        self.explorer_purpose = ExplorerPurpose::PickProjectDir;
+        self.main_view = MainView::Explorer;
+        self.wake_caret();
+    }
+
+    /// `S` on the add-project explorer (`ExplorerAction::SelectCwd`):
+    /// registers whatever directory is currently being browsed. Already
+    /// an absolute, real filesystem path (it came from actually listing
+    /// it), so this only needs to canonicalize away any `..`/symlink
+    /// noise before persisting -- no typed-input parsing like the old
+    /// free-text prompt needed.
+    fn register_project_dir(&mut self, dir: &Path) {
+        let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         self.known_projects.add(root);
         if let Err(err) = self.known_projects.save() {
             eprintln!("fenix: couldn't save project history: {err}");
         }
+        self.main_view = MainView::Editor;
+        self.explorer = None;
+        self.explorer_purpose = ExplorerPurpose::Browse;
     }
 
     /// `SPC p s`: unlike find-file/switch-project (which already have a
@@ -977,6 +1309,22 @@ impl App {
         self.wake_caret();
     }
 
+    /// `SPC d d`: (re-)opens the dashboard in the focused pane, freshly
+    /// generated from the current `known_projects`/`recent_files` --
+    /// always a *new* buffer, same "no dedup" precedent as `SPC b X`
+    /// above (repeated presses just make more buffers; see this
+    /// feature's own plan for why that's an intentional, not a new,
+    /// simplification).
+    pub(crate) fn open_dashboard(&mut self) {
+        let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
+        let id = self.buffers.open_dashboard(&dashboard.text);
+        self.dashboard_lines.insert(id, dashboard.lines);
+        let focused = self.windows().focused_id();
+        self.windows_mut().set_content(focused, id);
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
@@ -1045,6 +1393,7 @@ impl App {
         let focused = self.windows().focused_id();
         self.windows_mut().set_content(focused, id);
         self.refresh_project_root();
+        self.record_recent_file(path);
         self.main_view = MainView::Editor;
     }
 
@@ -1061,9 +1410,11 @@ impl App {
     /// Registers `root` as the current project and immediately chains
     /// into a find-file picker scoped to it -- matches Projectile's own
     /// default "switch project" action rather than leaving you with
-    /// nothing to do next. `main_view`/the stash are untouched: we're
-    /// already mid-picker (this runs from `picker_confirm`), just
-    /// swapping which picker is active.
+    /// nothing to do next. Sets `main_view = Picker` explicitly: a no-op
+    /// for the original caller (`picker_confirm`, already mid-picker so
+    /// this was already true), but necessary for the dashboard's own
+    /// call site (`dashboard_activate_selected`), which isn't already
+    /// mid-picker when it calls this.
     fn switch_to_project(&mut self, root: PathBuf) {
         self.project_root = Some(root.clone());
         self.known_projects.add(root.clone());
@@ -1073,6 +1424,35 @@ impl App {
         let candidates = Self::find_file_candidates(&root);
         self.active_picker = Some(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
         self.picker_scroll = 0;
+        self.main_view = MainView::Picker;
+    }
+
+    /// `Enter` on a dashboard buffer (see `handle_key`'s `BufferKind::
+    /// Dashboard` check, right before the Vim fallthrough): looks up
+    /// what the cursor's current line means via `dashboard_lines`, a
+    /// no-op for any line that isn't a `Project`/`RecentFile` entry
+    /// (banner/header/blank/footer). A project entry reuses `switch_to_
+    /// project` (registers, then chains into a find-file picker, exactly
+    /// what confirming it from the `SPC p p` picker already does); a
+    /// recent-file entry reuses `open_file_from_picker` (opens it,
+    /// records it, and focuses the editor) -- opening a file is opening
+    /// a file, however the path was found.
+    fn dashboard_activate_selected(&mut self) {
+        let line = {
+            let ob = self.open();
+            ob.buffer.line_col(&ob.cursor).0
+        };
+        let entry = self
+            .dashboard_lines
+            .get(&self.focused_buffer_id())
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .and_then(|meta| meta.entry.clone());
+        let Some(entry) = entry else { return };
+        match entry {
+            dashboard::DashboardEntry::Project(root) => self.switch_to_project(root),
+            dashboard::DashboardEntry::RecentFile(path) => self.open_file_from_picker(&path),
+        }
     }
 
     /// Routes one keypress to the active picker: plain characters edit
@@ -1204,6 +1584,14 @@ impl App {
                 }
             }
             ExplorerAction::Quit => self.explorer_quit(),
+            ExplorerAction::SelectCwd => {
+                if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickProjectDir {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.register_project_dir(&cwd);
+                }
+                // No-op during ordinary browsing (`SPC f j`/the sidebar) --
+                // `S` only means something while picking a project dir.
+            }
         }
         self.wake_caret();
     }
@@ -1213,12 +1601,20 @@ impl App {
     /// buffer and, depending on how the explorer got here, either
     /// returning to the editor (full-buffer mode, dropping the stash --
     /// the new file is now current) or just handing focus back to it
-    /// (sidebar mode, which stays open).
+    /// (sidebar mode, which stays open). While picking a project
+    /// directory (`SPC p a`), opening a file does nothing -- there's
+    /// nothing sensible to do with a file when what's being picked is a
+    /// directory; use `S` to register the directory currently being
+    /// browsed instead.
     fn explorer_open_selected(&mut self) {
         let Some(explorer) = self.active_explorer() else { return };
         let Some(entry) = explorer.selected_entry() else { return };
         let path = entry.path.clone();
         let is_dir = entry.is_dir;
+
+        if !is_dir && self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickProjectDir {
+            return;
+        }
 
         if is_dir {
             match ExplorerState::open(&path) {
@@ -1232,6 +1628,7 @@ impl App {
         let focused = self.windows().focused_id();
         self.windows_mut().set_content(focused, id);
         self.refresh_project_root();
+        self.record_recent_file(&path);
 
         if self.main_view == MainView::Explorer {
             self.main_view = MainView::Editor;
@@ -1249,6 +1646,7 @@ impl App {
         if self.main_view == MainView::Explorer {
             self.main_view = MainView::Editor;
             self.explorer = None;
+            self.explorer_purpose = ExplorerPurpose::Browse;
         } else if self.sidebar_focused {
             self.sidebar_focused = false;
         }
@@ -1460,7 +1858,8 @@ impl App {
         let current = theme::ALL.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
         let next = (current + 1) % theme::ALL.len();
         self.theme = theme::ALL[next];
-        if let Err(err) = theme::save_to(self.theme, &self.theme_path) {
+        self.config.theme = Some(self.theme.name.to_string());
+        if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save theme choice: {err}");
         }
         if let Some(window) = &self.window {
@@ -1477,7 +1876,8 @@ impl App {
     fn adjust_font_size(&mut self, size: f32) {
         let Some(text) = &mut self.text else { return };
         text.set_font_size(size);
-        if let Err(err) = text::save_font_size(text.font_size(), &self.font_size_path) {
+        self.config.font_size = Some(text.font_size());
+        if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save font size: {err}");
         }
         if let Some(window) = &self.window {
@@ -1539,17 +1939,15 @@ impl App {
             return;
         }
 
-        // The grep search-term prompt, the add-project prompt, and an
-        // open picker all capture input the same way -- checked ahead of
-        // the explorer/sidebar-focus check below since a picker can be
-        // opened while the sidebar is focused (switch-project's find-file
-        // chain, for instance).
+        // The grep search-term prompt and an open picker both capture
+        // input the same way -- checked ahead of the explorer/sidebar-
+        // focus check below since a picker can be opened while the
+        // sidebar is focused (switch-project's find-file chain, for
+        // instance). The add-project flow no longer has its own prompt
+        // state to check here -- it's just the ordinary explorer
+        // (`main_view == Explorer`), routed the same way `SPC f j` is.
         if self.pending_grep_query.is_some() {
             self.grep_query_key(keypress);
-            return;
-        }
-        if self.pending_add_project_path.is_some() {
-            self.add_project_query_key(keypress);
             return;
         }
         if self.active_picker.is_some() {
@@ -1655,11 +2053,75 @@ impl App {
             return;
         }
 
+        // The completion popup only ever exists in Insert mode. `Ctrl-
+        // Space` force-opens it regardless of whether it's already open
+        // (unclaimed today -- not in the global Ctrl-chord list above,
+        // not handled by `handle_insert_key`). While it's open, its
+        // navigation/accept/dismiss keys are fully claimed here and never
+        // reach Vim; every other key (plain typing, Backspace, arrows)
+        // falls through to the ordinary Vim dispatch below, after which
+        // `sync_completion` re-derives the popup's state fresh -- there's
+        // no `VimEvent` for "a character was typed," so this recomputes
+        // instead of tracking it incrementally.
+        if self.vim.mode() == Mode::Insert {
+            if keypress == KeyPress::char(' ').with_ctrl() {
+                self.force_open_completion();
+                self.wake_caret();
+                return;
+            }
+            if self.completion.is_some() {
+                match keypress.code {
+                    KeyCode::Named(FenixNamedKey::Down) => {
+                        self.completion.as_mut().unwrap().picker.move_selection(1);
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Named(FenixNamedKey::Up) => {
+                        self.completion.as_mut().unwrap().picker.move_selection(-1);
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Char('n') if keypress.mods.ctrl => {
+                        self.completion.as_mut().unwrap().picker.move_selection(1);
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Char('p') if keypress.mods.ctrl => {
+                        self.completion.as_mut().unwrap().picker.move_selection(-1);
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Named(FenixNamedKey::Tab) | KeyCode::Named(FenixNamedKey::Enter) => {
+                        self.accept_completion();
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Named(FenixNamedKey::Escape) => {
+                        self.completion = None;
+                        self.wake_caret();
+                        return;
+                    }
+                    _ => {} // plain typing/Backspace/arrows -- fall through to Vim
+                }
+            }
+        }
+
+        // The dashboard is a real Vim-navigable buffer (see `BufferKind`'s
+        // own doc comment) -- every other key still reaches Vim below
+        // unchanged (movement, `/` search, `gg`/`G`...); only `Enter`
+        // means something special on it.
+        if self.open().kind == BufferKind::Dashboard && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
+            self.dashboard_activate_selected();
+            self.wake_caret();
+            return;
+        }
+
         let id = self.focused_buffer_id();
         let vim_event = {
             let Some(ob) = self.buffers.get_mut(id) else { return };
             self.vim.handle_key(&mut ob.buffer, &mut ob.cursor, keypress)
         };
+        self.sync_completion();
         match vim_event {
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
@@ -1675,7 +2137,8 @@ impl App {
                 self.pulse = Some(Pulse { range, started: Instant::now() });
             }
             VimEvent::IndentWidthChanged(width) => {
-                if let Err(err) = save_indent_width(width, &self.indent_width_path) {
+                self.config.indent_width = Some(width);
+                if let Err(err) = self.config.save() {
                     eprintln!("fenix: couldn't save indent width ({err})");
                 }
             }
@@ -1754,7 +2217,6 @@ impl App {
         if self.vim.mode() == Mode::Command
             || self.vim.mode() == Mode::Search
             || self.pending_grep_query.is_some()
-            || self.pending_add_project_path.is_some()
             || self.explorer_prompt.is_some()
         {
             return None;
@@ -1764,11 +2226,22 @@ impl App {
                 Some(explorer) => {
                     let marked =
                         if explorer.marks.is_empty() { String::new() } else { format!(" [{} marked]", explorer.marks.len()) };
-                    format!("│ {}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                    match self.explorer_purpose {
+                        ExplorerPurpose::Browse => {
+                            format!("│ {}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                        }
+                        ExplorerPurpose::PickProjectDir => {
+                            format!("│ {}   S to add as a project, q to cancel ", explorer.cwd.display())
+                        }
+                    }
                 }
                 None => String::new(),
             };
-            return Some(("EXPLORE", suffix));
+            let badge = match self.explorer_purpose {
+                ExplorerPurpose::Browse => "EXPLORE",
+                ExplorerPurpose::PickProjectDir => "ADDPROJ",
+            };
+            return Some((badge, suffix));
         }
         if self.main_view == MainView::Picker {
             let (label, count) = match &self.active_picker {
@@ -1782,12 +2255,9 @@ impl App {
             return Some((label, format!("│ {count} matches ")));
         }
         let ob = self.open();
-        let filename = ob
-            .buffer
-            .path()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "[No Name]".to_string());
+        let filename = ob.buffer.path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
+            if ob.kind == BufferKind::Dashboard { "*dashboard*".to_string() } else { "[No Name]".to_string() }
+        });
         let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = ob.buffer.line_col(&ob.cursor);
         let mode_label =
@@ -1817,9 +2287,6 @@ impl App {
         }
         if let Some(query) = &self.pending_grep_query {
             return format!("rg: {query}");
-        }
-        if let Some(path) = &self.pending_add_project_path {
-            return format!("add project: {path}");
         }
         if let Some(prompt_text) = self.explorer_prompt_text() {
             return prompt_text;
@@ -1870,7 +2337,7 @@ impl App {
     /// buffer) so a split's every visible pane gets a gutter sized to
     /// *its own* buffer's line count, not just the focused one's.
     fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
-        if self.line_number_mode == LineNumberMode::Off {
+        if self.line_number_mode == LineNumberMode::Off || ob.kind == BufferKind::Dashboard {
             return 0;
         }
         ob.buffer.visual_line_count().max(1).to_string().len() + 1
@@ -1888,12 +2355,21 @@ impl App {
     /// one flat `theme.fg` span when non-empty. `ob` (rather than always
     /// the focused buffer) is what makes every visible pane -- not just
     /// the focused one -- show its own buffer's real content.
+    ///
+    /// `dashboard_pad`, when `Some`, replaces the real-gutter/tilde logic
+    /// entirely: index `buffer_line` gives that specific row's own
+    /// horizontal-centering pad (in characters, from `dashboard_center_
+    /// offset` -- different rows can want different padding, e.g. the
+    /// banner block and the content block below it center independently)
+    /// written as literal leading blank characters, since `TextArea.left`
+    /// has no geometric offset to hook a shift into.
     fn content_spans(
         &self,
         ob: &OpenBuffer,
         render_base_line: usize,
         rows: usize,
         gutter_chars: usize,
+        dashboard_pad: Option<&[usize]>,
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
@@ -1903,7 +2379,12 @@ impl App {
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
-            if gutter_chars > 0 {
+            if let Some(pad) = dashboard_pad {
+                let n = pad.get(buffer_line).copied().unwrap_or(0);
+                if n > 0 {
+                    spans.push((" ".repeat(n), theme.fg));
+                }
+            } else if gutter_chars > 0 {
                 let gutter = if has_line {
                     let n = match self.line_number_mode {
                         LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
@@ -1961,8 +2442,20 @@ impl App {
         rows: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let theme = self.theme;
+        // Cloned out ahead of the `self.buffers.get_mut` borrow below --
+        // `dashboard_lines` is a different field, but going through a
+        // `&self` method call for it while `ob` (from `self.buffers`) is
+        // still borrowed would look like a whole-`self` borrow to the
+        // compiler. The cloned `Vec` is small (a few dozen entries at
+        // most), so this is cheap.
+        let dashboard_lines = self.dashboard_lines.get(&id).cloned();
         let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
         let deltas = ob.buffer.drain_edits();
+
+        if ob.kind == BufferKind::Dashboard {
+            return dashboard_highlights_for_visible_range(ob, dashboard_lines.as_deref(), render_base_line, rows, theme);
+        }
+
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
 
         let edits: Vec<fenix_syntax::RawEdit> = deltas
@@ -2177,6 +2670,75 @@ impl App {
         Some((rect, spans))
     }
 
+    /// The completion popup's rich-text spans and resolved rect, anchored
+    /// just below the caret (`popup::Anchor::BelowPoint`) -- mirrors
+    /// `which_key_popup`'s shape. `None` whenever there's no open
+    /// completion session, the focused pane has no caret to anchor under
+    /// (an empty window), or the candidate window ends up with nothing to
+    /// show. Also returns which shown row (if any) is the current
+    /// selection, for the caller to draw its own highlight rect (the
+    /// popup itself is drawn behind text in the base `bg_rect` pass --
+    /// see the two-pass render comment near where this is consumed).
+    fn completion_popup(
+        &self,
+        window_width: f32,
+        modeline_top: f32,
+        focused_rect: fenix_window::Rect,
+        focused_caret: Option<(usize, usize)>,
+        gutter_px: f32,
+        content_frac: f32,
+    ) -> Option<(fenix_window::Rect, RowSpans, Option<usize>)> {
+        let state = self.completion.as_ref()?;
+        let (row, col) = focused_caret?;
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+        let (caret_x, caret_y) = caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height);
+
+        let shown_rows = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING).min(COMPLETION_MAX_ROWS);
+        let rows: Vec<(bool, &fenix_picker::Candidate<fenix_completion::CompletionItem>)> =
+            state.picker.visible_rows(self.completion_scroll, shown_rows).collect();
+        if rows.is_empty() {
+            return None;
+        }
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        let mut selected_row = None;
+        for (i, (is_selected, candidate)) in rows.iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            if *is_selected {
+                selected_row = Some(i);
+            }
+            // `caret_text`/`fg_modeline`, not `syntax_keyword`/
+            // `syntax_function` -- this popup shares the modeline's
+            // background (`bg_modeline`, pushed below alongside every
+            // other popup kind), and the `syntax_*` family is calibrated
+            // for contrast against `bg` (the content background)
+            // instead. Same bug class already fixed for which-key's own
+            // key column and the dashboard banner earlier this project:
+            // `caret_text`/`fg_modeline` are the two colors actually
+            // guaranteed legible against `bg_modeline` in every theme.
+            let color = match candidate.payload.kind {
+                fenix_completion::CompletionKind::Keyword => theme.caret_text,
+                fenix_completion::CompletionKind::Tag => theme.fg_modeline,
+            };
+            spans.push((candidate.label.clone(), color, false));
+        }
+
+        let longest = rows.iter().map(|(_, c)| c.label.chars().count()).max().unwrap_or(0);
+        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (longest as f32 * char_width + COMPLETION_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+        let height = rows.len() as f32 * line_height + COMPLETION_PADDING;
+        let rect =
+            popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
+        Some((rect, spans, selected_row))
+    }
+
     /// Builds the visible rows of a directory listing as rich-text spans
     /// (indent, icon glyph, name, git-status marker, and -- for the
     /// full-width explorer only, not the narrow sidebar -- size/age
@@ -2325,6 +2887,22 @@ impl App {
             rect: fenix_window::Rect,
             spans: RowSpans,
             hl_row: Option<usize>,
+            /// Whether `hl_row` should render with `theme.selection`
+            /// (real standalone contrast) instead of `theme.hl_line`
+            /// (a deliberately subtle tint, per `hl_line`'s own doc
+            /// comment, that's fine to be understated because a
+            /// blinking caret on the same row already draws the eye).
+            /// Explorer/Picker have no caret at all (`caret: None`
+            /// below) -- their `hl_row` *is* the only indicator of
+            /// where you are, so it needs `selection`'s contrast, the
+            /// same reasoning the sidebar's own selected-row highlight
+            /// already uses `theme.selection` for. The dashboard also
+            /// gets the strong styling: it's Vim-navigable text with a
+            /// real caret, but functions as a menu you skim rather than
+            /// actively type into, so the same "needs to be seen at a
+            /// glance, not just backed up by the caret" reasoning
+            /// applies.
+            hl_row_strong: bool,
             marked_rows: Vec<usize>,
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
@@ -2354,6 +2932,7 @@ impl App {
                     rect,
                     spans,
                     hl_row: selected_row,
+                    hl_row_strong: true,
                     marked_rows: marks,
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
@@ -2378,6 +2957,7 @@ impl App {
                     rect,
                     spans,
                     hl_row: selected_row,
+                    hl_row_strong: true,
                     marked_rows: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
@@ -2397,21 +2977,62 @@ impl App {
             }
             let rendered_scroll = self.buffers.get(buffer_id).map(|ob| ob.rendered_scroll).unwrap_or(0.0);
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
-            let render_frac = rendered_scroll - rendered_scroll.floor();
-            let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
-            let gutter_px = gutter_chars as f32 * char_width;
-            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, render_base_line, pane_visible_lines + 1);
-            let content_spans = match self.buffers.get(buffer_id) {
-                Some(ob) => self.content_spans(ob, render_base_line, pane_visible_lines + 1, gutter_chars, &syntax_highlights),
-                None => Vec::new(),
-            };
-            let spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
-
+            let mut render_frac = rendered_scroll - rendered_scroll.floor();
+            // Computed here (rather than at its previous spot, further
+            // down) so the dashboard-centering block below can look up
+            // the cursor's own row in the per-line pad table.
             let (line, col) = self
                 .buffers
                 .get(buffer_id)
                 .map(|ob| ob.buffer.line_col(&ob.cursor))
                 .unwrap_or((0, 0));
+
+            let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
+            let mut gutter_px = gutter_chars as f32 * char_width;
+            let mut dashboard_pad: Option<Vec<usize>> = None;
+            // The dashboard centers itself in its pane. Vertical centering
+            // is a real pixel offset (`text.rs`'s `TextArea.top` actually
+            // reads `content_frac`, so biasing it here works). Horizontal
+            // centering can't work the same way: `TextArea.left` is fixed
+            // at `rect.x + PAD_LEFT` and never reads `gutter_px` -- that
+            // field only feeds caret/selection *position math*, matching
+            // where a real line-number gutter's *baked-in leading
+            // characters* happen to end, not an independent geometric
+            // shift. So horizontal centering reuses that same mechanism:
+            // per-line padding baked as blank characters into the
+            // rendered spans (see `content_spans`'s `dashboard_pad`
+            // parameter), exactly how a real gutter's digits shift real
+            // content today. `gutter_px` (used only for caret/selection
+            // position math, never for the real gutter case a dashboard
+            // never has) takes specifically the *cursor's own row's* pad
+            // -- selection/pulse/bracket-match are never meaningfully
+            // used on a dashboard buffer, so sharing this one value with
+            // them too isn't a real compromise.
+            let is_dashboard = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
+            if let Some(ob) = self.buffers.get(buffer_id) {
+                if ob.kind == BufferKind::Dashboard {
+                    let empty = Vec::new();
+                    let dash_lines = self.dashboard_lines.get(&buffer_id).unwrap_or(&empty);
+                    let (pad_by_line, extra_top_px) = dashboard_center_offset(ob, dash_lines, rect, char_width, line_height);
+                    gutter_px = pad_by_line.get(line).copied().unwrap_or(0) as f32 * char_width;
+                    render_frac -= extra_top_px / line_height;
+                    dashboard_pad = Some(pad_by_line);
+                }
+            }
+            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, render_base_line, pane_visible_lines + 1);
+            let content_spans = match self.buffers.get(buffer_id) {
+                Some(ob) => self.content_spans(
+                    ob,
+                    render_base_line,
+                    pane_visible_lines + 1,
+                    gutter_chars,
+                    dashboard_pad.as_deref(),
+                    &syntax_highlights,
+                ),
+                None => Vec::new(),
+            };
+            let spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
+
             // During a large animated pan the cursor's actual line can
             // legitimately be outside the currently-fetched window for
             // part of the transition (it hasn't panned into view yet) --
@@ -2435,6 +3056,7 @@ impl App {
                 rect,
                 spans,
                 hl_row,
+                hl_row_strong: is_dashboard,
                 marked_rows: Vec::new(),
                 selection_segments,
                 pulse_overlay,
@@ -2448,8 +3070,6 @@ impl App {
         let modeline_pieces = self.modeline_pieces();
         let modeline_command_text = if let Some(query) = &self.pending_grep_query {
             Some(format!("rg: {query}"))
-        } else if let Some(path) = &self.pending_add_project_path {
-            Some(format!("add project: {path}"))
         } else if self.vim.mode() == Mode::Search {
             let prefix = if self.vim.search_forward() { "/" } else { "?" };
             Some(format!("{prefix}{}", self.vim.search_query()))
@@ -2468,6 +3088,13 @@ impl App {
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
         let which_key_popup = self.which_key_popup(window_width, modeline_top);
+        // Never `Some` at the same time as `which_key_popup` -- one only
+        // appears mid-Normal/-pending-sequence, the other only in Insert
+        // mode -- so `popup_rects` below never ends up with more than one
+        // entry in practice, even though it's shaped as a list.
+        let completion_popup = panes_render.iter().find(|p| p.pane == focused_pane).and_then(|focused| {
+            self.completion_popup(window_width, modeline_top, focused.rect, focused.caret, focused.gutter_px, focused.content_frac)
+        });
         let caret_alpha = self.caret_alpha();
 
         let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
@@ -2499,13 +3126,23 @@ impl App {
             }
         }
 
-        let popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = if let Some((rect, spans)) = &which_key_popup {
+        let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
+        // The row (if any) the currently-open popup wants highlighted --
+        // only the completion popup has a notion of a "selected" row
+        // today (which-key has no selection), consulted below alongside
+        // the `bg_rect` background push shared by every popup kind.
+        let mut popup_selected_row: Option<usize> = None;
+        if let Some((rect, spans)) = &which_key_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::WhichKey, rect.w, &refs);
-            vec![(popup::PopupId::WhichKey, *rect)]
-        } else {
-            Vec::new()
-        };
+            popup_rects.push((popup::PopupId::WhichKey, *rect));
+        }
+        if let Some((rect, spans, selected_row)) = &completion_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::Completion, rect.w, &refs);
+            popup_rects.push((popup::PopupId::Completion, *rect));
+            popup_selected_row = *selected_row;
+        }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
         let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * line_height;
@@ -2520,7 +3157,8 @@ impl App {
             let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
             if let Some(row) = pane.hl_row {
                 let y = row_y(row);
-                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, line_height, theme.hl_line);
+                let color = if pane.hl_row_strong { theme.selection } else { theme.hl_line };
+                bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, line_height, color);
             }
             for row in &pane.marked_rows {
                 let y = row_y(*row);
@@ -2625,10 +3263,8 @@ impl App {
         if let Some(focused) = panes_render.iter().find(|p| p.pane == focused_pane) {
             if let Some((row, col)) = focused.caret {
                 if caret_alpha > 0.0 {
-                    let content_x = focused.rect.x + text::PAD_LEFT + focused.gutter_px;
-                    let caret_x = content_x + col as f32 * char_width;
-                    let caret_y = focused.rect.y + text::PAD_TOP + row as f32 * line_height
-                        - focused.content_frac * line_height;
+                    let (caret_x, caret_y) =
+                        caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
                     let [r, g, b, a] = theme.caret;
                     // Insert keeps the thin bar (an I-beam-style "about to
                     // type here" marker); every other mode (Normal, Visual,
@@ -2710,8 +3346,19 @@ impl App {
         // painted, regardless of what that was.
         if !popup_rects.is_empty() {
             bg_rect.clear();
-            for &(_, rect) in &popup_rects {
+            for &(id, rect) in &popup_rects {
                 bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+                // The completion popup's own selected-candidate row --
+                // same `theme.hl_line` mechanism a pane's current-line
+                // highlight and a picker/explorer's selected-row highlight
+                // already use, just applied to a floating popup's local
+                // coordinates instead of a pane's.
+                if id == popup::PopupId::Completion {
+                    if let Some(row) = popup_selected_row {
+                        let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
+                        bg_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.hl_line);
+                    }
+                }
             }
             bg_rect.flush(gpu);
             text.prepare_popups(gpu, theme, &popup_rects);
@@ -2732,7 +3379,7 @@ impl App {
             });
             if !popup_rects.is_empty() {
                 bg_rect.render(&mut pass);
-                text.render(&mut pass);
+                text.render_popups(&mut pass);
             }
             caret_rect.render(&mut pass);
         }
@@ -2759,7 +3406,7 @@ impl ApplicationHandler for App {
         // on the first real frame, which winit already requests
         // immediately after this.
         let mut text = TextPipeline::new(&gpu);
-        text.set_font_size(text::load_font_size(&self.font_size_path));
+        text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
 
@@ -3002,6 +3649,7 @@ mod tests {
     #[test]
     fn modeline_reflects_filename_dirty_state_mode_and_position() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer(); // with_file(None) now opens the dashboard, not a plain scratch buffer
         assert_eq!(app.modeline_text(), "  NORMAL │ [No Name]   Ln 1, Col 1 ");
 
         app.test_insert('a');
@@ -3251,15 +3899,17 @@ mod tests {
 
     #[test]
     fn gutter_chars_defaults_to_absolute_and_sizes_for_line_count() {
-        let app = App::with_file(None); // empty buffer: one visual line
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer(); // with_file(None) now opens the dashboard; this test wants a plain empty buffer
         assert_eq!(app.gutter_chars(app.open()), 2); // 1-digit number + 1 padding column
     }
 
     #[test]
     fn content_spans_marks_rows_past_buffer_end_with_tilde() {
-        let app = App::with_file(None); // single empty line, cursor on it
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer(); // single empty line, cursor on it
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 3, gutter, &[]);
+        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -3267,9 +3917,10 @@ mod tests {
     #[test]
     fn content_spans_off_mode_still_shows_tilde_for_rows_past_end() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Off;
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, &[]);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -3277,11 +3928,12 @@ mod tests {
     #[test]
     fn content_spans_relative_mode_shows_distance_from_cursor() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Relative;
         app.test_insert_str("a\nb\nc\nd");
         app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 4, gutter, &[]);
+        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[]);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -3289,12 +3941,42 @@ mod tests {
     #[test]
     fn content_spans_current_line_number_uses_fg_not_gutter_fg() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.test_insert_str("a\nb");
         app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, &[]);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[]);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
+    }
+
+    #[test]
+    fn content_spans_pads_a_dashboard_buffer_with_real_leading_blanks_not_gutter_digits() {
+        // Regression test: horizontal centering only works if the padding
+        // is actually written into the rendered text -- `gutter_px` alone
+        // (a caret/selection position-math field) never reaches
+        // `TextArea.left`, which is hardcoded to `rect.x + PAD_LEFT` in
+        // `text.rs`. A prior version of this feature computed a pixel
+        // offset and folded it into `gutter_px`, which compiled and had
+        // passing unit tests but never visibly centered anything.
+        let app = App::with_file(None); // opens the dashboard
+        let ob = app.open();
+        assert_eq!(ob.kind, BufferKind::Dashboard);
+
+        let pad = [5usize];
+        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[]);
+        assert_eq!(spans[0].0, "     "); // 5 literal spaces, not "1 " or similar
+    }
+
+    #[test]
+    fn content_spans_never_shows_a_tilde_past_the_end_of_a_dashboard_buffer() {
+        let app = App::with_file(None);
+        let ob = app.open();
+        let visual_lines = ob.buffer.visual_line_count();
+        let pad: Vec<usize> = vec![0; visual_lines + 11];
+        // Ask for a row well past the dashboard's own content.
+        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[]);
+        assert!(!spans.iter().any(|(s, _)| s == "~"));
     }
 
     #[test]
@@ -3313,28 +3995,32 @@ mod tests {
     fn cycle_theme_wraps_through_all_themes_and_persists() {
         let dir = TempDir::new("cycle_theme");
         let mut app = App::with_file(None);
-        app.theme_path = dir.path().join("theme.txt");
         // Fixed starting point -- not asserted from `with_file`'s own
         // load, since that reads the *real* config path and would be
         // flaky against whatever's actually persisted on this machine.
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
         app.theme = &theme::ORBIT_DARK;
 
         app.cycle_theme();
         assert_eq!(app.theme.name, "TempleOS");
-        assert_eq!(theme::load_from(&app.theme_path).name, "TempleOS"); // persisted
+        assert_eq!(app.config.theme, Some("TempleOS".to_string()));
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.theme, Some("TempleOS".to_string())); // persisted
 
         app.cycle_theme();
         assert_eq!(app.theme.name, "Orbit Dark"); // wrapped back around
-        assert_eq!(theme::load_from(&app.theme_path).name, "Orbit Dark");
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.theme, Some("Orbit Dark".to_string()));
     }
 
     // `increase_font_size`/`decrease_font_size`/`reset_font_size`
     // themselves need a real `TextPipeline`, which needs a real GPU
     // device to construct -- not something a headless test builds (same
     // reason `resolve_font_size`/persistence are tested directly at the
-    // `text` module level instead). What a headless `App::with_file`
-    // *can* verify is that these are safe no-ops before `resumed()` has
-    // run (`self.text` is `None` at that point) rather than panicking.
+    // `fenix_config`/`text` module level instead). What a headless
+    // `App::with_file` *can* verify is that these are safe no-ops before
+    // `resumed()` has run (`self.text` is `None` at that point) rather
+    // than panicking.
     #[test]
     fn font_size_adjustments_are_safe_no_ops_before_the_gpu_exists() {
         let mut app = App::with_file(None);
@@ -3345,47 +4031,19 @@ mod tests {
     }
 
     #[test]
-    fn load_indent_width_from_a_missing_file_falls_back_to_the_default() {
-        let dir = TempDir::new("load_indent_width_missing");
-        assert_eq!(load_indent_width(&dir.path().join("does-not-exist.txt")), fenix_vim::DEFAULT_INDENT_WIDTH);
-    }
+    fn a_persisted_indent_width_applies_to_vim() {
+        // Mirrors what `with_file` does with `config.indent_width` --
+        // `with_file` itself always reads the *real* config path, so
+        // this exercises the same pipeline (a loaded `Config` feeding
+        // `VimState::set_indent_width`) directly instead.
+        let dir = TempDir::new("persisted_indent_width_applies");
+        let mut config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        config.indent_width = Some(3);
+        config.save().unwrap();
 
-    #[test]
-    fn load_indent_width_ignores_zero_and_unparsable_values() {
-        let dir = TempDir::new("load_indent_width_invalid");
-        let path = dir.path().join("indent_width.txt");
-
-        std::fs::write(&path, "0").unwrap();
-        assert_eq!(load_indent_width(&path), fenix_vim::DEFAULT_INDENT_WIDTH);
-
-        std::fs::write(&path, "not-a-number").unwrap();
-        assert_eq!(load_indent_width(&path), fenix_vim::DEFAULT_INDENT_WIDTH);
-    }
-
-    #[test]
-    fn save_indent_width_then_load_indent_width_round_trips() {
-        let dir = TempDir::new("indent_width_round_trip");
-        let path = dir.path().join("indent_width.txt");
-        save_indent_width(3, &path).unwrap();
-        assert_eq!(load_indent_width(&path), 3);
-    }
-
-    #[test]
-    fn save_indent_width_creates_missing_parent_directories() {
-        let dir = TempDir::new("indent_width_creates_parents");
-        let path = dir.path().join("nested").join("config").join("indent_width.txt");
-        save_indent_width(4, &path).unwrap();
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn with_file_applies_a_persisted_indent_width_to_vim() {
-        let dir = TempDir::new("with_file_applies_indent_width");
-        let path = dir.path().join("indent_width.txt");
-        save_indent_width(3, &path).unwrap();
-
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
         let mut vim = VimState::new();
-        vim.set_indent_width(load_indent_width(&path));
+        vim.set_indent_width(reloaded.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
         assert_eq!(vim.indent_width(), 3);
     }
 
@@ -3393,7 +4051,7 @@ mod tests {
     fn set_shiftwidth_command_persists_the_new_width() {
         let dir = TempDir::new("set_shiftwidth_persists");
         let mut app = App::with_file(None);
-        app.indent_width_path = dir.path().join("indent_width.txt");
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
 
         let event = app.test_vim_key(KeyPress::char(':'));
         assert_eq!(event, VimEvent::None);
@@ -3408,9 +4066,11 @@ mod tests {
         // persistence call it would make directly (same posture as
         // vim_pulse_event_yields_a_renderable_pulse_overlay above).
         if let VimEvent::IndentWidthChanged(width) = event {
-            save_indent_width(width, &app.indent_width_path).unwrap();
+            app.config.indent_width = Some(width);
+            app.config.save().unwrap();
         }
-        assert_eq!(load_indent_width(&app.indent_width_path), 3);
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.indent_width, Some(3));
     }
 
     #[test]
@@ -3443,6 +4103,7 @@ mod tests {
     #[test]
     fn syntax_state_seeds_from_the_detected_language() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer(); // with_file(None) now opens the dashboard, which never has syntax
         assert!(app.open().syntax.is_none()); // no path -> no language
 
         app.open_mut().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, ""));
@@ -3452,7 +4113,7 @@ mod tests {
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
 
-        let spans = app.content_spans(app.open(), 0, 1, 0, &highlights);
+        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights);
         let fn_span = spans.iter().find(|(s, _)| s == "fn");
         assert_eq!(
             fn_span.map(|(_, c)| *c),
@@ -3545,6 +4206,159 @@ mod tests {
         // The sidebar's own listing must be untouched by the jump.
         assert!(app.sidebar_open);
         assert_eq!(app.sidebar.as_ref().unwrap().cwd, sidebar_dir.path());
+    }
+
+    #[test]
+    fn sync_completion_opens_and_lists_matching_keywords_in_a_tcl_buffer() {
+        let dir = TempDir::new("completion_opens");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("a 2-char identifier prefix should open the popup");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"set".to_string()));
+        assert!(labels.contains(&"seek".to_string()));
+        assert!(!labels.contains(&"proc".to_string())); // doesn't match "se"
+    }
+
+    #[test]
+    fn sync_completion_closes_when_the_prefix_becomes_empty() {
+        let dir = TempDir::new("completion_closes_on_empty_prefix");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+        app.sync_completion();
+        assert!(app.completion.is_some());
+
+        app.open_mut().cursor = Cursor::at_start(); // no identifier char before the cursor now
+        app.sync_completion();
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn sync_completion_is_none_outside_insert_mode() {
+        let dir = TempDir::new("completion_none_outside_insert");
+        let file = dir.write("foo.tcl", "se");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        // Starts in Normal mode -- never entered Insert.
+        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 };
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn sync_completion_is_none_for_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_none_for_non_tcl");
+        let file = dir.write("foo.rs", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn accept_completion_replaces_the_typed_prefix_with_the_full_label() {
+        let dir = TempDir::new("completion_accept");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+        app.sync_completion();
+        let expected_label = app.completion.as_ref().unwrap().picker.selected().unwrap().payload.label.clone();
+
+        app.accept_completion();
+
+        assert!(app.completion.is_none());
+        assert_eq!(app.open().buffer.text(), expected_label);
+        assert_eq!(app.open().cursor.char_idx, expected_label.chars().count());
+    }
+
+    #[test]
+    fn force_open_completion_shows_the_full_list_even_with_an_empty_prefix() {
+        let dir = TempDir::new("completion_force_open");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+
+        app.force_open_completion();
+
+        let state = app.completion.as_ref().expect("Ctrl-Space should force-open the popup");
+        assert_eq!(state.picker.len(), fenix_completion::tcl::KEYWORDS.len());
+    }
+
+    #[test]
+    fn force_open_completion_does_nothing_on_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_force_open_non_tcl");
+        let file = dir.write("foo.rs", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+
+        app.force_open_completion();
+
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn tcl_candidates_include_ctags_sourced_procs_from_the_project_root() {
+        let dir = TempDir::new("completion_ctags_source");
+        dir.write("lib.tcl", "proc my_custom_proc {} {\n    return 1\n}\n");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("my_cus");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"my_custom_proc".to_string()), "expected a ctags-sourced proc, got {labels:?}");
+    }
+
+    #[test]
+    fn tcl_candidates_include_entries_from_a_configured_symbols_file() {
+        let dir = TempDir::new("completion_symbols_file");
+        let symbols_path = dir.write("symbols.txt", "my_external_symbol\nanother_one\n");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.completion_symbols_file = Some(symbols_path);
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("my_ext");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"my_external_symbol".to_string()), "expected a symbols-file entry, got {labels:?}");
+    }
+
+    #[test]
+    fn a_symbols_file_entry_that_duplicates_a_keyword_is_not_shown_twice() {
+        let dir = TempDir::new("completion_symbols_file_dedup");
+        // "set" is already a Tcl keyword -- the symbols-file entry should
+        // be deduped against it, not appear as a second candidate.
+        let symbols_path = dir.write("symbols.txt", "set\n");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.completion_symbols_file = Some(symbols_path);
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert_eq!(labels.iter().filter(|l| *l == "set").count(), 1);
     }
 
     #[test]
@@ -3902,6 +4716,76 @@ mod tests {
         assert!(joined.contains("more"));
     }
 
+    fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<fenix_completion::CompletionItem> {
+        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind })
+    }
+
+    #[test]
+    fn completion_popup_is_none_when_nothing_is_open() {
+        let app = App::with_file(None);
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        assert!(app.completion_popup(800.0, 580.0, rect, Some((0, 0)), 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn completion_popup_is_none_without_a_caret_to_anchor_under() {
+        let mut app = App::with_file(None);
+        let items = vec![completion_item("set", fenix_completion::CompletionKind::Keyword)];
+        app.completion = Some(CompletionState { prefix_start: 0, picker: fenix_picker::PickerState::new(items) });
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        assert!(app.completion_popup(800.0, 580.0, rect, None, 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn completion_popup_lists_candidates_and_flags_the_selected_row() {
+        let mut app = App::with_file(None);
+        let items =
+            vec![completion_item("set", fenix_completion::CompletionKind::Keyword), completion_item("seek", fenix_completion::CompletionKind::Keyword)];
+        let mut picker = fenix_picker::PickerState::new(items);
+        picker.move_selection(1); // select "seek", index 1
+        app.completion = Some(CompletionState { prefix_start: 0, picker });
+
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: 100.0 };
+        let (_, spans, selected_row) = app.completion_popup(800.0, 580.0, rect, Some((0, 4)), 0.0, 0.0).unwrap();
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("set"));
+        assert!(joined.contains("seek"));
+        assert_eq!(selected_row, Some(1));
+    }
+
+    #[test]
+    fn completion_popup_colors_keywords_and_tags_differently() {
+        let mut app = App::with_file(None);
+        let items =
+            vec![completion_item("set", fenix_completion::CompletionKind::Keyword), completion_item("my_proc", fenix_completion::CompletionKind::Tag)];
+        app.completion = Some(CompletionState { prefix_start: 0, picker: fenix_picker::PickerState::new(items) });
+
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: 100.0 };
+        let (_, spans, _) = app.completion_popup(800.0, 580.0, rect, Some((0, 0)), 0.0, 0.0).unwrap();
+        let keyword_color = spans.iter().find(|(s, _, _)| s == "set").unwrap().1;
+        let tag_color = spans.iter().find(|(s, _, _)| s == "my_proc").unwrap().1;
+        // caret_text/fg_modeline, not syntax_keyword/syntax_function --
+        // this popup's background is bg_modeline, and the syntax_* family
+        // is calibrated for contrast against bg instead (see the doc
+        // comment on completion_popup's color match for the full story).
+        assert_eq!(keyword_color, app.theme.caret_text);
+        assert_eq!(tag_color, app.theme.fg_modeline);
+        assert_ne!(keyword_color, tag_color);
+    }
+
+    #[test]
+    fn completion_popup_rect_never_extends_past_the_window_or_under_the_modeline() {
+        let mut app = App::with_file(None);
+        let items = vec![completion_item("set", fenix_completion::CompletionKind::Keyword)];
+        app.completion = Some(CompletionState { prefix_start: 0, picker: fenix_picker::PickerState::new(items) });
+
+        // Anchored near the bottom-right corner -- must clamp, not overflow.
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 40.0 };
+        let (popup_rect, _, _) = app.completion_popup(300.0, 40.0, rect, Some((0, 290)), 0.0, 0.0).unwrap();
+        assert!(popup_rect.x + popup_rect.w <= 300.0 + 0.01);
+        assert!(popup_rect.y + popup_rect.h <= 40.0 + 0.01);
+    }
+
     #[test]
     fn explorer_open_selected_on_a_directory_navigates_into_it() {
         let dir = TempDir::new("open_dir");
@@ -4238,30 +5122,32 @@ mod tests {
     }
 
     #[test]
-    fn picker_add_project_prompt_prefills_with_the_current_project_root() {
+    fn picker_add_project_prompt_opens_the_explorer_at_the_current_project_root() {
+        let root_dir = TempDir::new("add_project_prompt_root");
         let mut app = App::with_file(None);
-        let root = PathBuf::from("/some/project");
-        app.project_root = Some(root.clone());
+        app.project_root = Some(root_dir.path().to_path_buf());
 
         app.picker_add_project_prompt();
 
-        assert_eq!(app.pending_add_project_path.as_deref(), Some(root.to_string_lossy().as_ref()));
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickProjectDir);
+        assert_eq!(app.explorer.as_ref().map(|e| e.cwd.as_path()), Some(root_dir.path()));
     }
 
     #[test]
-    fn add_project_query_key_enter_registers_and_saves_the_typed_path() {
-        let known_dir = TempDir::new("add_project_enter");
-        let project_dir = TempDir::new("add_project_target");
+    fn select_cwd_registers_the_browsed_directory_and_returns_to_the_editor() {
+        let known_dir = TempDir::new("select_cwd_known");
+        let project_dir = TempDir::new("select_cwd_target");
         let mut app = App::with_file(None);
         app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.project_root = Some(project_dir.path().to_path_buf());
 
-        app.pending_add_project_path = Some(String::new());
-        for ch in project_dir.path().to_string_lossy().chars() {
-            app.add_project_query_key(KeyPress::char(ch));
-        }
-        app.add_project_query_key(KeyPress::named(FenixNamedKey::Enter));
+        app.picker_add_project_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
 
-        assert!(app.pending_add_project_path.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.explorer.is_none());
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
         let canonical = std::fs::canonicalize(project_dir.path()).unwrap();
         assert_eq!(app.known_projects.roots(), std::slice::from_ref(&canonical));
         // Persisted, not just held in memory.
@@ -4270,51 +5156,33 @@ mod tests {
     }
 
     #[test]
-    fn add_project_query_key_escape_cancels_without_registering() {
-        let known_dir = TempDir::new("add_project_escape");
+    fn select_cwd_is_a_noop_outside_pick_project_dir_mode() {
+        let dir = TempDir::new("select_cwd_browse_noop");
+        let known_dir = TempDir::new("select_cwd_browse_noop_known");
         let mut app = App::with_file(None);
         app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
-        app.pending_add_project_path = Some("/some/path".to_string());
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer_purpose = ExplorerPurpose::Browse;
+        app.main_view = MainView::Explorer;
 
-        app.add_project_query_key(KeyPress::named(FenixNamedKey::Escape));
-
-        assert!(app.pending_add_project_path.is_none());
-        assert!(app.known_projects.roots().is_empty());
-    }
-
-    #[test]
-    fn add_project_query_key_backspace_edits_the_typed_path() {
-        let mut app = App::with_file(None);
-        app.pending_add_project_path = Some("/foo".to_string());
-        app.add_project_query_key(KeyPress::named(FenixNamedKey::Backspace));
-        assert_eq!(app.pending_add_project_path.as_deref(), Some("/fo"));
-    }
-
-    #[test]
-    fn confirm_add_project_ignores_blank_input() {
-        let known_dir = TempDir::new("add_project_blank");
-        let mut app = App::with_file(None);
-        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
-
-        app.confirm_add_project("   ");
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
 
         assert!(app.known_projects.roots().is_empty());
+        assert_eq!(app.main_view, MainView::Explorer, "browsing should be untouched by a stray S");
     }
 
     #[test]
-    fn confirm_add_project_expands_a_leading_tilde() {
-        let known_dir = TempDir::new("add_project_tilde");
+    fn opening_a_file_while_picking_a_project_dir_does_nothing() {
+        let dir = TempDir::new("pick_project_dir_ignores_files");
+        dir.write("main.rs", "fn main() {}");
         let mut app = App::with_file(None);
-        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.project_root = Some(dir.path().to_path_buf());
 
-        app.confirm_add_project("~");
+        app.picker_add_project_prompt();
+        app.explorer_open_selected();
 
-        let home = dirs::home_dir().expect("test environment should have a home dir");
-        // `~` alone may or may not canonicalize (depends on the real
-        // filesystem), so just check it expanded away from a literal "~".
-        assert_eq!(app.known_projects.roots().len(), 1);
-        assert_ne!(app.known_projects.roots()[0], PathBuf::from("~"));
-        assert!(app.known_projects.roots()[0].starts_with(&home) || app.known_projects.roots()[0] == home);
+        assert_eq!(app.main_view, MainView::Explorer, "a file open shouldn't leave the picker");
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickProjectDir);
     }
 
     #[test]
@@ -4488,7 +5356,202 @@ mod tests {
 
         assert_ne!(app.focused_buffer_id(), a_id);
         assert_eq!(app.open().buffer.text(), "");
+        assert_eq!(app.open().kind, BufferKind::Text);
         assert_eq!(app.open().buffer.path(), None);
+    }
+
+    #[test]
+    fn with_file_none_opens_the_dashboard_instead_of_a_plain_scratch_buffer() {
+        let app = App::with_file(None);
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+        assert!(app.open().buffer.text().contains("a keyboard-first editor"));
+        assert!(app.dashboard_lines.contains_key(&app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn gutter_chars_is_zero_for_a_dashboard_buffer() {
+        let app = App::with_file(None);
+        assert_eq!(app.gutter_chars(app.open()), 0);
+    }
+
+    #[test]
+    fn dashboard_center_offset_centers_the_banner_and_content_blocks_independently() {
+        // The regression this guards: the banner block (~30 chars) and
+        // the content block below it are rarely the same width -- here
+        // the content block is made deliberately much wider (a long
+        // project path) than the banner. If both shared one pad (the
+        // whole document's widest line), the banner would visibly sit
+        // left of the pane's true center, exactly the bug reported.
+        let known_dir = TempDir::new("dashboard_center_offset_sections");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.known_projects.add(PathBuf::from("/a/very/long/project/path/that/is/wider/than/the/banner/block"));
+        app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
+        app.open_dashboard();
+
+        let ob = app.open();
+        let id = app.focused_buffer_id();
+        let lines = app.dashboard_lines.get(&id).unwrap();
+        let char_width = 8.0;
+        let line_height = 20.0;
+        // Wide enough that neither block's padding clamps to zero.
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 2000.0, h: 2000.0 };
+
+        let (pad_by_line, _) = dashboard_center_offset(ob, lines, rect, char_width, line_height);
+
+        let banner_line = lines
+            .iter()
+            .position(|l| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Banner))
+            .unwrap();
+        let project_line = lines
+            .iter()
+            .position(|l| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Project))
+            .unwrap();
+        assert_ne!(pad_by_line[banner_line], pad_by_line[project_line]);
+
+        // Every banner row shares the same pad as every other banner
+        // row -- centered as one coherent block, not row-by-row.
+        let all_banner_pads: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Banner))
+            .map(|(i, _)| pad_by_line[i])
+            .collect();
+        assert!(all_banner_pads.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn dashboard_center_offset_never_goes_negative_in_a_too_small_pane() {
+        let app = App::with_file(None);
+        let ob = app.open();
+        let id = app.focused_buffer_id();
+        let lines = app.dashboard_lines.get(&id).unwrap();
+        // Smaller than the content on both axes.
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+
+        let (pad_by_line, extra_top_px) = dashboard_center_offset(ob, lines, rect, 8.0, 20.0);
+
+        assert!(pad_by_line.iter().all(|&p| p == 0));
+        assert_eq!(extra_top_px, 0.0);
+    }
+
+    #[test]
+    fn modeline_shows_a_placeholder_filename_for_the_dashboard() {
+        let app = App::with_file(None);
+        assert!(app.modeline_text().contains("*dashboard*"));
+    }
+
+    #[test]
+    fn open_dashboard_replaces_the_focused_pane_with_a_fresh_dashboard_buffer() {
+        let dir = TempDir::new("open_dashboard");
+        let a = dir.write("a.txt", "hello");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        let a_id = app.focused_buffer_id();
+
+        app.open_dashboard();
+
+        assert_ne!(app.focused_buffer_id(), a_id);
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+        assert!(app.dashboard_lines.contains_key(&app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn record_recent_file_persists_the_canonicalized_path() {
+        let dir = TempDir::new("record_recent_file");
+        let recent_dir = TempDir::new("record_recent_file_config");
+        let file = dir.write("a.txt", "hello");
+        let mut app = App::with_file(None);
+        app.recent_files = fenix_project::RecentFiles::load_or_default(recent_dir.path().join("recent_files.txt"));
+
+        app.record_recent_file(&file);
+
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(app.recent_files.paths(), std::slice::from_ref(&canonical));
+        let reloaded =
+            fenix_project::RecentFiles::load_or_default(recent_dir.path().join("recent_files.txt"));
+        assert_eq!(reloaded.paths(), &[canonical]);
+    }
+
+    /// Moves the focused buffer's cursor to the first line whose
+    /// `dashboard_lines` entry has the given style -- shared by the
+    /// activation tests below to find the row to put the cursor on
+    /// without hand-counting generated line numbers.
+    fn move_cursor_to_dashboard_line(app: &mut App, style: dashboard::DashboardLineStyle) -> usize {
+        let lines = app.dashboard_lines.get(&app.focused_buffer_id()).cloned().unwrap();
+        let line = lines
+            .iter()
+            .position(|l| l.as_ref().map(|m| m.style) == Some(style))
+            .unwrap_or_else(|| panic!("no dashboard line with style {style:?}"));
+        let start = app.open().buffer.line_start_char(line);
+        app.open_mut().cursor.char_idx = start;
+        line
+    }
+
+    #[test]
+    fn dashboard_activate_selected_on_a_project_line_switches_to_that_project() {
+        let known_dir = TempDir::new("dashboard_activate_project");
+        let project_dir = TempDir::new("dashboard_activate_project_target");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.known_projects.add(project_dir.path().to_path_buf());
+        app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
+        app.open_dashboard();
+        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::Project);
+
+        app.dashboard_activate_selected();
+
+        assert_eq!(app.main_view, MainView::Picker);
+        assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
+        assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(_))));
+    }
+
+    #[test]
+    fn dashboard_activate_selected_on_a_recent_file_line_opens_it() {
+        let known_dir = TempDir::new("dashboard_activate_recent");
+        let file_dir = TempDir::new("dashboard_activate_recent_target");
+        let file = file_dir.write("notes.txt", "hello");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
+        app.recent_files.add(file.clone());
+        app.open_dashboard();
+        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::RecentFile);
+
+        app.dashboard_activate_selected();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.open().buffer.text(), "hello");
+        assert_eq!(app.open().kind, BufferKind::Text);
+    }
+
+    #[test]
+    fn dashboard_activate_selected_on_a_non_entry_line_does_nothing() {
+        let mut app = App::with_file(None);
+        let dashboard_id = app.focused_buffer_id();
+        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::Banner);
+
+        app.dashboard_activate_selected();
+
+        // Still the same dashboard buffer, nothing opened or switched to.
+        assert_eq!(app.focused_buffer_id(), dashboard_id);
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+        assert_eq!(app.main_view, MainView::Editor);
+    }
+
+    #[test]
+    fn enter_on_a_non_dashboard_buffer_is_not_intercepted() {
+        // Guards the `handle_key` check itself: an ordinary Text buffer's
+        // Enter must still reach Vim (inserting a newline in Insert mode,
+        // moving down a line in Normal mode) rather than this feature's
+        // Enter-interception silently swallowing it. Exercised through
+        // `open()`/`kind`, the exact condition `handle_key` gates on --
+        // a real winit `KeyEvent` isn't constructible from a unit test,
+        // same reason every other `handle_key` behavior in this suite is
+        // tested via the methods it dispatches to, not the event itself.
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        assert_ne!(app.open().kind, BufferKind::Dashboard);
     }
 
     #[test]

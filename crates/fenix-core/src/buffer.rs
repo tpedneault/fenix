@@ -78,6 +78,25 @@ impl Buffer {
         }
     }
 
+    /// Seeds a buffer with `text` directly (no path, no undo history --
+    /// unlike `empty()` followed by `insert_str`, this doesn't push an
+    /// `Edit`, so there's nothing for a stray `u` to undo). For content
+    /// that's generated rather than typed or read from disk, e.g. the
+    /// startup dashboard (`fenix-buffers::BufferList::open_dashboard`).
+    /// Named `from_text`, not `from_str`, to avoid colliding with the
+    /// `std::str::FromStr` trait method's naming convention.
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            rope: Rope::from_str(text),
+            path: None,
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+            pending_syntax_edits: Vec::new(),
+        }
+    }
+
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
@@ -541,15 +560,21 @@ mod tests {
     use super::*;
 
     fn buffer_with(text: &str) -> Buffer {
-        Buffer {
-            rope: Rope::from_str(text),
-            path: None,
-            dirty: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            pending: None,
-            pending_syntax_edits: Vec::new(),
-        }
+        Buffer::from_text(text)
+    }
+
+    #[test]
+    fn from_text_seeds_the_text_with_no_path_and_no_undo_history() {
+        let buffer = Buffer::from_text("hello\nworld\n");
+        assert_eq!(buffer.text(), "hello\nworld\n");
+        assert_eq!(buffer.path(), None);
+        assert!(!buffer.is_dirty());
+        // No Edit was ever pushed, so undo is a no-op -- the seeded text
+        // isn't itself something a stray `u` can strip away.
+        let mut cursor = Cursor::at_start();
+        let mut buffer = buffer;
+        buffer.undo(&mut cursor);
+        assert_eq!(buffer.text(), "hello\nworld\n");
     }
 
     #[test]

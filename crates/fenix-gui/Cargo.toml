@@ -8,6 +8,8 @@ anyhow = "1.0.104"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 dirs = "6"
 fenix-buffers = { path = "../fenix-buffers" }
+fenix-completion = { path = "../fenix-completion" }
+fenix-config = { path = "../fenix-config" }
 fenix-core = { path = "../fenix-core" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-keymap = { path = "../fenix-keymap" }

@@ -1,0 +1,7 @@
+[package]
+name = "fenix-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs = "6"

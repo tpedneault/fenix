@@ -1,6 +1,3 @@
-use std::io;
-use std::path::{Path, PathBuf};
-
 /// A named, swappable color palette (plus a couple of non-color style
 /// knobs -- font family, window border). Every field is consumed
 /// generically by rendering code (`syntax_color`, `git_status_color`,
@@ -267,7 +264,17 @@ pub const TEMPLEOS: Theme = Theme {
     fg_modeline: text_color(0xffffff),
     caret: rgba(0xffff55),
     caret_text: text_color(0xffff55),
-    hl_line: rgba_alpha(0x5555ff, 0.15),
+    // 0.15 alpha (this field's original value) was too faint to actually
+    // read against a pure-white `bg`: blue's channels are far enough from
+    // white's that the hue itself isn't the problem (unlike the old
+    // `selection` yellow, see that field's doc comment), but at 15% the
+    // blended result -- roughly (229, 229, 255) -- is close enough to
+    // (255, 255, 255) that it disappeared in practice, not just "subtle."
+    // Bumped to a level that's clearly visible while staying weaker than
+    // `selection`'s own 0.45, matching this field's own doc comment
+    // (hl_line doesn't need as much contrast as selection since the caret
+    // already marks the current line too).
+    hl_line: rgba_alpha(0x5555ff, 0.25),
     // Blue, not yellow: yellow's R/G channels already match the white
     // `bg`, so blending only ever moves the B channel -- no alpha gets it
     // past a barely-there pale tint. Blue's channels are all far from
@@ -324,35 +331,6 @@ pub const ALL: &[&Theme] = &[&ORBIT_DARK, &TEMPLEOS];
 /// expressions.
 pub fn by_name(name: &str) -> Option<&'static Theme> {
     ALL.iter().find(|t| t.name.eq_ignore_ascii_case(name)).copied()
-}
-
-/// `dirs::config_dir()/fenix/theme.txt` -- same location convention
-/// `fenix_project::KnownProjects::default_path` already established,
-/// just a different file. `None` only on a platform with no notion of
-/// a config directory at all.
-pub fn default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("theme.txt"))
-}
-
-/// Loads the persisted theme choice from `path`, falling back to
-/// `ORBIT_DARK` on any failure -- missing file, unreadable file, or a
-/// name that doesn't match any known theme. This is a convenience
-/// preference, not critical data, so it never fails outright -- same
-/// posture as `fenix_project::KnownProjects::load_or_default`.
-pub fn load_from(path: &Path) -> &'static Theme {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => by_name(contents.trim()).unwrap_or(&ORBIT_DARK),
-        Err(_) => &ORBIT_DARK,
-    }
-}
-
-/// Persists `theme`'s name to `path`, creating parent directories as
-/// needed -- mirrors `KnownProjects::save`'s shape exactly.
-pub fn save_to(theme: &Theme, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, theme.name)
 }
 
 #[cfg(test)]
@@ -420,58 +398,4 @@ mod tests {
         assert!(by_name("nonexistent-theme").is_none());
     }
 
-    /// A real, uniquely-named temp directory, removed on drop -- same
-    /// reasoning as every other crate's own `TempDir`: persistence here
-    /// is real filesystem I/O, tested against a real filesystem.
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("fenix-gui-theme-test-{name}-{}-{n}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn load_from_a_missing_file_falls_back_to_orbit_dark() {
-        let dir = TempDir::new("load_missing");
-        let theme = load_from(&dir.path().join("does-not-exist.txt"));
-        assert_eq!(theme.name, "Orbit Dark");
-    }
-
-    #[test]
-    fn load_from_an_unrecognized_name_falls_back_to_orbit_dark() {
-        let dir = TempDir::new("load_unrecognized");
-        let path = dir.path().join("theme.txt");
-        std::fs::write(&path, "not-a-real-theme").unwrap();
-        let theme = load_from(&path);
-        assert_eq!(theme.name, "Orbit Dark");
-    }
-
-    #[test]
-    fn save_to_then_load_from_round_trips() {
-        let dir = TempDir::new("save_round_trip");
-        let path = dir.path().join("theme.txt");
-        save_to(&TEMPLEOS, &path).unwrap();
-        assert_eq!(load_from(&path).name, "TempleOS");
-    }
-
-    #[test]
-    fn save_to_creates_missing_parent_directories() {
-        let dir = TempDir::new("save_creates_parents");
-        let path = dir.path().join("nested").join("config").join("theme.txt");
-        save_to(&ORBIT_DARK, &path).unwrap();
-        assert!(path.exists());
-    }
 }
