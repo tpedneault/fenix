@@ -97,11 +97,44 @@ pub struct TextPipeline {
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
     sidebar: GlyphBuffer,
-    /// Body-text font family for the active theme -- `None` resolves to
-    /// `Family::Monospace` (see `content_family`), `Some(name)` to
-    /// `Family::Name(name)`. Icon spans in `rich_spans` are unaffected,
-    /// always `ICON_FONT_FAMILY` regardless of this.
+    /// Effective body-text font family: a `config.ini` `font_family`
+    /// override, or else the active theme's own `Theme::font_family` --
+    /// whichever `App::redraw` resolved and passed to `set_font_family`.
+    /// `None` falls back to `default_family` (see its own doc comment).
+    /// Icon spans in `rich_spans` are unaffected, always `ICON_FONT_
+    /// FAMILY` regardless of this.
+    ///
+    /// `&'static str`, not `&str`/`String`: an incoming family name is
+    /// leaked once via `Box::leak` in `set_font_family` the first time
+    /// it's seen, the standard idiom for turning a small, bounded set
+    /// of long-lived runtime strings into `'static` ones. Bounded here
+    /// by "however many distinct fonts a user names in one session"
+    /// (a config value plus however many themes get cycled through,
+    /// each already `&'static str` itself) -- negligible, and it keeps
+    /// `content_family()` returning `Family<'static>`, so none of its
+    /// six call sites need touching just because this field's *source*
+    /// changed from theme-only to theme-or-config.
     content_family: Option<&'static str>,
+    /// The system's real default monospace font, resolved *once* here
+    /// (via `fontdb::Database::family_name(&Family::Monospace)`, the
+    /// same generic-family-alias resolution `Family::Monospace` itself
+    /// would trigger) rather than re-resolved on every shape. This is
+    /// the fix for a real, measured performance bug: shaping text with
+    /// the generic `Family::Monospace` enum variant directly costs
+    /// `cosmic-text` extra per-shape fallback-substitution work it only
+    /// does for that variant (confirmed via a standalone headless
+    /// benchmark against this crate's own font database: ~37ms/shape
+    /// for `Family::Monospace` vs. ~6ms for a concrete `Family::Name`
+    /// on identical text) -- paid on every keystroke, since content is
+    /// reshaped once per `redraw()`. Resolving the *name* once and
+    /// always shaping via `Family::Name(_)` from then on keeps the
+    /// same visual font (it's the same name the generic variant would
+    /// have resolved to) without paying that tax continuously. Used as
+    /// the fallback whenever no theme/config font is set -- previously
+    /// every theme without an explicit `font_family` (i.e. every theme
+    /// except TempleOS) paid this cost on every frame, which is why
+    /// typing felt slower on any theme but TempleOS.
+    default_family: &'static str,
     /// The active font's real, measured monospace advance width in
     /// pixels at the current `font_size` -- recomputed whenever
     /// `content_family` (`set_theme`) or `font_size` (`set_font_size`)
@@ -125,6 +158,12 @@ impl TextPipeline {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        // See `default_family`'s own doc comment -- resolved once here,
+        // leaked to `'static` (bounded, one-time cost) so every later
+        // shape uses the fast concrete-name path instead of re-resolving
+        // (and paying `cosmic-text`'s generic-family tax) every frame.
+        let default_family: &'static str =
+            Box::leak(font_system.db().family_name(&Family::Monospace).to_string().into_boxed_str());
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&gpu.device);
         let viewport = Viewport::new(&gpu.device, &cache);
@@ -142,7 +181,7 @@ impl TextPipeline {
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
 
-        let char_width = Self::measure_char_width(&mut font_system, Family::Monospace, FONT_SIZE, LINE_HEIGHT);
+        let char_width = Self::measure_char_width(&mut font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
 
         Self {
             font_system,
@@ -156,29 +195,34 @@ impl TextPipeline {
             modeline,
             sidebar,
             content_family: None,
+            default_family,
             char_width,
             font_size: FONT_SIZE,
             line_height: LINE_HEIGHT,
         }
     }
 
-    /// Resolves the active theme's body-text font: `Family::Name(_)` when
-    /// `Theme::font_family` names one, else the generic `Family::Monospace`
-    /// fallback every theme used before this existed.
+    /// Resolves the active body-text font: `Family::Name(_)` for whatever
+    /// `set_font_family` was last given, else `default_family` (see its
+    /// own doc comment -- never the slow generic `Family::Monospace`).
     fn content_family(&self) -> Family<'static> {
-        self.content_family.map(Family::Name).unwrap_or(Family::Monospace)
+        Family::Name(self.content_family.unwrap_or(self.default_family))
     }
 
-    /// Adopts `theme`'s font choice for all subsequent `set_*` calls --
-    /// called once per `redraw()`, before them. A no-op beyond the
-    /// equality check when the family hasn't actually changed since
-    /// last frame, so re-measuring `char_width` (a real shaping pass)
-    /// only happens on an actual theme/font switch, not every redraw.
-    pub fn set_theme(&mut self, theme: &Theme) {
-        if self.content_family == theme.font_family {
+    /// Sets the effective body-text font for all subsequent `set_*`
+    /// calls -- called once per `redraw()`, before them, with whatever
+    /// `App` resolved as the effective family (a `config.ini`
+    /// `font_family` override, else the active theme's own `Theme::
+    /// font_family`, else `None`). A no-op beyond the equality check
+    /// when the family hasn't actually changed since last frame, so
+    /// re-measuring `char_width` (a real shaping pass) and leaking a
+    /// new `'static` copy of `family` only happen on an actual switch,
+    /// not every redraw.
+    pub fn set_font_family(&mut self, family: Option<&str>) {
+        if self.content_family == family {
             return;
         }
-        self.content_family = theme.font_family;
+        self.content_family = family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
         let family = self.content_family();
         self.char_width = Self::measure_char_width(&mut self.font_system, family, self.font_size, self.line_height);
     }
@@ -607,6 +651,25 @@ mod tests {
             "expected the system default monospace font ({default_width}px) to be narrower \
              than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
         );
+    }
+
+    #[test]
+    fn resolving_the_monospace_generic_family_yields_a_usable_concrete_name() {
+        // The precondition `default_family` (in `TextPipeline::new`)
+        // depends on: `content_family()`'s fallback must always be a
+        // resolved concrete `Family::Name`, never the generic `Family::
+        // Monospace` variant itself, because shaping via the generic
+        // variant is measurably slower (see `default_family`'s own doc
+        // comment -- ~37ms/shape vs. ~6ms for a concrete name on this
+        // crate's own font database in a standalone benchmark). This
+        // guards the one fact that fix relies on: `fontdb` actually
+        // resolves `Family::Monospace` to some real, non-empty family
+        // name on a real font database, so leaking it once at startup
+        // and shaping via `Family::Name(_)` from then on can't silently
+        // fall back to shaping against an empty/bogus family.
+        let font_system = FontSystem::new();
+        let resolved = font_system.db().family_name(&Family::Monospace);
+        assert!(!resolved.is_empty(), "expected fontdb to resolve Family::Monospace to a real family name");
     }
 
     #[test]

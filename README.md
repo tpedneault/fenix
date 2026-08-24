@@ -152,6 +152,7 @@ load.
 [editor]
 theme = TempleOS
 font_size = 16
+font_family = Fira Code
 indent_width = 4
 
 [completion]
@@ -162,6 +163,7 @@ symbols_file = /home/you/tcl-symbols.txt
 |---|---|---|
 | `editor` | `theme` | `Orbit Dark` or `TempleOS` (case-insensitive) |
 | `editor` | `font_size` | Body text size in points |
+| `editor` | `font_family` | Body text font family, by name, as installed on your system. Overrides whatever the active theme names; unset falls back to the theme's own choice (and from there to your system's default monospace font) |
 | `editor` | `indent_width` | Spaces per indent level (`>>`/`<<`, Tab, auto-indent) |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
 

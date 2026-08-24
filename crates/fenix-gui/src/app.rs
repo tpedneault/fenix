@@ -2836,9 +2836,15 @@ impl App {
         // consumer needs the *current* value, not the `text::LINE_HEIGHT`/
         // `MODELINE_HEIGHT` constants those used to be).
         let theme = self.theme;
+        // A `config.ini` `font_family` always wins over whatever the
+        // active theme names; an unset config falls through to the
+        // theme's own choice (`None` for every theme but TempleOS,
+        // which `TextPipeline::set_font_family` resolves to the fast
+        // concrete-name fallback rather than the slow generic one).
+        let font_family = self.config.font_family.as_deref().or(theme.font_family);
         let (char_width, line_height, modeline_height) = match &mut self.text {
             Some(text) => {
-                text.set_theme(theme);
+                text.set_font_family(font_family);
                 (text.char_width(), text.line_height(), text.modeline_height())
             }
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT, text::LINE_HEIGHT + 8.0),

@@ -26,6 +26,7 @@ pub struct Config {
     path: PathBuf,
     pub theme: Option<String>,
     pub font_size: Option<f32>,
+    pub font_family: Option<String>,
     pub indent_width: Option<usize>,
     pub completion_symbols_file: Option<PathBuf>,
 }
@@ -55,6 +56,7 @@ impl Config {
             path,
             theme: editor.and_then(|s| s.get("theme")).cloned(),
             font_size: editor.and_then(|s| s.get("font_size")).and_then(|v| v.parse().ok()),
+            font_family: editor.and_then(|s| s.get("font_family")).cloned(),
             indent_width: editor.and_then(|s| s.get("indent_width")).and_then(|v| v.parse().ok()),
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
         })
@@ -65,10 +67,17 @@ impl Config {
     /// preference, not critical data, same posture as `KnownProjects::
     /// load_or_default`.
     pub fn load_or_default(path: PathBuf) -> Self {
-        Self::load(path.clone()).unwrap_or(Self { path, theme: None, font_size: None, indent_width: None, completion_symbols_file: None })
+        Self::load(path.clone()).unwrap_or(Self {
+            path,
+            theme: None,
+            font_size: None,
+            font_family: None,
+            indent_width: None,
+            completion_symbols_file: None,
+        })
     }
 
-    /// Writes the known two-section, four-key layout, creating parent
+    /// Writes the known two-section, five-key layout, creating parent
     /// directories as needed -- only `Some` fields are written, so a
     /// setting cleared back to `None` doesn't leave a stale empty line
     /// behind on the next save. Not a generic INI writer: there's only
@@ -85,6 +94,9 @@ impl Config {
         }
         if let Some(font_size) = self.font_size {
             out.push_str(&format!("font_size = {font_size}\n"));
+        }
+        if let Some(font_family) = &self.font_family {
+            out.push_str(&format!("font_family = {font_family}\n"));
         }
         if let Some(indent_width) = self.indent_width {
             out.push_str(&format!("indent_width = {indent_width}\n"));
@@ -119,6 +131,7 @@ mod tests {
         let config = Config::load(temp_path("missing")).unwrap();
         assert!(config.theme.is_none());
         assert!(config.font_size.is_none());
+        assert!(config.font_family.is_none());
         assert!(config.indent_width.is_none());
         assert!(config.completion_symbols_file.is_none());
     }
@@ -134,11 +147,12 @@ mod tests {
     }
 
     #[test]
-    fn all_four_fields_round_trip_through_save_and_load() {
+    fn all_five_fields_round_trip_through_save_and_load() {
         let path = temp_path("round_trip");
         let mut config = Config::load_or_default(path.clone());
         config.theme = Some("TempleOS".to_string());
         config.font_size = Some(18.0);
+        config.font_family = Some("Fira Code".to_string());
         config.indent_width = Some(2);
         config.completion_symbols_file = Some(PathBuf::from("/home/thomas/tcl-symbols.txt"));
         config.save().unwrap();
@@ -146,6 +160,7 @@ mod tests {
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.theme, Some("TempleOS".to_string()));
         assert_eq!(reloaded.font_size, Some(18.0));
+        assert_eq!(reloaded.font_family, Some("Fira Code".to_string()));
         assert_eq!(reloaded.indent_width, Some(2));
         assert_eq!(reloaded.completion_symbols_file, Some(PathBuf::from("/home/thomas/tcl-symbols.txt")));
         std::fs::remove_file(&path).ok();
