@@ -47,7 +47,15 @@ for anyone curious to poke around or build on it.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
-  workspaces (`SPC TAB`).
+  workspaces (`SPC TAB`). Every pane shows a small title bar naming its
+  buffer (the filename, or a placeholder like `*dashboard*`/`*docker*`/
+  a dired buffer's own directory for one with no path) -- with a split
+  open, two different files are labeled at a glance, not just whichever
+  one happens to be focused (the modeline only ever names that one).
+- **Modeline**: mode badge, filename, and cursor position on the left;
+  a live local date/time clock flush against the right edge, ticking in
+  place as you work (omitted rather than overlapping anything if the
+  window's too narrow to fit it).
 - **Startup dashboard**: a real, Vim-navigable buffer listing known
   projects and recent files, shown when Fenix is launched with no file
   argument (`SPC o d` to reopen it later).
@@ -142,6 +150,7 @@ popup shows what keys continue it.
 | `SPC t t` | Cycle theme |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
+| `SPC t f` | Toggle fullscreen |
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |

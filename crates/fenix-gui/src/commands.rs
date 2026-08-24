@@ -40,6 +40,7 @@ impl CommandRegistry {
         );
         registry.register("view.cycle_theme", "Cycle to the next theme", cmd_cycle_theme);
         registry.register("view.pick_theme", "Pick a theme by name", cmd_pick_theme);
+        registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",
@@ -130,6 +131,10 @@ fn cmd_cycle_theme(ctx: &mut CommandCtx) {
 
 fn cmd_pick_theme(ctx: &mut CommandCtx) {
     ctx.app.picker_pick_theme();
+}
+
+fn cmd_toggle_fullscreen(ctx: &mut CommandCtx) {
+    ctx.app.toggle_fullscreen();
 }
 
 fn cmd_explorer_jump(ctx: &mut CommandCtx) {

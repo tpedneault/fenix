@@ -652,6 +652,33 @@ fn pane_content_rect(rect: fenix_window::Rect, line_height: f32, has_title: bool
     }
 }
 
+/// The modeline's bottom-right clock text -- real local wall-clock time,
+/// re-formatted fresh every `redraw()` (no caching/dirty-tracking) so it
+/// naturally freeloads on the existing ~500ms caret-blink redraw cadence
+/// instead of needing its own timer plumbing.
+fn modeline_clock_text() -> String {
+    format_clock(chrono::Local::now())
+}
+
+/// Pure formatting split out from `modeline_clock_text` so it's
+/// unit-testable against a fixed instant instead of the real clock.
+fn format_clock(now: chrono::DateTime<chrono::Local>) -> String {
+    now.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// How many space characters to insert before the clock so it lands
+/// flush against the window's right edge, given `existing_chars`
+/// already rendered on the modeline (the badge+suffix, or the raw `:`/
+/// `/` command-line text) out of `columns` total available character
+/// columns. `0` means "don't render the clock at all" -- covers both a
+/// window too narrow to fit it and the exact-fit edge case with no room
+/// left for even one column of visual separation from what's already
+/// there, so a long filename/command can never make the clock overlap
+/// or glue onto existing text.
+fn modeline_clock_gap(existing_chars: usize, columns: usize, clock_chars: usize) -> usize {
+    columns.saturating_sub(existing_chars).saturating_sub(clock_chars)
+}
+
 fn dashboard_line_is_banner(style: dashboard::DashboardLineStyle) -> bool {
     matches!(style, dashboard::DashboardLineStyle::Banner | dashboard::DashboardLineStyle::Tagline)
 }
@@ -3052,6 +3079,20 @@ impl App {
         }
     }
 
+    /// `SPC t f`: toggles borderless fullscreen. `winit::window::Window`
+    /// is the source of truth (`window.fullscreen()`), not a mirrored
+    /// `App`-owned flag -- nothing else in `App` duplicates window-owned
+    /// state either, and this stays correct even if the window somehow
+    /// left fullscreen by a means other than this toggle (e.g. the OS).
+    pub(crate) fn toggle_fullscreen(&mut self) {
+        let Some(window) = &self.window else { return };
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+        } else {
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
     /// `SPC t p`: a fuzzy picker over every shipped theme (`theme::ALL`),
     /// for jumping straight to one by name rather than cycling through
     /// them one at a time.
@@ -3551,6 +3592,29 @@ impl App {
         self.pane_state(self.focused_pane_id()).rendered_scroll.floor().max(0.0) as usize
     }
 
+    /// The display name for `buffer_id` -- its filename if it has a
+    /// path, else a kind-specific placeholder (`*dashboard*`, `*docker*`,
+    /// a dired buffer's own directory, or `[No Name]`). Shared by the
+    /// modeline (which only ever names the *focused* pane) and the
+    /// per-pane title strips `redraw()` draws above every visible pane
+    /// -- with a split open, two different files need their own labels
+    /// to tell them apart at a glance, not just the one the modeline
+    /// shows for whichever pane happens to be focused.
+    fn buffer_display_name(&self, buffer_id: BufferId) -> String {
+        let Some(ob) = self.buffers.get(buffer_id) else { return "[No Name]".to_string() };
+        ob.buffer.path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
+            if ob.kind == BufferKind::Dashboard {
+                "*dashboard*".to_string()
+            } else if ob.kind == BufferKind::Explorer {
+                self.dired_states.get(&buffer_id).map(|s| s.cwd.display().to_string()).unwrap_or_else(|| "*dired*".to_string())
+            } else if ob.kind == BufferKind::Docker {
+                "*docker*".to_string()
+            } else {
+                "[No Name]".to_string()
+            }
+        })
+    }
+
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
     /// command or a `/`/`?` search query, since either replaces the
     /// whole modeline with raw prompt text instead of the usual badge +
@@ -3599,20 +3663,7 @@ impl App {
             return Some((label, format!("│ {count} matches ")));
         }
         let ob = self.open();
-        let filename = ob.buffer.path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
-            if ob.kind == BufferKind::Dashboard {
-                "*dashboard*".to_string()
-            } else if ob.kind == BufferKind::Explorer {
-                self.dired_states
-                    .get(&self.focused_buffer_id())
-                    .map(|s| s.cwd.display().to_string())
-                    .unwrap_or_else(|| "*dired*".to_string())
-            } else if ob.kind == BufferKind::Docker {
-                "*docker*".to_string()
-            } else {
-                "[No Name]".to_string()
-            }
-        });
+        let filename = self.buffer_display_name(self.focused_buffer_id());
         let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
         let mode_label =
@@ -4407,6 +4458,9 @@ impl App {
         struct PaneRender {
             pane: fenix_window::WindowId,
             rect: fenix_window::Rect,
+            /// This pane's title-bar text -- its buffer's display name,
+            /// or the Docker panel's own descriptive override.
+            title: String,
             spans: RowSpans,
             hl_row: Option<usize>,
             /// Whether `hl_row` should render with `theme.selection`
@@ -4438,9 +4492,20 @@ impl App {
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
-            // A pane with a title (`pane_titles`, e.g. the Docker
-            // panel's fixed layout -- see `open_docker_panel`) has its
-            // *content* area shrunk by one `line_height` from the top,
+            // Looked up early (not just where it's needed for content
+            // below) since every pane's title bar needs it too, even a
+            // pane currently showing the Explorer/Picker overlay --
+            // those overlays never change what buffer the pane maps to,
+            // just what's rendered in its content area this frame.
+            let buffer_id = *self.windows().content(pane).expect("every pane has a buffer");
+            // The Docker panel's fixed layout gives its panes their own
+            // descriptive titles ("Containers", "Logs", ...) via `pane_
+            // titles`, consulted first; every other pane is titled with
+            // its buffer's own display name, so a split showing two
+            // different files can tell them apart at a glance.
+            let pane_title = self.pane_titles.get(&pane).cloned().unwrap_or_else(|| self.buffer_display_name(buffer_id));
+            // Every pane always has a title now, so its *content* area
+            // is always shrunk by one `line_height` from the top,
             // reserving that strip for the title bar drawn later below.
             // `rect.y + rect.h` (the pane's bottom edge) is unchanged by
             // a top-only shrink, so every existing bit of geometry that
@@ -4448,7 +4513,7 @@ impl App {
             // bounds checks) needs no changes at all -- only this local
             // `rect` binding, used for everything downstream in this
             // pane's own block, is adjusted.
-            let rect = pane_content_rect(rect, line_height, self.pane_titles.contains_key(&pane));
+            let rect = pane_content_rect(rect, line_height, true);
             let is_focused = pane == focused_pane;
             let pane_visible_lines = text::lines_that_fit(rect.h, line_height);
 
@@ -4464,6 +4529,7 @@ impl App {
                 panes_render.push(PaneRender {
                     pane,
                     rect,
+                    title: pane_title,
                     spans,
                     hl_row: selected_row,
                     hl_row_strong: true,
@@ -4490,6 +4556,7 @@ impl App {
                 panes_render.push(PaneRender {
                     pane,
                     rect,
+                    title: pane_title,
                     spans,
                     hl_row: selected_row,
                     hl_row_strong: true,
@@ -4506,8 +4573,8 @@ impl App {
             }
 
             // Plain buffer content -- every pane not currently showing an
-            // overlay, focused or not.
-            let buffer_id = *self.windows().content(pane).expect("every pane has a buffer");
+            // overlay, focused or not. `buffer_id` was already looked up
+            // above, alongside `pane_title`.
             if is_focused {
                 self.ensure_cursor_visible(pane_visible_lines);
             }
@@ -4593,6 +4660,7 @@ impl App {
             panes_render.push(PaneRender {
                 pane,
                 rect,
+                title: pane_title,
                 spans,
                 hl_row,
                 hl_row_strong: is_dashboard,
@@ -4658,19 +4726,17 @@ impl App {
         }
         text.retain_panes(&live_panes);
 
-        // Title-bar strips for every pane `pane_titles` names (e.g. the
-        // Docker panel's fixed layout) -- `pane.rect` here is already
+        // Title-bar strips for every pane -- `pane.rect` here is already
         // the *shrunk* content rect (see the top-of-loop adjustment
         // above), so the strip itself sits exactly one `line_height`
         // above it, same width.
         let title_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = panes_render
             .iter()
-            .filter_map(|pane| {
-                let title = self.pane_titles.get(&pane.pane)?;
+            .map(|pane| {
                 let title_rect =
                     fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - line_height, w: pane.rect.w, h: line_height };
-                text.set_pane_title_rich(pane.pane, title_rect.w, &[(title.as_str(), theme.fg_modeline, false)]);
-                Some((pane.pane, title_rect))
+                text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), theme.fg_modeline, false)]);
+                (pane.pane, title_rect)
             })
             .collect();
         text.retain_titles(&live_panes);
@@ -4679,14 +4745,39 @@ impl App {
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_sidebar_rich(&sidebar_refs);
         }
+        let modeline_columns = (window_width / char_width).floor().max(0.0) as usize;
+        let clock_text = modeline_clock_text();
+        let clock_chars = clock_text.chars().count();
         match &modeline_pieces {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
-                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
+                let existing_chars = badge.chars().count() + suffix.chars().count();
+                let gap = modeline_clock_gap(existing_chars, modeline_columns, clock_chars);
+                if gap > 0 {
+                    let pad = " ".repeat(gap);
+                    text.set_modeline_text(&[
+                        (badge.as_str(), badge_fg),
+                        (suffix.as_str(), theme.fg_modeline),
+                        (pad.as_str(), theme.fg_modeline),
+                        (clock_text.as_str(), theme.gutter_fg),
+                    ]);
+                } else {
+                    text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
+                }
             }
             None => {
                 let cmd = modeline_command_text.as_deref().unwrap_or("");
-                text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
+                let gap = modeline_clock_gap(cmd.chars().count(), modeline_columns, clock_chars);
+                if gap > 0 {
+                    let pad = " ".repeat(gap);
+                    text.set_modeline_text(&[
+                        (cmd, theme.fg_modeline),
+                        (pad.as_str(), theme.fg_modeline),
+                        (clock_text.as_str(), theme.gutter_fg),
+                    ]);
+                } else {
+                    text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
+                }
             }
         }
 
@@ -5172,6 +5263,40 @@ mod tests {
         let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 10.0 };
         let shrunk = pane_content_rect(rect, 20.0, true);
         assert_eq!(shrunk.h, 0.0);
+    }
+
+    #[test]
+    fn format_clock_uses_an_iso_date_and_24_hour_time() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 3, 5, 9, 7, 2).unwrap();
+        assert_eq!(format_clock(now), "2026-03-05 09:07:02");
+    }
+
+    #[test]
+    fn modeline_clock_gap_returns_the_exact_space_count_when_there_is_room() {
+        assert_eq!(modeline_clock_gap(20, 100, 19), 61);
+    }
+
+    #[test]
+    fn modeline_clock_gap_is_zero_when_the_window_is_too_narrow() {
+        assert_eq!(modeline_clock_gap(20, 30, 19), 0);
+    }
+
+    #[test]
+    fn modeline_clock_gap_is_zero_at_the_exact_fit_boundary() {
+        // Exactly enough room for the existing text plus the clock, but
+        // not even one column of separation between them -- treated the
+        // same as "doesn't fit," not rendered glued onto existing text.
+        assert_eq!(modeline_clock_gap(20, 39, 19), 0);
+    }
+
+    #[test]
+    fn toggle_fullscreen_is_a_no_op_without_a_real_window() {
+        // `App::window` is only ever `Some` after a real winit `resumed`
+        // callback, never in a headless test -- this just confirms the
+        // early-return path doesn't panic.
+        let mut app = App::with_file(None);
+        app.toggle_fullscreen();
     }
 
     #[test]
@@ -7420,6 +7545,30 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         assert!(app.modeline_text().contains("*docker*"));
+    }
+
+    #[test]
+    fn buffer_display_name_uses_the_filename_for_a_real_path() {
+        let dir = TempDir::new("buffer_display_name_path");
+        let a = dir.write("hello.rs", "fn main() {}");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "hello.rs");
+    }
+
+    #[test]
+    fn buffer_display_name_falls_back_to_no_name_for_a_pathless_text_buffer() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "[No Name]");
+    }
+
+    #[test]
+    fn buffer_display_name_matches_each_special_kinds_modeline_placeholder() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*dashboard*");
+        app.open_docker_panel();
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*docker*");
     }
 
     #[test]
