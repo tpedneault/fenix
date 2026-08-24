@@ -23,7 +23,12 @@ for anyone curious to poke around or build on it.
 - **`SPC`-leader menu** with a live which-key popup showing available
   continuations as you type a sequence.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
-  YAML, Python, JavaScript/TypeScript/TSX, C, Bash, and Tcl.
+  YAML, Python, JavaScript/TypeScript/TSX, C, Bash, and Tcl. In Tcl,
+  a bare word in command position is only colored as a command if it's
+  actually known -- a built-in, a ctags-scanned project definition, or
+  a symbols-file entry (the same three sources autocompletion draws
+  from), matched against its fully-qualified path with an optional
+  leading `::` -- not just any word that happens to be first on a line.
 - **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
   buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
   `Enter` opens a file or navigates into a directory, `-` goes up, `R`

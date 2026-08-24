@@ -2815,6 +2815,26 @@ impl App {
         // compiler. The cloned `Vec` is small (a few dozen entries at
         // most), so this is cheap.
         let dashboard_lines = self.dashboard_lines.get(&id).cloned();
+
+        // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
+        // @function)` rule captures *every* word in command position,
+        // since a tree-sitter query has no way to know whether it's a
+        // real command -- only Fenix's own known-symbols set (built-in
+        // keywords, ctags, the external symbols file: the exact same
+        // three sources `tcl_candidates` already merges for completion)
+        // can validate that. Built up here, before `self.buffers.get_mut`
+        // below, since `tcl_candidates` is itself a `&mut self` call.
+        let is_tcl = self.buffers.get(id).is_some_and(|ob| {
+            ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
+                == Some(fenix_syntax::LanguageId::Tcl)
+        });
+        let known_tcl_commands: Option<std::collections::HashSet<String>> = if is_tcl {
+            let root = self.project_root.clone();
+            Some(self.tcl_candidates(root.as_deref()).into_iter().map(|c| c.payload.label).collect())
+        } else {
+            None
+        };
+
         let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
         let deltas = ob.buffer.drain_edits();
 
@@ -2843,6 +2863,20 @@ impl App {
         syntax
             .highlights_in_range(&source, byte_range)
             .into_iter()
+            .filter(|(range, name)| {
+                // Only the generic, unvalidated "function" capture (any
+                // bare word in command position) needs cross-referencing
+                // -- every other Tcl capture (specific builtins, "proc",
+                // keywords, the switch/unset/variable special cases, ...)
+                // is already validated by the query's own static
+                // `#any-of?` lists, so it's left alone here.
+                let Some(known) = &known_tcl_commands else { return true };
+                if *name != "function" {
+                    return true;
+                }
+                let text = &source[range.clone()];
+                known.contains(text.strip_prefix("::").unwrap_or(text))
+            })
             .map(|(range, name)| (range, theme.syntax_color(name)))
             .collect()
     }
@@ -4645,6 +4679,63 @@ mod tests {
             Some(app.theme.syntax_color("keyword")),
             "expected \"fn\" colored as a keyword, got {spans:?}"
         );
+    }
+
+    #[test]
+    fn tcl_command_highlighting_only_colors_known_commands() {
+        let dir = TempDir::new("tcl_command_highlight_known");
+        let file = dir.write("main.tcl", "puts hello\nmyUnknownCmd123 foo\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 2);
+        let spans = app.content_spans(app.open(), 0, 2, 0, None, &highlights, 0);
+
+        // "puts" -- a real builtin (in `tcl::KEYWORDS` and the query's
+        // own `#any-of?` list) -- keeps its function color.
+        let puts_span = spans.iter().find(|(s, _)| s == "puts");
+        assert_eq!(
+            puts_span.map(|(_, c)| *c),
+            Some(app.theme.syntax_color("function")),
+            "expected \"puts\" colored as a known command, got {spans:?}"
+        );
+
+        // "myUnknownCmd123" isn't a known command anywhere (not a
+        // builtin, not ctags-sourced, not in a symbols file) -- must not
+        // get the function color just for sitting in command position.
+        let unknown_span = spans.iter().find(|(s, _)| s == "myUnknownCmd123");
+        assert_ne!(
+            unknown_span.map(|(_, c)| *c),
+            Some(app.theme.syntax_color("function")),
+            "expected \"myUnknownCmd123\" NOT colored as a command, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn tcl_command_highlighting_recognizes_a_ctags_sourced_proc_by_its_qualified_name() {
+        let dir = TempDir::new("tcl_command_highlight_ctags");
+        dir.write("lib.tcl", "namespace eval myns {\n    proc greet {} {\n        return 1\n    }\n}\n");
+        let file = dir.write("main.tcl", "myns::greet\n::myns::greet\ngreet\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        let id = app.focused_buffer_id();
+
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 3);
+        let command_color = app.theme.syntax_color("function");
+        // The buffer text itself carries the "::" prefix distinction, so
+        // check color by byte range rather than by re-finding text (both
+        // "myns::greet" and "::myns::greet" would otherwise collide on a
+        // naive text search).
+        let color_at = |byte: usize| highlights.iter().find(|(r, _)| r.contains(&byte)).map(|(_, c)| *c);
+
+        assert_eq!(color_at(0), Some(command_color), "unqualified \"myns::greet\" should be recognized");
+        let second_line_start = app.open().buffer.text().find("::myns::greet").unwrap();
+        assert_eq!(color_at(second_line_start), Some(command_color), "\"::myns::greet\" (with prefix) should be recognized");
+
+        // Bare "greet" (no namespace qualifier at all) is a different,
+        // unknown identifier -- only the qualified forms are known.
+        let bare_line_start = app.open().buffer.text().rfind("greet").unwrap();
+        assert_ne!(color_at(bare_line_start), Some(command_color), "bare \"greet\" should not match the qualified proc");
     }
 
     #[test]
