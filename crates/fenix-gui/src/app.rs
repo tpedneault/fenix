@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
@@ -66,6 +68,17 @@ const BORDER_WIDTH: f32 = 3.0;
 /// risking pulling in an unbounded amount of text from a chatty
 /// container.
 const DOCKER_LOG_TAIL_LINES: usize = 500;
+
+/// How often the Docker panel's background stats poller ticks --
+/// generous enough to feel genuinely "live" without hammering `docker
+/// stats` (a real subprocess spawn) many times a second for no
+/// perceptible benefit.
+const STATS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// The stats-poller thread's stop check granularity -- it sleeps in
+/// steps this short (rather than one `STATS_POLL_INTERVAL`-long sleep)
+/// so a stop request (session closed, app quitting) lands within this
+/// long, not up to a full 2s late.
+const STATS_POLL_STOP_CHECK: Duration = Duration::from_millis(100);
 
 /// Vertical padding inside the which-key popup, above its first row and
 /// below its last -- factored into both its own height and `popup::
@@ -166,6 +179,149 @@ struct DockerSession {
     /// log-follow mode for container `id` (Phase 6); `None` while it's
     /// showing plain info/logs snapshots.
     logs_container: Option<String>,
+    /// The session's background stats poller -- `None` when the session
+    /// was opened without a real `event_proxy` (every test, since `App::
+    /// with_file` never sets one; see `App::new`'s own doc comment), in
+    /// which case there's nothing to wake and nothing spawns. Never read
+    /// again once set -- it's a pure RAII guard, held only so its `Drop`
+    /// impl runs (stopping the thread) when the session closes/is
+    /// replaced, the same "hold it just for the side effect of dropping
+    /// it" idiom as a `MutexGuard`/`TempDir`.
+    #[allow(dead_code)]
+    stats_poller: Option<DockerStatsPoller>,
+    /// The session's live log-follower, if `logs_container` names a
+    /// container currently being tailed -- same "held only for its
+    /// `Drop` side effect" RAII shape as `stats_poller`.
+    #[allow(dead_code)]
+    log_follower: Option<DockerLogFollower>,
+}
+
+/// A background `docker stats --no-stream` poller for one open Docker
+/// session -- ticks every `STATS_POLL_INTERVAL`, each tick pushing a
+/// fresh `FenixUserEvent::StatsReady` through the event proxy. Never
+/// re-lists containers itself (see `DockerSession::containers`'s own
+/// doc comment) -- purely a stats source, merged against whatever the
+/// session already has cached by `App::apply_docker_stats`.
+///
+/// `Drop` is what makes teardown *real*, not just a "bounded leftover"
+/// the way an inert `HashMap` entry would be (see `DockerSession`'s own
+/// doc comment on why role lives there): whenever a `DockerSession` is
+/// replaced or dropped, its poller's `stop` flag is set and its thread
+/// is joined before the struct finishes dropping, so it's guaranteed
+/// gone, not just abandoned to keep running in the background.
+struct DockerStatsPoller {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DockerStatsPoller {
+    /// Takes a plain `send` callback (`true` = delivered, `false` =
+    /// the receiving end is gone, stop) rather than an `EventLoopProxy`
+    /// directly -- the real call site (`open_docker_panel`) wraps
+    /// `proxy.send_event(...).is_ok()` into one, but this indirection
+    /// is what makes the thread-lifecycle logic itself (spawn, tick,
+    /// stop-check, join-on-drop) directly unit-testable with a plain
+    /// closure, without needing a real winit `EventLoop` (which nothing
+    /// outside a running GUI can construct headlessly).
+    fn spawn(send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let stats = fenix_docker::container_stats();
+            // `false` here means the receiving end is gone (the whole
+            // app is shutting down) -- nothing left to wake, so the
+            // thread can just end rather than looping forever sending
+            // into the void.
+            if !send(FenixUserEvent::StatsReady(stats)) {
+                return;
+            }
+            let mut waited = Duration::ZERO;
+            while waited < STATS_POLL_INTERVAL {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let step = STATS_POLL_STOP_CHECK.min(STATS_POLL_INTERVAL - waited);
+                std::thread::sleep(step);
+                waited += step;
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for DockerStatsPoller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// One live `docker logs -f` child + the thread reading its stdout, for
+/// whichever container the Docker session's Details pane is currently
+/// following. Exactly one exists per session at a time -- pressing `l`
+/// on a different (or the same) row always replaces the session's
+/// `log_follower` field first, and dropping the old value's `Drop` impl
+/// (below) tears it down before the new one is spawned, so there's
+/// never two live `docker logs -f` children per session.
+struct DockerLogFollower {
+    child: std::process::Child,
+    stop: Arc<AtomicBool>,
+    reader_handle: Option<JoinHandle<()>>,
+}
+
+impl DockerLogFollower {
+    /// `send` mirrors `DockerStatsPoller::spawn`'s own callback shape
+    /// (real callers wrap `proxy.send_event(...).is_ok()`), for the
+    /// same "testable without a real winit `EventLoop`" reason.
+    fn spawn(mut child: std::process::Child, buffer_id: BufferId, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let reader_handle = child.stdout.take().map(|stdout| {
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(stdout).lines() {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(line) = line else { break };
+                    if !send(FenixUserEvent::LogLine(buffer_id, line)) {
+                        return;
+                    }
+                }
+                // Reached on real EOF (the process exited on its own,
+                // e.g. the container stopped) -- a deliberate `kill()`
+                // in `Drop` also produces EOF here, which is exactly
+                // why the `stop` check above (not this one) is what
+                // distinguishes "torn down on purpose, stay quiet" from
+                // "actually ended, tell Details."
+                if !thread_stop.load(Ordering::Relaxed) {
+                    let _ = send(FenixUserEvent::LogEnded(buffer_id));
+                }
+            })
+        });
+        Self { child, stop, reader_handle }
+    }
+}
+
+impl Drop for DockerLogFollower {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Kills `docker logs -f`, which closes its stdout pipe from the
+        // writing end -- that's what unblocks the reader thread's
+        // blocking `BufRead::lines()` call with an EOF/error instead of
+        // it hanging forever waiting for more output that will never
+        // come.
+        let _ = self.child.kill();
+        let _ = self.child.wait(); // reap, avoid a zombie process
+        if let Some(handle) = self.reader_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Which of a `DockerSession`'s four panes is currently focused, if
@@ -177,6 +333,30 @@ enum DockerPaneRole {
     Images,
     Volumes,
     Details,
+}
+
+/// Cross-thread wake events -- the only way anything outside the winit
+/// event loop's own thread (the Docker panel's stats poller/log
+/// follower, Phases 5-6) can get `App` to mutate state and request a
+/// redraw (see `ApplicationHandler::user_event`, and `App::event_proxy`'s
+/// own doc comment). Each variant names *what changed*, not *what to
+/// do* -- `App::user_event` decides the "do."
+#[derive(Debug)]
+pub enum FenixUserEvent {
+    /// A fresh `docker stats --no-stream` snapshot, from the active
+    /// Docker session's background poller.
+    StatsReady(Vec<fenix_docker::ContainerStat>),
+    /// One new line of `docker logs -f` output for the Docker session's
+    /// Details pane buffer, from the active log-follower thread.
+    /// Carries the target `BufferId` explicitly (not implicitly
+    /// "whatever's focused") since the line can arrive well after
+    /// focus moved elsewhere.
+    LogLine(BufferId, String),
+    /// The log-follower's `docker logs -f` child process exited
+    /// (killed deliberately, or the daemon/container went away) -- lets
+    /// the Details pane show a "log stream ended" marker instead of
+    /// just silently going stale.
+    LogEnded(BufferId),
 }
 
 /// The autocompletion popup's live state -- see `App::completion`'s own
@@ -941,6 +1121,11 @@ pub struct App {
     /// The active Docker multi-pane session (`SPC d d`), if any -- see
     /// `DockerSession`'s own doc comment.
     docker_session: Option<DockerSession>,
+    /// `Some` only for a real, `main.rs`-launched `App` (see `App::new`'s
+    /// own doc comment) -- the handle background threads (the Docker
+    /// stats poller/log follower) get their own `Clone` of, to wake the
+    /// main event loop via `FenixUserEvent`. `None` in every test.
+    event_proxy: Option<winit::event_loop::EventLoopProxy<FenixUserEvent>>,
 
     /// The autocompletion popup's live state -- `Some` only while Insert
     /// mode, the focused buffer's language, and the prefix at the cursor
@@ -997,9 +1182,21 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Self {
+    /// `proxy` is what lets background threads (the Docker panel's
+    /// stats poller/log follower, Phases 5-6) wake the main event loop
+    /// and hand it fresh data via `user_event` -- see `FenixUserEvent`'s
+    /// own doc comment. Only the real entry point (`main.rs`) calls
+    /// `new`; every test constructs `App` via `with_file` directly and
+    /// never sets `event_proxy` (stays `None`), which is exactly why
+    /// spawning code checks `event_proxy.is_some()` before spawning
+    /// anything -- no fake/mock event loop needed for tests, a session
+    /// opened in a test just never has live-updating panes, which is
+    /// already true today (nothing there needs a working `docker`
+    /// either, per every existing "never fails" test in this file).
+    pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>) -> Self {
         let file_arg = env::args().nth(1);
         let mut app = Self::with_file(file_arg.clone());
+        app.event_proxy = Some(event_proxy);
         // Recording lives here, not inside `with_file` -- `with_file` is
         // what the test suite calls directly to simulate "opened with
         // this file," and recording there would mean every such test
@@ -1086,6 +1283,7 @@ impl App {
             docker_confirm_remove: None,
             pane_titles: HashMap::new(),
             docker_session: None,
+            event_proxy: None,
             completion: None,
             tcl_candidates_cache: None,
             completion_scroll: 0,
@@ -1825,6 +2023,15 @@ impl App {
         self.pane_titles.insert(volumes_pane, "Volumes".to_string());
         self.pane_titles.insert(details_pane, "Details".to_string());
 
+        // Only spawned for a real, `main.rs`-launched `App` -- every
+        // test's `event_proxy` stays `None` (see `App::new`'s own doc
+        // comment), so a session opened in a test just never ticks,
+        // which is fine (nothing there needs a working `docker` either).
+        let stats_poller = self
+            .event_proxy
+            .clone()
+            .map(|proxy| DockerStatsPoller::spawn(move |event| proxy.send_event(event).is_ok()));
+
         self.docker_session = Some(DockerSession {
             workspace_index,
             containers_pane,
@@ -1839,6 +2046,8 @@ impl App {
             images,
             volumes,
             logs_container: None,
+            stats_poller,
+            log_follower: None,
         });
 
         self.refresh_project_root();
@@ -1868,6 +2077,68 @@ impl App {
                 *ps = PaneState::seeded_at(Cursor::at_start());
             }
         }
+    }
+
+    /// Same job as `set_docker_buffer`, but *preserves* every affected
+    /// pane's cursor row instead of resetting it to the top -- used by
+    /// the automatic ~2s stats tick (`apply_docker_stats`), which would
+    /// otherwise yank the user's cursor back to row 0 roughly 30 times
+    /// a minute. `set_docker_buffer`'s own reset-to-top behavior stays
+    /// exactly right for the *manual* `u` refresh and for switching
+    /// Details between info/log content -- both are real content-shape
+    /// changes (rows can reorder/appear/disappear, or the whole meaning
+    /// of the buffer just changed), where an old cursor position really
+    /// is meaningless; a stats tick never does either, it only appends
+    /// text to the end of already-existing rows.
+    fn refresh_docker_buffer_preserving_cursor(&mut self, id: BufferId, panel: docker_panel::DockerPanel) {
+        self.docker_lines.insert(id, panel.lines);
+        let new_line_count = panel.text.lines().count();
+
+        // Captured *before* the rewrite below -- `Buffer::replace_range`
+        // invalidates any char/line position computed against the old
+        // text, so this has to happen first (same ordering care `syntax_
+        // highlights_for_visible_range` already takes for an analogous
+        // conflicting-borrow reason).
+        let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                if let Some(ob) = self.buffers.get(id) {
+                    let (line, _) = ob.buffer.line_col(&self.pane_state(pane).cursor);
+                    old_lines.push((pane, line));
+                }
+            }
+        }
+
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+
+        for (pane, old_line) in old_lines {
+            let clamped = old_line.min(new_line_count.saturating_sub(1));
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let char_idx = ob.buffer.line_start_char(clamped);
+            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+            // `rendered_scroll`/`scroll_line` are deliberately left
+            // untouched -- a tick that doesn't change row count (the
+            // overwhelmingly common case) leaves the user's scroll
+            // position completely undisturbed, not just their cursor.
+        }
+    }
+
+    /// `FenixUserEvent::StatsReady` handling: merges a fresh `docker
+    /// stats` snapshot into the Containers pane via the cursor-
+    /// preserving path above. A no-op if no session is open (the stats
+    /// poller is always torn down with its session, but a stray
+    /// already-in-flight event landing right at teardown is a cheap
+    /// no-op to discard rather than something worth racing to prevent).
+    fn apply_docker_stats(&mut self, stats: Vec<fenix_docker::ContainerStat>) {
+        let Some(session) = self.docker_session.as_ref() else { return };
+        let containers_buffer = session.containers_buffer;
+        let containers = session.containers.clone();
+        let panel = docker_panel::render_containers(&containers, &stats);
+        self.refresh_docker_buffer_preserving_cursor(containers_buffer, panel);
     }
 
     /// `u` (on any of the three left panes, or Details): re-lists
@@ -2006,22 +2277,110 @@ impl App {
         }
     }
 
-    /// `l` on the Containers pane: fetches the last `DOCKER_LOG_TAIL_
-    /// LINES` lines of the container under the cursor's logs and shows
-    /// them in the Details pane, in place -- a one-shot snapshot for
-    /// now; Phase 6 upgrades this to a genuinely live-streaming,
-    /// auto-following tail. Doesn't move focus (unlike the old single-
-    /// buffer panel's version, which opened a whole new buffer/pane).
+    /// `l` on the Containers pane: switches the Details pane into live
+    /// log-follow mode for the container under the cursor -- spawns
+    /// `docker logs -f`, replacing any previous follower first (so
+    /// there's never more than one live child per session; see
+    /// `DockerLogFollower`'s own doc comment), then forwards each new
+    /// line into Details as it arrives via `FenixUserEvent::LogLine`
+    /// (see `append_docker_log_line`). Doesn't move focus -- Containers
+    /// stays focused, Details just starts streaming in place.
+    ///
+    /// Without a real `event_proxy` (every test, and any launch that
+    /// somehow reaches this before the event loop exists) there's
+    /// nothing that could ever deliver a `LogLine` event, so this falls
+    /// back to `container_logs`' one-shot snapshot instead -- the
+    /// feature still does something sensible rather than silently
+    /// showing nothing.
     fn docker_view_logs_selected(&mut self) {
         let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() else { return };
-        let Some(session) = self.docker_session.as_ref() else { return };
+        let Some(session) = self.docker_session.as_mut() else { return };
         let details_buffer = session.details_buffer;
-        let text = match fenix_docker::container_logs(&id, DOCKER_LOG_TAIL_LINES) {
-            Ok(text) if text.is_empty() => "(no log output)\n".to_string(),
-            Ok(text) => text,
-            Err(err) => format!("fenix: couldn't fetch logs for {id}: {err}\n"),
+        session.log_follower = None; // tear down any previous follower first
+
+        let Some(proxy) = self.event_proxy.clone() else {
+            let text = match fenix_docker::container_logs(&id, DOCKER_LOG_TAIL_LINES) {
+                Ok(text) if text.is_empty() => "(no log output)\n".to_string(),
+                Ok(text) => text,
+                Err(err) => format!("fenix: couldn't fetch logs for {id}: {err}\n"),
+            };
+            self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+            return;
         };
+
+        let Some(child) = fenix_docker::spawn_log_follower(&id, DOCKER_LOG_TAIL_LINES) else {
+            let text = format!("fenix: couldn't start `docker logs -f` for {id}\n");
+            self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+            return;
+        };
+
+        let follower = DockerLogFollower::spawn(child, details_buffer, move |event| proxy.send_event(event).is_ok());
+        if let Some(session) = self.docker_session.as_mut() {
+            session.log_follower = Some(follower);
+            session.logs_container = Some(id.clone());
+        }
+        let text = format!("-- following logs for {id} --\n");
         self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+    }
+
+    /// `FenixUserEvent::LogLine` handling: appends one new line to the
+    /// Details buffer. Discards a stray event for a buffer that isn't
+    /// (or isn't anymore) the current session's Details buffer -- a
+    /// cheap no-op, not worth racing to prevent at teardown.
+    ///
+    /// Auto-follow: for every pane currently showing this buffer, if
+    /// its cursor was already on the last line *before* this line
+    /// arrived, it's moved to the new last line after appending too, so
+    /// the view stays pinned to the bottom -- the disclosed "simple
+    /// heuristic" from the plan. A pane whose cursor was anywhere else
+    /// (the user scrolled up to read earlier output) is left alone;
+    /// navigating back to the end (real Vim `G`) re-arms auto-follow
+    /// for it on the next line, since the same "already at the end"
+    /// check will then be true again.
+    fn append_docker_log_line(&mut self, buffer_id: BufferId, line: String) {
+        if self.docker_session.as_ref().map(|s| s.details_buffer) != Some(buffer_id) {
+            return;
+        }
+        let panes_at_end: Vec<fenix_window::WindowId> = self
+            .windows()
+            .windows()
+            .into_iter()
+            .filter(|&pane| self.windows().content(pane) == Some(&buffer_id))
+            .filter(|&pane| {
+                let Some(ob) = self.buffers.get(buffer_id) else { return false };
+                let (row, _) = ob.buffer.line_col(&self.pane_state(pane).cursor);
+                row + 1 >= ob.buffer.visual_line_count()
+            })
+            .collect();
+
+        let Some(ob) = self.buffers.get_mut(buffer_id) else { return };
+        let mut append_cursor = Cursor { char_idx: ob.buffer.len_chars(), sticky_col: 0 };
+        ob.buffer.insert_str(&mut append_cursor, &format!("{line}\n"));
+
+        if let Some(ob) = self.buffers.get(buffer_id) {
+            let last_line = ob.buffer.visual_line_count().saturating_sub(1);
+            let end_char = ob.buffer.line_start_char(last_line);
+            for pane in panes_at_end {
+                self.pane_state_mut(pane).cursor = Cursor { char_idx: end_char, sticky_col: 0 };
+            }
+        }
+    }
+
+    /// `FenixUserEvent::LogEnded` handling: appends a marker line and
+    /// drops the session's `log_follower` (the child already exited on
+    /// its own in this path -- `Drop` still runs for consistency, but
+    /// `kill()`/`wait()` on an already-gone process are harmless no-ops).
+    fn finish_docker_log_stream(&mut self, buffer_id: BufferId) {
+        if self.docker_session.as_ref().map(|s| s.details_buffer) != Some(buffer_id) {
+            return;
+        }
+        if let Some(ob) = self.buffers.get_mut(buffer_id) {
+            let mut append_cursor = Cursor { char_idx: ob.buffer.len_chars(), sticky_col: 0 };
+            ob.buffer.insert_str(&mut append_cursor, "-- log stream ended --\n");
+        }
+        if let Some(session) = self.docker_session.as_mut() {
+            session.log_follower = None;
+        }
     }
 
     /// `SPC d b`: builds an image from the current project root's
@@ -2736,6 +3095,23 @@ impl App {
         let elapsed = Instant::now().duration_since(self.blink_transition_start);
         let t = ease_out_cubic(elapsed.as_secs_f32() / BLINK_FADE.as_secs_f32());
         if self.blink_visible { t } else { 1.0 - t }
+    }
+
+    /// The actual `FenixUserEvent` handling logic, factored out of the
+    /// `ApplicationHandler::user_event` trait method so it's directly
+    /// callable from tests without needing a real `ActiveEventLoop`
+    /// (which nothing outside winit's own running loop can construct)
+    /// -- same reasoning `handle_key`/`test_vim_key` already established
+    /// for keyboard input.
+    fn handle_user_event(&mut self, event: FenixUserEvent) {
+        match event {
+            FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
+            FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
+            FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
@@ -4502,7 +4878,16 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<FenixUserEvent> for App {
+    /// Thin trait-required wrapper around `handle_user_event` -- see
+    /// that method's own doc comment for why the actual logic lives
+    /// there instead of here (same "extract the `ActiveEventLoop`-free
+    /// part so it's directly testable" reasoning `handle_key`/
+    /// `test_vim_key` already established for keyboard input).
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
+        self.handle_user_event(event);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -4658,6 +5043,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hand-built `fenix_docker::Container`, for tests that need real
+    /// container values without a working `docker` -- mirrors `docker_
+    /// panel.rs`'s own private test helper of the same shape.
+    fn container(id: &str, name: &str) -> fenix_docker::Container {
+        fenix_docker::Container {
+            id: id.to_string(),
+            name: name.to_string(),
+            image: "nginx:latest".to_string(),
+            status: "Up 3 days".to_string(),
+            state: "running".to_string(),
+        }
+    }
 
     #[test]
     fn pane_content_rect_without_a_title_is_unchanged() {
@@ -6946,6 +7344,204 @@ mod tests {
 
         assert_ne!(app.focused_buffer_id(), a_id);
         assert_eq!(app.open().kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn handle_user_event_never_panics_for_any_variant() {
+        // `App::user_event` (the real `ApplicationHandler` trait method)
+        // needs a real `ActiveEventLoop`, which nothing outside winit's
+        // own running loop can construct -- this exercises the actual
+        // logic (`handle_user_event`) directly instead, same workaround
+        // `test_vim_key` already uses for keyboard input.
+        let mut app = App::with_file(None);
+        app.handle_user_event(FenixUserEvent::StatsReady(Vec::new()));
+        app.handle_user_event(FenixUserEvent::LogLine(app.focused_buffer_id(), "a line".to_string()));
+        app.handle_user_event(FenixUserEvent::LogEnded(app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn docker_stats_poller_ticks_at_least_once_and_stops_promptly_on_drop() {
+        // No real `EventLoopProxy` needed -- `DockerStatsPoller::spawn`
+        // takes a plain callback (see its own doc comment for why), so
+        // this exercises the actual thread-lifecycle logic (spawn, tick,
+        // stop-check, join-on-drop) directly with a channel standing in
+        // for "deliver this event somewhere."
+        let (tx, rx) = std::sync::mpsc::channel::<FenixUserEvent>();
+        let poller = DockerStatsPoller::spawn(move |event| tx.send(event).is_ok());
+        let received = rx.recv_timeout(Duration::from_secs(3)).expect("poller should tick at least once");
+        assert!(matches!(received, FenixUserEvent::StatsReady(_)));
+
+        let before_drop = Instant::now();
+        drop(poller);
+        // Bounded by `STATS_POLL_STOP_CHECK` (100ms), not the full
+        // `STATS_POLL_INTERVAL` (2s) -- generous margin for test-host
+        // scheduling jitter, but well under a full interval.
+        assert!(before_drop.elapsed() < Duration::from_secs(1), "drop should join promptly, not wait out a full poll interval");
+    }
+
+    #[test]
+    fn docker_log_follower_delivers_lines_and_stops_promptly_on_drop() {
+        // A real subprocess standing in for `docker logs -f` (a harmless
+        // long-running command, per the plan's own "never assert on
+        // real docker output" posture) -- prints two lines immediately,
+        // then sleeps long enough that `drop`'s `kill()` is what has to
+        // end it, not the process exiting on its own.
+        let child = std::process::Command::new("sh")
+            .args(["-c", "echo line1; echo line2; sleep 100"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh should be available to spawn in this environment");
+
+        let buffer_id = App::with_file(None).focused_buffer_id();
+        let (tx, rx) = std::sync::mpsc::channel::<FenixUserEvent>();
+        let follower = DockerLogFollower::spawn(child, buffer_id, move |event| tx.send(event).is_ok());
+
+        match rx.recv_timeout(Duration::from_secs(3)).expect("should receive at least one log line") {
+            FenixUserEvent::LogLine(id, line) => {
+                assert_eq!(id, buffer_id);
+                assert_eq!(line, "line1");
+            }
+            other => panic!("expected a LogLine event, got {other:?}"),
+        }
+
+        let before_drop = Instant::now();
+        drop(follower);
+        assert!(before_drop.elapsed() < Duration::from_secs(2), "drop should kill+join promptly, not wait out the child's own 100s sleep");
+    }
+
+    #[test]
+    fn append_docker_log_line_auto_follows_a_pane_that_was_already_at_the_last_line() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
+        let details_pane = app.docker_session.as_ref().unwrap().details_pane;
+        app.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text: "line1\nline2\n".to_string(), lines: Vec::new() });
+        // Put the cursor on the last (real) line -- "line2".
+        let last_line = app.buffers.get(details_buffer).unwrap().buffer.visual_line_count() - 1;
+        let start = app.buffers.get(details_buffer).unwrap().buffer.line_start_char(last_line);
+        app.pane_state_mut(details_pane).cursor = Cursor { char_idx: start, sticky_col: 0 };
+
+        app.append_docker_log_line(details_buffer, "line3".to_string());
+
+        let text = app.buffers.get(details_buffer).unwrap().buffer.text();
+        assert!(text.contains("line3"));
+        let new_last_line = app.buffers.get(details_buffer).unwrap().buffer.visual_line_count() - 1;
+        let (cursor_line, _) = app.buffers.get(details_buffer).unwrap().buffer.line_col(&app.pane_state(details_pane).cursor);
+        assert_eq!(cursor_line, new_last_line, "cursor should have followed to the new last line");
+    }
+
+    #[test]
+    fn append_docker_log_line_leaves_a_pane_alone_if_the_user_scrolled_away() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
+        let details_pane = app.docker_session.as_ref().unwrap().details_pane;
+        app.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text: "line1\nline2\nline3\n".to_string(), lines: Vec::new() });
+        // Cursor on the *first* line, not the last -- simulates having
+        // scrolled up to read earlier output.
+        app.pane_state_mut(details_pane).cursor = Cursor { char_idx: 0, sticky_col: 0 };
+
+        app.append_docker_log_line(details_buffer, "line4".to_string());
+
+        let (cursor_line, _) = app.buffers.get(details_buffer).unwrap().buffer.line_col(&app.pane_state(details_pane).cursor);
+        assert_eq!(cursor_line, 0, "cursor should stay put, not get yanked to the new bottom");
+    }
+
+    #[test]
+    fn append_docker_log_line_ignores_a_stray_event_for_a_buffer_that_is_not_the_current_details_buffer() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
+        let before = app.buffers.get(containers_buffer).unwrap().buffer.text();
+
+        app.append_docker_log_line(containers_buffer, "should be ignored".to_string());
+
+        let after = app.buffers.get(containers_buffer).unwrap().buffer.text();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn finish_docker_log_stream_appends_a_marker_and_clears_the_follower() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
+
+        app.finish_docker_log_stream(details_buffer);
+
+        let text = app.buffers.get(details_buffer).unwrap().buffer.text();
+        assert!(text.contains("log stream ended"));
+        assert!(app.docker_session.as_ref().unwrap().log_follower.is_none());
+    }
+
+    #[test]
+    fn refresh_docker_buffer_preserving_cursor_keeps_the_same_row_when_row_count_is_unchanged() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
+        let containers_pane = app.docker_session.as_ref().unwrap().containers_pane;
+
+        let three_rows = vec![container("a", "one"), container("b", "two"), container("c", "three")];
+        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&three_rows, &[]));
+        // Move the cursor to row 1 ("two").
+        let start_of_row_1 = app.buffers.get(containers_buffer).unwrap().buffer.line_start_char(1);
+        app.pane_state_mut(containers_pane).cursor = Cursor { char_idx: start_of_row_1, sticky_col: 0 };
+
+        // Same row count, different content (stats appended) -- cursor
+        // should stay on row 1, not reset to row 0.
+        app.refresh_docker_buffer_preserving_cursor(
+            containers_buffer,
+            docker_panel::render_containers(&three_rows, &[fenix_docker::ContainerStat { container_id: "b".to_string(), cpu_percent: "5%".to_string(), mem_usage: "1MiB".to_string() }]),
+        );
+
+        let (line, _) = app.buffers.get(containers_buffer).unwrap().buffer.line_col(&app.pane_state(containers_pane).cursor);
+        assert_eq!(line, 1);
+    }
+
+    #[test]
+    fn refresh_docker_buffer_preserving_cursor_clamps_when_the_new_listing_is_shorter() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
+        let containers_pane = app.docker_session.as_ref().unwrap().containers_pane;
+
+        let three_rows = vec![container("a", "one"), container("b", "two"), container("c", "three")];
+        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&three_rows, &[]));
+        let last_line = app.buffers.get(containers_buffer).unwrap().buffer.visual_line_count() - 1;
+        let start_of_last_line = app.buffers.get(containers_buffer).unwrap().buffer.line_start_char(last_line);
+        app.pane_state_mut(containers_pane).cursor = Cursor { char_idx: start_of_last_line, sticky_col: 0 };
+
+        // Now refresh with a much shorter listing -- must clamp, not
+        // panic or leave the cursor out of bounds.
+        let one_row = vec![container("a", "one")];
+        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&one_row, &[]));
+
+        let new_len = app.buffers.get(containers_buffer).unwrap().buffer.visual_line_count();
+        let (line, _) = app.buffers.get(containers_buffer).unwrap().buffer.line_col(&app.pane_state(containers_pane).cursor);
+        assert!(line < new_len);
+    }
+
+    #[test]
+    fn apply_docker_stats_merges_into_the_containers_pane_without_a_session_being_a_no_op() {
+        // No `docker_session` open -- must not panic.
+        let mut app = App::with_file(None);
+        app.apply_docker_stats(vec![]);
+    }
+
+    #[test]
+    fn apply_docker_stats_merges_a_matching_stat_into_the_containers_buffer() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
+        app.docker_session.as_mut().unwrap().containers = vec![container("abc123", "web")];
+
+        app.apply_docker_stats(vec![fenix_docker::ContainerStat {
+            container_id: "abc123".to_string(),
+            cpu_percent: "3.5%".to_string(),
+            mem_usage: "20MiB".to_string(),
+        }]);
+
+        let text = app.buffers.get(containers_buffer).unwrap().buffer.text();
+        assert!(text.contains("CPU: 3.5%"));
     }
 
     #[test]

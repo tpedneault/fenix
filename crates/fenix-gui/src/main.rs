@@ -13,13 +13,14 @@ mod theme;
 
 use winit::event_loop::{ControlFlow, EventLoop};
 
-use app::App;
+use app::{App, FenixUserEvent};
 
 fn main() -> anyhow::Result<()> {
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<FenixUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new();
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(proxy);
     event_loop.run_app(&mut app)?;
 
     Ok(())
