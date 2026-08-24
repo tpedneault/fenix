@@ -29,7 +29,8 @@ for anyone curious to poke around or build on it.
   create/rename/copy/move/delete, and inline subtree expansion.
 - **Project tooling**: fuzzy find-file (`SPC p f`), project-wide search via
   ripgrep (`SPC p s`), switch between known projects (`SPC p p`).
-- **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`), directional
+- **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
+  pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
   workspaces (`SPC TAB`).
 - **Startup dashboard**: a real, Vim-navigable buffer listing known

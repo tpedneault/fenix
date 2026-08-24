@@ -15,7 +15,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowId};
 
-use fenix_core::Cursor;
+use fenix_core::{Buffer, Cursor};
 
 use crate::commands::CommandRegistry;
 use crate::completion;
@@ -94,6 +94,32 @@ struct ScrollAnim {
     from: f32,
     to: usize,
     started: Instant,
+}
+
+/// One window pane's own live editing position -- cursor and scroll,
+/// independent of whatever other pane(s) might be showing the same
+/// buffer (see `fenix_buffers::OpenBuffer`'s own doc comment: `cursor`
+/// there is just the buffer's *remembered* position, used only to seed
+/// a pane's `PaneState` the first time that buffer is shown in it).
+/// Lives on `Workspace`, not `App`, keyed by `fenix_window::WindowId` --
+/// `WindowId`s are only unique *within* one `WindowTree`, not globally
+/// (each tree's own internal counter starts fresh), so storing this
+/// globally on `App` would let panes in different workspaces collide on
+/// the same key. Scoping it to the `Workspace` that owns the tree those
+/// ids came from rules that out entirely, and as a side benefit means
+/// switching workspaces leaves every pane's cursor/scroll exactly where
+/// it was.
+#[derive(Clone, Copy)]
+struct PaneState {
+    cursor: Cursor,
+    scroll_line: usize,
+    rendered_scroll: f32,
+}
+
+impl PaneState {
+    fn seeded_at(cursor: Cursor) -> Self {
+        Self { cursor, scroll_line: 0, rendered_scroll: 0.0 }
+    }
 }
 
 /// The autocompletion popup's live state -- see `App::completion`'s own
@@ -522,20 +548,33 @@ fn format_age(modified: std::time::SystemTime) -> String {
 struct Workspace {
     name: String,
     windows: WindowTree<BufferId>,
+    /// Keyed by `fenix_window::WindowId` -- see `PaneState`'s own doc
+    /// comment for why this lives here, not on `App` directly.
+    pane_states: HashMap<fenix_window::WindowId, PaneState>,
+    scroll_anims: HashMap<fenix_window::WindowId, ScrollAnim>,
+}
+
+impl Workspace {
+    fn new(name: String, windows: WindowTree<BufferId>, initial_cursor: Cursor) -> Self {
+        let mut pane_states = HashMap::new();
+        pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
+        Self { name, windows, pane_states, scroll_anims: HashMap::new() }
+    }
 }
 
 /// A non-empty, ordered list of workspaces with one active at a time.
 /// Switching workspaces is just moving `active` -- the `WindowTree`s
-/// themselves are untouched, so a workspace's layout is exactly as it
-/// was left.
+/// (and each one's own `pane_states`/`scroll_anims`) themselves are
+/// untouched, so a workspace's layout *and* every pane's cursor/scroll
+/// position within it are exactly as they were left.
 struct WorkspaceList {
     workspaces: Vec<Workspace>,
     active: usize,
 }
 
 impl WorkspaceList {
-    fn new(initial_windows: WindowTree<BufferId>) -> Self {
-        Self { workspaces: vec![Workspace { name: "workspace-1".to_string(), windows: initial_windows }], active: 0 }
+    fn new(initial_windows: WindowTree<BufferId>, initial_cursor: Cursor) -> Self {
+        Self { workspaces: vec![Workspace::new("workspace-1".to_string(), initial_windows, initial_cursor)], active: 0 }
     }
 
     fn active(&self) -> &WindowTree<BufferId> {
@@ -544,6 +583,22 @@ impl WorkspaceList {
 
     fn active_mut(&mut self) -> &mut WindowTree<BufferId> {
         &mut self.workspaces[self.active].windows
+    }
+
+    fn active_pane_states(&self) -> &HashMap<fenix_window::WindowId, PaneState> {
+        &self.workspaces[self.active].pane_states
+    }
+
+    fn active_pane_states_mut(&mut self) -> &mut HashMap<fenix_window::WindowId, PaneState> {
+        &mut self.workspaces[self.active].pane_states
+    }
+
+    fn active_scroll_anims(&self) -> &HashMap<fenix_window::WindowId, ScrollAnim> {
+        &self.workspaces[self.active].scroll_anims
+    }
+
+    fn active_scroll_anims_mut(&mut self) -> &mut HashMap<fenix_window::WindowId, ScrollAnim> {
+        &mut self.workspaces[self.active].scroll_anims
     }
 
     fn active_name(&self) -> &str {
@@ -561,10 +616,11 @@ impl WorkspaceList {
     /// `SPC TAB n`: a new, auto-named workspace (`workspace-2`, etc. --
     /// no name-entry prompt in v1) seeded with a single pane showing
     /// `content`, so it starts on the buffer you were already looking
-    /// at rather than nothing. Becomes active.
-    fn new_workspace(&mut self, content: BufferId) {
+    /// at rather than nothing (`cursor` seeds that pane's own live
+    /// position, from the buffer's remembered one). Becomes active.
+    fn new_workspace(&mut self, content: BufferId, cursor: Cursor) {
         let name = format!("workspace-{}", self.workspaces.len() + 1);
-        self.workspaces.push(Workspace { name, windows: WindowTree::new(content) });
+        self.workspaces.push(Workspace::new(name, WindowTree::new(content), cursor));
         self.active = self.workspaces.len() - 1;
     }
 
@@ -605,24 +661,23 @@ pub struct App {
     bg_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
 
-    /// Every open buffer, keyed by `BufferId` -- cursor, scroll position,
-    /// and syntax state all live on each buffer's own `OpenBuffer`
-    /// (buffer-local, not per-window; see the type's own doc comment for
-    /// why). `App` never touches a buffer directly, only through this and
-    /// `windows` -- use the `open`/`open_mut`/`focused_buffer_id` helpers.
+    /// Every open buffer, keyed by `BufferId` -- syntax state lives on
+    /// each buffer's own `OpenBuffer`. Live cursor/scroll position is
+    /// *per-window*, not per-buffer (see `PaneState`'s own doc comment)
+    /// -- owned by whichever `Workspace` the pane belongs to, reached via
+    /// `pane_state`/`pane_state_mut`/`focused_pane_id`, not through a
+    /// buffer at all. `App` never touches a buffer directly, only through
+    /// this and `windows` -- use the `open`/`open_mut`/`focused_buffer_id`
+    /// helpers.
     buffers: BufferList,
-    /// Every workspace's own split layout -- `windows()`/`windows_mut()`
+    /// Every workspace's own split layout (and, per workspace, every
+    /// pane's own live cursor/scroll and in-flight scroll animation --
+    /// see `Workspace`'s own fields) -- `windows()`/`windows_mut()`
     /// (right after the constructor) are the accessors to use everywhere
     /// else; they read/write whichever workspace is currently active, the
     /// same "always go through the helper, not the field" discipline
     /// `open`/`open_mut` already establish for buffers.
     workspaces: WorkspaceList,
-    /// In-flight scroll transitions, keyed by which buffer they're
-    /// easing -- kept here rather than on `OpenBuffer` since `ScrollAnim`
-    /// needs `Instant`, an animation/rendering-layer concern `fenix-
-    /// buffers` (host-agnostic, no such concept) shouldn't need to know
-    /// about.
-    scroll_anims: HashMap<BufferId, ScrollAnim>,
 
     /// See `LineNumberMode` doc comment -- hardcoded for now.
     line_number_mode: LineNumberMode,
@@ -785,7 +840,8 @@ impl App {
                 id
             }
         };
-        let workspaces = WorkspaceList::new(WindowTree::new(initial_id));
+        let initial_cursor = buffers.get(initial_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        let workspaces = WorkspaceList::new(WindowTree::new(initial_id), initial_cursor);
 
         // `project_root` (used to scope `SPC p f`/`SPC p s`) is still
         // auto-detected from whatever file is open -- only the *known-
@@ -813,7 +869,6 @@ impl App {
             caret_rect: None,
             buffers,
             workspaces,
-            scroll_anims: HashMap::new(),
             line_number_mode: LineNumberMode::Absolute,
             main_view: MainView::Editor,
             explorer: None,
@@ -875,6 +930,62 @@ impl App {
     fn open_mut(&mut self) -> &mut OpenBuffer {
         let id = self.focused_buffer_id();
         self.buffers.get_mut(id).expect("focused window always has an open buffer")
+    }
+
+    fn focused_pane_id(&self) -> fenix_window::WindowId {
+        self.windows().focused_id()
+    }
+
+    /// `pane`'s own live cursor/scroll -- every existing pane has one,
+    /// seeded when the pane was created (`Workspace::new`/`split_window`/
+    /// `set_pane_content`), so this can safely `.expect()` rather than
+    /// return `Option`, the same invariant-backed shape `open`/`open_mut`
+    /// already use for `focused_buffer_id`.
+    fn pane_state(&self, pane: fenix_window::WindowId) -> &PaneState {
+        self.workspaces.active_pane_states().get(&pane).expect("every existing pane has a PaneState")
+    }
+
+    fn pane_state_mut(&mut self, pane: fenix_window::WindowId) -> &mut PaneState {
+        self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState")
+    }
+
+    /// The focused pane's live cursor -- read-only convenience mirroring
+    /// `open()`'s role but for pane-owned (not buffer-owned) state. Same
+    /// "don't use where another `self` field is also needed in the same
+    /// expression" caveat as `open()`'s own doc comment.
+    fn cursor(&self) -> Cursor {
+        self.pane_state(self.focused_pane_id()).cursor
+    }
+
+    /// The focused buffer plus the focused pane's live cursor, as the two
+    /// separate mutable borrows most buffer-editing call sites need
+    /// simultaneously (`Buffer` methods take `&mut Cursor` as a sibling
+    /// argument, not something bundled into one struct anymore now that
+    /// cursor is pane-owned rather than buffer-owned). Not usable from a
+    /// spot that *also* needs another `self` field (like `self.vim`) in
+    /// the same expression -- those inline `self.buffers.get_mut(id)` /
+    /// `self.workspaces.active_pane_states_mut().get_mut(&pane)` directly
+    /// instead (see `handle_key`'s Vim dispatch), the same reasoning
+    /// `open`/`open_mut`'s own doc comment already gives.
+    fn focused_buffer_and_cursor_mut(&mut self) -> (&mut Buffer, &mut Cursor) {
+        let buffer_id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
+        let buffer = &mut self.buffers.get_mut(buffer_id).expect("focused window always has an open buffer").buffer;
+        let cursor = &mut self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState").cursor;
+        (buffer, cursor)
+    }
+
+    /// Points `pane` at `buffer_id` and resets that pane's live cursor/
+    /// scroll to the newly-shown buffer's own remembered position --
+    /// every `WindowTree::set_content` call site goes through this
+    /// instead of calling it directly, so a pane switching to a
+    /// different buffer never keeps stale cursor/scroll state left over
+    /// from whatever it was showing before (which could easily be out of
+    /// bounds for the new buffer's own length).
+    fn set_pane_content(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId) {
+        self.windows_mut().set_content(pane, buffer_id);
+        let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
     }
 
     /// Re-derives `project_root` for the focused buffer -- called every
@@ -967,7 +1078,9 @@ impl App {
             self.completion = None;
             return;
         }
-        let Some((start, prefix)) = completion::prefix_at_cursor(&ob.buffer, &ob.cursor) else {
+        let cursor = self.cursor();
+        let ob = self.open();
+        let Some((start, prefix)) = completion::prefix_at_cursor(&ob.buffer, &cursor) else {
             self.completion = None;
             return;
         };
@@ -1001,8 +1114,10 @@ impl App {
         if language != Some(fenix_syntax::LanguageId::Tcl) {
             return;
         }
+        let cursor = self.cursor();
+        let ob = self.open();
         let (prefix_start, prefix) =
-            completion::prefix_at_cursor(&ob.buffer, &ob.cursor).unwrap_or((ob.cursor.char_idx, String::new()));
+            completion::prefix_at_cursor(&ob.buffer, &cursor).unwrap_or((cursor.char_idx, String::new()));
         let root = self.project_root.clone();
         let candidates = self.tcl_candidates(root.as_deref());
         let mut picker = fenix_picker::PickerState::new(candidates);
@@ -1024,9 +1139,9 @@ impl App {
     fn accept_completion(&mut self) {
         let Some(state) = self.completion.take() else { return };
         let Some(label) = state.picker.selected().map(|c| c.payload.label.clone()) else { return };
-        let ob = self.open_mut();
-        let end = ob.cursor.char_idx;
-        ob.buffer.replace_range(&mut ob.cursor, state.prefix_start, end, &label);
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let end = cursor.char_idx;
+        buffer.replace_range(cursor, state.prefix_start, end, &label);
     }
 
     pub(crate) fn save(&mut self) {
@@ -1264,8 +1379,8 @@ impl App {
     /// picker`, there's no path to resolve/read; the buffer already
     /// exists in the registry).
     fn switch_focused_to_buffer(&mut self, id: BufferId) {
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.buffers.touch(id);
         self.refresh_project_root();
         self.main_view = MainView::Editor;
@@ -1304,7 +1419,7 @@ impl App {
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
         for pane in self.windows().windows() {
             if self.windows().content(pane) == Some(&id) {
-                self.windows_mut().set_content(pane, fallback);
+                self.set_pane_content(pane, fallback);
             }
         }
         self.buffers.touch(fallback);
@@ -1315,8 +1430,8 @@ impl App {
     /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
     pub(crate) fn new_scratch_buffer(&mut self) {
         let id = self.buffers.open_scratch();
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -1331,8 +1446,8 @@ impl App {
         let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
         let id = self.buffers.open_dashboard(&dashboard.text);
         self.dashboard_lines.insert(id, dashboard.lines);
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -1408,21 +1523,21 @@ impl App {
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
         let id = self.buffers.open_path(path);
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.refresh_project_root();
         self.record_recent_file(path);
         self.main_view = MainView::Editor;
     }
 
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
-        let ob = self.open_mut();
-        let target_line = m.line.saturating_sub(1).min(ob.buffer.visual_line_count().saturating_sub(1));
-        let start = ob.buffer.line_start_char(target_line);
-        let col = m.col.saturating_sub(1).min(ob.buffer.line_len(target_line));
-        ob.cursor.char_idx = start + col;
-        let (_, sticky) = ob.buffer.line_col(&ob.cursor);
-        ob.cursor.sticky_col = sticky;
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let target_line = m.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
+        let start = buffer.line_start_char(target_line);
+        let col = m.col.saturating_sub(1).min(buffer.line_len(target_line));
+        cursor.char_idx = start + col;
+        let (_, sticky) = buffer.line_col(cursor);
+        cursor.sticky_col = sticky;
     }
 
     /// Registers `root` as the current project and immediately chains
@@ -1456,10 +1571,8 @@ impl App {
     /// records it, and focuses the editor) -- opening a file is opening
     /// a file, however the path was found.
     fn dashboard_activate_selected(&mut self) {
-        let line = {
-            let ob = self.open();
-            ob.buffer.line_col(&ob.cursor).0
-        };
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
         let entry = self
             .dashboard_lines
             .get(&self.focused_buffer_id())
@@ -1643,8 +1756,8 @@ impl App {
         }
 
         let id = self.buffers.open_path(&path);
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.refresh_project_root();
         self.record_recent_file(&path);
 
@@ -1750,7 +1863,15 @@ impl App {
     /// were already looking at.
     fn split_window(&mut self, kind: SplitKind) {
         let id = self.focused_buffer_id();
-        self.windows_mut().split(kind, id);
+        // The new pane starts as a second, independent view of the same
+        // buffer -- same cursor/scroll as the pane it split from (real
+        // Vim's own `:split` behavior), not the buffer's stale remembered
+        // position. Cloned *before* `split` reassigns focus to the new
+        // pane, from the source pane's own `PaneState` (see `PaneState`'s
+        // own doc comment for why cursor/scroll are per-pane now).
+        let source_state = *self.pane_state(self.focused_pane_id());
+        let new_pane = self.windows_mut().split(kind, id);
+        self.workspaces.active_pane_states_mut().insert(new_pane, source_state);
         self.wake_caret();
     }
 
@@ -1793,7 +1914,11 @@ impl App {
     /// never closed here, only the pane showing it -- other panes may
     /// still reference the same `BufferId`.
     pub(crate) fn close_window(&mut self) {
-        self.windows_mut().close_focused();
+        let closed_pane = self.focused_pane_id();
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&closed_pane);
+            self.workspaces.active_scroll_anims_mut().remove(&closed_pane);
+        }
         self.wake_caret();
     }
 
@@ -1817,7 +1942,8 @@ impl App {
     /// buffer) -- becomes active immediately.
     pub(crate) fn new_workspace(&mut self) {
         let id = self.focused_buffer_id();
-        self.workspaces.new_workspace(id);
+        let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.workspaces.new_workspace(id, cursor);
         self.wake_caret();
     }
 
@@ -1841,14 +1967,14 @@ impl App {
     }
 
     pub(crate) fn undo(&mut self) {
-        let ob = self.open_mut();
-        ob.buffer.undo(&mut ob.cursor);
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        buffer.undo(cursor);
         self.wake_caret();
     }
 
     pub(crate) fn redo(&mut self) {
-        let ob = self.open_mut();
-        ob.buffer.redo(&mut ob.cursor);
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        buffer.redo(cursor);
         self.wake_caret();
     }
 
@@ -2067,8 +2193,8 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
-            let ob = self.open_mut();
-            ob.buffer.move_page(&mut ob.cursor, page_size, down);
+            let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+            buffer.move_page(cursor, page_size, down);
             self.wake_caret();
             return;
         }
@@ -2151,9 +2277,11 @@ impl App {
         }
 
         let id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
         let vim_event = {
             let Some(ob) = self.buffers.get_mut(id) else { return };
-            self.vim.handle_key(&mut ob.buffer, &mut ob.cursor, keypress)
+            let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
+            self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress)
         };
         self.sync_completion();
         match vim_event {
@@ -2181,20 +2309,26 @@ impl App {
         self.wake_caret();
     }
 
-    /// Keeps the cursor's line within the visible window, scrolling as
-    /// needed. Must be called with the same `visible_lines` used to render.
+    /// Keeps the cursor's line within the *focused pane's* visible
+    /// window, scrolling as needed. Must be called with the same
+    /// `visible_lines` used to render. Every pane owns its own scroll
+    /// independently (see `PaneState`'s own doc comment) -- only the
+    /// focused one auto-follows the cursor like this; others just render
+    /// wherever they were last left.
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
-        let id = self.focused_buffer_id();
+        let buffer_id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
         let (line, scroll_line) = {
-            let ob = self.buffers.get(id).expect("focused window always has an open buffer");
-            (ob.buffer.line_col(&ob.cursor).0, ob.scroll_line)
+            let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
+            let cursor = self.pane_state(pane).cursor;
+            (ob.buffer.line_col(&cursor).0, self.pane_state(pane).scroll_line)
         };
         let target = scroll_to_include(scroll_line, line, visible_lines);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
             // A jump bigger than a few screens (`G`, a search landing far
             // away) snaps instantly rather than blurring through an ease.
-            // A target arriving while the *previous* ease for this buffer
+            // A target arriving while the *previous* ease for this pane
             // hasn't finished yet snaps too: that only happens when scroll
             // targets are coming in faster than SCROLL_DURATION can settle
             // (held-key repeat, e.g. holding `j`), and re-triggering a
@@ -2203,44 +2337,45 @@ impl App {
             // lines behind the cursor instead of ever catching up -- the
             // opposite of the "never sits between a keypress and its
             // effect" goal this animation was built for.
-            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.scroll_anims.contains_key(&id) {
-                self.scroll_anims.remove(&id);
-                self.buffers.get_mut(id).unwrap().rendered_scroll = target as f32;
+            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.workspaces.active_scroll_anims().contains_key(&pane) {
+                self.workspaces.active_scroll_anims_mut().remove(&pane);
+                self.pane_state_mut(pane).rendered_scroll = target as f32;
             } else {
-                let from = self.buffers.get(id).unwrap().rendered_scroll;
-                self.scroll_anims.insert(id, ScrollAnim { from, to: target, started: Instant::now() });
+                let from = self.pane_state(pane).rendered_scroll;
+                self.workspaces.active_scroll_anims_mut().insert(pane, ScrollAnim { from, to: target, started: Instant::now() });
             }
-            self.buffers.get_mut(id).unwrap().scroll_line = target;
+            self.pane_state_mut(pane).scroll_line = target;
         }
         self.update_rendered_scroll();
     }
 
-    /// Advances the focused buffer's `rendered_scroll` toward its
+    /// Advances the focused pane's `rendered_scroll` toward its
     /// `scroll_line` if a transition is in flight, clearing it once
     /// settled.
     fn update_rendered_scroll(&mut self) {
-        let id = self.focused_buffer_id();
-        let scroll_line = self.buffers.get(id).unwrap().scroll_line;
-        let Some(anim) = self.scroll_anims.get(&id) else {
-            self.buffers.get_mut(id).unwrap().rendered_scroll = scroll_line as f32;
+        let pane = self.focused_pane_id();
+        let scroll_line = self.pane_state(pane).scroll_line;
+        let Some(anim) = self.workspaces.active_scroll_anims().get(&pane) else {
+            self.pane_state_mut(pane).rendered_scroll = scroll_line as f32;
             return;
         };
-        let t = Instant::now().duration_since(anim.started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
+        let (from, to, started) = (anim.from, anim.to, anim.started);
+        let t = Instant::now().duration_since(started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
         if t >= 1.0 {
-            self.buffers.get_mut(id).unwrap().rendered_scroll = anim.to as f32;
-            self.scroll_anims.remove(&id);
+            self.pane_state_mut(pane).rendered_scroll = to as f32;
+            self.workspaces.active_scroll_anims_mut().remove(&pane);
         } else {
-            let (from, to) = (anim.from, anim.to as f32);
-            self.buffers.get_mut(id).unwrap().rendered_scroll = from + (to - from) * ease_out_cubic(t);
+            let to = to as f32;
+            self.pane_state_mut(pane).rendered_scroll = from + (to - from) * ease_out_cubic(t);
         }
     }
 
-    /// The buffer line rendering starts from -- `rendered_scroll` rounded
-    /// down. Content, caret, hl-line, selection, and pulse all anchor
-    /// their row math to this (not `scroll_line`, which is only the
-    /// *target* `rendered_scroll` is easing toward).
+    /// The focused pane's line rendering starts from -- `rendered_scroll`
+    /// rounded down. Content, caret, hl-line, selection, and pulse all
+    /// anchor their row math to this (not `scroll_line`, which is only
+    /// the *target* `rendered_scroll` is easing toward).
     fn render_base_line(&self) -> usize {
-        self.open().rendered_scroll.floor().max(0.0) as usize
+        self.pane_state(self.focused_pane_id()).rendered_scroll.floor().max(0.0) as usize
     }
 
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
@@ -2294,7 +2429,7 @@ impl App {
             if ob.kind == BufferKind::Dashboard { "*dashboard*".to_string() } else { "[No Name]".to_string() }
         });
         let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
-        let (line, col) = ob.buffer.line_col(&ob.cursor);
+        let (line, col) = ob.buffer.line_col(&self.cursor());
         let mode_label =
             if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
         // Only shown once there's more than one workspace to distinguish --
@@ -2398,6 +2533,13 @@ impl App {
     /// banner block and the content block below it center independently)
     /// written as literal leading blank characters, since `TextArea.left`
     /// has no geometric offset to hook a shift into.
+    ///
+    /// `cursor_line` is `ob`'s *pane's* own cursor row (relative-gutter
+    /// numbering needs it) -- passed in rather than read off `ob.cursor`
+    /// now that cursor is pane-owned, not buffer-owned (see `PaneState`'s
+    /// own doc comment), so this stays correct for any pane, not just
+    /// the focused one.
+    #[allow(clippy::too_many_arguments)] // a plain data parameter list, not a design smell worth a struct for one private call site
     fn content_spans(
         &self,
         ob: &OpenBuffer,
@@ -2406,10 +2548,10 @@ impl App {
         gutter_chars: usize,
         dashboard_pad: Option<&[usize]>,
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+        cursor_line: usize,
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
-        let (cursor_line, _) = ob.buffer.line_col(&ob.cursor);
         let mut spans = Vec::new();
         for r in 0..rows {
             let buffer_line = render_base_line + r;
@@ -2532,7 +2674,7 @@ impl App {
 
         match self.vim.visual_kind() {
             VisualKind::Char => {
-                let cursor_idx = self.open().cursor.char_idx;
+                let cursor_idx = self.cursor().char_idx;
                 let (lo, hi) =
                     if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
                 let hi = hi.min(self.open().buffer.len_chars());
@@ -2550,7 +2692,7 @@ impl App {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
                 let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
                 let (_, anchor_col) = self.open().buffer.line_col(&anchor_cursor);
-                let (_, cursor_col) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
+                let (_, cursor_col) = self.open().buffer.line_col(&self.cursor());
                 let (col_lo, col_hi) = if anchor_col <= cursor_col {
                     (anchor_col, cursor_col + 1)
                 } else {
@@ -2573,7 +2715,7 @@ impl App {
     fn anchor_cursor_line_range(&self, anchor: usize) -> (usize, usize) {
         let anchor_cursor = Cursor { char_idx: anchor, sticky_col: 0 };
         let (anchor_line, _) = self.open().buffer.line_col(&anchor_cursor);
-        let (cursor_line, _) = { let ob = self.open(); ob.buffer.line_col(&ob.cursor) };
+        let (cursor_line, _) = self.open().buffer.line_col(&self.cursor());
         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
@@ -2603,7 +2745,7 @@ impl App {
     /// -> view segments" conversion, called once per bracket rather
     /// than over a combined range since the two are rarely adjacent.
     fn bracket_match_segments(&self, visible_lines: usize) -> Segments {
-        let cursor_idx = self.open().cursor.char_idx;
+        let cursor_idx = self.cursor().char_idx;
         let Some(match_idx) = fenix_vim::find_matching_bracket(&self.open().buffer, cursor_idx) else {
             return Vec::new();
         };
@@ -2661,7 +2803,7 @@ impl App {
         if self.vim.mode() != Mode::Search {
             return hl_row.map(|row| (row, col));
         }
-        self.vim.preview_match(&self.open().buffer, &self.open().cursor).and_then(|idx| {
+        self.vim.preview_match(&self.open().buffer, &self.cursor()).and_then(|idx| {
             let preview_cursor = Cursor { char_idx: idx, sticky_col: 0 };
             let (preview_line, preview_col) = self.open().buffer.line_col(&preview_cursor);
             preview_line
@@ -3078,17 +3220,18 @@ impl App {
             if is_focused {
                 self.ensure_cursor_visible(pane_visible_lines);
             }
-            let rendered_scroll = self.buffers.get(buffer_id).map(|ob| ob.rendered_scroll).unwrap_or(0.0);
+            // Every pane -- not just the focused one -- has its own
+            // `PaneState` (seeded when it was created), so each renders
+            // from its own independent cursor/scroll position.
+            let pane_state = *self.pane_state(pane);
+            let rendered_scroll = pane_state.rendered_scroll;
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let mut render_frac = rendered_scroll - rendered_scroll.floor();
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
             // the cursor's own row in the per-line pad table.
-            let (line, col) = self
-                .buffers
-                .get(buffer_id)
-                .map(|ob| ob.buffer.line_col(&ob.cursor))
-                .unwrap_or((0, 0));
+            let (line, col) =
+                self.buffers.get(buffer_id).map(|ob| ob.buffer.line_col(&pane_state.cursor)).unwrap_or((0, 0));
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
             let mut gutter_px = gutter_chars as f32 * char_width;
@@ -3131,6 +3274,7 @@ impl App {
                     gutter_chars,
                     dashboard_pad.as_deref(),
                     &syntax_highlights,
+                    line,
                 ),
                 None => Vec::new(),
             };
@@ -3584,7 +3728,8 @@ impl ApplicationHandler for App {
             }
             None => false,
         };
-        let animating = blink_transitioning || pulse_active || self.scroll_anims.contains_key(&self.focused_buffer_id());
+        let animating =
+            blink_transitioning || pulse_active || self.workspaces.active_scroll_anims().contains_key(&self.focused_pane_id());
         if animating {
             needs_redraw = true;
         }
@@ -3608,8 +3753,8 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 impl App {
     fn test_insert(&mut self, ch: char) {
-        let ob = self.open_mut();
-        ob.buffer.insert_char(&mut ob.cursor, ch);
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        buffer.insert_char(cursor, ch);
     }
 
     fn test_insert_str(&mut self, s: &str) {
@@ -3620,8 +3765,10 @@ impl App {
 
     fn test_vim_key(&mut self, key: KeyPress) -> VimEvent {
         let id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
         let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
-        self.vim.handle_key(&mut ob.buffer, &mut ob.cursor, key)
+        let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
+        self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, key)
     }
 
     /// Points the focused pane at `path`, opening it fresh in the
@@ -3629,8 +3776,25 @@ impl App {
     /// `explorer_open_selected` do in production.
     fn test_open_path(&mut self, path: &Path) {
         let id = self.buffers.open_path(path);
-        let focused = self.windows().focused_id();
-        self.windows_mut().set_content(focused, id);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
+    }
+
+    /// The focused pane's live cursor -- test-only convenience wrapping
+    /// `pane_state`, since tests can't borrow two fields at once the way
+    /// production code inlines it (`focused_buffer_and_cursor_mut`, etc.).
+    #[cfg(test)]
+    fn test_cursor(&self) -> Cursor {
+        self.pane_state(self.focused_pane_id()).cursor
+    }
+
+    /// Overwrites the focused pane's live cursor -- test-only convenience
+    /// replacing the old `app.open_mut().cursor = ...` idiom, now that
+    /// cursor lives on the pane, not the buffer.
+    #[cfg(test)]
+    fn test_set_cursor(&mut self, cursor: Cursor) {
+        let pane = self.focused_pane_id();
+        self.pane_state_mut(pane).cursor = cursor;
     }
 }
 
@@ -3667,7 +3831,7 @@ mod tests {
         }
         // cursor is now on line 30; a 10-line viewport starting at 0 doesn't include it
         app.ensure_cursor_visible(10);
-        assert_eq!(app.open().scroll_line, 21);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_line, 21);
     }
 
     #[test]
@@ -3677,9 +3841,9 @@ mod tests {
             app.test_insert('\n');
         }
         app.ensure_cursor_visible(3); // 6 lines, 3-line viewport -> scrolls a bit
-        assert!(app.scroll_anims.contains_key(&app.focused_buffer_id()));
-        let ob = app.open();
-        assert_ne!(ob.rendered_scroll, ob.scroll_line as f32); // still mid-ease, not snapped
+        assert!(app.workspaces.active_scroll_anims().contains_key(&app.focused_pane_id()));
+        let ps = app.pane_state(app.focused_pane_id());
+        assert_ne!(ps.rendered_scroll, ps.scroll_line as f32); // still mid-ease, not snapped
     }
 
     #[test]
@@ -3694,26 +3858,26 @@ mod tests {
         for _ in 0..30 {
             app.test_insert('\n');
         }
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         for _ in 0..15 {
-            let ob = app.open_mut();
-            ob.buffer.move_down(&mut ob.cursor);
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
         }
         // Cursor now on line 15; a 10-line viewport wants scroll_line = 6.
         app.ensure_cursor_visible(10);
-        let id = app.focused_buffer_id();
-        assert!(app.scroll_anims.contains_key(&id)); // mid-ease from that first scroll
+        let pane = app.focused_pane_id();
+        assert!(app.workspaces.active_scroll_anims().contains_key(&pane)); // mid-ease from that first scroll
 
         // One more line down before the ease had a chance to settle -- the
         // exact shape of holding `j`.
         {
-            let ob = app.open_mut();
-            ob.buffer.move_down(&mut ob.cursor);
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
         }
         app.ensure_cursor_visible(10);
-        let ob = app.open();
-        assert_eq!(ob.rendered_scroll, ob.scroll_line as f32, "must snap, not compound the lag from the still-active ease");
-        assert!(!app.scroll_anims.contains_key(&id));
+        let ps = app.pane_state(pane);
+        assert_eq!(ps.rendered_scroll, ps.scroll_line as f32, "must snap, not compound the lag from the still-active ease");
+        assert!(!app.workspaces.active_scroll_anims().contains_key(&pane));
     }
 
     #[test]
@@ -3723,38 +3887,39 @@ mod tests {
             app.test_insert('\n');
         }
         app.ensure_cursor_visible(10); // jump of ~490 lines, way past the snap threshold
-        assert!(!app.scroll_anims.contains_key(&app.focused_buffer_id()));
-        let ob = app.open();
-        assert_eq!(ob.rendered_scroll, ob.scroll_line as f32);
+        assert!(!app.workspaces.active_scroll_anims().contains_key(&app.focused_pane_id()));
+        let ps = app.pane_state(app.focused_pane_id());
+        assert_eq!(ps.rendered_scroll, ps.scroll_line as f32);
     }
 
     #[test]
     fn rendered_scroll_eases_toward_target_and_settles() {
         let mut app = App::with_file(None);
-        let id = app.focused_buffer_id();
+        let pane = app.focused_pane_id();
         {
-            let ob = app.open_mut();
-            ob.scroll_line = 10;
-            ob.rendered_scroll = 0.0;
+            let ps = app.pane_state_mut(pane);
+            ps.scroll_line = 10;
+            ps.rendered_scroll = 0.0;
         }
-        app.scroll_anims.insert(id, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION / 2 });
+        app.workspaces.active_scroll_anims_mut().insert(pane, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION / 2 });
         app.update_rendered_scroll();
-        let r = app.open().rendered_scroll;
+        let r = app.pane_state(pane).rendered_scroll;
         assert!(r > 0.0 && r < 10.0, "should be partway there");
-        assert!(app.scroll_anims.contains_key(&id));
+        assert!(app.workspaces.active_scroll_anims().contains_key(&pane));
 
-        app.scroll_anims.insert(id, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION * 2 });
+        app.workspaces.active_scroll_anims_mut().insert(pane, ScrollAnim { from: 0.0, to: 10, started: Instant::now() - SCROLL_DURATION * 2 });
         app.update_rendered_scroll();
-        assert_eq!(app.open().rendered_scroll, 10.0);
-        assert!(!app.scroll_anims.contains_key(&id)); // settled, animation cleared
+        assert_eq!(app.pane_state(pane).rendered_scroll, 10.0);
+        assert!(!app.workspaces.active_scroll_anims().contains_key(&pane)); // settled, animation cleared
     }
 
     #[test]
     fn render_base_line_splits_a_fractional_scroll_position() {
         let mut app = App::with_file(None);
-        app.open_mut().rendered_scroll = 4.25;
+        let pane = app.focused_pane_id();
+        app.pane_state_mut(pane).rendered_scroll = 4.25;
         assert_eq!(app.render_base_line(), 4);
-        assert!((app.open().rendered_scroll.fract() - 0.25).abs() < f32::EPSILON);
+        assert!((app.pane_state(pane).rendered_scroll.fract() - 0.25).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3792,7 +3957,7 @@ mod tests {
         for ch in "hello world".chars() {
             app.test_insert(ch);
         }
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         app.test_vim_key(KeyPress::char('v'));
         for _ in 0..4 {
             app.test_vim_key(KeyPress::char('l'));
@@ -3811,7 +3976,7 @@ mod tests {
     fn bracket_match_segments_covers_both_brackets_when_the_cursor_is_on_one() {
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
-        app.open_mut().cursor = Cursor::at_start(); // on the opening '('
+        app.test_set_cursor(Cursor::at_start()); // on the opening '('
         assert_eq!(app.bracket_match_segments(10), vec![(0, 0, 1), (0, 6, 7)]);
     }
 
@@ -3819,7 +3984,7 @@ mod tests {
     fn bracket_match_segments_works_from_the_closing_side_too() {
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
-        app.open_mut().cursor = Cursor { char_idx: 6, sticky_col: 6 }; // on the ')'
+        app.test_set_cursor(Cursor { char_idx: 6, sticky_col: 6 }); // on the ')'
         assert_eq!(app.bracket_match_segments(10), vec![(0, 6, 7), (0, 0, 1)]);
     }
 
@@ -3827,7 +3992,7 @@ mod tests {
     fn bracket_match_segments_empty_when_the_cursor_is_not_on_a_bracket() {
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
-        app.open_mut().cursor = Cursor { char_idx: 3, sticky_col: 3 }; // on 'l'
+        app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 3 }); // on 'l'
         assert!(app.bracket_match_segments(10).is_empty());
     }
 
@@ -3835,7 +4000,7 @@ mod tests {
     fn bracket_match_segments_empty_for_an_unmatched_bracket() {
         let mut app = App::with_file(None);
         app.test_insert_str("(hello");
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         assert!(app.bracket_match_segments(10).is_empty());
     }
 
@@ -3843,7 +4008,7 @@ mod tests {
     fn hlsearch_segments_covers_every_match_after_a_confirmed_search() {
         let mut app = App::with_file(None);
         app.test_insert_str("foo bar foo baz foo");
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -3863,7 +4028,7 @@ mod tests {
     fn hlsearch_segments_clears_after_an_edit() {
         let mut app = App::with_file(None);
         app.test_insert_str("foo bar foo");
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -3878,13 +4043,13 @@ mod tests {
     fn focused_caret_previews_the_search_match_without_moving_the_real_cursor() {
         let mut app = App::with_file(None);
         app.test_insert_str("foo bar foo");
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
         // The second "foo" starts at char 8, still line 0 -- row 0, col 8.
         assert_eq!(app.focused_caret(None, 0, 0, 10), Some((0, 8)));
-        assert_eq!(app.open().cursor.char_idx, 0, "the real cursor must not move during preview");
+        assert_eq!(app.test_cursor().char_idx, 0, "the real cursor must not move during preview");
     }
 
     #[test]
@@ -3900,7 +4065,7 @@ mod tests {
         for ch in "one\ntwo\nthree".chars() {
             app.test_insert(ch);
         }
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
 
         app.test_vim_key(KeyPress::char('v'));
         assert!(app.modeline_text().contains("VISUAL"));
@@ -3950,7 +4115,7 @@ mod tests {
         for ch in "one\ntwo\nthree".chars() {
             app.test_insert(ch);
         }
-        app.open_mut().cursor = Cursor { char_idx: 5, sticky_col: 1 }; // column 1 of "two"
+        app.test_set_cursor(Cursor { char_idx: 5, sticky_col: 1 }); // column 1 of "two"
         app.test_vim_key(KeyPress::char('V'));
         assert_eq!(app.visual_selection_segments(10), vec![(1, 0, 3)]);
     }
@@ -3961,7 +4126,7 @@ mod tests {
         for ch in "abc\ndef\nghi".chars() {
             app.test_insert(ch);
         }
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         app.test_vim_key(KeyPress::char('v').with_ctrl());
         for ch in ['j', 'j', 'l'] {
             app.test_vim_key(KeyPress::char(ch));
@@ -4046,7 +4211,7 @@ mod tests {
         for ch in "hello world".chars() {
             app.test_insert(ch);
         }
-        app.open_mut().cursor = Cursor::at_start();
+        app.test_set_cursor(Cursor::at_start());
         assert!(app.pulse.is_none());
 
         app.test_vim_key(KeyPress::char('y'));
@@ -4075,7 +4240,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.new_scratch_buffer(); // single empty line, cursor on it
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[]);
+        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -4086,7 +4251,7 @@ mod tests {
         app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Off;
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[]);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -4097,9 +4262,9 @@ mod tests {
         app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Relative;
         app.test_insert_str("a\nb\nc\nd");
-        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1, 'b'
+        app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1, 'b'
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[]);
+        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[], 1);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -4109,9 +4274,9 @@ mod tests {
         let mut app = App::with_file(None);
         app.new_scratch_buffer();
         app.test_insert_str("a\nb");
-        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 }; // line 1
+        app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[]);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 1);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
     }
@@ -4130,7 +4295,7 @@ mod tests {
         assert_eq!(ob.kind, BufferKind::Dashboard);
 
         let pad = [5usize];
-        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[]);
+        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[], 0);
         assert_eq!(spans[0].0, "     "); // 5 literal spaces, not "1 " or similar
     }
 
@@ -4141,7 +4306,7 @@ mod tests {
         let visual_lines = ob.buffer.visual_line_count();
         let pad: Vec<usize> = vec![0; visual_lines + 11];
         // Ask for a row well past the dashboard's own content.
-        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[]);
+        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0);
         assert!(!spans.iter().any(|(s, _)| s == "~"));
     }
 
@@ -4284,7 +4449,7 @@ mod tests {
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
 
-        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights);
+        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0);
         let fn_span = spans.iter().find(|(s, _)| s == "fn");
         assert_eq!(
             fn_span.map(|(_, c)| *c),
@@ -4406,7 +4571,7 @@ mod tests {
         app.sync_completion();
         assert!(app.completion.is_some());
 
-        app.open_mut().cursor = Cursor::at_start(); // no identifier char before the cursor now
+        app.test_set_cursor(Cursor::at_start()); // no identifier char before the cursor now
         app.sync_completion();
         assert!(app.completion.is_none());
     }
@@ -4417,7 +4582,7 @@ mod tests {
         let file = dir.write("foo.tcl", "se");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         // Starts in Normal mode -- never entered Insert.
-        app.open_mut().cursor = Cursor { char_idx: 2, sticky_col: 0 };
+        app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 });
 
         app.sync_completion();
 
@@ -4451,7 +4616,7 @@ mod tests {
 
         assert!(app.completion.is_none());
         assert_eq!(app.open().buffer.text(), expected_label);
-        assert_eq!(app.open().cursor.char_idx, expected_label.chars().count());
+        assert_eq!(app.test_cursor().char_idx, expected_label.chars().count());
     }
 
     #[test]
@@ -4662,6 +4827,44 @@ mod tests {
         app.split_vertical();
         app.close_window();
         assert_eq!(app.windows().window_count(), 1);
+    }
+
+    #[test]
+    fn splitting_a_window_gives_each_pane_its_own_independent_cursor() {
+        // The actual feature: two panes on the same buffer must not
+        // share a cursor -- moving one's must leave the other's exactly
+        // where it was.
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.test_insert_str("one\ntwo\nthree");
+        app.test_set_cursor(Cursor::at_start());
+
+        let original_pane = app.focused_pane_id();
+        app.split_vertical(); // new pane focused, seeded from the same position
+        let new_pane = app.focused_pane_id();
+        assert_ne!(original_pane, new_pane);
+        assert_eq!(app.pane_state(new_pane).cursor.char_idx, 0);
+
+        // Move the cursor in the new (focused) pane only.
+        for ch in ['j', 'j'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        assert_ne!(app.pane_state(new_pane).cursor.char_idx, 0);
+
+        // Switch focus back to the original pane -- its cursor must be
+        // untouched by what just happened in the other one.
+        app.navigate_window(NavDirection::Left);
+        assert_eq!(app.focused_pane_id(), original_pane);
+        assert_eq!(app.cursor().char_idx, 0);
+    }
+
+    #[test]
+    fn closing_a_window_drops_its_pane_state() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        let new_pane = app.focused_pane_id();
+        app.close_window();
+        assert!(app.workspaces.active_pane_states().get(&new_pane).is_none());
     }
 
     #[test]
@@ -5191,7 +5394,7 @@ mod tests {
         app.picker_confirm();
 
         assert_eq!(app.main_view, MainView::Editor);
-        let (line, _) = { let ob = app.open(); ob.buffer.line_col(&ob.cursor) };
+        let (line, _) = app.open().buffer.line_col(&app.test_cursor());
         assert_eq!(line, 1); // "needle here" is the second line (index 1)
     }
 
@@ -5686,7 +5889,7 @@ mod tests {
             .position(|l| l.as_ref().map(|m| m.style) == Some(style))
             .unwrap_or_else(|| panic!("no dashboard line with style {style:?}"));
         let start = app.open().buffer.line_start_char(line);
-        app.open_mut().cursor.char_idx = start;
+        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
         line
     }
 

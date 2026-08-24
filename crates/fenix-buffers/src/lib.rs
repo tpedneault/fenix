@@ -22,13 +22,18 @@ pub enum BufferKind {
     Dashboard,
 }
 
-/// One open buffer's full state. Cursor and scroll position are kept
-/// buffer-local (not per-window) -- a deliberate v1 simplification: if the
-/// same buffer is shown in two panes at once, they show the same cursor/
-/// scroll, not independent ones the way real Emacs windows work. Much
-/// simpler (panes just reference a `BufferId`, no shared-mutable-state
-/// design needed) and still covers the common case of different buffers in
-/// different panes.
+/// One open buffer's full state. `cursor` here is the buffer's
+/// *remembered* position (mirrors Vim's own `'"` "last position" mark) --
+/// used only to seed a pane's live cursor the first time that buffer is
+/// shown in it (opening a file fresh, or splitting to show an already-
+/// open buffer in a second pane for the first time). It is not updated
+/// while a pane is actively editing the buffer -- live cursor/scroll
+/// position during editing is per-*window*, owned by the host
+/// (`fenix-gui`'s `App`, keyed by `WindowId`), not here: if the same
+/// buffer is shown in two panes at once, each pane scrolls/positions its
+/// cursor independently, the way real Emacs windows work. This registry
+/// has no notion of windows/panes at all (it doesn't depend on
+/// `fenix-window`), so it can't own that state itself.
 ///
 /// `buffer: Buffer` is unconditional, not wrapped in a content enum --
 /// dozens of call sites across `fenix-vim`/`fenix-gui` (every motion,
@@ -40,12 +45,7 @@ pub struct OpenBuffer {
     pub buffer: Buffer,
     pub cursor: Cursor,
     pub syntax: Option<fenix_syntax::SyntaxState>,
-    pub scroll_line: usize,
-    pub rendered_scroll: f32,
     pub kind: BufferKind,
-    // Deliberately no `scroll_anim` field here -- that needs `Instant`, an
-    // animation/rendering-layer concern kept in fenix-gui (keyed by
-    // `BufferId` there), not something this host-agnostic registry needs.
 }
 
 /// A registry of open buffers, keyed by `BufferId`. Depends only on
@@ -77,10 +77,7 @@ impl BufferList {
         if let Some(path) = buffer.path() {
             self.path_index.insert(path.to_path_buf(), id);
         }
-        self.buffers.insert(
-            id,
-            OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, scroll_line: 0, rendered_scroll: 0.0, kind },
-        );
+        self.buffers.insert(id, OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, kind });
         self.touch(id);
         id
     }
