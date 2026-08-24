@@ -109,22 +109,21 @@ pub struct TextPipeline {
     modeline: GlyphBuffer,
     /// The modeline's right-aligned date/time clock -- a *separate*
     /// buffer from `modeline` (rather than embedding it via literal
-    /// space-padding in that shared string) specifically so its position
-    /// is real pixel math (`clock_left`, computed by the caller from the
-    /// actual clock text's measured length) instead of relying on a long
-    /// run of repeated space glyphs summing to exactly `count *
-    /// char_width` -- that assumption drifted visibly at wide window
-    /// widths (a big gap = many space glyphs = accumulated rounding
-    /// error), which is exactly what a real, reported bug looked like:
-    /// most of the clock pushed off the right edge after going
-    /// fullscreen. A short, separately-positioned run has no such
-    /// accumulation to go wrong.
+    /// space-padding in that shared string, which a first attempt at
+    /// this did) so its position comes from cosmic-text's own real
+    /// `Align::Right` layout against a sized box (`set_clock_rich`),
+    /// not from approximating the text's pixel width as `char_count *
+    /// char_width` -- that approximation was consistently a little off
+    /// in practice (real glyph shaping isn't perfectly uniform even in
+    /// a "monospace" font), which is exactly what two real, reported
+    /// bugs looked like: the clock drifting off the right edge, first
+    /// after going fullscreen (space-padding accumulated the error over
+    /// a very long run) and then even at ordinary widths after that fix
+    /// (the *width estimate itself* was still off, just by less).
+    /// Letting the shaping engine do the real measurement sidesteps the
+    /// whole class of "my estimate doesn't match the real glyph
+    /// advances" bugs instead of chasing another one.
     clock: GlyphBuffer,
-    /// `clock`'s left `x` position for this frame, set by `set_clock_
-    /// rich` alongside its text and read back in `prepare()` (which has
-    /// no other way to know it, since `TextArea.left` isn't stored on
-    /// the `glyphon::Buffer` itself).
-    clock_left: f32,
     sidebar: GlyphBuffer,
     /// Effective body-text font family: a `config.ini` `font_family`
     /// override, or else the active theme's own `Theme::font_family` --
@@ -228,7 +227,6 @@ impl TextPipeline {
             popups: HashMap::new(),
             modeline,
             clock,
-            clock_left: 0.0,
             sidebar,
             content_family: None,
             default_family,
@@ -436,20 +434,24 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
-    /// Sets the modeline clock's text and its left `x` pixel position
-    /// (computed by the caller, which already knows the real window
-    /// width and measured `char_width` -- see `App::redraw`'s `modeline_
-    /// clock_left`). A *separate* buffer/`TextArea` from `set_modeline_
-    /// text`, not embedded in it -- see `clock`'s own doc comment for
-    /// why. `segments` empty means "don't show the clock this frame"
-    /// (not enough room); `left` is irrelevant in that case.
-    pub fn set_clock_rich(&mut self, left: f32, segments: &[(&str, Color)]) {
-        self.clock_left = left;
+    /// Sets the modeline clock's text, right-aligned within a `box_width`-
+    /// wide box whose left edge is the window's own left edge (`0`) --
+    /// its *right* edge (`box_width`) is therefore where the clock's own
+    /// right edge lands, computed by cosmic-text's real `Align::Right`
+    /// layout against the glyphs' actual shaped widths, not by this
+    /// crate guessing a pixel width from a char count (`clock`'s own doc
+    /// comment explains why that guess wasn't reliable enough). The
+    /// caller (`App::redraw`) passes `window_width` minus its own right
+    /// margin as `box_width`. `segments` empty means "don't show the
+    /// clock this frame" (not enough room); `box_width` is irrelevant
+    /// in that case.
+    pub fn set_clock_rich(&mut self, box_width: f32, segments: &[(&str, Color)]) {
+        self.clock.set_size(Some(box_width.max(0.0)), Some(self.line_height));
         let body_family = self.content_family();
         let default_attrs = Attrs::new().family(body_family);
         let spans: Vec<(&str, Attrs)> =
             segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
-        self.clock.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.clock.set_rich_text(spans, &default_attrs, Shaping::Advanced, Some(glyphon::cosmic_text::Align::Right));
         self.clock.shape_until_scroll(&mut self.font_system, false);
     }
 
@@ -498,12 +500,14 @@ impl TextPipeline {
     pub fn resize(&mut self, width: f32, height: f32) {
         // Pane buffers are resized every frame in `set_pane_rich` (their
         // rect comes from `WindowTree::layout`, recomputed each redraw
-        // regardless of whether the window itself just resized), so only
-        // the four fixed panels need handling here.
+        // regardless of whether the window itself just resized), and
+        // `clock` gets its width fresh every frame from `set_clock_rich`
+        // (it needs to be current every single redraw, not just after a
+        // resize, since it also depends on how much of the modeline's
+        // left side is occupied) -- so only the two remaining fixed
+        // panels need handling here.
         self.modeline.set_size(Some(width), Some(self.modeline_height()));
         self.modeline.shape_until_scroll(&mut self.font_system, false);
-        self.clock.set_size(Some(width), Some(self.modeline_height()));
-        self.clock.shape_until_scroll(&mut self.font_system, false);
         self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height, self.modeline_height())));
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
@@ -597,7 +601,10 @@ impl TextPipeline {
         });
         areas.push(TextArea {
             buffer: &self.clock,
-            left: self.clock_left,
+            // Always `0` -- `set_clock_rich`'s box starts at the window's
+            // left edge; its own `Align::Right` layout is what actually
+            // pushes the glyphs to sit at the box's *right* edge.
+            left: 0.0,
             top: modeline_top + 4.0,
             scale: 1.0,
             bounds: modeline_bounds,
