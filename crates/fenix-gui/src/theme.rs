@@ -269,8 +269,16 @@ pub const TEMPLEOS: Theme = Theme {
     bg_modeline: rgba(0x0000aa),
     fg: text_color(0x000000),
     fg_modeline: text_color(0xffffff),
-    caret: rgba(0xffff55),
-    caret_text: text_color(0xffff55),
+    // Light Blue, not the fixed palette's own Yellow -- the caret used
+    // to be `0xffff55`, but as a solid block caret (Normal/Visual/
+    // Replace/Command mode's shape, see `caret_is_block`) sitting on
+    // every current line, bright yellow read as harsh/hard to read in
+    // practice, not just a stylistic quibble. Reuses the same accent
+    // `hl_line`/`mode_command` already use elsewhere in this theme, so
+    // it stays inside the fixed 16-color CGA/EGA set this theme is
+    // built from rather than introducing a new hue.
+    caret: rgba(0x5555ff),
+    caret_text: text_color(0x5555ff),
     // 0.15 alpha (this field's original value) was too faint to actually
     // read against a pure-white `bg`: blue's channels are far enough from
     // white's that the hue itself isn't the problem (unlike the old

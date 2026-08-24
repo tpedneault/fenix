@@ -937,15 +937,16 @@ fn dashboard_highlights_for_visible_range(
             dashboard::DashboardLineStyle::Banner
             | dashboard::DashboardLineStyle::Tagline
             | dashboard::DashboardLineStyle::Header => {
-                // `syntax_keyword`, not `caret_text`: `caret_text` was
-                // chosen (see its own doc comment) to read against
-                // `bg_modeline`, but the dashboard renders as ordinary
-                // pane content, against `bg` -- on TempleOS specifically
-                // that's a *white* background, where `caret_text`'s
-                // yellow (0xffff55) is nearly unreadable (its R/G
-                // channels already match white's). `syntax_*` colors are
-                // the ones actually chosen per-theme for legibility
-                // against `bg`, which is exactly what this needs.
+                // `syntax_keyword`, not `caret_text`: `caret_text` is
+                // calibrated to read against `bg_modeline` (see its own
+                // doc comment), not against `bg` -- the dashboard
+                // renders as ordinary pane content, against `bg`, where
+                // a color chosen for the modeline's background isn't
+                // guaranteed to hold up (TempleOS's own `bg` is white,
+                // a case where several accent colors read poorly).
+                // `syntax_*` colors are the ones actually chosen per-
+                // theme for legibility against `bg`, which is exactly
+                // what this needs.
                 ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
             }
             dashboard::DashboardLineStyle::Footer => {
