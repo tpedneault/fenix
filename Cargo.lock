@@ -545,6 +545,7 @@ dependencies = [
  "fenix-core",
  "fenix-docker",
  "fenix-explorer",
+ "fenix-git",
  "fenix-keymap",
  "fenix-picker",
  "fenix-project",

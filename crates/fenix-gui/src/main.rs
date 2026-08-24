@@ -3,6 +3,7 @@ mod commands;
 mod completion;
 mod dashboard;
 mod docker_panel;
+mod git_panel;
 mod gpu;
 mod icon;
 mod keymap;

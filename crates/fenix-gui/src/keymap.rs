@@ -134,6 +134,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('b')], "build image", "docker.build");
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('q')], "close docker panel", "docker.close");
 
+        // Lazygit-style Git panel.
+        t.label_group(&[spc, KeyPress::char('g')], "git");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
+
         t.label_group(&[spc, KeyPress::char('c')], "completion");
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('r')],

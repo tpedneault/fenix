@@ -23,6 +23,7 @@ use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
 use crate::docker_panel;
+use crate::git_panel;
 use crate::gpu::GpuState;
 use crate::icon;
 use crate::keymap;
@@ -354,6 +355,139 @@ enum DockerPaneRole {
     Logs,
 }
 
+/// A Lazygit-style Git management session (`SPC g g`) -- mirrors
+/// `DockerSession`'s own shape and reasoning almost exactly (six panes
+/// instead of five, one background poller instead of two, action-key
+/// routing keyed off *which pane is focused* rather than `BufferKind`
+/// alone). The one real structural difference: every `fenix-git` call
+/// targets a *specific repository* (`repo_root`), not a daemon reachable
+/// regardless of cwd the way `fenix-docker` is -- see `fenix-git::
+/// process`'s own doc comment for why every function there takes an
+/// explicit root path.
+struct GitSession {
+    workspace_index: usize,
+    status_pane: fenix_window::WindowId,
+    files_pane: fenix_window::WindowId,
+    branches_pane: fenix_window::WindowId,
+    commits_pane: fenix_window::WindowId,
+    stash_pane: fenix_window::WindowId,
+    main_pane: fenix_window::WindowId,
+    status_buffer: BufferId,
+    files_buffer: BufferId,
+    branches_buffer: BufferId,
+    commits_buffer: BufferId,
+    stash_buffer: BufferId,
+    main_buffer: BufferId,
+    repo_root: PathBuf,
+    /// Last-listed files/branches/commits/stashes, cached so `git_sync_
+    /// main`/action handlers can look up whichever row is under the
+    /// cursor without re-shelling `git` on every keystroke -- same
+    /// reasoning as `DockerSession::containers`/`images`/`volumes`.
+    files: Vec<fenix_git::FileEntry>,
+    branches: Vec<fenix_git::Branch>,
+    commits: Vec<fenix_git::Commit>,
+    stashes: Vec<fenix_git::Stash>,
+    /// The most recent status poll -- `None` before the first tick lands
+    /// (or outside a real repo). Feeds the Status pane, which -- unlike
+    /// the Docker panel's own Status pane -- always shows the same
+    /// repo-overview info regardless of cursor position elsewhere (see
+    /// `git_panel::render_status`'s own doc comment for why that's the
+    /// real Lazygit-accurate behavior, not a simplification).
+    status: Option<fenix_git::RepoStatus>,
+    /// Same "held only for its `Drop` side effect" RAII shape as
+    /// `DockerSession::stats_poller`.
+    #[allow(dead_code)]
+    status_poller: Option<GitStatusPoller>,
+}
+
+/// A background `git status --porcelain=v2 --branch` poller for one open
+/// Git session -- ticks every `STATS_POLL_INTERVAL`, mirrors
+/// `DockerStatsPoller` exactly (same interval, same stop/join-on-drop
+/// teardown discipline) except it needs to know *which* repository to
+/// poll, since `fenix-git` has no daemon-wide equivalent to shell
+/// against.
+struct GitStatusPoller {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl GitStatusPoller {
+    fn spawn(repo_root: PathBuf, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let status = fenix_git::status(&repo_root);
+            if !send(FenixUserEvent::GitStatusReady(status)) {
+                return;
+            }
+            let mut waited = Duration::ZERO;
+            while waited < STATS_POLL_INTERVAL {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let step = STATS_POLL_STOP_CHECK.min(STATS_POLL_INTERVAL - waited);
+                std::thread::sleep(step);
+                waited += step;
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for GitStatusPoller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Which of a `GitSession`'s six panes is currently focused, if any --
+/// mirrors `DockerPaneRole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitPaneRole {
+    Status,
+    Files,
+    Branches,
+    Commits,
+    Stash,
+    Main,
+}
+
+/// A destructive Git action armed by its own key until the next keypress
+/// confirms (`y`) or cancels -- same "wait for exactly one more raw key"
+/// shape as `docker_confirm_remove`, generalized to the several different
+/// kinds of destructive action the Git panel has (Docker only ever had
+/// one: remove).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitConfirmAction {
+    DiscardFile { path: String, untracked: bool },
+    DeleteBranch { name: String },
+    DropStash { index: usize },
+}
+
+/// Which free-text Git prompt (if any) is capturing the next keystrokes --
+/// same "next key(s) mean something special" pattern `ExplorerPrompt`
+/// already uses for file-manager text input, applied here to a commit
+/// message or a new branch's name. Stashing (`s` on Files) needs no
+/// prompt -- real Lazygit's own plain `s` just stashes everything with
+/// git's own default message; `S` for named/partial stash variants isn't
+/// implemented (see the Git panel's own scope notes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitPromptKind {
+    CommitMessage,
+    NewBranch,
+}
+
+struct GitPrompt {
+    kind: GitPromptKind,
+    input: String,
+}
+
 /// Cross-thread wake events -- the only way anything outside the winit
 /// event loop's own thread (the Docker panel's stats poller/log
 /// follower, Phases 5-6) can get `App` to mutate state and request a
@@ -376,6 +510,10 @@ pub enum FenixUserEvent {
     /// the Details pane show a "log stream ended" marker instead of
     /// just silently going stale.
     LogEnded(BufferId),
+    /// A fresh `git status --porcelain=v2 --branch` snapshot (`None`
+    /// outside a repo), from the active Git session's background
+    /// poller.
+    GitStatusReady(Option<fenix_git::RepoStatus>),
 }
 
 /// The autocompletion popup's live state -- see `App::completion`'s own
@@ -829,6 +967,30 @@ fn docker_badge_color(color: docker_panel::DockerBadgeColor, theme: &Theme) -> g
     }
 }
 
+/// (staged, unstaged, untracked) counts for `render_status`'s summary
+/// line -- a file counts as staged if its index status is a real change
+/// (not `.`/unset), unstaged likewise for the worktree status, and
+/// untracked when both sides read `?`. A file can be both staged and
+/// unstaged at once (partially staged), matching real `git status`.
+fn file_counts(files: &[fenix_git::FileEntry]) -> (usize, usize, usize) {
+    let mut staged = 0;
+    let mut unstaged = 0;
+    let mut untracked = 0;
+    for f in files {
+        if f.index_status == '?' && f.worktree_status == '?' {
+            untracked += 1;
+            continue;
+        }
+        if f.index_status != '.' {
+            staged += 1;
+        }
+        if f.worktree_status != '.' {
+            unstaged += 1;
+        }
+    }
+    (staged, unstaged, untracked)
+}
+
 fn docker_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<docker_panel::DockerLine>]>,
@@ -862,6 +1024,63 @@ fn docker_highlights_for_visible_range(
         if let Some((badge_len, color)) = meta.badge {
             let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
             ranges.push((line_start_byte..badge_end_byte, docker_badge_color(color, theme)));
+        }
+    }
+    ranges
+}
+
+/// `GitBadgeColor` -> a real theme color -- mirrors `docker_badge_color`.
+fn git_badge_color(color: git_panel::GitBadgeColor, theme: &Theme) -> glyphon::Color {
+    match color {
+        git_panel::GitBadgeColor::Good => theme.git_staged,
+        git_panel::GitBadgeColor::Warn => theme.git_modified,
+        git_panel::GitBadgeColor::Bad => theme.git_conflicted,
+        git_panel::GitBadgeColor::Neutral => theme.gutter_fg,
+    }
+}
+
+/// Resolves a real `BufferKind::Git` buffer's per-line syntax-highlight
+/// ranges from its cached `GitLine` metadata -- mirrors
+/// `docker_highlights_for_visible_range` exactly, extended with the
+/// three diff-line colors `render_main`'s unified-diff output needs
+/// (`DiffAdd`/`DiffDel` reuse the same green/red the git-status badges
+/// already use; `DiffHunk` gets the dim gutter color, matching how most
+/// diff viewers de-emphasize hunk headers relative to the actual +/-
+/// lines).
+fn git_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<git_panel::GitLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        match meta.style {
+            git_panel::GitLineStyle::Empty => {
+                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
+            }
+            git_panel::GitLineStyle::Detail => {
+                if let Some(dim_from) = meta.dim_from {
+                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
+                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
+                }
+            }
+            git_panel::GitLineStyle::DiffAdd => ranges.push((line_start_byte..line_end_byte, theme.git_staged)),
+            git_panel::GitLineStyle::DiffDel => ranges.push((line_start_byte..line_end_byte, theme.git_conflicted)),
+            git_panel::GitLineStyle::DiffHunk => ranges.push((line_start_byte..line_end_byte, theme.gutter_fg)),
+            git_panel::GitLineStyle::File | git_panel::GitLineStyle::Branch | git_panel::GitLineStyle::Commit | git_panel::GitLineStyle::Stash => {}
+        }
+        if let Some((badge_len, color)) = meta.badge {
+            let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
+            ranges.push((line_start_byte..badge_end_byte, git_badge_color(color, theme)));
         }
     }
     ranges
@@ -1204,10 +1423,27 @@ pub struct App {
     /// The active Docker multi-pane session (`SPC d d`), if any -- see
     /// `DockerSession`'s own doc comment.
     docker_session: Option<DockerSession>,
+    /// Per-line metadata for every real `BufferKind::Git` buffer
+    /// currently open (`SPC g g`) -- mirrors `docker_lines` exactly.
+    git_lines: HashMap<BufferId, Vec<Option<git_panel::GitLine>>>,
+    /// Armed by `d` on Files/Branches/Stash until the next keypress
+    /// confirms or cancels -- mirrors `docker_confirm_remove`, just over
+    /// `GitConfirmAction`'s several destructive-action kinds instead of
+    /// Docker's single "remove."
+    git_confirm: Option<GitConfirmAction>,
+    /// Capturing a commit message or new branch name -- mirrors
+    /// `explorer_prompt`'s "next keystrokes are text input" shape.
+    git_prompt: Option<GitPrompt>,
+    /// Set by `x` on a Git pane -- mirrors `docker_menu_open` exactly.
+    git_menu_open: bool,
+    /// The active Git multi-pane session (`SPC g g`), if any -- see
+    /// `GitSession`'s own doc comment.
+    git_session: Option<GitSession>,
     /// `Some` only for a real, `main.rs`-launched `App` (see `App::new`'s
     /// own doc comment) -- the handle background threads (the Docker
-    /// stats poller/log follower) get their own `Clone` of, to wake the
-    /// main event loop via `FenixUserEvent`. `None` in every test.
+    /// stats poller/log follower, the Git status poller) get their own
+    /// `Clone` of, to wake the main event loop via `FenixUserEvent`.
+    /// `None` in every test.
     event_proxy: Option<winit::event_loop::EventLoopProxy<FenixUserEvent>>,
 
     /// The autocompletion popup's live state -- `Some` only while Insert
@@ -1367,6 +1603,11 @@ impl App {
             docker_menu_open: false,
             pane_titles: HashMap::new(),
             docker_session: None,
+            git_lines: HashMap::new(),
+            git_confirm: None,
+            git_prompt: None,
+            git_menu_open: false,
+            git_session: None,
             event_proxy: None,
             completion: None,
             tcl_candidates_cache: None,
@@ -2007,6 +2248,21 @@ impl App {
                 return;
             }
         }
+        if let Some(session) = &self.git_session {
+            if [
+                session.status_buffer,
+                session.files_buffer,
+                session.branches_buffer,
+                session.commits_buffer,
+                session.stash_buffer,
+                session.main_buffer,
+            ]
+            .contains(&id)
+            {
+                self.git_session_close();
+                return;
+            }
+        }
         self.buffers.close(id);
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
         for pane in self.windows().windows() {
@@ -2525,6 +2781,500 @@ impl App {
             }
         }
         self.wake_caret();
+    }
+
+    /// `SPC g g`: opens (or, if one's already open, refocuses/refreshes)
+    /// the Lazygit-style multi-pane session -- Status/Files/Branches/
+    /// Commits/Stash stacked on the left, Main (diff view) on the right,
+    /// each with its own title bar. Mirrors `open_docker_panel` closely
+    /// (session-reuse-on-reopen, its own workspace, a background
+    /// poller) -- see `GitSession`'s own doc comment for the one real
+    /// structural difference (every `fenix-git` call targets a specific
+    /// repo root, not a daemon reachable regardless of cwd).
+    pub(crate) fn open_git_panel(&mut self) {
+        if let Some(session) = &self.git_session {
+            let (workspace_index, files_pane) = (session.workspace_index, session.files_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(files_pane);
+            self.git_refresh_session();
+            self.wake_caret();
+            return;
+        }
+
+        let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let status = fenix_git::status(&repo_root);
+        let files = fenix_git::list_files(&repo_root);
+        let branches = fenix_git::list_branches(&repo_root);
+        let commits = fenix_git::list_commits(&repo_root, 50);
+        let stashes = fenix_git::list_stashes(&repo_root);
+
+        let (staged, unstaged, untracked) = file_counts(&files);
+        let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
+        let files_panel = git_panel::render_files(&files);
+        let branches_panel = git_panel::render_branches(&branches);
+        let commits_panel = git_panel::render_commits(&commits);
+        let stash_panel = git_panel::render_stash(&stashes);
+        let main_panel = git_panel::render_main(None);
+
+        let status_buffer = self.buffers.open_git(&status_panel.text);
+        let files_buffer = self.buffers.open_git(&files_panel.text);
+        let branches_buffer = self.buffers.open_git(&branches_panel.text);
+        let commits_buffer = self.buffers.open_git(&commits_panel.text);
+        let stash_buffer = self.buffers.open_git(&stash_panel.text);
+        let main_buffer = self.buffers.open_git(&main_panel.text);
+        self.git_lines.insert(status_buffer, status_panel.lines);
+        self.git_lines.insert(files_buffer, files_panel.lines);
+        self.git_lines.insert(branches_buffer, branches_panel.lines);
+        self.git_lines.insert(commits_buffer, commits_panel.lines);
+        self.git_lines.insert(stash_buffer, stash_panel.lines);
+        self.git_lines.insert(main_buffer, main_panel.lines);
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(status_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let status_pane = self.focused_pane_id();
+
+        // Right column first, at the outer split -- same ~35/65 left/
+        // right proportions `open_docker_panel` uses for its own Status/
+        // Logs vs. Containers/Images/Volumes split, and for the same
+        // reason: list rows don't need much width, a diff view does.
+        let main_pane = self.windows_mut().split(SplitKind::Vertical, main_buffer);
+        self.workspaces.active_pane_states_mut().insert(main_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.15);
+
+        // Left column: Status/Files/Branches/Commits/Stash stacked.
+        // Status is shrunk well below the default 50/50 split (it's a
+        // handful of fixed overview lines, not a list); everything after
+        // that cascades naturally the same way Containers/Images/Volumes
+        // already do for the Docker panel -- Files (split off Status)
+        // keeps the biggest remaining share "for free," and each further
+        // split below it takes half of whatever's left, without needing
+        // its own explicit resize.
+        self.windows_mut().focus(status_pane);
+        let files_pane = self.windows_mut().split(SplitKind::Horizontal, files_buffer);
+        self.workspaces.active_pane_states_mut().insert(files_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.35);
+        let branches_pane = self.windows_mut().split(SplitKind::Horizontal, branches_buffer);
+        self.workspaces.active_pane_states_mut().insert(branches_pane, PaneState::seeded_at(cursor));
+        let commits_pane = self.windows_mut().split(SplitKind::Horizontal, commits_buffer);
+        self.workspaces.active_pane_states_mut().insert(commits_pane, PaneState::seeded_at(cursor));
+        let stash_pane = self.windows_mut().split(SplitKind::Horizontal, stash_buffer);
+        self.workspaces.active_pane_states_mut().insert(stash_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().focus(files_pane);
+
+        self.pane_titles.insert(status_pane, "Status".to_string());
+        self.pane_titles.insert(files_pane, "Files".to_string());
+        self.pane_titles.insert(branches_pane, "Branches".to_string());
+        self.pane_titles.insert(commits_pane, "Commits".to_string());
+        self.pane_titles.insert(stash_pane, "Stash".to_string());
+        self.pane_titles.insert(main_pane, "Main".to_string());
+
+        // Same "only a real, main.rs-launched App spawns anything" posture
+        // as `open_docker_panel`'s own stats poller.
+        let status_poller = self
+            .event_proxy
+            .clone()
+            .map(|proxy| GitStatusPoller::spawn(repo_root.clone(), move |event| proxy.send_event(event).is_ok()));
+
+        self.git_session = Some(GitSession {
+            workspace_index,
+            status_pane,
+            files_pane,
+            branches_pane,
+            commits_pane,
+            stash_pane,
+            main_pane,
+            status_buffer,
+            files_buffer,
+            branches_buffer,
+            commits_buffer,
+            stash_buffer,
+            main_buffer,
+            repo_root,
+            files,
+            branches,
+            commits,
+            stashes,
+            status,
+            status_poller,
+        });
+
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Rewrites `id`'s buffer text from a freshly-rendered `GitPanel`,
+    /// resetting every pane currently showing it back to the top --
+    /// mirrors `set_docker_buffer` exactly.
+    fn set_git_buffer(&mut self, id: BufferId, panel: git_panel::GitPanel) {
+        self.git_lines.insert(id, panel.lines);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    /// `FenixUserEvent::GitStatusReady` handling: caches the fresh status
+    /// and re-renders the Status pane -- mirrors `apply_docker_stats`,
+    /// including its "reset to top is harmless, Status is a small read-
+    /// only info pane" reasoning.
+    fn apply_git_status(&mut self, status: Option<fenix_git::RepoStatus>) {
+        let Some(session) = self.git_session.as_mut() else { return };
+        session.status = status.clone();
+        let (staged, unstaged, untracked) = file_counts(&session.files);
+        let status_buffer = session.status_buffer;
+        self.set_git_buffer(status_buffer, git_panel::render_status(status.as_ref(), staged, unstaged, untracked));
+    }
+
+    /// `u` (on any pane): re-lists files/branches/commits/stashes and the
+    /// repo status, re-renders all six panes, then re-syncs Main from
+    /// whatever's now under the cursor. Mirrors `docker_refresh_session`.
+    fn git_refresh_session(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let (status_buffer, files_buffer, branches_buffer, commits_buffer, stash_buffer) =
+            (session.status_buffer, session.files_buffer, session.branches_buffer, session.commits_buffer, session.stash_buffer);
+
+        let status = fenix_git::status(&repo_root);
+        let files = fenix_git::list_files(&repo_root);
+        let branches = fenix_git::list_branches(&repo_root);
+        let commits = fenix_git::list_commits(&repo_root, 50);
+        let stashes = fenix_git::list_stashes(&repo_root);
+        let (staged, unstaged, untracked) = file_counts(&files);
+        let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
+        let files_panel = git_panel::render_files(&files);
+        let branches_panel = git_panel::render_branches(&branches);
+        let commits_panel = git_panel::render_commits(&commits);
+        let stash_panel = git_panel::render_stash(&stashes);
+
+        if let Some(session) = self.git_session.as_mut() {
+            session.status = status;
+            session.files = files;
+            session.branches = branches;
+            session.commits = commits;
+            session.stashes = stashes;
+        }
+        self.set_git_buffer(status_buffer, status_panel);
+        self.set_git_buffer(files_buffer, files_panel);
+        self.set_git_buffer(branches_buffer, branches_panel);
+        self.set_git_buffer(commits_buffer, commits_panel);
+        self.set_git_buffer(stash_buffer, stash_panel);
+        self.git_sync_main();
+    }
+
+    /// Which of the current `git_session`'s six panes (if any) is
+    /// focused right now -- mirrors `docker_focused_role`, including the
+    /// same active-workspace guard (see its own doc comment for why
+    /// that's needed: `WindowId`s are only unique within one workspace).
+    fn git_focused_role(&self) -> Option<GitPaneRole> {
+        let session = self.git_session.as_ref()?;
+        if self.workspaces.active_index() != session.workspace_index {
+            return None;
+        }
+        let focused = self.focused_pane_id();
+        if focused == session.status_pane {
+            Some(GitPaneRole::Status)
+        } else if focused == session.files_pane {
+            Some(GitPaneRole::Files)
+        } else if focused == session.branches_pane {
+            Some(GitPaneRole::Branches)
+        } else if focused == session.commits_pane {
+            Some(GitPaneRole::Commits)
+        } else if focused == session.stash_pane {
+            Some(GitPaneRole::Stash)
+        } else if focused == session.main_pane {
+            Some(GitPaneRole::Main)
+        } else {
+            None
+        }
+    }
+
+    /// What the cursor's current line on a Git buffer targets -- mirrors
+    /// `docker_entry_at_cursor`.
+    fn git_entry_at_cursor(&self) -> Option<git_panel::GitEntry> {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        self.git_lines.get(&self.focused_buffer_id()).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).and_then(|meta| meta.entry.clone())
+    }
+
+    /// The selected row's full `FileEntry` (not just its path), looked
+    /// up in the session's own cached `files` -- needed by discard (to
+    /// know whether it's untracked) and by `git_sync_main` (to know
+    /// whether it's staged).
+    fn git_selected_file(&self) -> Option<fenix_git::FileEntry> {
+        let git_panel::GitEntry::File(path) = self.git_entry_at_cursor()? else { return None };
+        self.git_session.as_ref()?.files.iter().find(|f| f.path == path).cloned()
+    }
+
+    /// Re-renders Main from whichever row is now under the cursor in
+    /// Files/Commits/Stash -- a no-op for Branches/Status/Main itself
+    /// (see `git_panel::render_status`'s own doc comment for why
+    /// Branches doesn't drive Main the way Files/Commits/Stash do: a
+    /// branch has no single "diff" of its own to show). Untracked files
+    /// have nothing for `git diff` to show (see `fenix_git::file_diff`'s
+    /// own doc comment) -- shown as a placeholder instead of an empty
+    /// diff.
+    fn git_sync_main(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let main_buffer = session.main_buffer;
+        let diff = match self.git_entry_at_cursor() {
+            Some(git_panel::GitEntry::File(path)) => {
+                let untracked = self.git_selected_file().is_some_and(|f| f.index_status == '?' && f.worktree_status == '?');
+                if untracked {
+                    Some("(untracked file -- nothing to diff yet; stage it to include it in a commit)".to_string())
+                } else {
+                    let staged = self.git_selected_file().is_some_and(|f| f.index_status != '.' && f.index_status != '?');
+                    fenix_git::file_diff(&repo_root, &path, staged).ok()
+                }
+            }
+            Some(git_panel::GitEntry::Commit(hash)) => fenix_git::commit_diff(&repo_root, &hash).ok(),
+            Some(git_panel::GitEntry::Stash(index)) => fenix_git::stash_diff(&repo_root, index).ok(),
+            Some(git_panel::GitEntry::Branch(_)) | None => return,
+        };
+        self.set_git_buffer(main_buffer, git_panel::render_main(diff.as_deref()));
+    }
+
+    /// `s` on Files: stages the file under the cursor.
+    fn git_stage_selected(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
+            if let Err(err) = fenix_git::stage_file(&repo_root, &path) {
+                eprintln!("fenix: git stage failed: {err}");
+            }
+            self.git_refresh_session();
+        }
+    }
+
+    /// `S` on Files: unstages the file under the cursor.
+    fn git_unstage_selected(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
+            if let Err(err) = fenix_git::unstage_file(&repo_root, &path) {
+                eprintln!("fenix: git unstage failed: {err}");
+            }
+            self.git_refresh_session();
+        }
+    }
+
+    /// `a` on Files: stages every changed file.
+    fn git_stage_all(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Err(err) = fenix_git::stage_all(&repo_root) {
+            eprintln!("fenix: git stage all failed: {err}");
+        }
+        self.git_refresh_session();
+    }
+
+    /// `A` on Files: unstages every staged file.
+    fn git_unstage_all(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Err(err) = fenix_git::unstage_all(&repo_root) {
+            eprintln!("fenix: git unstage all failed: {err}");
+        }
+        self.git_refresh_session();
+    }
+
+    /// `z` on Files: stashes every change (tracked + untracked staged/
+    /// unstaged), git's own default `stash push` behavior.
+    fn git_stash_all(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Err(err) = fenix_git::stash_push(&repo_root) {
+            eprintln!("fenix: git stash failed: {err}");
+        }
+        self.git_refresh_session();
+    }
+
+    /// `P` on Files: pushes the current branch.
+    fn git_push(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Err(err) = fenix_git::push(&repo_root) {
+            eprintln!("fenix: git push failed: {err}");
+        }
+        self.git_refresh_session();
+    }
+
+    /// `p` on Files: pulls into the current branch.
+    fn git_pull(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Err(err) = fenix_git::pull(&repo_root) {
+            eprintln!("fenix: git pull failed: {err}");
+        }
+        self.git_refresh_session();
+    }
+
+    /// `c` on Branches: checks out the branch under the cursor.
+    fn git_checkout_selected_branch(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Some(git_panel::GitEntry::Branch(name)) = self.git_entry_at_cursor() {
+            if let Err(err) = fenix_git::checkout_branch(&repo_root, &name) {
+                eprintln!("fenix: git checkout failed: {err}");
+            }
+            self.git_refresh_session();
+        }
+    }
+
+    /// `a` on Stash: applies the entry under the cursor (keeps it in the
+    /// stash list -- see `g` for apply-and-drop).
+    fn git_stash_apply_selected(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Some(git_panel::GitEntry::Stash(index)) = self.git_entry_at_cursor() {
+            if let Err(err) = fenix_git::stash_apply(&repo_root, index) {
+                eprintln!("fenix: git stash apply failed: {err}");
+            }
+            self.git_refresh_session();
+        }
+    }
+
+    /// `g` on Stash: applies the entry under the cursor and removes it
+    /// from the stash list in one step.
+    fn git_stash_pop_selected(&mut self) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        if let Some(git_panel::GitEntry::Stash(index)) = self.git_entry_at_cursor() {
+            if let Err(err) = fenix_git::stash_pop(&repo_root, index) {
+                eprintln!("fenix: git stash pop failed: {err}");
+            }
+            self.git_refresh_session();
+        }
+    }
+
+    /// `c` on Files: arms the commit-message prompt.
+    fn git_commit_prompt(&mut self) {
+        self.git_prompt = Some(GitPrompt { kind: GitPromptKind::CommitMessage, input: String::new() });
+    }
+
+    /// `n` on Branches: arms the new-branch-name prompt.
+    fn git_new_branch_prompt(&mut self) {
+        self.git_prompt = Some(GitPrompt { kind: GitPromptKind::NewBranch, input: String::new() });
+    }
+
+    /// `d` on Files/Branches/Stash: arms the matching destructive-action
+    /// confirmation for whatever's under the cursor.
+    fn git_arm_confirm(&mut self) {
+        let Some(entry) = self.git_entry_at_cursor() else { return };
+        let action = match entry {
+            git_panel::GitEntry::File(path) => {
+                let untracked = self.git_selected_file().is_some_and(|f| f.index_status == '?' && f.worktree_status == '?');
+                GitConfirmAction::DiscardFile { path, untracked }
+            }
+            git_panel::GitEntry::Branch(name) => GitConfirmAction::DeleteBranch { name },
+            git_panel::GitEntry::Stash(index) => GitConfirmAction::DropStash { index },
+            git_panel::GitEntry::Commit(_) => return,
+        };
+        self.git_confirm = Some(action);
+    }
+
+    /// `SPC g q`: closes the whole Git session -- mirrors
+    /// `docker_session_close` exactly.
+    pub(crate) fn git_session_close(&mut self) {
+        let Some(session) = self.git_session.take() else { return };
+        for id in
+            [session.status_buffer, session.files_buffer, session.branches_buffer, session.commits_buffer, session.stash_buffer, session.main_buffer]
+        {
+            self.buffers.close(id);
+            self.git_lines.remove(&id);
+        }
+        for pane in [session.status_pane, session.files_pane, session.branches_pane, session.commits_pane, session.stash_pane, session.main_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Modeline text while a Git destructive action is armed -- mirrors
+    /// `docker_confirm_text`.
+    fn git_confirm_text(&self) -> Option<String> {
+        let action = self.git_confirm.as_ref()?;
+        Some(match action {
+            GitConfirmAction::DiscardFile { path, .. } => format!("Discard changes to {path}? (y/n)"),
+            GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
+            GitConfirmAction::DropStash { index } => format!("Drop stash@{{{index}}}? (y/n)"),
+        })
+    }
+
+    /// Resolves an armed Git destructive action: `y` confirms and runs
+    /// it, anything else cancels. Mirrors `docker_confirm_key`.
+    fn git_confirm_key(&mut self, keypress: KeyPress) {
+        let action = self.git_confirm.take();
+        if keypress.code == KeyCode::Char('y') {
+            if let (Some(action), Some(session)) = (action, self.git_session.as_ref()) {
+                let repo_root = session.repo_root.clone();
+                let result = match action {
+                    GitConfirmAction::DiscardFile { path, untracked } => fenix_git::discard_file(&repo_root, &path, untracked),
+                    GitConfirmAction::DeleteBranch { name } => fenix_git::delete_branch(&repo_root, &name, false),
+                    GitConfirmAction::DropStash { index } => fenix_git::stash_drop(&repo_root, index),
+                };
+                if let Err(err) = result {
+                    eprintln!("fenix: git action failed: {err}");
+                }
+                self.git_refresh_session();
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `git_prompt` is
+    /// active -- mirrors `explorer_prompt_text`.
+    fn git_prompt_text(&self) -> Option<String> {
+        let prompt = self.git_prompt.as_ref()?;
+        Some(match prompt.kind {
+            GitPromptKind::CommitMessage => format!("Commit message: {}", prompt.input),
+            GitPromptKind::NewBranch => format!("New branch name: {}", prompt.input),
+        })
+    }
+
+    /// Mirrors `explorer_prompt_key`'s text-accumulation shape exactly.
+    fn git_prompt_key(&mut self, key: KeyPress) {
+        let Some(prompt) = &mut self.git_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.git_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let GitPrompt { kind, input } = self.git_prompt.take().unwrap();
+                self.git_prompt_submit(kind, &input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    fn git_prompt_submit(&mut self, kind: GitPromptKind, input: &str) {
+        if input.trim().is_empty() {
+            return;
+        }
+        let Some(session) = self.git_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let result = match kind {
+            GitPromptKind::CommitMessage => fenix_git::commit(&repo_root, input),
+            GitPromptKind::NewBranch => fenix_git::create_branch(&repo_root, input),
+        };
+        if let Err(err) = result {
+            eprintln!("fenix: git operation failed: {err}");
+        }
+        self.git_refresh_session();
     }
 
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
@@ -3183,6 +3933,7 @@ impl App {
             FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
+            FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -3203,6 +3954,8 @@ impl App {
         // whatever that key would otherwise do (real Lazydocker's own
         // "view command options" convention).
         self.docker_menu_open = false;
+        // Same reasoning, for the Git panel's own `x` which-key menu.
+        self.git_menu_open = false;
 
         // An active prompt (rename/create-name/confirm-delete) captures
         // every keystroke until it resolves -- takes priority over
@@ -3218,6 +3971,18 @@ impl App {
         // anything else cancels (see `docker_confirm_key`).
         if self.docker_confirm_remove.is_some() {
             self.docker_confirm_key(keypress);
+            return;
+        }
+
+        // Same capturing shape for the Git panel's own destructive-action
+        // confirm and its commit-message/new-branch-name prompt -- mirrors
+        // `docker_confirm_remove`/`explorer_prompt` exactly.
+        if self.git_confirm.is_some() {
+            self.git_confirm_key(keypress);
+            return;
+        }
+        if self.git_prompt.is_some() {
+            self.git_prompt_key(keypress);
             return;
         }
 
@@ -3491,6 +4256,97 @@ impl App {
             }
         }
 
+        // Lazygit-style multi-pane panel -- same "claim a small, pane-
+        // scoped action-key set, everything else falls through to Vim"
+        // shape as the Docker block above. Real lazygit's own `<space>`
+        // stage-toggle isn't reachable here: `SPC` is already the global
+        // leader-key trigger in Normal mode, checked earlier than this
+        // block ever runs (see `git_menu_popup`'s own doc comment) -- so
+        // Files uses separate `s`/`S` stage/unstage keys instead, matching
+        // Docker's own `s`/`S`/`R` precedent of distinct keys per action
+        // rather than a single toggle.
+        if let Some(role) = self.git_focused_role() {
+            use GitPaneRole::*;
+            match (role, keypress.code) {
+                (Files, KeyCode::Char('s')) if keypress.mods == Mods::default() => {
+                    self.git_stage_selected();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('S')) if keypress.mods == Mods::default() => {
+                    self.git_unstage_selected();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('a')) if keypress.mods == Mods::default() => {
+                    self.git_stage_all();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('A')) if keypress.mods == Mods::default() => {
+                    self.git_unstage_all();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('z')) if keypress.mods == Mods::default() => {
+                    self.git_stash_all();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('P')) if keypress.mods == Mods::default() => {
+                    self.git_push();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('p')) if keypress.mods == Mods::default() => {
+                    self.git_pull();
+                    self.wake_caret();
+                    return;
+                }
+                (Files, KeyCode::Char('c')) if keypress.mods == Mods::default() => {
+                    self.git_commit_prompt();
+                    self.wake_caret();
+                    return;
+                }
+                (Branches, KeyCode::Char('c')) if keypress.mods == Mods::default() => {
+                    self.git_checkout_selected_branch();
+                    self.wake_caret();
+                    return;
+                }
+                (Branches, KeyCode::Char('n')) if keypress.mods == Mods::default() => {
+                    self.git_new_branch_prompt();
+                    self.wake_caret();
+                    return;
+                }
+                (Stash, KeyCode::Char('a')) if keypress.mods == Mods::default() => {
+                    self.git_stash_apply_selected();
+                    self.wake_caret();
+                    return;
+                }
+                (Stash, KeyCode::Char('g')) if keypress.mods == Mods::default() => {
+                    self.git_stash_pop_selected();
+                    self.wake_caret();
+                    return;
+                }
+                (Files | Branches | Stash, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
+                    self.git_arm_confirm();
+                    self.wake_caret();
+                    return;
+                }
+                (_, KeyCode::Char('u')) if keypress.mods == Mods::default() => {
+                    self.git_refresh_session();
+                    self.wake_caret();
+                    return;
+                }
+                (Files | Branches | Commits | Stash, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                    self.git_menu_open = true;
+                    self.wake_caret();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -3511,6 +4367,13 @@ impl App {
             && self.docker_session.as_ref().is_some_and(|s| s.logs_container.is_none())
         {
             self.docker_sync_details();
+        }
+        // Same "cheap, derive fresh from whatever's under the cursor now"
+        // re-sync for the Git panel's Main pane, after ordinary Vim
+        // movement in Files/Commits/Stash (Branches has no diff of its
+        // own to show -- see `git_sync_main`'s own doc comment).
+        if matches!(self.git_focused_role(), Some(GitPaneRole::Files | GitPaneRole::Commits | GitPaneRole::Stash)) {
+            self.git_sync_main();
         }
         match vim_event {
             VimEvent::RequestSave => {
@@ -3623,6 +4486,8 @@ impl App {
                 self.dired_states.get(&buffer_id).map(|s| s.cwd.display().to_string()).unwrap_or_else(|| "*dired*".to_string())
             } else if ob.kind == BufferKind::Docker {
                 "*docker*".to_string()
+            } else if ob.kind == BufferKind::Git {
+                "*git*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -3639,6 +4504,8 @@ impl App {
             || self.pending_grep_query.is_some()
             || self.explorer_prompt.is_some()
             || self.docker_confirm_remove.is_some()
+            || self.git_confirm.is_some()
+            || self.git_prompt.is_some()
         {
             return None;
         }
@@ -3714,6 +4581,12 @@ impl App {
         if let Some(confirm_text) = self.docker_confirm_text() {
             return confirm_text;
         }
+        if let Some(confirm_text) = self.git_confirm_text() {
+            return confirm_text;
+        }
+        if let Some(prompt_text) = self.git_prompt_text() {
+            return prompt_text;
+        }
         let (mode_label, suffix) = self.modeline_pieces().unwrap();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
     }
@@ -3764,6 +4637,7 @@ impl App {
             || ob.kind == BufferKind::Dashboard
             || ob.kind == BufferKind::Explorer
             || ob.kind == BufferKind::Docker
+            || ob.kind == BufferKind::Git
         {
             return 0;
         }
@@ -3884,6 +4758,7 @@ impl App {
         // most), so this is cheap.
         let dashboard_lines = self.dashboard_lines.get(&id).cloned();
         let docker_lines = self.docker_lines.get(&id).cloned();
+        let git_lines = self.git_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -3912,6 +4787,9 @@ impl App {
         }
         if ob.kind == BufferKind::Docker {
             return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Git {
+            return git_highlights_for_visible_range(ob, git_lines.as_deref(), render_base_line, rows, theme);
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -4219,6 +5097,70 @@ impl App {
             DockerPaneRole::Images => &[("r", "run"), ("d", "remove"), ("u", "refresh")],
             DockerPaneRole::Volumes => &[("u", "refresh")],
             DockerPaneRole::Status | DockerPaneRole::Logs => return None,
+        };
+
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+
+        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING).max(1);
+        let shown_count = bindings.len().min(max_rows);
+
+        const KEY_COLUMN_CHARS: usize = 6;
+        let longest_label = bindings[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
+        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
+        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        for (i, (key, label)) in bindings[..shown_count].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            spans.push((format!("{key:<KEY_COLUMN_CHARS$}"), theme.caret_text, false));
+            spans.push(((*label).to_string(), theme.fg_modeline, false));
+        }
+
+        let height = shown_count as f32 * line_height + WHICH_KEY_PADDING;
+        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
+        Some((rect, spans))
+    }
+
+    /// The Git panel's contextual "view command options" popup (`x` on a
+    /// Files/Branches/Commits/Stash pane) -- mirrors `docker_menu_popup`
+    /// exactly, including its own note on why literal Vim/lazygit
+    /// `<space>`-based stage-toggle isn't used here: `SPC` is already
+    /// globally claimed as Fenix's leader-key trigger (checked earlier
+    /// than any pane-role routing in `handle_key`), so Files uses
+    /// separate `s`/`S` stage/unstage keys instead, matching the
+    /// existing Docker-panel precedent of separate keys over a single
+    /// toggle (`s`/`S` start/stop, `R` restart) rather than inventing a
+    /// new convention. `None` on Status/Main, which have no bindings of
+    /// their own beyond the global `u` (mirrors Docker's Status/Logs).
+    fn git_menu_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        if !self.git_menu_open {
+            return None;
+        }
+        let bindings: &[(&str, &str)] = match self.git_focused_role()? {
+            GitPaneRole::Files => &[
+                ("s", "stage"),
+                ("S", "unstage"),
+                ("a", "stage all"),
+                ("A", "unstage all"),
+                ("c", "commit"),
+                ("d", "discard"),
+                ("z", "stash all"),
+                ("P", "push"),
+                ("p", "pull"),
+                ("u", "refresh"),
+            ],
+            GitPaneRole::Branches => &[("c", "checkout"), ("n", "new branch"), ("d", "delete"), ("u", "refresh")],
+            GitPaneRole::Commits => &[("u", "refresh")],
+            GitPaneRole::Stash => &[("a", "apply"), ("g", "pop"), ("d", "drop"), ("u", "refresh")],
+            GitPaneRole::Status | GitPaneRole::Main => return None,
         };
 
         let (char_width, line_height) = match &self.text {
@@ -4699,6 +5641,10 @@ impl App {
             Some(prompt_text)
         } else if let Some(confirm_text) = self.docker_confirm_text() {
             Some(confirm_text)
+        } else if let Some(confirm_text) = self.git_confirm_text() {
+            Some(confirm_text)
+        } else if let Some(prompt_text) = self.git_prompt_text() {
+            Some(prompt_text)
         } else if modeline_pieces.is_none() {
             Some(format!(":{}", self.vim.command_line()))
         } else {
@@ -4717,6 +5663,9 @@ impl App {
         // focused, where a leader/operator-pending sequence or an Insert-
         // mode completion session can't simultaneously be active.
         let docker_menu_popup = self.docker_menu_popup(window_width, modeline_top);
+        // Same non-coexistence reasoning as `docker_menu_popup` above,
+        // just for the Git session.
+        let git_menu_popup = self.git_menu_popup(window_width, modeline_top);
         // Never `Some` at the same time as `which_key_popup` -- one only
         // appears mid-Normal/-pending-sequence, the other only in Insert
         // mode -- so `popup_rects` below never ends up with more than one
@@ -4807,6 +5756,11 @@ impl App {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::DockerMenu, rect.w, &refs);
             popup_rects.push((popup::PopupId::DockerMenu, *rect));
+        }
+        if let Some((rect, spans)) = &git_menu_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::GitMenu, rect.w, &refs);
+            popup_rects.push((popup::PopupId::GitMenu, *rect));
         }
         if let Some((rect, spans, selected_row)) = &completion_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();

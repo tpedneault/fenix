@@ -82,6 +82,30 @@ for anyone curious to poke around or build on it.
   next keypress, which still does whatever it would normally do. `SPC d
   b` builds an image from the current project root's `Dockerfile`;
   `SPC d q` closes the whole session.
+- **Git panel** (Lazygit-style): `SPC g g` opens a real, six-pane
+  workspace -- Status/Files/Branches/Commits/Stash stacked on the left
+  (each its own real, Vim-navigable buffer with a title bar), Main on
+  the right showing a diff of whatever's under the cursor in Files/
+  Commits/Stash. Status is a fixed repo-overview summary (branch,
+  upstream, ahead/behind, staged/unstaged/untracked counts) that live-
+  updates on its own every ~2s via a background poller, independent of
+  cursor movement -- the inverse of the Docker panel's Status/Logs
+  split, same pattern, roles swapped to match what's actually true of
+  each domain. On Files: `s`/`S` stage/unstage the file under the
+  cursor, `a`/`A` stage/unstage everything, `c` commits (prompts for a
+  message), `d` discards the file under the cursor (`y`/`n` confirm,
+  handling untracked files correctly via `git clean` rather than `git
+  checkout`), `z` stashes every change, `P`/`p` push/pull. On Branches:
+  `c` checks out the branch under the cursor, `n` creates a new one
+  (prompts for a name), `d` deletes it (confirm). On Stash: `a` applies
+  the entry under the cursor, `g` pops it, `d` drops it (confirm). `u`
+  refreshes the whole session from any pane; `x` on Files/Branches/
+  Commits/Stash shows a contextual popup of that pane's keys, same
+  dismiss-on-next-keypress convention as Docker's. Real lazygit's own
+  `<space>` stage-toggle isn't used here -- `SPC` is already Fenix's
+  global leader-key trigger -- so Files uses separate `s`/`S` keys
+  instead, matching the Docker panel's own `s`/`S`/`R` precedent.
+  `SPC g q` closes the whole session.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
@@ -161,6 +185,8 @@ popup shows what keys continue it.
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
+| `SPC g g` | Open (or refocus/refresh) the Git panel |
+| `SPC g q` | Close the Git panel session |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
 | `SPC w h/j/k/l` | Move focus between windows |
@@ -226,6 +252,41 @@ special, and only on the pane named:
 | `d` | Containers, Images | Remove the entry under the cursor (`y`/`n` to confirm) |
 | `u` | any | Refresh the whole session |
 | `x` | Containers, Images, Volumes | Show this pane's available keys |
+
+### Git panel (`SPC g g`)
+
+Opens its own workspace with six real, titled panes -- Status, Files,
+Branches, Commits, and Stash stacked on the left, Main on the right.
+Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...` all
+work). Moving the cursor in Files, Commits, or Stash re-syncs Main to
+that row's diff; Status doesn't follow the cursor -- it's a fixed
+repo-overview summary that live-updates on its own every ~2s
+regardless of where the cursor is. Only these are special, and only on
+the pane named:
+
+| Keys | Pane | Action |
+|---|---|---|
+| `s` | Files | Stage the file under the cursor |
+| `S` | Files | Unstage the file under the cursor |
+| `a` | Files | Stage every changed file |
+| `A` | Files | Unstage every staged file |
+| `c` | Files | Commit (prompts for a message) |
+| `d` | Files | Discard the file under the cursor (`y`/`n` to confirm) |
+| `z` | Files | Stash every change |
+| `P` / `p` | Files | Push / pull |
+| `c` | Branches | Checkout the branch under the cursor |
+| `n` | Branches | New branch (prompts for a name) |
+| `d` | Branches | Delete the branch under the cursor (`y`/`n` to confirm) |
+| `a` | Stash | Apply the entry under the cursor |
+| `g` | Stash | Pop the entry under the cursor |
+| `d` | Stash | Drop the entry under the cursor (`y`/`n` to confirm) |
+| `u` | any | Refresh the whole session |
+| `x` | Files, Branches, Commits, Stash | Show this pane's available keys |
+
+Real lazygit's own `<space>` stage-toggle isn't used here, since `SPC`
+is already Fenix's global leader-key trigger -- Files uses separate
+`s`/`S` keys instead, the same distinct-keys-per-action convention the
+Docker panel's own `s`/`S`/`R` already established.
 
 ### Autocompletion popup (Tcl, Insert mode)
 

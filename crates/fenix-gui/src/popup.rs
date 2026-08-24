@@ -29,6 +29,11 @@ pub enum PopupId {
     /// either -- it only shows while the Docker panel has focus, where
     /// neither of those other two popups can appear.
     DockerMenu,
+    /// The Git panel's own contextual "view command options" popup
+    /// (`x` on a Files/Branches/Commits/Stash pane) -- same shape and
+    /// same non-coexistence reasoning as `DockerMenu`, just for the Git
+    /// session instead.
+    GitMenu,
 }
 
 /// Where a popup wants to appear, before clamping to the window.

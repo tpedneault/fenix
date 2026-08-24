@@ -56,6 +56,8 @@ impl CommandRegistry {
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
+        registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
+        registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -179,6 +181,14 @@ fn cmd_docker_build(ctx: &mut CommandCtx) {
 
 fn cmd_docker_close(ctx: &mut CommandCtx) {
     ctx.app.docker_session_close();
+}
+
+fn cmd_git_open(ctx: &mut CommandCtx) {
+    ctx.app.open_git_panel();
+}
+
+fn cmd_git_close(ctx: &mut CommandCtx) {
+    ctx.app.git_session_close();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {

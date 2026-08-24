@@ -28,6 +28,9 @@ pub enum BufferKind {
     /// A Lazydocker-style container/image dashboard (`SPC d d`) -- same
     /// "real buffer, just tagged" shape as `Dashboard`/`Explorer`.
     Docker,
+    /// A Lazygit-style repo status/files/branches/commits/stash panel
+    /// (`SPC g g`) -- same "real buffer, just tagged" shape as `Docker`.
+    Git,
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -121,6 +124,14 @@ impl BufferList {
     /// re-renders `text` via `Buffer::replace_range` on refresh.
     pub fn open_docker(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Docker)
+    }
+
+    /// A real buffer seeded with `text` (a rendered status/files/branches/
+    /// commits/stash listing) and tagged `Git` -- `SPC g g`. Same "real
+    /// buffer, just tagged" shape as `open_docker`; the host re-renders
+    /// `text` via `Buffer::replace_range` on refresh.
+    pub fn open_git(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Git)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
@@ -281,6 +292,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "containers\nimages\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn open_git_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_git("status\nfiles\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "status\nfiles\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Git);
     }
 
     #[test]
