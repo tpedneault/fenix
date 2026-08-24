@@ -23,6 +23,12 @@ pub enum PopupId {
     /// mode -- so no popup-overlap handling is needed anywhere this id
     /// is used.
     Completion,
+    /// The Docker panel's contextual "view command options" popup
+    /// (`x` on a Containers/Images/Volumes pane), anchored `TopRight`
+    /// like `WhichKey`. Never coexists with `WhichKey`/`Completion`
+    /// either -- it only shows while the Docker panel has focus, where
+    /// neither of those other two popups can appear.
+    DockerMenu,
 }
 
 /// Where a popup wants to appear, before clamping to the window.

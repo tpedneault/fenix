@@ -51,20 +51,29 @@ for anyone curious to poke around or build on it.
 - **Startup dashboard**: a real, Vim-navigable buffer listing known
   projects and recent files, shown when Fenix is launched with no file
   argument (`SPC o d` to reopen it later).
-- **Docker panel** (Lazydocker-style): `SPC d d` opens a real, four-pane
+- **Docker panel** (Lazydocker-style): `SPC d d` opens a real, five-pane
   workspace -- Containers/Images/Volumes on the left (each its own real,
-  Vim-navigable buffer with a title bar), a Details pane on the right
-  that live-updates to whatever's under the cursor in the focused left
-  pane. Containers' CPU/MEM ticks on their own every ~2s without a
-  keypress. `s`/`S`/`R` start/stop/restart the container under the
-  cursor, `r` runs a new container from the image under the cursor, `x`
-  removes the container/image under the cursor (with a `y`/`n`
-  confirmation), `u` refreshes. `l` switches Details into a live tail of
-  that container's logs (`docker logs -f`), streaming new lines in and
-  auto-scrolling to the bottom while you're already there -- scroll up
-  to read earlier output and it leaves you alone until you navigate
-  back to the end. `SPC d b` builds an image from the current project
-  root's `Dockerfile`; `SPC d q` closes the whole session.
+  Vim-navigable buffer with a title bar), Status and Logs stacked on the
+  right. Status live-updates to whatever's under the cursor in the
+  focused left pane, including a selected container's CPU/MEM (which
+  also ticks on its own every ~2s without a keypress); Logs is a
+  dedicated pane for streamed log output. Each Containers row is just
+  `[X] name`, prefixed with a one-letter, color-coded status badge
+  (`R` running, `P` paused, `X` exited, etc.) instead of inline text
+  that used to clip at small font sizes. `s`/`S`/`R` start/stop/restart
+  the container under the cursor, `r` runs a new container from the
+  image under the cursor, `d` removes the container/image under the
+  cursor (with a `y`/`n` confirmation), `u` refreshes. `l` switches Logs
+  into a live tail of that container's logs (`docker logs -f`),
+  streaming new lines in and auto-scrolling to the bottom while you're
+  already there -- scroll up to read earlier output and it leaves you
+  alone until you navigate back to the end. Per-pane keybinding hints no
+  longer clip inline either -- press `x` on a Containers/Images/Volumes
+  pane for a Lazydocker-style contextual popup listing that pane's
+  available keys; it's purely informational and dismisses on the very
+  next keypress, which still does whatever it would normally do. `SPC d
+  b` builds an image from the current project root's `Dockerfile`;
+  `SPC d q` closes the whole session.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
@@ -182,21 +191,26 @@ Only these are special:
 
 ### Docker panel (`SPC d d`)
 
-Opens its own workspace with four real, titled panes -- Containers,
-Images, and Volumes stacked on the left, Details on the right. Each is
-an ordinary Vim-navigable buffer (`j k gg G / n N ...` all work); moving
-the cursor in a left pane live-updates Details with that row's info.
-Only these are special, and only on the pane named:
+Opens its own workspace with five real, titled panes -- Containers,
+Images, and Volumes stacked on the left, Status and Logs stacked on the
+right. Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...`
+all work); moving the cursor in a left pane live-updates Status with
+that row's info. A Containers row is just a color-coded status badge
+plus the container's name (`[R]` green for running, `[P]` yellow for
+paused, `[X]` red for exited, etc.) -- press `x` on a pane for a
+which-key-style popup of its available keys instead. Only these are
+special, and only on the pane named:
 
 | Keys | Pane | Action |
 |---|---|---|
 | `s` | Containers | Start the container under the cursor |
 | `S` | Containers | Stop the container under the cursor |
 | `R` | Containers | Restart the container under the cursor |
-| `l` | Containers | Stream that container's logs live into Details (`docker logs -f`) |
+| `l` | Containers | Stream that container's logs live into the Logs pane (`docker logs -f`) |
 | `r` | Images | Run a new detached container from the image under the cursor |
-| `x` | Containers, Images | Remove the entry under the cursor (`y`/`n` to confirm) |
+| `d` | Containers, Images | Remove the entry under the cursor (`y`/`n` to confirm) |
 | `u` | any | Refresh the whole session |
+| `x` | Containers, Images, Volumes | Show this pane's available keys |
 
 ### Autocompletion popup (Tcl, Insert mode)
 

@@ -148,36 +148,54 @@ impl PaneState {
 /// not one-per-workspace: re-pressing `SPC d d` while one already
 /// exists refocuses/refreshes it in place instead of opening a second
 /// (see `open_docker_panel`'s own doc comment) -- this session owns
-/// live background threads/processes (Phases 5-6) that a second,
-/// orphaned session would leak.
+/// live background threads/processes that a second, orphaned session
+/// would leak.
+///
+/// Five panes, not four: Containers/Images/Volumes stacked on the left,
+/// then Status (small, on top) and Logs (below it) stacked on the
+/// right -- Status always shows plain info fields (+ live CPU/MEM once
+/// a stats tick has landed, if the selection is a container) for
+/// whatever's under the cursor in the focused left pane; Logs is
+/// dedicated purely to `l`'s live-streamed log output. Splitting these
+/// into two buffers (rather than the original single "Details" pane
+/// toggling between the two) is what let `docker_sync_details` drop its
+/// old "skip while following logs" gate -- moving the cursor in
+/// Containers now always refreshes Status, streaming logs or not,
+/// since they're no longer the same buffer.
 ///
 /// Role (which pane is which) lives here, not as extra `BufferKind`
-/// variants: all four buffers stay tagged the existing `BufferKind::
-/// Docker`. The Details pane specifically needs to switch role in
-/// place (plain info -> live logs, Phase 6) without becoming a
-/// different buffer, which a `kind` tag is a poor fit for -- `App`'s
-/// action-key routing and `docker_sync_details` both key off *which
-/// pane is focused* (`DockerPaneRole`/`docker_focused_role`) instead.
+/// variants: all five buffers stay tagged the existing `BufferKind::
+/// Docker` -- `App`'s action-key routing and `docker_sync_details` both
+/// key off *which pane is focused* (`DockerPaneRole`/`docker_focused_
+/// role`) instead.
 struct DockerSession {
     workspace_index: usize,
     containers_pane: fenix_window::WindowId,
     images_pane: fenix_window::WindowId,
     volumes_pane: fenix_window::WindowId,
-    details_pane: fenix_window::WindowId,
+    status_pane: fenix_window::WindowId,
+    logs_pane: fenix_window::WindowId,
     containers_buffer: BufferId,
     images_buffer: BufferId,
     volumes_buffer: BufferId,
-    details_buffer: BufferId,
-    /// Last-listed containers/images/volumes, cached so the Details
-    /// pane (`docker_sync_details`) and, later, the stats poller
-    /// (Phase 5) can re-render merged rows without re-running `docker
-    /// ps`/`docker images`/`docker volume ls` on every cursor move/tick.
+    status_buffer: BufferId,
+    logs_buffer: BufferId,
+    /// Last-listed containers/images/volumes, cached so `docker_sync_
+    /// details` and the stats poller can re-render merged rows without
+    /// re-running `docker ps`/`docker images`/`docker volume ls` on
+    /// every cursor move/tick.
     containers: Vec<fenix_docker::Container>,
     images: Vec<fenix_docker::Image>,
     volumes: Vec<fenix_docker::Volume>,
-    /// `Some(id)` once the Details pane has been switched into live
-    /// log-follow mode for container `id` (Phase 6); `None` while it's
-    /// showing plain info/logs snapshots.
+    /// The most recent `docker stats --no-stream` snapshot, cached so
+    /// the Status pane can show live CPU/MEM for whichever container is
+    /// currently selected without needing its own separate fetch --
+    /// same "cache what the poller already produced" reasoning as
+    /// `containers`/`images`/`volumes`.
+    last_stats: Vec<fenix_docker::ContainerStat>,
+    /// `Some(id)` once the Logs pane has been switched into live
+    /// log-follow mode for container `id`; `None` before `l` has ever
+    /// been pressed this session.
     logs_container: Option<String>,
     /// The session's background stats poller -- `None` when the session
     /// was opened without a real `event_proxy` (every test, since `App::
@@ -324,7 +342,7 @@ impl Drop for DockerLogFollower {
     }
 }
 
-/// Which of a `DockerSession`'s four panes is currently focused, if
+/// Which of a `DockerSession`'s five panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,7 +350,8 @@ enum DockerPaneRole {
     Containers,
     Images,
     Volumes,
-    Details,
+    Status,
+    Logs,
 }
 
 /// Cross-thread wake events -- the only way anything outside the winit
@@ -753,11 +772,22 @@ fn dashboard_highlights_for_visible_range(
 
 /// The Docker panel's equivalent of `dashboard_highlights_for_visible_
 /// range` -- same shape, built from `docker_panel::render`'s own per-line
-/// metadata instead of a real parser. `Header` lines get a full-line
-/// accent color; `Footer`/`Empty` get a full-line dim color;
-/// `Container`/`Image` lines only push a range for their dim status/size
-/// portion (from `dim_from` onward) -- the name/repo:tag portion before
-/// it falls back to `content_spans`'s own `theme.fg` default.
+/// metadata instead of a real parser. `Empty` lines get a full-line dim
+/// color; `Container`/`Image`/`Volume`/`Detail` lines push a range for
+/// their dim status/size portion (from `dim_from` onward) -- the name/
+/// repo:tag portion before it falls back to `content_spans`'s own
+/// `theme.fg` default. A Containers row's leading `[X]` status badge
+/// (`meta.badge`) gets its own colored range, resolved from the theme-
+/// agnostic `DockerBadgeColor` bucket to a real theme color here.
+fn docker_badge_color(color: docker_panel::DockerBadgeColor, theme: &Theme) -> glyphon::Color {
+    match color {
+        docker_panel::DockerBadgeColor::Good => theme.git_staged,
+        docker_panel::DockerBadgeColor::Warn => theme.git_modified,
+        docker_panel::DockerBadgeColor::Bad => theme.git_conflicted,
+        docker_panel::DockerBadgeColor::Neutral => theme.gutter_fg,
+    }
+}
+
 fn docker_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<docker_panel::DockerLine>]>,
@@ -775,7 +805,7 @@ fn docker_highlights_for_visible_range(
         let line_start_byte = ob.buffer.char_to_byte(start);
         let line_end_byte = ob.buffer.char_to_byte(start + len);
         match meta.style {
-            docker_panel::DockerLineStyle::Footer | docker_panel::DockerLineStyle::Empty => {
+            docker_panel::DockerLineStyle::Empty => {
                 ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
             }
             docker_panel::DockerLineStyle::Container
@@ -787,6 +817,10 @@ fn docker_highlights_for_visible_range(
                     ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
                 }
             }
+        }
+        if let Some((badge_len, color)) = meta.badge {
+            let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
+            ranges.push((line_start_byte..badge_end_byte, docker_badge_color(color, theme)));
         }
     }
     ranges
@@ -1100,11 +1134,11 @@ pub struct App {
     /// Per-line metadata for every real `BufferKind::Docker` buffer
     /// currently open (`SPC d d`), keyed by `BufferId` -- same per-buffer-
     /// keyed precedent as `dashboard_lines`/`dired_lines`. Consulted by
-    /// the action keys (`s`/`S`/`R`/`r`/`x`) to know what the cursor's
+    /// the action keys (`s`/`S`/`R`/`r`/`d`) to know what the cursor's
     /// current line targets, and by the panel's own syntax-highlight
     /// coloring.
     docker_lines: HashMap<BufferId, Vec<Option<docker_panel::DockerLine>>>,
-    /// Armed by `x` on a Docker buffer row until the next keypress
+    /// Armed by `d` on a Docker buffer row until the next keypress
     /// confirms (`y`) or cancels (anything else) -- same "wait for
     /// exactly one more raw key" shape as `fenix-vim`'s own `r<char>`,
     /// applied here to a destructive remove instead of a replace.
@@ -1112,6 +1146,14 @@ pub struct App {
     /// already do (see `modeline_pieces`/`docker_confirm_text`) to show
     /// what's being confirmed.
     docker_confirm_remove: Option<docker_panel::DockerEntry>,
+    /// Set by `x` on a Docker pane -- shows a which-key-style popup
+    /// listing that pane's available action keys (real Lazydocker's own
+    /// "view command options" convention). Purely informational, not a
+    /// capturing prompt like `docker_confirm_remove`/`explorer_prompt`:
+    /// `handle_key` clears it unconditionally on every keypress *before*
+    /// dispatching that keypress normally, so pressing any key dismisses
+    /// the popup and still does whatever that key would otherwise do.
+    docker_menu_open: bool,
     /// A short title string for whichever panes currently have one --
     /// a general primitive (see `text.rs`'s matching `titles` field),
     /// populated only by the Docker panel's fixed multi-pane layout
@@ -1281,6 +1323,7 @@ impl App {
             dired_lines: HashMap::new(),
             docker_lines: HashMap::new(),
             docker_confirm_remove: None,
+            docker_menu_open: false,
             pane_titles: HashMap::new(),
             docker_session: None,
             event_proxy: None,
@@ -1916,7 +1959,9 @@ impl App {
     pub(crate) fn kill_buffer(&mut self) {
         let id = self.focused_buffer_id();
         if let Some(session) = &self.docker_session {
-            if [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.details_buffer].contains(&id) {
+            if [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer]
+                .contains(&id)
+            {
                 self.docker_session_close();
                 return;
             }
@@ -1960,13 +2005,14 @@ impl App {
 
     /// `SPC d d`: opens (or, if one's already open, refocuses/refreshes)
     /// the Lazydocker-style multi-pane session -- Containers/Images/
-    /// Volumes panes on the left, a Details pane on the right, each with
-    /// its own title bar (`pane_titles`). Deliberately breaks from the
-    /// "always a new buffer/pane, no dedup" precedent `open_dashboard`/
-    /// this feature's own earlier single-buffer form used: a session now
-    /// owns live background threads/processes (Phases 5-6), and a second,
-    /// orphaned one would leak them. Gets its own workspace (`SPC TAB`) so
-    /// it doesn't disturb whatever splits/buffers were already open.
+    /// Volumes stacked on the left, Status (small) and Logs stacked on
+    /// the right, each with its own title bar (`pane_titles`).
+    /// Deliberately breaks from the "always a new buffer/pane, no
+    /// dedup" precedent `open_dashboard`/this feature's own earlier
+    /// single-buffer form used: a session now owns live background
+    /// threads/processes, and a second, orphaned one would leak them.
+    /// Gets its own workspace (`SPC TAB`) so it doesn't disturb whatever
+    /// splits/buffers were already open.
     pub(crate) fn open_docker_panel(&mut self) {
         if let Some(session) = &self.docker_session {
             let (workspace_index, containers_pane) = (session.workspace_index, session.containers_pane);
@@ -1981,30 +2027,38 @@ impl App {
         let images = fenix_docker::list_images();
         let volumes = fenix_docker::list_volumes();
 
-        let containers_panel = docker_panel::render_containers(&containers, &[]);
+        let containers_panel = docker_panel::render_containers(&containers);
         let images_panel = docker_panel::render_images(&images);
         let volumes_panel = docker_panel::render_volumes(&volumes);
-        let details_panel = docker_panel::render_details(None);
+        let status_panel = docker_panel::render_details(None, None);
 
         let containers_buffer = self.buffers.open_docker(&containers_panel.text);
         let images_buffer = self.buffers.open_docker(&images_panel.text);
         let volumes_buffer = self.buffers.open_docker(&volumes_panel.text);
-        let details_buffer = self.buffers.open_docker(&details_panel.text);
+        let status_buffer = self.buffers.open_docker(&status_panel.text);
+        let logs_buffer = self.buffers.open_docker("");
         self.docker_lines.insert(containers_buffer, containers_panel.lines);
         self.docker_lines.insert(images_buffer, images_panel.lines);
         self.docker_lines.insert(volumes_buffer, volumes_panel.lines);
-        self.docker_lines.insert(details_buffer, details_panel.lines);
+        self.docker_lines.insert(status_buffer, status_panel.lines);
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(containers_buffer, cursor);
         let workspace_index = self.workspaces.active_index();
         let containers_pane = self.focused_pane_id();
 
-        // Right column (Details) first, at the outer split -- default
-        // 0.5 ratio, narrowed to ~35/65 next.
-        let details_pane = self.windows_mut().split(SplitKind::Vertical, details_buffer);
-        self.workspaces.active_pane_states_mut().insert(details_pane, PaneState::seeded_at(cursor));
+        // Right column first, at the outer split -- default 0.5 ratio,
+        // narrowed to ~35/65 next (left column is 3 stacked panes, so
+        // it needs less width per pane than the right column's 2).
+        let status_pane = self.windows_mut().split(SplitKind::Vertical, status_buffer);
+        self.workspaces.active_pane_states_mut().insert(status_pane, PaneState::seeded_at(cursor));
         self.windows_mut().resize_focused(-0.15);
+
+        // Right column itself: Status (small, on top) / Logs (the rest)
+        // -- shrink Status down from the default 50/50 split.
+        let logs_pane = self.windows_mut().split(SplitKind::Horizontal, logs_buffer);
+        self.workspaces.active_pane_states_mut().insert(logs_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.2);
 
         // Left column: Containers/Images/Volumes stacked, each split at
         // the default 0.5 ratio -- splitting sequentially like this
@@ -2021,7 +2075,8 @@ impl App {
         self.pane_titles.insert(containers_pane, "Containers".to_string());
         self.pane_titles.insert(images_pane, "Images".to_string());
         self.pane_titles.insert(volumes_pane, "Volumes".to_string());
-        self.pane_titles.insert(details_pane, "Details".to_string());
+        self.pane_titles.insert(status_pane, "Status".to_string());
+        self.pane_titles.insert(logs_pane, "Logs".to_string());
 
         // Only spawned for a real, `main.rs`-launched `App` -- every
         // test's `event_proxy` stays `None` (see `App::new`'s own doc
@@ -2037,14 +2092,17 @@ impl App {
             containers_pane,
             images_pane,
             volumes_pane,
-            details_pane,
+            status_pane,
+            logs_pane,
             containers_buffer,
             images_buffer,
             volumes_buffer,
-            details_buffer,
+            status_buffer,
+            logs_buffer,
             containers,
             images,
             volumes,
+            last_stats: Vec::new(),
             logs_container: None,
             stats_poller,
             log_follower: None,
@@ -2079,71 +2137,26 @@ impl App {
         }
     }
 
-    /// Same job as `set_docker_buffer`, but *preserves* every affected
-    /// pane's cursor row instead of resetting it to the top -- used by
-    /// the automatic ~2s stats tick (`apply_docker_stats`), which would
-    /// otherwise yank the user's cursor back to row 0 roughly 30 times
-    /// a minute. `set_docker_buffer`'s own reset-to-top behavior stays
-    /// exactly right for the *manual* `u` refresh and for switching
-    /// Details between info/log content -- both are real content-shape
-    /// changes (rows can reorder/appear/disappear, or the whole meaning
-    /// of the buffer just changed), where an old cursor position really
-    /// is meaningless; a stats tick never does either, it only appends
-    /// text to the end of already-existing rows.
-    fn refresh_docker_buffer_preserving_cursor(&mut self, id: BufferId, panel: docker_panel::DockerPanel) {
-        self.docker_lines.insert(id, panel.lines);
-        let new_line_count = panel.text.lines().count();
-
-        // Captured *before* the rewrite below -- `Buffer::replace_range`
-        // invalidates any char/line position computed against the old
-        // text, so this has to happen first (same ordering care `syntax_
-        // highlights_for_visible_range` already takes for an analogous
-        // conflicting-borrow reason).
-        let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
-        for pane in self.windows().windows() {
-            if self.windows().content(pane) == Some(&id) {
-                if let Some(ob) = self.buffers.get(id) {
-                    let (line, _) = ob.buffer.line_col(&self.pane_state(pane).cursor);
-                    old_lines.push((pane, line));
-                }
-            }
-        }
-
-        if let Some(ob) = self.buffers.get_mut(id) {
-            let end = ob.buffer.len_chars();
-            let mut scratch_cursor = Cursor::at_start();
-            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
-        }
-
-        for (pane, old_line) in old_lines {
-            let clamped = old_line.min(new_line_count.saturating_sub(1));
-            let Some(ob) = self.buffers.get(id) else { continue };
-            let char_idx = ob.buffer.line_start_char(clamped);
-            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
-            // `rendered_scroll`/`scroll_line` are deliberately left
-            // untouched -- a tick that doesn't change row count (the
-            // overwhelmingly common case) leaves the user's scroll
-            // position completely undisturbed, not just their cursor.
-        }
-    }
-
-    /// `FenixUserEvent::StatsReady` handling: merges a fresh `docker
-    /// stats` snapshot into the Containers pane via the cursor-
-    /// preserving path above. A no-op if no session is open (the stats
-    /// poller is always torn down with its session, but a stray
-    /// already-in-flight event landing right at teardown is a cheap
-    /// no-op to discard rather than something worth racing to prevent).
+    /// `FenixUserEvent::StatsReady` handling: caches the fresh `docker
+    /// stats` snapshot and re-syncs Status so a container's live CPU/MEM
+    /// updates in place if one is currently selected -- Containers rows
+    /// no longer show stats inline (see `docker_panel::render_
+    /// containers`'s own doc comment for why), so there's no Containers-
+    /// buffer rewrite here at all anymore, and Status is small/read-only
+    /// enough that resetting it to the top on every tick (`docker_sync_
+    /// details`'s own `set_docker_buffer` reset-to-top behavior) is
+    /// harmless. A no-op if no session is open (the stats poller is
+    /// always torn down with its session, but a stray already-in-flight
+    /// event landing right at teardown is a cheap no-op to discard).
     fn apply_docker_stats(&mut self, stats: Vec<fenix_docker::ContainerStat>) {
-        let Some(session) = self.docker_session.as_ref() else { return };
-        let containers_buffer = session.containers_buffer;
-        let containers = session.containers.clone();
-        let panel = docker_panel::render_containers(&containers, &stats);
-        self.refresh_docker_buffer_preserving_cursor(containers_buffer, panel);
+        let Some(session) = self.docker_session.as_mut() else { return };
+        session.last_stats = stats;
+        self.docker_sync_details();
     }
 
-    /// `u` (on any of the three left panes, or Details): re-lists
+    /// `u` (on any of the three left panes, Status, or Logs): re-lists
     /// containers/images/volumes from `docker` and re-renders all three,
-    /// then re-syncs Details from whatever's now under the cursor.
+    /// then re-syncs Status from whatever's now under the cursor.
     fn docker_refresh_session(&mut self) {
         let Some(session) = self.docker_session.as_ref() else { return };
         let (containers_buffer, images_buffer, volumes_buffer) =
@@ -2152,7 +2165,7 @@ impl App {
         let containers = fenix_docker::list_containers();
         let images = fenix_docker::list_images();
         let volumes = fenix_docker::list_volumes();
-        let containers_panel = docker_panel::render_containers(&containers, &[]);
+        let containers_panel = docker_panel::render_containers(&containers);
         let images_panel = docker_panel::render_images(&images);
         let volumes_panel = docker_panel::render_volumes(&volumes);
 
@@ -2167,7 +2180,7 @@ impl App {
         self.docker_sync_details();
     }
 
-    /// Which of the current `docker_session`'s four panes (if any) is
+    /// Which of the current `docker_session`'s five panes (if any) is
     /// focused right now -- `None` when there's no session, the active
     /// *workspace* isn't even the session's own one, or the focused
     /// pane belongs to something else entirely. The workspace check
@@ -2189,8 +2202,10 @@ impl App {
             Some(DockerPaneRole::Images)
         } else if focused == session.volumes_pane {
             Some(DockerPaneRole::Volumes)
-        } else if focused == session.details_pane {
-            Some(DockerPaneRole::Details)
+        } else if focused == session.status_pane {
+            Some(DockerPaneRole::Status)
+        } else if focused == session.logs_pane {
+            Some(DockerPaneRole::Logs)
         } else {
             None
         }
@@ -2212,27 +2227,32 @@ impl App {
             .and_then(|meta| meta.entry.clone())
     }
 
-    /// Re-renders the Details pane from whichever row is now under the
+    /// Re-renders the Status pane from whichever row is now under the
     /// cursor in the focused left pane, looked up in the session's own
-    /// cached `containers`/`images`/`volumes` -- pure formatting, no
-    /// `docker` call. A no-op if nothing's selected or there's no
-    /// session at all.
+    /// cached `containers`/`images`/`volumes` (plus `last_stats`, for a
+    /// container's live CPU/MEM) -- pure formatting, no `docker` call.
+    /// A no-op if nothing's selected or there's no session at all.
+    /// Unconditional now that Status and Logs are separate buffers (see
+    /// `DockerSession`'s own doc comment) -- moving the cursor around
+    /// while logs are streaming no longer needs to skip this the way
+    /// the single shared "Details" pane once did.
     fn docker_sync_details(&mut self) {
         let Some(entry) = self.docker_entry_at_cursor() else { return };
         let Some(session) = self.docker_session.as_ref() else { return };
-        let detail = match entry {
+        let (detail, stat) = match entry {
             docker_panel::DockerEntry::Container(id) => {
-                session.containers.iter().find(|c| c.id == id).cloned().map(docker_panel::DockerDetail::Container)
+                let stat = docker_panel::find_stat(&session.last_stats, &id).cloned();
+                (session.containers.iter().find(|c| c.id == id).cloned().map(docker_panel::DockerDetail::Container), stat)
             }
             docker_panel::DockerEntry::Image(id) => {
-                session.images.iter().find(|i| i.id == id).cloned().map(docker_panel::DockerDetail::Image)
+                (session.images.iter().find(|i| i.id == id).cloned().map(docker_panel::DockerDetail::Image), None)
             }
             docker_panel::DockerEntry::Volume(name) => {
-                session.volumes.iter().find(|v| v.name == name).cloned().map(docker_panel::DockerDetail::Volume)
+                (session.volumes.iter().find(|v| v.name == name).cloned().map(docker_panel::DockerDetail::Volume), None)
             }
         };
-        let details_buffer = session.details_buffer;
-        self.set_docker_buffer(details_buffer, docker_panel::render_details(detail.as_ref()));
+        let status_buffer = session.status_buffer;
+        self.set_docker_buffer(status_buffer, docker_panel::render_details(detail.as_ref(), stat.as_ref()));
     }
 
     /// `s` on the Containers pane: starts the container under the cursor.
@@ -2277,14 +2297,14 @@ impl App {
         }
     }
 
-    /// `l` on the Containers pane: switches the Details pane into live
+    /// `l` on the Containers pane: switches the Logs pane into live
     /// log-follow mode for the container under the cursor -- spawns
     /// `docker logs -f`, replacing any previous follower first (so
     /// there's never more than one live child per session; see
     /// `DockerLogFollower`'s own doc comment), then forwards each new
-    /// line into Details as it arrives via `FenixUserEvent::LogLine`
-    /// (see `append_docker_log_line`). Doesn't move focus -- Containers
-    /// stays focused, Details just starts streaming in place.
+    /// line into Logs as it arrives via `FenixUserEvent::LogLine` (see
+    /// `append_docker_log_line`). Doesn't move focus -- Containers
+    /// stays focused, Logs just starts streaming in place.
     ///
     /// Without a real `event_proxy` (every test, and any launch that
     /// somehow reaches this before the event loop exists) there's
@@ -2295,7 +2315,7 @@ impl App {
     fn docker_view_logs_selected(&mut self) {
         let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() else { return };
         let Some(session) = self.docker_session.as_mut() else { return };
-        let details_buffer = session.details_buffer;
+        let logs_buffer = session.logs_buffer;
         session.log_follower = None; // tear down any previous follower first
 
         let Some(proxy) = self.event_proxy.clone() else {
@@ -2304,23 +2324,23 @@ impl App {
                 Ok(text) => text,
                 Err(err) => format!("fenix: couldn't fetch logs for {id}: {err}\n"),
             };
-            self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+            self.set_docker_buffer(logs_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
             return;
         };
 
         let Some(child) = fenix_docker::spawn_log_follower(&id, DOCKER_LOG_TAIL_LINES) else {
             let text = format!("fenix: couldn't start `docker logs -f` for {id}\n");
-            self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+            self.set_docker_buffer(logs_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
             return;
         };
 
-        let follower = DockerLogFollower::spawn(child, details_buffer, move |event| proxy.send_event(event).is_ok());
+        let follower = DockerLogFollower::spawn(child, logs_buffer, move |event| proxy.send_event(event).is_ok());
         if let Some(session) = self.docker_session.as_mut() {
             session.log_follower = Some(follower);
             session.logs_container = Some(id.clone());
         }
         let text = format!("-- following logs for {id} --\n");
-        self.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
+        self.set_docker_buffer(logs_buffer, docker_panel::DockerPanel { text, lines: Vec::new() });
     }
 
     /// `FenixUserEvent::LogLine` handling: appends one new line to the
@@ -2338,7 +2358,7 @@ impl App {
     /// for it on the next line, since the same "already at the end"
     /// check will then be true again.
     fn append_docker_log_line(&mut self, buffer_id: BufferId, line: String) {
-        if self.docker_session.as_ref().map(|s| s.details_buffer) != Some(buffer_id) {
+        if self.docker_session.as_ref().map(|s| s.logs_buffer) != Some(buffer_id) {
             return;
         }
         let panes_at_end: Vec<fenix_window::WindowId> = self
@@ -2371,7 +2391,7 @@ impl App {
     /// its own in this path -- `Drop` still runs for consistency, but
     /// `kill()`/`wait()` on an already-gone process are harmless no-ops).
     fn finish_docker_log_stream(&mut self, buffer_id: BufferId) {
-        if self.docker_session.as_ref().map(|s| s.details_buffer) != Some(buffer_id) {
+        if self.docker_session.as_ref().map(|s| s.logs_buffer) != Some(buffer_id) {
             return;
         }
         if let Some(ob) = self.buffers.get_mut(buffer_id) {
@@ -2402,9 +2422,9 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC d q`, or `SPC b k` on any of the session's four buffers (see
+    /// `SPC d q`, or `SPC b k` on any of the session's five buffers (see
     /// `kill_buffer`'s own hook): tears down the whole multi-pane
-    /// session -- closes all four buffers, clears their `docker_lines`/
+    /// session -- closes all five buffers, clears their `docker_lines`/
     /// `pane_titles` entries, and removes the session's own workspace
     /// (switched to first, so this is correct regardless of whichever
     /// workspace happens to be active when it's called -- always
@@ -2413,11 +2433,11 @@ impl App {
     /// before it, so there's always at least one other workspace left).
     pub(crate) fn docker_session_close(&mut self) {
         let Some(session) = self.docker_session.take() else { return };
-        for id in [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.details_buffer] {
+        for id in [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer] {
             self.buffers.close(id);
             self.docker_lines.remove(&id);
         }
-        for pane in [session.containers_pane, session.images_pane, session.volumes_pane, session.details_pane] {
+        for pane in [session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane] {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
@@ -3121,6 +3141,14 @@ impl App {
 
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
 
+        // A Docker which-key menu (`x` on a pane) is purely informational,
+        // not a capturing prompt -- cleared unconditionally on *every*
+        // keypress before that keypress is dispatched normally below, so
+        // pressing any key both dismisses the popup and still does
+        // whatever that key would otherwise do (real Lazydocker's own
+        // "view command options" convention).
+        self.docker_menu_open = false;
+
         // An active prompt (rename/create-name/confirm-delete) captures
         // every keystroke until it resolves -- takes priority over
         // everything else, including global Ctrl-chords, so e.g. Ctrl-S
@@ -3387,7 +3415,7 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Containers, KeyCode::Char('x')) | (Images, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                (Containers, KeyCode::Char('d')) | (Images, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
                     if let Some(entry) = self.docker_entry_at_cursor() {
                         self.docker_confirm_remove = Some(entry);
                     }
@@ -3396,6 +3424,11 @@ impl App {
                 }
                 (_, KeyCode::Char('u')) if keypress.mods == Mods::default() => {
                     self.docker_refresh_session();
+                    self.wake_caret();
+                    return;
+                }
+                (Containers | Images | Volumes, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                    self.docker_menu_open = true;
                     self.wake_caret();
                     return;
                 }
@@ -4103,6 +4136,56 @@ impl App {
         Some((rect, spans))
     }
 
+    /// The Docker panel's contextual "view command options" popup (`x`
+    /// on a Containers/Images/Volumes pane) -- mirrors `which_key_popup`'s
+    /// shape, but its content is a small static per-`DockerPaneRole` list
+    /// instead of `pending_hints()`. `None` whenever the popup isn't
+    /// showing (`docker_menu_open` is false), the focused pane isn't part
+    /// of a Docker session, or that pane has no bindings of its own
+    /// (Status/Logs).
+    fn docker_menu_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        if !self.docker_menu_open {
+            return None;
+        }
+        let bindings: &[(&str, &str)] = match self.docker_focused_role()? {
+            DockerPaneRole::Containers => {
+                &[("s", "start"), ("S", "stop"), ("R", "restart"), ("l", "logs"), ("d", "remove"), ("u", "refresh")]
+            }
+            DockerPaneRole::Images => &[("r", "run"), ("d", "remove"), ("u", "refresh")],
+            DockerPaneRole::Volumes => &[("u", "refresh")],
+            DockerPaneRole::Status | DockerPaneRole::Logs => return None,
+        };
+
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+
+        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING).max(1);
+        let shown_count = bindings.len().min(max_rows);
+
+        const KEY_COLUMN_CHARS: usize = 6;
+        let longest_label = bindings[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
+        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
+        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        for (i, (key, label)) in bindings[..shown_count].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            spans.push((format!("{key:<KEY_COLUMN_CHARS$}"), theme.caret_text, false));
+            spans.push(((*label).to_string(), theme.fg_modeline, false));
+        }
+
+        let height = shown_count as f32 * line_height + WHICH_KEY_PADDING;
+        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
+        Some((rect, spans))
+    }
+
     /// The completion popup's rich-text spans and resolved rect, anchored
     /// just below the caret (`popup::Anchor::BelowPoint`) -- mirrors
     /// `which_key_popup`'s shape. `None` whenever there's no open
@@ -4547,6 +4630,11 @@ impl App {
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
         let which_key_popup = self.which_key_popup(window_width, modeline_top);
+        // Never `Some` at the same time as `which_key_popup`/`completion_
+        // popup` in practice -- it only shows while a Docker pane is
+        // focused, where a leader/operator-pending sequence or an Insert-
+        // mode completion session can't simultaneously be active.
+        let docker_menu_popup = self.docker_menu_popup(window_width, modeline_top);
         // Never `Some` at the same time as `which_key_popup` -- one only
         // appears mid-Normal/-pending-sequence, the other only in Insert
         // mode -- so `popup_rects` below never ends up with more than one
@@ -4612,6 +4700,11 @@ impl App {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::WhichKey, rect.w, &refs);
             popup_rects.push((popup::PopupId::WhichKey, *rect));
+        }
+        if let Some((rect, spans)) = &docker_menu_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::DockerMenu, rect.w, &refs);
+            popup_rects.push((popup::PopupId::DockerMenu, *rect));
         }
         if let Some((rect, spans, selected_row)) = &completion_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -7302,20 +7395,17 @@ mod tests {
     }
 
     #[test]
-    fn open_docker_panel_opens_a_tagged_buffer_with_a_footer_line() {
+    fn open_docker_panel_opens_a_tagged_buffer_with_line_metadata() {
         // `docker` itself is unreachable in a headless/sandboxed test
         // environment (no daemon socket access) -- `list_containers`/
         // `list_images` degrade to empty `Vec`s per their own "never
         // fails" contract, so this only asserts the wiring (buffer kind,
-        // line-metadata table, the always-present footer), not real
-        // container/image data.
+        // line-metadata table), not real container/image data.
         let mut app = App::with_file(None);
         app.open_docker_panel();
         assert_eq!(app.open().kind, BufferKind::Docker);
         let id = app.focused_buffer_id();
         assert!(app.docker_lines.contains_key(&id));
-        let lines = app.docker_lines.get(&id).unwrap();
-        assert!(lines.iter().flatten().any(|l| l.style == docker_panel::DockerLineStyle::Footer));
     }
 
     #[test]
@@ -7413,20 +7503,20 @@ mod tests {
     fn append_docker_log_line_auto_follows_a_pane_that_was_already_at_the_last_line() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
-        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
-        let details_pane = app.docker_session.as_ref().unwrap().details_pane;
-        app.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text: "line1\nline2\n".to_string(), lines: Vec::new() });
+        let logs_buffer = app.docker_session.as_ref().unwrap().logs_buffer;
+        let logs_pane = app.docker_session.as_ref().unwrap().logs_pane;
+        app.set_docker_buffer(logs_buffer, docker_panel::DockerPanel { text: "line1\nline2\n".to_string(), lines: Vec::new() });
         // Put the cursor on the last (real) line -- "line2".
-        let last_line = app.buffers.get(details_buffer).unwrap().buffer.visual_line_count() - 1;
-        let start = app.buffers.get(details_buffer).unwrap().buffer.line_start_char(last_line);
-        app.pane_state_mut(details_pane).cursor = Cursor { char_idx: start, sticky_col: 0 };
+        let last_line = app.buffers.get(logs_buffer).unwrap().buffer.visual_line_count() - 1;
+        let start = app.buffers.get(logs_buffer).unwrap().buffer.line_start_char(last_line);
+        app.pane_state_mut(logs_pane).cursor = Cursor { char_idx: start, sticky_col: 0 };
 
-        app.append_docker_log_line(details_buffer, "line3".to_string());
+        app.append_docker_log_line(logs_buffer, "line3".to_string());
 
-        let text = app.buffers.get(details_buffer).unwrap().buffer.text();
+        let text = app.buffers.get(logs_buffer).unwrap().buffer.text();
         assert!(text.contains("line3"));
-        let new_last_line = app.buffers.get(details_buffer).unwrap().buffer.visual_line_count() - 1;
-        let (cursor_line, _) = app.buffers.get(details_buffer).unwrap().buffer.line_col(&app.pane_state(details_pane).cursor);
+        let new_last_line = app.buffers.get(logs_buffer).unwrap().buffer.visual_line_count() - 1;
+        let (cursor_line, _) = app.buffers.get(logs_buffer).unwrap().buffer.line_col(&app.pane_state(logs_pane).cursor);
         assert_eq!(cursor_line, new_last_line, "cursor should have followed to the new last line");
     }
 
@@ -7434,21 +7524,21 @@ mod tests {
     fn append_docker_log_line_leaves_a_pane_alone_if_the_user_scrolled_away() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
-        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
-        let details_pane = app.docker_session.as_ref().unwrap().details_pane;
-        app.set_docker_buffer(details_buffer, docker_panel::DockerPanel { text: "line1\nline2\nline3\n".to_string(), lines: Vec::new() });
+        let logs_buffer = app.docker_session.as_ref().unwrap().logs_buffer;
+        let logs_pane = app.docker_session.as_ref().unwrap().logs_pane;
+        app.set_docker_buffer(logs_buffer, docker_panel::DockerPanel { text: "line1\nline2\nline3\n".to_string(), lines: Vec::new() });
         // Cursor on the *first* line, not the last -- simulates having
         // scrolled up to read earlier output.
-        app.pane_state_mut(details_pane).cursor = Cursor { char_idx: 0, sticky_col: 0 };
+        app.pane_state_mut(logs_pane).cursor = Cursor { char_idx: 0, sticky_col: 0 };
 
-        app.append_docker_log_line(details_buffer, "line4".to_string());
+        app.append_docker_log_line(logs_buffer, "line4".to_string());
 
-        let (cursor_line, _) = app.buffers.get(details_buffer).unwrap().buffer.line_col(&app.pane_state(details_pane).cursor);
+        let (cursor_line, _) = app.buffers.get(logs_buffer).unwrap().buffer.line_col(&app.pane_state(logs_pane).cursor);
         assert_eq!(cursor_line, 0, "cursor should stay put, not get yanked to the new bottom");
     }
 
     #[test]
-    fn append_docker_log_line_ignores_a_stray_event_for_a_buffer_that_is_not_the_current_details_buffer() {
+    fn append_docker_log_line_ignores_a_stray_event_for_a_buffer_that_is_not_the_current_logs_buffer() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
@@ -7464,60 +7554,13 @@ mod tests {
     fn finish_docker_log_stream_appends_a_marker_and_clears_the_follower() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
-        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
+        let logs_buffer = app.docker_session.as_ref().unwrap().logs_buffer;
 
-        app.finish_docker_log_stream(details_buffer);
+        app.finish_docker_log_stream(logs_buffer);
 
-        let text = app.buffers.get(details_buffer).unwrap().buffer.text();
+        let text = app.buffers.get(logs_buffer).unwrap().buffer.text();
         assert!(text.contains("log stream ended"));
         assert!(app.docker_session.as_ref().unwrap().log_follower.is_none());
-    }
-
-    #[test]
-    fn refresh_docker_buffer_preserving_cursor_keeps_the_same_row_when_row_count_is_unchanged() {
-        let mut app = App::with_file(None);
-        app.open_docker_panel();
-        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
-        let containers_pane = app.docker_session.as_ref().unwrap().containers_pane;
-
-        let three_rows = vec![container("a", "one"), container("b", "two"), container("c", "three")];
-        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&three_rows, &[]));
-        // Move the cursor to row 1 ("two").
-        let start_of_row_1 = app.buffers.get(containers_buffer).unwrap().buffer.line_start_char(1);
-        app.pane_state_mut(containers_pane).cursor = Cursor { char_idx: start_of_row_1, sticky_col: 0 };
-
-        // Same row count, different content (stats appended) -- cursor
-        // should stay on row 1, not reset to row 0.
-        app.refresh_docker_buffer_preserving_cursor(
-            containers_buffer,
-            docker_panel::render_containers(&three_rows, &[fenix_docker::ContainerStat { container_id: "b".to_string(), cpu_percent: "5%".to_string(), mem_usage: "1MiB".to_string() }]),
-        );
-
-        let (line, _) = app.buffers.get(containers_buffer).unwrap().buffer.line_col(&app.pane_state(containers_pane).cursor);
-        assert_eq!(line, 1);
-    }
-
-    #[test]
-    fn refresh_docker_buffer_preserving_cursor_clamps_when_the_new_listing_is_shorter() {
-        let mut app = App::with_file(None);
-        app.open_docker_panel();
-        let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
-        let containers_pane = app.docker_session.as_ref().unwrap().containers_pane;
-
-        let three_rows = vec![container("a", "one"), container("b", "two"), container("c", "three")];
-        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&three_rows, &[]));
-        let last_line = app.buffers.get(containers_buffer).unwrap().buffer.visual_line_count() - 1;
-        let start_of_last_line = app.buffers.get(containers_buffer).unwrap().buffer.line_start_char(last_line);
-        app.pane_state_mut(containers_pane).cursor = Cursor { char_idx: start_of_last_line, sticky_col: 0 };
-
-        // Now refresh with a much shorter listing -- must clamp, not
-        // panic or leave the cursor out of bounds.
-        let one_row = vec![container("a", "one")];
-        app.refresh_docker_buffer_preserving_cursor(containers_buffer, docker_panel::render_containers(&one_row, &[]));
-
-        let new_len = app.buffers.get(containers_buffer).unwrap().buffer.visual_line_count();
-        let (line, _) = app.buffers.get(containers_buffer).unwrap().buffer.line_col(&app.pane_state(containers_pane).cursor);
-        assert!(line < new_len);
     }
 
     #[test]
@@ -7528,11 +7571,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_docker_stats_merges_a_matching_stat_into_the_containers_buffer() {
+    fn apply_docker_stats_merges_a_matching_stat_into_the_status_pane() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
+        let status_buffer = app.docker_session.as_ref().unwrap().status_buffer;
         app.docker_session.as_mut().unwrap().containers = vec![container("abc123", "web")];
+        app.docker_lines.insert(
+            containers_buffer,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Container,
+                entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
+                dim_from: None,
+                badge: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
 
         app.apply_docker_stats(vec![fenix_docker::ContainerStat {
             container_id: "abc123".to_string(),
@@ -7540,23 +7594,24 @@ mod tests {
             mem_usage: "20MiB".to_string(),
         }]);
 
-        let text = app.buffers.get(containers_buffer).unwrap().buffer.text();
+        let text = app.buffers.get(status_buffer).unwrap().buffer.text();
         assert!(text.contains("CPU: 3.5%"));
     }
 
     #[test]
-    fn open_docker_panel_creates_a_four_pane_session_with_titles() {
+    fn open_docker_panel_creates_a_five_pane_session_with_titles() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let panes = [session.containers_pane, session.images_pane, session.volumes_pane, session.details_pane];
+        let panes = [session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane];
         let distinct: std::collections::HashSet<_> = panes.iter().collect();
-        assert_eq!(distinct.len(), 4, "every pane should be a distinct WindowId");
-        assert_eq!(app.windows().window_count(), 4);
+        assert_eq!(distinct.len(), 5, "every pane should be a distinct WindowId");
+        assert_eq!(app.windows().window_count(), 5);
         assert_eq!(app.pane_titles.get(&session.containers_pane).map(String::as_str), Some("Containers"));
         assert_eq!(app.pane_titles.get(&session.images_pane).map(String::as_str), Some("Images"));
         assert_eq!(app.pane_titles.get(&session.volumes_pane).map(String::as_str), Some("Volumes"));
-        assert_eq!(app.pane_titles.get(&session.details_pane).map(String::as_str), Some("Details"));
+        assert_eq!(app.pane_titles.get(&session.status_pane).map(String::as_str), Some("Status"));
+        assert_eq!(app.pane_titles.get(&session.logs_pane).map(String::as_str), Some("Logs"));
         assert_eq!(app.focused_pane_id(), session.containers_pane);
     }
 
@@ -7571,14 +7626,18 @@ mod tests {
         let containers_rect = rect_for(session.containers_pane);
         let images_rect = rect_for(session.images_pane);
         let volumes_rect = rect_for(session.volumes_pane);
-        let details_rect = rect_for(session.details_pane);
+        let status_rect = rect_for(session.status_pane);
+        let logs_rect = rect_for(session.logs_pane);
 
-        // Left column is narrower than the right (Details) column.
-        assert!(containers_rect.w < details_rect.w);
+        // Left column is narrower than the right (Status/Logs) column.
+        assert!(containers_rect.w < status_rect.w);
+        assert!(containers_rect.w < logs_rect.w);
         // Containers gets roughly half the left column's height,
         // Images/Volumes split the other half evenly.
         assert!(containers_rect.h > images_rect.h);
         assert!((images_rect.h - volumes_rect.h).abs() < 1.0);
+        // Logs gets a bigger share of the right column than Status.
+        assert!(logs_rect.h > status_rect.h);
     }
 
     #[test]
@@ -7611,16 +7670,18 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let (containers, images, volumes, details) =
-            (session.containers_pane, session.images_pane, session.volumes_pane, session.details_pane);
+        let (containers, images, volumes, status, logs) =
+            (session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane);
 
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
         app.windows_mut().focus(images);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Images));
         app.windows_mut().focus(volumes);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Volumes));
-        app.windows_mut().focus(details);
-        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Details));
+        app.windows_mut().focus(status);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Status));
+        app.windows_mut().focus(logs);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Logs));
         app.windows_mut().focus(containers);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
 
@@ -7629,11 +7690,11 @@ mod tests {
     }
 
     #[test]
-    fn docker_sync_details_renders_the_selected_container_into_the_details_pane() {
+    fn docker_sync_details_renders_the_selected_container_into_the_status_pane() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session_containers_buffer = app.docker_session.as_ref().unwrap().containers_buffer;
-        let details_buffer = app.docker_session.as_ref().unwrap().details_buffer;
+        let status_buffer = app.docker_session.as_ref().unwrap().status_buffer;
 
         // Seed a fake container both in the cached session list (what
         // `docker_sync_details` actually reads) and in `docker_lines`
@@ -7653,23 +7714,24 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Container,
                 entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
 
         app.docker_sync_details();
 
-        let details_text = app.buffers.get(details_buffer).unwrap().buffer.text();
-        assert!(details_text.contains("Name: web"));
+        let status_text = app.buffers.get(status_buffer).unwrap().buffer.text();
+        assert!(status_text.contains("Name: web"));
     }
 
     #[test]
-    fn docker_session_close_removes_all_four_buffers_and_the_workspace() {
+    fn docker_session_close_removes_all_five_buffers_and_the_workspace() {
         let mut app = App::with_file(None);
         let workspace_count_before = app.workspaces.len();
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let buffers = [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.details_buffer];
+        let buffers = [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer];
 
         app.docker_session_close();
 
@@ -7720,6 +7782,7 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Container,
                 entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
@@ -7728,13 +7791,13 @@ mod tests {
     }
 
     #[test]
-    fn docker_view_logs_selected_updates_the_details_pane_in_place() {
+    fn docker_view_logs_selected_updates_the_logs_pane_in_place() {
         // `docker logs` itself is unreachable in this sandboxed test
         // environment (no daemon socket access) -- it'll come back an
         // `Err`, which `docker_view_logs_selected` still renders into
-        // the Details buffer rather than silently doing nothing. The
+        // the Logs buffer rather than silently doing nothing. The
         // point of this test is the wiring (focus stays on Containers,
-        // Details gets rewritten), not the specific log text.
+        // Logs gets rewritten), not the specific log text.
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let containers_id = app.focused_buffer_id();
@@ -7744,16 +7807,17 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Container,
                 entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
-        let details_id = app.docker_session.as_ref().unwrap().details_buffer;
+        let logs_id = app.docker_session.as_ref().unwrap().logs_buffer;
 
         app.docker_view_logs_selected();
 
         assert_eq!(app.focused_buffer_id(), containers_id); // focus never left Containers
-        let details_text = app.buffers.get(details_id).unwrap().buffer.text();
-        assert!(!details_text.is_empty());
+        let logs_text = app.buffers.get(logs_id).unwrap().buffer.text();
+        assert!(!logs_text.is_empty());
     }
 
     #[test]
@@ -7767,6 +7831,7 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Image,
                 entry: Some(docker_panel::DockerEntry::Image("sha256:dead".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
@@ -7788,6 +7853,7 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Image,
                 entry: Some(docker_panel::DockerEntry::Image("sha256:dead".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
@@ -7812,6 +7878,7 @@ mod tests {
                 style: docker_panel::DockerLineStyle::Container,
                 entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
                 dim_from: None,
+                badge: None,
             })],
         );
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
@@ -7824,6 +7891,61 @@ mod tests {
         app.docker_confirm_key(KeyPress::char('y'));
         assert!(app.docker_confirm_remove.is_none());
         assert_eq!(app.open().kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn docker_menu_popup_is_none_when_not_open() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        assert!(app.docker_menu_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn docker_menu_popup_is_none_outside_a_docker_session() {
+        let mut app = App::with_file(None);
+        app.docker_menu_open = true;
+        assert!(app.docker_menu_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn docker_menu_popup_lists_the_containers_pane_bindings() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        app.docker_menu_open = true;
+        let (_, spans) = app.docker_menu_popup(800.0, 580.0).unwrap();
+        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        for key in ["s", "S", "R", "l", "d", "u"] {
+            assert!(text.contains(key), "expected the Containers menu to mention '{key}': {text}");
+        }
+        assert!(text.contains("remove"));
+        assert!(text.contains("refresh"));
+    }
+
+    #[test]
+    fn docker_menu_popup_lists_the_images_pane_bindings() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let images_pane = app.docker_session.as_ref().unwrap().images_pane;
+        app.windows_mut().focus(images_pane);
+        app.docker_menu_open = true;
+        let (_, spans) = app.docker_menu_popup(800.0, 580.0).unwrap();
+        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(text.contains("run"));
+        assert!(text.contains("remove"));
+        assert!(text.contains("refresh"));
+    }
+
+    #[test]
+    fn docker_menu_popup_is_none_on_the_status_and_logs_panes() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let session = app.docker_session.as_ref().unwrap();
+        let (status_pane, logs_pane) = (session.status_pane, session.logs_pane);
+        app.docker_menu_open = true;
+        app.windows_mut().focus(status_pane);
+        assert!(app.docker_menu_popup(800.0, 580.0).is_none());
+        app.windows_mut().focus(logs_pane);
+        assert!(app.docker_menu_popup(800.0, 580.0).is_none());
     }
 
     #[test]
