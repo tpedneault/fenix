@@ -307,6 +307,8 @@ impl TextPipeline {
 
         self.modeline.set_metrics(metrics);
         self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.clock.set_metrics(metrics);
+        self.clock.shape_until_scroll(&mut self.font_system, false);
         self.sidebar.set_metrics(metrics);
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
         for buf in self.content_buffers.values_mut() {
