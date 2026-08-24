@@ -50,7 +50,14 @@ for anyone curious to poke around or build on it.
   workspaces (`SPC TAB`).
 - **Startup dashboard**: a real, Vim-navigable buffer listing known
   projects and recent files, shown when Fenix is launched with no file
-  argument (`SPC d d` to reopen it later).
+  argument (`SPC o d` to reopen it later).
+- **Docker panel** (Lazydocker-style): `SPC d d` opens a real,
+  Vim-navigable buffer listing every container and image (via the
+  `docker` CLI). `s`/`S`/`R` start/stop/restart the container under the
+  cursor, `r` runs a new container from the image under the cursor, `x`
+  removes the container/image under the cursor (with a `y`/`n`
+  confirmation), `u` refreshes. `SPC d b` builds an image from the
+  current project root's `Dockerfile`.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
@@ -87,6 +94,9 @@ and degrade gracefully (never a hard error) if they're not:
 - [`git`](https://git-scm.com/) — git-status badges in the file explorer.
 - [`Universal Ctags`](https://ctags.io/) (`ctags`) — project-definition
   completion for Tcl.
+- [`docker`](https://docs.docker.com/engine/) — the Docker panel
+  (`SPC d d`); with no `docker` on `PATH` (or an unreachable daemon) the
+  panel just shows an empty listing instead of failing.
 
 ### Running the tests
 
@@ -116,7 +126,9 @@ popup shows what keys continue it.
 | `SPC p s` | Search project (ripgrep) |
 | `SPC p p` | Switch project |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
-| `SPC d d` | Open the startup dashboard |
+| `SPC o d` | Open the startup dashboard |
+| `SPC d d` | Open the Docker panel (containers/images) |
+| `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
 | `SPC w h/j/k/l` | Move focus between windows |
@@ -159,6 +171,20 @@ Only these are special:
 | `-` | Go to the parent directory |
 | `R` | Refresh |
 | `.` | Toggle hidden files |
+
+### Docker panel (`SPC d d`)
+
+A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`).
+Only these are special:
+
+| Keys | Action |
+|---|---|
+| `s` | Start the container under the cursor |
+| `S` | Stop the container under the cursor |
+| `R` | Restart the container under the cursor |
+| `r` | Run a new detached container from the image under the cursor |
+| `x` | Remove the container/image under the cursor (`y`/`n` to confirm) |
+| `u` | Refresh the listing |
 
 ### Autocompletion popup (Tcl, Insert mode)
 
@@ -224,6 +250,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-picker` | Generic fuzzy matching + live-filtered candidate list, used by every fuzzy-finder |
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
 | `fenix-completion` | Completion sources: Tcl keywords, ctags-scanned definitions, external symbols file |
+| `fenix-docker` | Docker CLI shelling: container/image listing, start/stop/restart/remove/run/build |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 

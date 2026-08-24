@@ -118,8 +118,15 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
 
-        t.label_group(&[spc, KeyPress::char('d')], "dashboard");
-        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('d')], "open dashboard", "dashboard.open");
+        t.label_group(&[spc, KeyPress::char('o')], "open");
+        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
+
+        // Reserved entirely for Docker (Lazydocker-style) -- the
+        // dashboard used to live at `SPC d d` but moved to `SPC o d`
+        // above so this whole group is free for docker commands.
+        t.label_group(&[spc, KeyPress::char('d')], "docker");
+        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('d')], "open docker panel", "docker.open");
+        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('b')], "build image", "docker.build");
 
         t.label_group(&[spc, KeyPress::char('c')], "completion");
         t.insert(
@@ -309,10 +316,30 @@ mod tests {
         let trie = leader_trie();
         let mut m = trie.matcher();
         m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('d'));
+        m.feed(KeyPress::char('o'));
         match m.feed(KeyPress::char('d')) {
             fenix_keymap::Step::Matched(&"dashboard.open") => {}
-            _ => panic!("expected SPC d d to resolve to dashboard.open"),
+            _ => panic!("expected SPC o d to resolve to dashboard.open"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_docker_open_and_build() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('d'));
+        match m.feed(KeyPress::char('d')) {
+            fenix_keymap::Step::Matched(&"docker.open") => {}
+            _ => panic!("expected SPC d d to resolve to docker.open"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('d'));
+        match m.feed(KeyPress::char('b')) {
+            fenix_keymap::Step::Matched(&"docker.build") => {}
+            _ => panic!("expected SPC d b to resolve to docker.build"),
         }
     }
 

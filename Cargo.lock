@@ -501,6 +501,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-docker"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "fenix-explorer"
 version = "0.0.1"
 dependencies = [
@@ -518,6 +525,7 @@ dependencies = [
  "fenix-completion",
  "fenix-config",
  "fenix-core",
+ "fenix-docker",
  "fenix-explorer",
  "fenix-keymap",
  "fenix-picker",

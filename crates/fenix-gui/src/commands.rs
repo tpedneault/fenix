@@ -52,6 +52,8 @@ impl CommandRegistry {
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
+        registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
+        registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -159,6 +161,14 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
 
 fn cmd_dashboard_open(ctx: &mut CommandCtx) {
     ctx.app.open_dashboard();
+}
+
+fn cmd_docker_open(ctx: &mut CommandCtx) {
+    ctx.app.open_docker_panel();
+}
+
+fn cmd_docker_build(ctx: &mut CommandCtx) {
+    ctx.app.docker_build();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {

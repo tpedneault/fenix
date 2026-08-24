@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod completion;
 mod dashboard;
+mod docker_panel;
 mod gpu;
 mod icon;
 mod keymap;

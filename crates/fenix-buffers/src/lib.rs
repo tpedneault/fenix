@@ -25,6 +25,9 @@ pub enum BufferKind {
     /// b`), tagged so the host can special-case navigation/actions and
     /// coloring the same way it already does for `Dashboard`.
     Explorer,
+    /// A Lazydocker-style container/image dashboard (`SPC d d`) -- same
+    /// "real buffer, just tagged" shape as `Dashboard`/`Explorer`.
+    Docker,
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -110,6 +113,14 @@ impl BufferList {
     /// listing changes (navigating into a directory, a refresh, ...).
     pub fn open_explorer(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Explorer)
+    }
+
+    /// A real buffer seeded with `text` (a rendered container/image
+    /// listing) and tagged `Docker` -- `SPC d d`. Same "real buffer, just
+    /// tagged" shape as `open_dashboard`/`open_explorer`; the host
+    /// re-renders `text` via `Buffer::replace_range` on refresh.
+    pub fn open_docker(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Docker)
     }
 
     /// Opens `path`, reusing an already-open buffer for that exact path
@@ -248,6 +259,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "a.txt\nb.txt\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Explorer);
+    }
+
+    #[test]
+    fn open_docker_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_docker("containers\nimages\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "containers\nimages\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Docker);
     }
 
     #[test]

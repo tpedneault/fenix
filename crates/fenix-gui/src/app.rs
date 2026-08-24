@@ -20,6 +20,7 @@ use fenix_core::{Buffer, Cursor};
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
+use crate::docker_panel;
 use crate::gpu::GpuState;
 use crate::icon;
 use crate::keymap;
@@ -498,6 +499,47 @@ fn dashboard_highlights_for_visible_range(
     ranges
 }
 
+/// The Docker panel's equivalent of `dashboard_highlights_for_visible_
+/// range` -- same shape, built from `docker_panel::render`'s own per-line
+/// metadata instead of a real parser. `Header` lines get a full-line
+/// accent color; `Footer`/`Empty` get a full-line dim color;
+/// `Container`/`Image` lines only push a range for their dim status/size
+/// portion (from `dim_from` onward) -- the name/repo:tag portion before
+/// it falls back to `content_spans`'s own `theme.fg` default.
+fn docker_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<docker_panel::DockerLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        match meta.style {
+            docker_panel::DockerLineStyle::Header => {
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            }
+            docker_panel::DockerLineStyle::Footer | docker_panel::DockerLineStyle::Empty => {
+                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
+            }
+            docker_panel::DockerLineStyle::Container | docker_panel::DockerLineStyle::Image => {
+                if let Some(dim_from) = meta.dim_from {
+                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
+                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
+                }
+            }
+        }
+    }
+    ranges
+}
+
 /// One-letter badge for an explorer row's git status.
 fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
     match status {
@@ -792,6 +834,22 @@ pub struct App {
     /// instead of `dashboard::render`'s.
     dired_lines: HashMap<BufferId, Vec<Option<usize>>>,
 
+    /// Per-line metadata for every real `BufferKind::Docker` buffer
+    /// currently open (`SPC d d`), keyed by `BufferId` -- same per-buffer-
+    /// keyed precedent as `dashboard_lines`/`dired_lines`. Consulted by
+    /// the action keys (`s`/`S`/`R`/`r`/`x`) to know what the cursor's
+    /// current line targets, and by the panel's own syntax-highlight
+    /// coloring.
+    docker_lines: HashMap<BufferId, Vec<Option<docker_panel::DockerLine>>>,
+    /// Armed by `x` on a Docker buffer row until the next keypress
+    /// confirms (`y`) or cancels (anything else) -- same "wait for
+    /// exactly one more raw key" shape as `fenix-vim`'s own `r<char>`,
+    /// applied here to a destructive remove instead of a replace.
+    /// Overrides the modeline the same way `Mode::Command`/`Mode::Search`
+    /// already do (see `modeline_pieces`/`docker_confirm_text`) to show
+    /// what's being confirmed.
+    docker_confirm_remove: Option<docker_panel::DockerEntry>,
+
     /// The autocompletion popup's live state -- `Some` only while Insert
     /// mode, the focused buffer's language, and the prefix at the cursor
     /// all currently justify showing it (see `sync_completion`, called
@@ -932,6 +990,8 @@ impl App {
             dashboard_lines,
             dired_states: HashMap::new(),
             dired_lines: HashMap::new(),
+            docker_lines: HashMap::new(),
+            docker_confirm_remove: None,
             completion: None,
             tcl_candidates_cache: None,
             completion_scroll: 0,
@@ -1596,6 +1656,157 @@ impl App {
         self.wake_caret();
     }
 
+    /// `SPC d d`: (re-)opens the Lazydocker-style container/image panel in
+    /// the focused pane, freshly listed from `docker` -- same "always a
+    /// new buffer, no dedup" precedent as `open_dashboard`/`SPC b X`.
+    pub(crate) fn open_docker_panel(&mut self) {
+        let containers = fenix_docker::list_containers();
+        let images = fenix_docker::list_images();
+        let panel = docker_panel::render(&containers, &images);
+        let id = self.buffers.open_docker(&panel.text);
+        self.docker_lines.insert(id, panel.lines);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Re-lists containers/images and regenerates `id`'s buffer text in
+    /// place -- same "rewrite the whole affected span as one step" tool
+    /// (`Buffer::replace_range`) `set_dired_state` already uses for the
+    /// dired buffer, and same "reset every pane showing it back to the
+    /// top" reasoning (a refreshed listing can reorder/add/remove rows,
+    /// so an old cursor position is meaningless against it).
+    fn set_docker_lines(&mut self, id: BufferId, containers: Vec<fenix_docker::Container>, images: Vec<fenix_docker::Image>) {
+        let panel = docker_panel::render(&containers, &images);
+        self.docker_lines.insert(id, panel.lines);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    /// `u` on a Docker buffer: re-lists containers/images from `docker`
+    /// and re-renders.
+    fn docker_refresh(&mut self) {
+        let id = self.focused_buffer_id();
+        self.set_docker_lines(id, fenix_docker::list_containers(), fenix_docker::list_images());
+    }
+
+    /// What the cursor's current line on a Docker buffer targets -- a
+    /// no-op (`None`) for a header/footer/blank line, mirroring
+    /// `dashboard_activate_selected`'s own lookup shape.
+    fn docker_entry_at_cursor(&self) -> Option<docker_panel::DockerEntry> {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        self.docker_lines
+            .get(&self.focused_buffer_id())
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .and_then(|meta| meta.entry.clone())
+    }
+
+    /// `s` on a Docker buffer: starts the container under the cursor.
+    /// A no-op on any other kind of row (an image, a header/footer line).
+    fn docker_start_selected(&mut self) {
+        if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
+            if let Err(err) = fenix_docker::start_container(&id) {
+                eprintln!("fenix: docker start failed: {err}");
+            }
+            self.docker_refresh();
+        }
+    }
+
+    /// `S` on a Docker buffer: stops the container under the cursor.
+    fn docker_stop_selected(&mut self) {
+        if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
+            if let Err(err) = fenix_docker::stop_container(&id) {
+                eprintln!("fenix: docker stop failed: {err}");
+            }
+            self.docker_refresh();
+        }
+    }
+
+    /// `R` on a Docker buffer: restarts the container under the cursor.
+    fn docker_restart_selected(&mut self) {
+        if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
+            if let Err(err) = fenix_docker::restart_container(&id) {
+                eprintln!("fenix: docker restart failed: {err}");
+            }
+            self.docker_refresh();
+        }
+    }
+
+    /// `r` on a Docker buffer: creates and starts a detached container
+    /// from the image under the cursor. A no-op on a container row.
+    fn docker_run_selected(&mut self) {
+        if let Some(docker_panel::DockerEntry::Image(id)) = self.docker_entry_at_cursor() {
+            if let Err(err) = fenix_docker::run_image(&id) {
+                eprintln!("fenix: docker run failed: {err}");
+            }
+            self.docker_refresh();
+        }
+    }
+
+    /// `SPC d b`: builds an image from the current project root's
+    /// `Dockerfile` (falling back to the process's cwd with no detected
+    /// project) -- doesn't need a Docker buffer focused, unlike the
+    /// per-row actions above, since a build targets the project, not a
+    /// selected container/image. Refreshes any already-open Docker
+    /// buffer in the focused pane so a freshly built image shows up
+    /// without a separate manual `u`.
+    pub(crate) fn docker_build(&mut self) {
+        let context_dir = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let tag = context_dir.file_name().map(|n| format!("{}:latest", n.to_string_lossy()));
+        match fenix_docker::build_image(&context_dir, tag.as_deref()) {
+            Ok(_) => println!("fenix: docker build succeeded for {}", context_dir.display()),
+            Err(err) => eprintln!("fenix: docker build failed: {err}"),
+        }
+        if self.open().kind == BufferKind::Docker {
+            self.docker_refresh();
+        }
+        self.wake_caret();
+    }
+
+    /// Modeline text while a Docker remove is armed (`x` was just
+    /// pressed) -- same "override the modeline with raw prompt text"
+    /// mechanism `Mode::Command`/`Mode::Search` already use.
+    fn docker_confirm_text(&self) -> Option<String> {
+        let entry = self.docker_confirm_remove.as_ref()?;
+        let what = match entry {
+            docker_panel::DockerEntry::Container(_) => "container",
+            docker_panel::DockerEntry::Image(_) => "image",
+        };
+        Some(format!("Remove this {what}? (y/n)"))
+    }
+
+    /// Resolves an armed Docker remove: `y` confirms and removes,
+    /// anything else cancels. Either way clears `docker_confirm_remove`
+    /// and returns the modeline to normal.
+    fn docker_confirm_key(&mut self, keypress: KeyPress) {
+        let entry = self.docker_confirm_remove.take();
+        if keypress.code == KeyCode::Char('y') {
+            if let Some(entry) = entry {
+                let result = match entry {
+                    docker_panel::DockerEntry::Container(id) => fenix_docker::remove_container(&id),
+                    docker_panel::DockerEntry::Image(id) => fenix_docker::remove_image(&id),
+                };
+                if let Err(err) = result {
+                    eprintln!("fenix: docker remove failed: {err}");
+                }
+                self.docker_refresh();
+            }
+        }
+        self.wake_caret();
+    }
+
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
@@ -2243,6 +2454,14 @@ impl App {
             return;
         }
 
+        // An armed Docker remove confirmation (`x` on a container/image
+        // row) captures the very next key the same way -- `y` confirms,
+        // anything else cancels (see `docker_confirm_key`).
+        if self.docker_confirm_remove.is_some() {
+            self.docker_confirm_key(keypress);
+            return;
+        }
+
         // The grep search-term prompt and an open picker both capture
         // input the same way -- checked ahead of the explorer/sidebar-
         // focus check below since a picker can be opened while the
@@ -2456,6 +2675,51 @@ impl App {
             }
         }
 
+        // Lazydocker-style panel: ordinary motions (`hjkl`, `gg`/`G`, `/`
+        // search) reach Vim below unchanged -- only a small action-key
+        // set is claimed here first, same shape as the dired buffer
+        // above. `s`/`S`/`R` act on the container under the cursor, `r`
+        // runs a new container from the image under the cursor, `x` arms
+        // a remove confirmation (`y`/anything to confirm/cancel, see
+        // `docker_confirm_key`), `u` refreshes.
+        if self.open().kind == BufferKind::Docker {
+            match keypress.code {
+                KeyCode::Char('s') if keypress.mods == Mods::default() => {
+                    self.docker_start_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('S') if keypress.mods == Mods::default() => {
+                    self.docker_stop_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('R') if keypress.mods == Mods::default() => {
+                    self.docker_restart_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('r') if keypress.mods == Mods::default() => {
+                    self.docker_run_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('x') if keypress.mods == Mods::default() => {
+                    if let Some(entry) = self.docker_entry_at_cursor() {
+                        self.docker_confirm_remove = Some(entry);
+                    }
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('u') if keypress.mods == Mods::default() => {
+                    self.docker_refresh();
+                    self.wake_caret();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -2567,6 +2831,7 @@ impl App {
             || self.vim.mode() == Mode::Search
             || self.pending_grep_query.is_some()
             || self.explorer_prompt.is_some()
+            || self.docker_confirm_remove.is_some()
         {
             return None;
         }
@@ -2613,6 +2878,8 @@ impl App {
                     .get(&self.focused_buffer_id())
                     .map(|s| s.cwd.display().to_string())
                     .unwrap_or_else(|| "*dired*".to_string())
+            } else if ob.kind == BufferKind::Docker {
+                "*docker*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -2649,6 +2916,9 @@ impl App {
         }
         if let Some(prompt_text) = self.explorer_prompt_text() {
             return prompt_text;
+        }
+        if let Some(confirm_text) = self.docker_confirm_text() {
+            return confirm_text;
         }
         let (mode_label, suffix) = self.modeline_pieces().unwrap();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
@@ -2696,7 +2966,11 @@ impl App {
     /// buffer) so a split's every visible pane gets a gutter sized to
     /// *its own* buffer's line count, not just the focused one's.
     fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
-        if self.line_number_mode == LineNumberMode::Off || ob.kind == BufferKind::Dashboard || ob.kind == BufferKind::Explorer {
+        if self.line_number_mode == LineNumberMode::Off
+            || ob.kind == BufferKind::Dashboard
+            || ob.kind == BufferKind::Explorer
+            || ob.kind == BufferKind::Docker
+        {
             return 0;
         }
         ob.buffer.visual_line_count().max(1).to_string().len() + 1
@@ -2815,6 +3089,7 @@ impl App {
         // compiler. The cloned `Vec` is small (a few dozen entries at
         // most), so this is cheap.
         let dashboard_lines = self.dashboard_lines.get(&id).cloned();
+        let docker_lines = self.docker_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -2840,6 +3115,9 @@ impl App {
 
         if ob.kind == BufferKind::Dashboard {
             return dashboard_highlights_for_visible_range(ob, dashboard_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Docker {
+            return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -3547,6 +3825,8 @@ impl App {
             Some(format!("{prefix}{}", self.vim.search_query()))
         } else if let Some(prompt_text) = self.explorer_prompt_text() {
             Some(prompt_text)
+        } else if let Some(confirm_text) = self.docker_confirm_text() {
+            Some(confirm_text)
         } else if modeline_pieces.is_none() {
             Some(format!(":{}", self.vim.command_line()))
         } else {
@@ -6243,6 +6523,134 @@ mod tests {
         assert_ne!(app.focused_buffer_id(), a_id);
         assert_eq!(app.open().kind, BufferKind::Dashboard);
         assert!(app.dashboard_lines.contains_key(&app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn open_docker_panel_opens_a_tagged_buffer_with_a_footer_line() {
+        // `docker` itself is unreachable in a headless/sandboxed test
+        // environment (no daemon socket access) -- `list_containers`/
+        // `list_images` degrade to empty `Vec`s per their own "never
+        // fails" contract, so this only asserts the wiring (buffer kind,
+        // line-metadata table, the always-present footer), not real
+        // container/image data.
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        assert_eq!(app.open().kind, BufferKind::Docker);
+        let id = app.focused_buffer_id();
+        assert!(app.docker_lines.contains_key(&id));
+        let lines = app.docker_lines.get(&id).unwrap();
+        assert!(lines.iter().flatten().any(|l| l.style == docker_panel::DockerLineStyle::Footer));
+    }
+
+    #[test]
+    fn gutter_chars_is_zero_for_a_docker_buffer() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        assert_eq!(app.gutter_chars(app.open()), 0);
+    }
+
+    #[test]
+    fn docker_buffer_modeline_falls_back_to_a_docker_marker() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        assert!(app.modeline_text().contains("*docker*"));
+    }
+
+    #[test]
+    fn open_docker_panel_replaces_the_focused_pane_with_a_fresh_docker_buffer() {
+        let dir = TempDir::new("open_docker_panel");
+        let a = dir.write("a.txt", "hello");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        let a_id = app.focused_buffer_id();
+
+        app.open_docker_panel();
+
+        assert_ne!(app.focused_buffer_id(), a_id);
+        assert_eq!(app.open().kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn docker_action_keys_on_a_non_entry_line_are_a_no_op() {
+        // Cursor sits on line 0 (the header), which has no `entry` --
+        // every action should just do nothing rather than panic.
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        app.docker_start_selected();
+        app.docker_stop_selected();
+        app.docker_restart_selected();
+        app.docker_run_selected();
+        assert_eq!(app.open().kind, BufferKind::Docker);
+        assert!(app.docker_confirm_remove.is_none());
+    }
+
+    #[test]
+    fn docker_entry_at_cursor_reads_the_line_under_the_cursor() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let id = app.focused_buffer_id();
+        // Force a known entry at line 0, independent of whatever real
+        // `docker` output (or lack thereof) actually rendered there.
+        app.docker_lines.insert(
+            id,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Container,
+                entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
+                dim_from: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+
+        assert_eq!(app.docker_entry_at_cursor(), Some(docker_panel::DockerEntry::Container("abc123".to_string())));
+    }
+
+    #[test]
+    fn docker_confirm_remove_shows_a_prompt_and_a_non_y_key_cancels_without_removing() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let id = app.focused_buffer_id();
+        app.docker_lines.insert(
+            id,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Image,
+                entry: Some(docker_panel::DockerEntry::Image("sha256:dead".to_string())),
+                dim_from: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+
+        let entry = app.docker_entry_at_cursor().unwrap();
+        app.docker_confirm_remove = Some(entry);
+        assert!(app.docker_confirm_text().unwrap().contains("image"));
+        assert!(app.modeline_text().contains("Remove this image?"));
+
+        app.docker_confirm_key(KeyPress::char('n'));
+        assert!(app.docker_confirm_remove.is_none());
+    }
+
+    #[test]
+    fn docker_confirm_remove_with_y_clears_the_prompt_and_refreshes() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let id = app.focused_buffer_id();
+        app.docker_lines.insert(
+            id,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Container,
+                entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
+                dim_from: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.docker_confirm_remove = app.docker_entry_at_cursor();
+
+        // `docker rm` itself fails in this sandboxed environment (no
+        // daemon access) -- the point of this test is that confirming
+        // clears the armed state and refreshes without panicking, not
+        // that a real removal happened.
+        app.docker_confirm_key(KeyPress::char('y'));
+        assert!(app.docker_confirm_remove.is_none());
+        assert_eq!(app.open().kind, BufferKind::Docker);
     }
 
     #[test]
