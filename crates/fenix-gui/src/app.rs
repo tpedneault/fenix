@@ -666,17 +666,39 @@ fn format_clock(now: chrono::DateTime<chrono::Local>) -> String {
     now.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// How many space characters to insert before the clock so it lands
-/// flush against the window's right edge, given `existing_chars`
-/// already rendered on the modeline (the badge+suffix, or the raw `:`/
-/// `/` command-line text) out of `columns` total available character
-/// columns. `0` means "don't render the clock at all" -- covers both a
-/// window too narrow to fit it and the exact-fit edge case with no room
-/// left for even one column of visual separation from what's already
-/// there, so a long filename/command can never make the clock overlap
-/// or glue onto existing text.
-fn modeline_clock_gap(existing_chars: usize, columns: usize, clock_chars: usize) -> usize {
-    columns.saturating_sub(existing_chars).saturating_sub(clock_chars)
+/// The clock's left `x` pixel position for it to sit flush against the
+/// window's right edge, given `existing_chars` already rendered on the
+/// modeline's left side (the badge+suffix, or the raw `:`/`/` command-
+/// line text). `None` means "don't render the clock at all" -- either
+/// the window's too narrow to fit it, or there isn't even one column of
+/// visual separation left from what's already there.
+///
+/// Computed directly in pixels from each side's own character count
+/// (`existing_chars`/`clock_chars`) rather than by padding a *shared*
+/// string with literal repeated space characters between them the way
+/// an earlier version of this did -- that meant a very wide window
+/// needed a very long run of space glyphs to reach the right edge, and
+/// nothing guarantees `n` consecutive rendered space glyphs sum to
+/// exactly `n * char_width` (real shaping can round per-glyph); the
+/// error accumulates over the run's length, so it stayed invisible on
+/// an ordinary window but became large enough at fullscreen width to
+/// push most of the clock off the visible edge (reported directly).
+/// Positioning the clock as its own independently-placed short run
+/// (`App::redraw` feeds this into `TextPipeline::set_clock_rich`) has
+/// no long run to accumulate error over -- worst case is the same few
+/// pixels of per-side slop `WHICH_KEY`-style popup sizing already
+/// tolerates elsewhere, not an unbounded, width-dependent drift.
+fn modeline_clock_left(existing_chars: usize, window_width: f32, char_width: f32, clock_chars: usize) -> Option<f32> {
+    let existing_px = existing_chars as f32 * char_width;
+    let clock_px = clock_chars as f32 * char_width;
+    let left = window_width - text::PAD_LEFT - clock_px;
+    // At least one char_width of breathing room from whatever's already
+    // on the left, so the clock never glues directly onto it.
+    if left - char_width >= text::PAD_LEFT + existing_px {
+        Some(left)
+    } else {
+        None
+    }
 }
 
 fn dashboard_line_is_banner(style: dashboard::DashboardLineStyle) -> bool {
@@ -4745,40 +4767,28 @@ impl App {
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_sidebar_rich(&sidebar_refs);
         }
-        let modeline_columns = (window_width / char_width).floor().max(0.0) as usize;
-        let clock_text = modeline_clock_text();
-        let clock_chars = clock_text.chars().count();
-        match &modeline_pieces {
+        let existing_chars = match &modeline_pieces {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
                 let existing_chars = badge.chars().count() + suffix.chars().count();
-                let gap = modeline_clock_gap(existing_chars, modeline_columns, clock_chars);
-                if gap > 0 {
-                    let pad = " ".repeat(gap);
-                    text.set_modeline_text(&[
-                        (badge.as_str(), badge_fg),
-                        (suffix.as_str(), theme.fg_modeline),
-                        (pad.as_str(), theme.fg_modeline),
-                        (clock_text.as_str(), theme.gutter_fg),
-                    ]);
-                } else {
-                    text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
-                }
+                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
+                existing_chars
             }
             None => {
                 let cmd = modeline_command_text.as_deref().unwrap_or("");
-                let gap = modeline_clock_gap(cmd.chars().count(), modeline_columns, clock_chars);
-                if gap > 0 {
-                    let pad = " ".repeat(gap);
-                    text.set_modeline_text(&[
-                        (cmd, theme.fg_modeline),
-                        (pad.as_str(), theme.fg_modeline),
-                        (clock_text.as_str(), theme.gutter_fg),
-                    ]);
-                } else {
-                    text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
-                }
+                text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
+                cmd.chars().count()
             }
+        };
+        // A *separate* buffer/`TextArea` from the modeline's own (see
+        // `clock`'s doc comment in `text.rs` for why -- in short, this
+        // is what fixes a real, reported bug where the clock drifted off
+        // the right edge at wide window widths).
+        let clock_text = modeline_clock_text();
+        let clock_chars = clock_text.chars().count();
+        match modeline_clock_left(existing_chars, window_width, char_width, clock_chars) {
+            Some(left) => text.set_clock_rich(left, &[(clock_text.as_str(), theme.gutter_fg)]),
+            None => text.set_clock_rich(0.0, &[]),
         }
 
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
@@ -5273,21 +5283,31 @@ mod tests {
     }
 
     #[test]
-    fn modeline_clock_gap_returns_the_exact_space_count_when_there_is_room() {
-        assert_eq!(modeline_clock_gap(20, 100, 19), 61);
+    fn modeline_clock_left_returns_the_pixel_position_flush_against_the_right_edge_when_there_is_room() {
+        // window_width=100, char_width=1 -- clock (19 chars) should sit
+        // at 100 - 8 (PAD_LEFT) - 19 = 73.
+        assert_eq!(modeline_clock_left(20, 100.0, 1.0, 19), Some(73.0));
     }
 
     #[test]
-    fn modeline_clock_gap_is_zero_when_the_window_is_too_narrow() {
-        assert_eq!(modeline_clock_gap(20, 30, 19), 0);
+    fn modeline_clock_left_is_none_when_the_window_is_too_narrow() {
+        assert_eq!(modeline_clock_left(20, 30.0, 1.0, 19), None);
     }
 
     #[test]
-    fn modeline_clock_gap_is_zero_at_the_exact_fit_boundary() {
-        // Exactly enough room for the existing text plus the clock, but
-        // not even one column of separation between them -- treated the
-        // same as "doesn't fit," not rendered glued onto existing text.
-        assert_eq!(modeline_clock_gap(20, 39, 19), 0);
+    fn modeline_clock_left_is_some_at_the_exact_fit_boundary() {
+        // Exactly enough room for the existing text, the clock, and one
+        // char_width of separation between them -- the minimum passing
+        // case (the `>=` in `modeline_clock_left`), not yet "doesn't fit."
+        assert_eq!(modeline_clock_left(10, 48.0, 2.0, 5), Some(30.0));
+    }
+
+    #[test]
+    fn modeline_clock_left_is_none_just_below_the_exact_fit_boundary() {
+        // One pixel of window width short of the boundary case above --
+        // no longer enough room, so the clock is omitted rather than
+        // glued onto the existing text.
+        assert_eq!(modeline_clock_left(10, 47.0, 2.0, 5), None);
     }
 
     #[test]

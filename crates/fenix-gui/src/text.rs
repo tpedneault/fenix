@@ -67,7 +67,9 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 /// (`popups`, keyed by `popup::PopupId` -- same lazy-create/retain
 /// lifecycle as `content_buffers`, since which-key already comes and
 /// goes with what's pending and a future completion popup will too),
-/// plus two fixed panels: `modeline` for the single-line status bar and
+/// plus three fixed panels: `modeline` for the single-line status bar,
+/// `clock` for its right-aligned date/time (its own buffer rather than
+/// text embedded in `modeline`, see `clock`'s own doc comment), and
 /// `sidebar` for the file explorer's persistent side panel. All share
 /// one atlas/renderer/font system -- glyphon's `TextRenderer::prepare`
 /// already takes an arbitrary-length `Vec<TextArea>`, so N panes or
@@ -105,6 +107,24 @@ pub struct TextPipeline {
     titles: HashMap<PaneId, GlyphBuffer>,
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
+    /// The modeline's right-aligned date/time clock -- a *separate*
+    /// buffer from `modeline` (rather than embedding it via literal
+    /// space-padding in that shared string) specifically so its position
+    /// is real pixel math (`clock_left`, computed by the caller from the
+    /// actual clock text's measured length) instead of relying on a long
+    /// run of repeated space glyphs summing to exactly `count *
+    /// char_width` -- that assumption drifted visibly at wide window
+    /// widths (a big gap = many space glyphs = accumulated rounding
+    /// error), which is exactly what a real, reported bug looked like:
+    /// most of the clock pushed off the right edge after going
+    /// fullscreen. A short, separately-positioned run has no such
+    /// accumulation to go wrong.
+    clock: GlyphBuffer,
+    /// `clock`'s left `x` position for this frame, set by `set_clock_
+    /// rich` alongside its text and read back in `prepare()` (which has
+    /// no other way to know it, since `TextArea.left` isn't stored on
+    /// the `glyphon::Buffer` itself).
+    clock_left: f32,
     sidebar: GlyphBuffer,
     /// Effective body-text font family: a `config.ini` `font_family`
     /// override, or else the active theme's own `Theme::font_family` --
@@ -186,6 +206,10 @@ impl TextPipeline {
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
+        let mut clock = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        clock.set_wrap(Wrap::None);
+        clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
+
         let mut sidebar = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
@@ -203,6 +227,8 @@ impl TextPipeline {
             titles: HashMap::new(),
             popups: HashMap::new(),
             modeline,
+            clock,
+            clock_left: 0.0,
             sidebar,
             content_family: None,
             default_family,
@@ -410,6 +436,23 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Sets the modeline clock's text and its left `x` pixel position
+    /// (computed by the caller, which already knows the real window
+    /// width and measured `char_width` -- see `App::redraw`'s `modeline_
+    /// clock_left`). A *separate* buffer/`TextArea` from `set_modeline_
+    /// text`, not embedded in it -- see `clock`'s own doc comment for
+    /// why. `segments` empty means "don't show the clock this frame"
+    /// (not enough room); `left` is irrelevant in that case.
+    pub fn set_clock_rich(&mut self, left: f32, segments: &[(&str, Color)]) {
+        self.clock_left = left;
+        let body_family = self.content_family();
+        let default_attrs = Attrs::new().family(body_family);
+        let spans: Vec<(&str, Attrs)> =
+            segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
+        self.clock.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.clock.shape_until_scroll(&mut self.font_system, false);
+    }
+
     /// Sets one popup's content (rich, icon-aware spans, same shape as
     /// `set_pane_rich`) and pixel width -- creating its `GlyphBuffer`
     /// lazily the first time it's rendered, same pattern and same
@@ -456,9 +499,11 @@ impl TextPipeline {
         // Pane buffers are resized every frame in `set_pane_rich` (their
         // rect comes from `WindowTree::layout`, recomputed each redraw
         // regardless of whether the window itself just resized), so only
-        // the three fixed panels need handling here.
+        // the four fixed panels need handling here.
         self.modeline.set_size(Some(width), Some(self.modeline_height()));
         self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.clock.set_size(Some(width), Some(self.modeline_height()));
+        self.clock.shape_until_scroll(&mut self.font_system, false);
         self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height, self.modeline_height())));
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
@@ -544,6 +589,15 @@ impl TextPipeline {
         areas.push(TextArea {
             buffer: &self.modeline,
             left: PAD_LEFT,
+            top: modeline_top + 4.0,
+            scale: 1.0,
+            bounds: modeline_bounds,
+            default_color: theme.fg_modeline,
+            custom_glyphs: &[],
+        });
+        areas.push(TextArea {
+            buffer: &self.clock,
+            left: self.clock_left,
             top: modeline_top + 4.0,
             scale: 1.0,
             bounds: modeline_bounds,
