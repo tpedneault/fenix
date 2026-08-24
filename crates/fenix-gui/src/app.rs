@@ -2369,11 +2369,11 @@ impl App {
         self.workspaces.active_pane_states_mut().insert(volumes_pane, PaneState::seeded_at(cursor));
         self.windows_mut().focus(containers_pane);
 
-        self.pane_titles.insert(containers_pane, "Containers".to_string());
-        self.pane_titles.insert(images_pane, "Images".to_string());
-        self.pane_titles.insert(volumes_pane, "Volumes".to_string());
-        self.pane_titles.insert(status_pane, "Status".to_string());
-        self.pane_titles.insert(logs_pane, "Logs".to_string());
+        self.pane_titles.insert(containers_pane, "1. Containers".to_string());
+        self.pane_titles.insert(images_pane, "2. Images".to_string());
+        self.pane_titles.insert(volumes_pane, "3. Volumes".to_string());
+        self.pane_titles.insert(status_pane, "4. Status".to_string());
+        self.pane_titles.insert(logs_pane, "5. Logs".to_string());
 
         // Only spawned for a real, `main.rs`-launched `App` -- every
         // test's `event_proxy` stays `None` (see `App::new`'s own doc
@@ -2505,6 +2505,22 @@ impl App {
             Some(DockerPaneRole::Logs)
         } else {
             None
+        }
+    }
+
+    /// The pane whose title bar is numbered `n` (`1. Containers` etc.,
+    /// see `open_docker_panel`'s own title strings) -- backs the digit-
+    /// key jump-to-pane shortcut. `None` outside a session or for a
+    /// number with no matching pane.
+    fn docker_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.docker_session.as_ref()?;
+        match n {
+            1 => Some(session.containers_pane),
+            2 => Some(session.images_pane),
+            3 => Some(session.volumes_pane),
+            4 => Some(session.status_pane),
+            5 => Some(session.logs_pane),
+            _ => None,
         }
     }
 
@@ -2863,12 +2879,12 @@ impl App {
         self.workspaces.active_pane_states_mut().insert(stash_pane, PaneState::seeded_at(cursor));
         self.windows_mut().focus(files_pane);
 
-        self.pane_titles.insert(status_pane, "Status".to_string());
-        self.pane_titles.insert(files_pane, "Files".to_string());
-        self.pane_titles.insert(branches_pane, "Branches".to_string());
-        self.pane_titles.insert(commits_pane, "Commits".to_string());
-        self.pane_titles.insert(stash_pane, "Stash".to_string());
-        self.pane_titles.insert(main_pane, "Main".to_string());
+        self.pane_titles.insert(status_pane, "1. Status".to_string());
+        self.pane_titles.insert(files_pane, "2. Files".to_string());
+        self.pane_titles.insert(branches_pane, "3. Branches".to_string());
+        self.pane_titles.insert(commits_pane, "4. Commits".to_string());
+        self.pane_titles.insert(stash_pane, "5. Stash".to_string());
+        self.pane_titles.insert(main_pane, "6. Main".to_string());
 
         // Same "only a real, main.rs-launched App spawns anything" posture
         // as `open_docker_panel`'s own stats poller.
@@ -2994,6 +3010,22 @@ impl App {
             Some(GitPaneRole::Main)
         } else {
             None
+        }
+    }
+
+    /// The pane whose title bar is numbered `n` (`1. Status` etc., see
+    /// `open_git_panel`'s own title strings) -- mirrors `docker_pane_by_
+    /// number`, backs the same digit-key jump-to-pane shortcut.
+    fn git_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.git_session.as_ref()?;
+        match n {
+            1 => Some(session.status_pane),
+            2 => Some(session.files_pane),
+            3 => Some(session.branches_pane),
+            4 => Some(session.commits_pane),
+            5 => Some(session.stash_pane),
+            6 => Some(session.main_pane),
+            _ => None,
         }
     }
 
@@ -4252,6 +4284,25 @@ impl App {
                     self.wake_caret();
                     return;
                 }
+                // Jump straight to the pane numbered `n` in its title bar
+                // (`1. Containers`, `2. Images`, ...) -- a plain digit
+                // here would otherwise just start an unused Vim count on
+                // a non-editable panel buffer, so claiming it costs
+                // nothing real editing would use.
+                (_, KeyCode::Char(c)) if keypress.mods == Mods::default() && c.is_ascii_digit() => {
+                    if let Some(pane) = self.docker_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                        self.windows_mut().focus(pane);
+                        if matches!(
+                            self.docker_focused_role(),
+                            Some(DockerPaneRole::Containers | DockerPaneRole::Images | DockerPaneRole::Volumes)
+                        ) && self.docker_session.as_ref().is_some_and(|s| s.logs_container.is_none())
+                        {
+                            self.docker_sync_details();
+                        }
+                        self.wake_caret();
+                    }
+                    return;
+                }
                 _ => {}
             }
         }
@@ -4341,6 +4392,18 @@ impl App {
                 (Files | Branches | Commits | Stash, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
                     self.git_menu_open = true;
                     self.wake_caret();
+                    return;
+                }
+                // Same digit-key jump-to-pane shortcut as the Docker
+                // block above (`1. Status`, `2. Files`, ...).
+                (_, KeyCode::Char(c)) if keypress.mods == Mods::default() && c.is_ascii_digit() => {
+                    if let Some(pane) = self.git_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                        self.windows_mut().focus(pane);
+                        if matches!(self.git_focused_role(), Some(GitPaneRole::Files | GitPaneRole::Commits | GitPaneRole::Stash)) {
+                            self.git_sync_main();
+                        }
+                        self.wake_caret();
+                    }
                     return;
                 }
                 _ => {}
@@ -5692,13 +5755,18 @@ impl App {
         // Title-bar strips for every pane -- `pane.rect` here is already
         // the *shrunk* content rect (see the top-of-loop adjustment
         // above), so the strip itself sits exactly one `line_height`
-        // above it, same width.
+        // above it, same width. The focused pane's title is colored with
+        // the same accent `caret_text` uses elsewhere (the which-key
+        // popup's key column), so which pane has focus reads at a glance
+        // across a split -- every other pane's title stays the plain
+        // `fg_modeline` it always has.
         let title_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = panes_render
             .iter()
             .map(|pane| {
                 let title_rect =
                     fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - line_height, w: pane.rect.w, h: line_height };
-                text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), theme.fg_modeline, false)]);
+                let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
+                text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), color, false)]);
                 (pane.pane, title_rect)
             })
             .collect();
@@ -8729,11 +8797,11 @@ mod tests {
         let distinct: std::collections::HashSet<_> = panes.iter().collect();
         assert_eq!(distinct.len(), 5, "every pane should be a distinct WindowId");
         assert_eq!(app.windows().window_count(), 5);
-        assert_eq!(app.pane_titles.get(&session.containers_pane).map(String::as_str), Some("Containers"));
-        assert_eq!(app.pane_titles.get(&session.images_pane).map(String::as_str), Some("Images"));
-        assert_eq!(app.pane_titles.get(&session.volumes_pane).map(String::as_str), Some("Volumes"));
-        assert_eq!(app.pane_titles.get(&session.status_pane).map(String::as_str), Some("Status"));
-        assert_eq!(app.pane_titles.get(&session.logs_pane).map(String::as_str), Some("Logs"));
+        assert_eq!(app.pane_titles.get(&session.containers_pane).map(String::as_str), Some("1. Containers"));
+        assert_eq!(app.pane_titles.get(&session.images_pane).map(String::as_str), Some("2. Images"));
+        assert_eq!(app.pane_titles.get(&session.volumes_pane).map(String::as_str), Some("3. Volumes"));
+        assert_eq!(app.pane_titles.get(&session.status_pane).map(String::as_str), Some("4. Status"));
+        assert_eq!(app.pane_titles.get(&session.logs_pane).map(String::as_str), Some("5. Logs"));
         assert_eq!(app.focused_pane_id(), session.containers_pane);
     }
 
@@ -8809,6 +8877,59 @@ mod tests {
 
         app.docker_session_close();
         assert_eq!(app.docker_focused_role(), None);
+    }
+
+    // `App::handle_key` itself can't be driven directly in a unit test
+    // (needs a real winit `KeyEvent`/`ActiveEventLoop`, see the comment
+    // above `vim_pulse_event_yields_a_renderable_pulse_overlay`) -- this
+    // covers the lookup its digit-key routing actually depends on,
+    // matching the same title-bar numbering `open_docker_panel` sets
+    // (`1. Containers`, `2. Images`, ...).
+    #[test]
+    fn docker_pane_by_number_matches_each_titles_own_number() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let session = app.docker_session.as_ref().unwrap();
+        let (containers, images, volumes, status, logs) =
+            (session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane);
+
+        assert_eq!(app.docker_pane_by_number(1), Some(containers));
+        assert_eq!(app.docker_pane_by_number(2), Some(images));
+        assert_eq!(app.docker_pane_by_number(3), Some(volumes));
+        assert_eq!(app.docker_pane_by_number(4), Some(status));
+        assert_eq!(app.docker_pane_by_number(5), Some(logs));
+        assert_eq!(app.docker_pane_by_number(6), None);
+        assert_eq!(app.docker_pane_by_number(0), None);
+
+        app.docker_session_close();
+        assert_eq!(app.docker_pane_by_number(1), None);
+    }
+
+    #[test]
+    fn git_pane_by_number_matches_each_titles_own_number() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let session = app.git_session.as_ref().unwrap();
+        let (status, files, branches, commits, stash, main) = (
+            session.status_pane,
+            session.files_pane,
+            session.branches_pane,
+            session.commits_pane,
+            session.stash_pane,
+            session.main_pane,
+        );
+
+        assert_eq!(app.git_pane_by_number(1), Some(status));
+        assert_eq!(app.git_pane_by_number(2), Some(files));
+        assert_eq!(app.git_pane_by_number(3), Some(branches));
+        assert_eq!(app.git_pane_by_number(4), Some(commits));
+        assert_eq!(app.git_pane_by_number(5), Some(stash));
+        assert_eq!(app.git_pane_by_number(6), Some(main));
+        assert_eq!(app.git_pane_by_number(7), None);
+        assert_eq!(app.git_pane_by_number(0), None);
+
+        app.git_session_close();
+        assert_eq!(app.git_pane_by_number(1), None);
     }
 
     #[test]

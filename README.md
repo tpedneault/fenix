@@ -52,6 +52,11 @@ for anyone curious to poke around or build on it.
   a dired buffer's own directory for one with no path) -- with a split
   open, two different files are labeled at a glance, not just whichever
   one happens to be focused (the modeline only ever names that one).
+  The focused pane's title is colored with an accent so it's obvious at
+  a glance which one has focus, whether you're editing, or inside the
+  Docker or Git panel. On the Docker and Git panels specifically, every
+  title is also prefixed with a number (`1. Containers`, `2. Images`,
+  ...) -- pressing that digit jumps focus straight to the matching pane.
 - **Modeline**: mode badge, filename, and cursor position on the left;
   a live local date/time clock flush against the right edge, ticking in
   place as you work (omitted rather than overlapping anything if the
@@ -239,11 +244,14 @@ all work); moving the cursor in a left pane live-updates Status with
 that row's info. A Containers row is just a color-coded status badge
 plus the container's name (`[R]` green for running, `[P]` yellow for
 paused, `[X]` red for exited, etc.) -- press `x` on a pane for a
-which-key-style popup of its available keys instead. Only these are
-special, and only on the pane named:
+which-key-style popup of its available keys instead. Each title bar is
+numbered (`1. Containers`, `2. Images`, ...) and the focused one is
+shown in an accent color -- pressing that digit jumps straight to it.
+Only these are special, and only on the pane named:
 
 | Keys | Pane | Action |
 |---|---|---|
+| `1`-`5` | any | Jump to the pane numbered that in its title bar |
 | `s` | Containers | Start the container under the cursor |
 | `S` | Containers | Stop the container under the cursor |
 | `R` | Containers | Restart the container under the cursor |
@@ -261,11 +269,14 @@ Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...` all
 work). Moving the cursor in Files, Commits, or Stash re-syncs Main to
 that row's diff; Status doesn't follow the cursor -- it's a fixed
 repo-overview summary that live-updates on its own every ~2s
-regardless of where the cursor is. Only these are special, and only on
-the pane named:
+regardless of where the cursor is. Each title bar is numbered (`1.
+Status`, `2. Files`, ...) and the focused one is shown in an accent
+color -- pressing that digit jumps straight to it. Only these are
+special, and only on the pane named:
 
 | Keys | Pane | Action |
 |---|---|---|
+| `1`-`6` | any | Jump to the pane numbered that in its title bar |
 | `s` | Files | Stage the file under the cursor |
 | `S` | Files | Unstage the file under the cursor |
 | `a` | Files | Stage every changed file |
