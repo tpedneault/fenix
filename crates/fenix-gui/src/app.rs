@@ -4851,6 +4851,27 @@ mod tests {
     }
 
     #[test]
+    fn tcl_candidates_show_the_fully_qualified_path_for_namespaced_procs() {
+        let dir = TempDir::new("completion_ctags_namespaced");
+        dir.write(
+            "lib.tcl",
+            "namespace eval myns {\n    namespace eval subns {\n        proc greet {} {\n            return 1\n        }\n    }\n}\n",
+        );
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("gre");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"myns::subns::greet".to_string()), "expected the fully-qualified path, got {labels:?}");
+        assert!(!labels.iter().any(|l| l == "greet"), "the bare, unqualified name should not appear");
+    }
+
+    #[test]
     fn tcl_candidates_include_entries_from_a_configured_symbols_file() {
         let dir = TempDir::new("completion_symbols_file");
         let symbols_path = dir.write("symbols.txt", "my_external_symbol\nanother_one\n");

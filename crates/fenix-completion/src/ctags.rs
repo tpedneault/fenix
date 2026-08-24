@@ -9,6 +9,16 @@ use std::process::Command;
 /// completion).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagEntry {
+    /// The fully-qualified name, e.g. `myns::subns::greet` for a `proc
+    /// greet` nested inside `namespace eval myns { namespace eval subns
+    /// {...} }`, or plain `global_proc` for one defined at the top
+    /// level -- never a leading `::`, even though Tcl's own fully-
+    /// qualified names always have one (`::myns::subns::greet`), since
+    /// completions should exclude the global-namespace prefix. Built
+    /// from ctags' own `namespace:` extra field (confirmed present by
+    /// default with just `--fields=+n`, already the flag `run` passes --
+    /// no extra flag needed) plus the tag's own bare name; a tag with no
+    /// `namespace:` field is already at the top level.
     pub name: String,
     pub file: PathBuf,
     pub line: usize,
@@ -64,7 +74,12 @@ fn parse(text: &str) -> Vec<TagEntry> {
             .find_map(|f| f.strip_prefix("line:"))
             .and_then(|n| n.parse::<usize>().ok())
             .unwrap_or(0);
-        entries.push(TagEntry { name: name.to_string(), file: PathBuf::from(file), line });
+        let namespace = fields[4..].iter().find_map(|f| f.strip_prefix("namespace:"));
+        let qualified_name = match namespace {
+            Some(ns) if !ns.is_empty() => format!("{}::{name}", ns.trim_start_matches("::")),
+            _ => name.to_string(),
+        };
+        entries.push(TagEntry { name: qualified_name, file: PathBuf::from(file), line });
     }
     entries
 }
@@ -94,12 +109,32 @@ mod tests {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].name, "greet");
-        assert_eq!(entries[0].line, 2);
-        assert_eq!(entries[1].name, "myns");
-        assert_eq!(entries[1].line, 1);
+        assert_eq!(entries[0].name, "myns"); // top-level namespace, no qualifier
+        assert_eq!(entries[0].line, 1);
+        assert_eq!(entries[1].name, "myns::greet"); // qualified, no leading "::"
+        assert_eq!(entries[1].line, 2);
         assert_eq!(entries[2].name, "top_level_proc");
         assert_eq!(entries[2].line, 7);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn nested_namespaces_produce_a_fully_qualified_name_without_a_leading_double_colon() {
+        let dir = temp_dir("nested-namespaces");
+        fs::write(
+            dir.join("foo.tcl"),
+            "namespace eval outer {\n    namespace eval inner {\n        proc deep {} {\n            return 1\n        }\n    }\n}\n",
+        )
+        .unwrap();
+
+        let entries = run(&dir, "Tcl");
+        let deep = entries.iter().find(|e| e.name.ends_with("deep")).expect("expected a 'deep' entry");
+        assert_eq!(deep.name, "outer::inner::deep");
+        assert!(!deep.name.starts_with("::"));
+
+        let inner = entries.iter().find(|e| e.name.ends_with("inner")).expect("expected an 'inner' entry");
+        assert_eq!(inner.name, "outer::inner");
 
         fs::remove_dir_all(&dir).ok();
     }

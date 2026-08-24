@@ -44,6 +44,8 @@ for anyone curious to poke around or build on it.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
+  Namespaced procs show their fully-qualified path (`myns::subns::proc`,
+  no leading `::`), not just the bare proc name.
 - **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
   `Solarized Dark`, and `One Dark`, cycled at runtime (`SPC t t`) or
   jumped to directly by name with a fuzzy picker (`SPC t p`), persisted
