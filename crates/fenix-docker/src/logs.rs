@@ -1,5 +1,6 @@
 use std::process::{Child, Command, Stdio};
 
+use crate::engine;
 use crate::process::run_action_combined_output;
 
 fn logs_args(id: &str, tail: usize) -> Vec<String> {
@@ -14,18 +15,19 @@ pub fn container_logs(id: &str, tail: usize) -> Result<String, String> {
     run_action_combined_output(&logs_args(id, tail))
 }
 
-/// Spawns `docker logs -f --tail N <id>` as a genuinely long-lived
-/// child process (stdout/stderr piped, both inherited into the same
-/// pipe reasoning `container_logs` already documents) for live
-/// tailing -- unlike `container_logs`'s one-shot snapshot, this process
-/// keeps running (streaming new output as the container produces it)
-/// until the caller kills it. Returns `None` (never panics) if `docker`
-/// itself can't be launched; the caller owns reading `child.stdout` on
-/// its own thread and is responsible for eventually killing the child
-/// (this crate stays GUI/event-loop-agnostic, so it doesn't manage that
-/// lifecycle itself -- see `fenix-gui`'s `DockerLogFollower`).
+/// Spawns `{docker,podman} logs -f --tail N <id>` (see `engine::
+/// resolve`) as a genuinely long-lived child process (stdout/stderr
+/// piped, both inherited into the same pipe reasoning `container_logs`
+/// already documents) for live tailing -- unlike `container_logs`'s
+/// one-shot snapshot, this process keeps running (streaming new output
+/// as the container produces it) until the caller kills it. Returns
+/// `None` (never panics) if the binary itself can't be launched; the
+/// caller owns reading `child.stdout` on its own thread and is
+/// responsible for eventually killing the child (this crate stays
+/// GUI/event-loop-agnostic, so it doesn't manage that lifecycle itself
+/// -- see `fenix-gui`'s `DockerLogFollower`).
 pub fn spawn_log_follower(id: &str, tail: usize) -> Option<Child> {
-    Command::new("docker")
+    Command::new(engine::resolve())
         .args(["logs", "-f", "--tail", &tail.to_string(), id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -49,10 +51,10 @@ mod tests {
 
     #[test]
     fn spawn_log_follower_never_panics_even_without_a_working_docker() {
-        // `docker` itself is on `PATH` in this environment (confirmed
-        // earlier this session), so this actually spawns a real process
-        // -- it just can't reach a daemon. Kill it immediately so the
-        // test doesn't leave a lingering `docker logs -f` child behind.
+        // Whatever `engine::resolve()` picks is on `PATH` in this
+        // environment, so this actually spawns a real process -- it
+        // just can't reach a daemon. Kill it immediately so the test
+        // doesn't leave a lingering `logs -f` child behind.
         if let Some(mut child) = spawn_log_follower("nonexistent", 10) {
             let _ = child.kill();
             let _ = child.wait();

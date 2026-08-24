@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use crate::engine;
+
 /// Shells `cmd args...` and parses stdout as newline-delimited JSON
 /// objects (what `docker ... --format '{{json .}}'` produces -- one flat
 /// JSON object per line, not a JSON array). Never fails: a missing
@@ -18,15 +20,16 @@ pub(crate) fn run_ndjson<T>(cmd: &str, args: &[&str], parse: impl Fn(&serde_json
         .collect()
 }
 
-/// Runs `docker args...`, returning stdout on success or stderr (or a
-/// synthetic message if the binary itself couldn't be launched) on
-/// failure -- the caller decides what to do with either (render into a
-/// buffer, ignore, etc.).
+/// Runs `{docker,podman} args...` (see `engine::resolve`), returning
+/// stdout on success or stderr (or a synthetic message if the binary
+/// itself couldn't be launched) on failure -- the caller decides what to
+/// do with either (render into a buffer, ignore, etc.).
 pub(crate) fn run_action(args: &[String]) -> Result<String, String> {
-    match Command::new("docker").args(args).output() {
+    let bin = engine::resolve();
+    match Command::new(bin).args(args).output() {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
-        Err(err) => Err(format!("couldn't run docker: {err}")),
+        Err(err) => Err(format!("couldn't run {bin}: {err}")),
     }
 }
 
@@ -41,14 +44,15 @@ pub(crate) fn run_action(args: &[String]) -> Result<String, String> {
 /// byte-for-byte in arrival order) -- fine for a one-shot log dump into
 /// a buffer, not a live `tail -f`.
 pub(crate) fn run_action_combined_output(args: &[String]) -> Result<String, String> {
-    match Command::new("docker").args(args).output() {
+    let bin = engine::resolve();
+    match Command::new(bin).args(args).output() {
         Ok(out) if out.status.success() => {
             let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
             combined.push_str(&String::from_utf8_lossy(&out.stderr));
             Ok(combined)
         }
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
-        Err(err) => Err(format!("couldn't run docker: {err}")),
+        Err(err) => Err(format!("couldn't run {bin}: {err}")),
     }
 }
 

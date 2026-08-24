@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::process::run_ndjson;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,12 +13,13 @@ pub struct ContainerStat {
 }
 
 /// One-shot CPU/mem snapshot for every running container -- mirrors
-/// `docker stats --no-stream`, not the continuously-streaming default
-/// (no `--no-stream`), so this returns promptly instead of blocking
+/// `docker stats --no-stream` (or `podman stats --no-stream`, see
+/// `engine::resolve`), not the continuously-streaming default (no
+/// `--no-stream`), so this returns promptly instead of blocking
 /// forever; call it on a timer for a "live" feel instead. Same
 /// never-fails posture as every other `fenix-docker` listing function.
 pub fn container_stats() -> Vec<ContainerStat> {
-    run_ndjson("docker", &["stats", "--no-stream", "--format", "{{json .}}"], parse_stat)
+    run_ndjson(engine::resolve(), &["stats", "--no-stream", "--format", "{{json .}}"], parse_stat)
 }
 
 fn parse_stat(v: &serde_json::Value) -> Option<ContainerStat> {

@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::process::run_ndjson;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,10 +9,11 @@ pub struct Image {
     pub size: String,
 }
 
-/// Lists every local image -- mirrors `docker images`. Same
-/// never-fails posture as `list_containers`.
+/// Lists every local image -- mirrors `docker images` (or `podman
+/// images`, see `engine::resolve`). Same never-fails posture as
+/// `list_containers`.
 pub fn list_images() -> Vec<Image> {
-    run_ndjson("docker", &["images", "--format", "{{json .}}"], parse_image)
+    run_ndjson(engine::resolve(), &["images", "--format", "{{json .}}"], parse_image)
 }
 
 fn parse_image(v: &serde_json::Value) -> Option<Image> {

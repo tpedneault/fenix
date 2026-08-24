@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::process::run_ndjson;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,21 +12,30 @@ pub struct Container {
     pub state: String,
 }
 
-/// Lists every container, running or not (`-a`) -- mirrors `docker ps -a`,
-/// not just the running subset, since a Lazydocker-style panel needs to
-/// show stopped containers too (that's the whole point of a `start`
-/// action existing). Never fails -- a missing `docker` binary, an
-/// unreachable daemon, or malformed output all yield an empty `Vec`, the
-/// same posture `ctags::run`/`grep_project` already established for a
-/// missing external tool.
+/// Lists every container, running or not (`-a`) -- mirrors `docker ps -a`
+/// (or `podman ps -a`, see `engine::resolve`), not just the running
+/// subset, since a Lazydocker-style panel needs to show stopped
+/// containers too (that's the whole point of a `start` action existing).
+/// Never fails -- a missing binary, an unreachable daemon, or malformed
+/// output all yield an empty `Vec`, the same posture `ctags::run`/
+/// `grep_project` already established for a missing external tool.
 pub fn list_containers() -> Vec<Container> {
-    run_ndjson("docker", &["ps", "-a", "--format", "{{json .}}"], parse_container)
+    run_ndjson(engine::resolve(), &["ps", "-a", "--format", "{{json .}}"], parse_container)
 }
 
+/// `Names` is a plain string in Docker's own `{{json .}}` output but a
+/// JSON array in Podman's (confirmed against real Podman output --
+/// containers/podman#6980) -- tolerates either shape, taking the first
+/// name when it's an array.
 fn parse_container(v: &serde_json::Value) -> Option<Container> {
+    let name = match v.get("Names")? {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(names) => names.first()?.as_str()?.to_string(),
+        _ => return None,
+    };
     Some(Container {
         id: v.get("ID")?.as_str()?.to_string(),
-        name: v.get("Names")?.as_str()?.to_string(),
+        name,
         image: v.get("Image")?.as_str()?.to_string(),
         status: v.get("Status").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
         state: v.get("State").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
@@ -46,6 +56,26 @@ mod tests {
         assert_eq!(c.image, "nginx:latest");
         assert_eq!(c.status, "Up 3 days");
         assert_eq!(c.state, "running");
+    }
+
+    #[test]
+    fn parses_a_real_shaped_podman_ps_json_line_with_names_as_an_array() {
+        // Podman's own `{{json .}}` output for `Names` is a JSON array,
+        // not a plain string like Docker's -- verified against real
+        // Podman output (containers/podman#6980), not assumed.
+        let line = r#"{"ID":"abc123","Image":"nginx:latest","Names":["web"],"State":"running","Status":"Up 3 days"}"#;
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        let c = parse_container(&v).unwrap();
+        assert_eq!(c.id, "abc123");
+        assert_eq!(c.name, "web");
+        assert_eq!(c.state, "running");
+    }
+
+    #[test]
+    fn parse_container_rejects_an_empty_names_array() {
+        let line = r#"{"ID":"abc123","Image":"nginx:latest","Names":[],"State":"running","Status":"Up"}"#;
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(parse_container(&v).is_none());
     }
 
     #[test]

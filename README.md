@@ -110,9 +110,14 @@ and degrade gracefully (never a hard error) if they're not:
 - [`git`](https://git-scm.com/) — git-status badges in the file explorer.
 - [`Universal Ctags`](https://ctags.io/) (`ctags`) — project-definition
   completion for Tcl.
-- [`docker`](https://docs.docker.com/engine/) — the Docker panel
-  (`SPC d d`); with no `docker` on `PATH` (or an unreachable daemon) the
-  panel just shows an empty listing instead of failing.
+- [`docker`](https://docs.docker.com/engine/) or [`podman`](https://podman.io/)
+  — the Docker panel (`SPC d d`). Fenix probes `docker` first and falls
+  back to `podman` if `docker` isn't runnable (auto-detected once per
+  run) — so a plain Podman install works with no configuration, and a
+  `podman-docker` compatibility shim (where `docker` itself resolves to
+  Podman) works too, indistinguishably. With neither on `PATH` (or an
+  unreachable daemon) the panel just shows an empty listing instead of
+  failing.
 
 ### Running the tests
 
@@ -276,7 +281,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-picker` | Generic fuzzy matching + live-filtered candidate list, used by every fuzzy-finder |
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
 | `fenix-completion` | Completion sources: Tcl keywords, ctags-scanned definitions, external symbols file |
-| `fenix-docker` | Docker CLI shelling: container/image listing, start/stop/restart/remove/run/build |
+| `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 

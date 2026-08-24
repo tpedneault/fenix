@@ -1,3 +1,4 @@
+use crate::engine;
 use crate::process::run_ndjson;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,10 +8,11 @@ pub struct Volume {
     pub mountpoint: String,
 }
 
-/// Lists every local volume -- mirrors `docker volume ls`. Same
-/// never-fails posture as `list_containers`/`list_images`.
+/// Lists every local volume -- mirrors `docker volume ls` (or `podman
+/// volume ls`, see `engine::resolve`). Same never-fails posture as
+/// `list_containers`/`list_images`.
 pub fn list_volumes() -> Vec<Volume> {
-    run_ndjson("docker", &["volume", "ls", "--format", "{{json .}}"], parse_volume)
+    run_ndjson(engine::resolve(), &["volume", "ls", "--format", "{{json .}}"], parse_volume)
 }
 
 fn parse_volume(v: &serde_json::Value) -> Option<Volume> {
