@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
-use fenix_keymap::{KeyCode, KeyPress, Matcher, NamedKey as FenixNamedKey, Step};
+use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, Step};
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
 use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
@@ -509,6 +509,36 @@ fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
     }
 }
 
+/// Plain-text rendering of a directory listing for a real `BufferKind::
+/// Explorer` buffer -- one line per entry (depth indent, name, a
+/// trailing `/` for directories, a one-letter git-status marker when
+/// known), paired with which `entries` index each generated line
+/// corresponds to (mirrors `dashboard_lines`' own role for `BufferKind::
+/// Dashboard`). Deliberately plainer than `explorer_row_spans`'s rich
+/// icon/color spans (the sidebar/full-buffer *overlay*'s own rendering,
+/// unchanged and untouched by this) -- this has to be real, plain rope
+/// text a Vim buffer can navigate/search, not colored display-only spans.
+fn explorer_dired_text(state: &ExplorerState) -> (String, Vec<Option<usize>>) {
+    let mut text = String::new();
+    let mut lines = Vec::with_capacity(state.entries.len());
+    for (i, entry) in state.entries.iter().enumerate() {
+        if i > 0 {
+            text.push('\n');
+        }
+        text.push_str(&"  ".repeat(entry.depth));
+        text.push_str(&entry.name);
+        if entry.is_dir {
+            text.push('/');
+        }
+        if let Some(status) = entry.git_status {
+            text.push_str("  ");
+            text.push_str(git_status_marker(status));
+        }
+        lines.push(Some(i));
+    }
+    (text, lines)
+}
+
 /// Human-readable file size (`"1.2K"`, `"340B"`) -- no crate for this,
 /// just repeated division, so no new dependency for one small column.
 fn format_size(bytes: u64) -> String {
@@ -747,6 +777,21 @@ pub struct App {
     /// highlight coloring.
     dashboard_lines: HashMap<BufferId, Vec<Option<dashboard::DashboardLine>>>,
 
+    /// The live, mutable directory-listing state for every real
+    /// `BufferKind::Explorer` buffer currently open (`SPC f j`), keyed by
+    /// `BufferId` -- same per-buffer-keyed precedent as `dashboard_
+    /// lines`. Distinct from `explorer`/`sidebar` (the older overlay
+    /// mechanism, still used unchanged for the `SPC p a` project-picking
+    /// flow and the persistent sidebar -- see `explorer_jump`'s own doc
+    /// comment for why ordinary browsing moved to a real buffer but
+    /// those two didn't).
+    dired_states: HashMap<BufferId, ExplorerState>,
+    /// Which `entries` index (if any) each generated line of a dired
+    /// buffer's real rope text corresponds to -- mirrors `dashboard_
+    /// lines`' exact role, just for `explorer_dired_text`'s output
+    /// instead of `dashboard::render`'s.
+    dired_lines: HashMap<BufferId, Vec<Option<usize>>>,
+
     /// The autocompletion popup's live state -- `Some` only while Insert
     /// mode, the focused buffer's language, and the prefix at the cursor
     /// all currently justify showing it (see `sync_completion`, called
@@ -885,6 +930,8 @@ impl App {
             known_projects,
             recent_files,
             dashboard_lines,
+            dired_states: HashMap::new(),
+            dired_lines: HashMap::new(),
             completion: None,
             tcl_candidates_cache: None,
             completion_scroll: 0,
@@ -1170,25 +1217,122 @@ impl App {
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
-    /// `SPC f j` (dired-jump): replaces the main view with a full-buffer
-    /// directory listing at the current file's directory. No stashing
-    /// needed -- the focused pane's `BufferId` is left untouched (the
-    /// buffer itself stays safely owned by `self.buffers` the whole
-    /// time), `main_view` alone controls whether it's rendered as buffer
-    /// content or the explorer/picker UI.
+    /// `SPC f j` (dired-jump): opens a real, closable (`SPC b k`),
+    /// splittable (`SPC w v`/`SPC w s`), buffer-switcher-listed (`SPC b
+    /// b`) dired buffer (`BufferKind::Explorer`) at the current file's
+    /// directory, in the focused pane -- unlike the older full-buffer/
+    /// sidebar overlay (`self.explorer`/`self.sidebar`, still used
+    /// unchanged for `SPC p a`'s directory-picking flow and the
+    /// persistent sidebar respectively; see `MainView::Explorer`'s own
+    /// doc comment), this is a genuine `BufferId` other panes/workspaces
+    /// can reference, and ordinary Vim motions navigate it for free
+    /// since its content is real rope text (see `handle_key`'s own
+    /// `BufferKind::Explorer` interception for the small set of action
+    /// keys layered on top).
     pub(crate) fn explorer_jump(&mut self) {
         let dir = self.explorer_start_dir();
-        let explorer = match ExplorerState::open(&dir) {
-            Ok(e) => e,
+        self.open_dired_at(&dir);
+    }
+
+    /// Shared by `explorer_jump` (which derives `dir` from the current
+    /// file) and tests (which just want a specific directory) -- opens a
+    /// fresh dired buffer at `dir` in the focused pane.
+    fn open_dired_at(&mut self, dir: &Path) {
+        let state = match ExplorerState::open(dir) {
+            Ok(s) => s,
             Err(err) => {
                 eprintln!("fenix: couldn't list {} ({err})", dir.display());
                 return;
             }
         };
-        self.explorer = Some(explorer);
-        self.explorer_purpose = ExplorerPurpose::Browse;
-        self.main_view = MainView::Explorer;
+        let (text, lines) = explorer_dired_text(&state);
+        let id = self.buffers.open_explorer(&text);
+        self.dired_states.insert(id, state);
+        self.dired_lines.insert(id, lines);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
         self.wake_caret();
+    }
+
+    /// Replaces `id`'s dired state with `new_state` and regenerates its
+    /// buffer's rope text to match in one atomic step (`Buffer::
+    /// replace_range` over the whole content -- same "rewrite the whole
+    /// affected span as one step" tool `:s` substitute already uses),
+    /// then resets every pane currently showing `id` back to the top --
+    /// the old cursor/scroll position is meaningless against entirely
+    /// different content (a different directory's listing).
+    fn set_dired_state(&mut self, id: BufferId, new_state: ExplorerState) {
+        let (text, lines) = explorer_dired_text(&new_state);
+        self.dired_states.insert(id, new_state);
+        self.dired_lines.insert(id, lines);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    /// `Enter` on a dired buffer: opens the file at the cursor's line
+    /// into the focused pane, or navigates into the directory at that
+    /// line in place (same `BufferId`, freshly regenerated) -- matches
+    /// real dired's own "navigating a subdirectory reuses the buffer"
+    /// convention, not a new buffer per level.
+    fn dired_activate_selected(&mut self) {
+        let id = self.focused_buffer_id();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let Some(Some(entry_idx)) = self.dired_lines.get(&id).and_then(|lines| lines.get(line)).copied() else {
+            return;
+        };
+        let Some(entry) = self.dired_states.get(&id).and_then(|s| s.entries.get(entry_idx)) else { return };
+        let path = entry.path.clone();
+        if entry.is_dir {
+            match ExplorerState::open(&path) {
+                Ok(new_state) => self.set_dired_state(id, new_state),
+                Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
+            }
+        } else {
+            self.open_file_from_picker(&path);
+        }
+    }
+
+    /// `-` on a dired buffer: navigates up to the parent of the
+    /// directory currently being browsed, in place.
+    fn dired_parent_dir(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(parent) = self.dired_states.get(&id).and_then(|s| s.cwd.parent()).map(Path::to_path_buf) else {
+            return;
+        };
+        match ExplorerState::open(&parent) {
+            Ok(new_state) => self.set_dired_state(id, new_state),
+            Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
+        }
+    }
+
+    /// `R` on a dired buffer: re-lists the same directory (picks up
+    /// files created/removed/renamed since it was opened).
+    fn dired_refresh(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(mut state) = self.dired_states.remove(&id) else { return };
+        if let Err(err) = state.refresh() {
+            eprintln!("fenix: couldn't refresh ({err})");
+        }
+        self.set_dired_state(id, state);
+    }
+
+    /// `.` on a dired buffer: toggles dotfile visibility and re-lists.
+    fn dired_toggle_hidden(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(mut state) = self.dired_states.remove(&id) else { return };
+        if let Err(err) = state.toggle_hidden() {
+            eprintln!("fenix: couldn't refresh ({err})");
+        }
+        self.set_dired_state(id, state);
     }
 
     /// `SPC e t`: toggles the sidebar open/closed. Opening focuses it
@@ -2276,6 +2420,42 @@ impl App {
             return;
         }
 
+        // A dired buffer is likewise real Vim-navigable text -- ordinary
+        // motions (`hjkl`, `gg`/`G`, `/` search, ...) reach Vim below
+        // unchanged. Only a small set of action keys are claimed here
+        // first (mirroring the Dashboard's own single-key interception
+        // above): none of them have a meaningful "edit this text"
+        // purpose on a directory listing anyway, so claiming them costs
+        // nothing real Vim editing would otherwise offer here. Marking/
+        // rename/create/delete/copy/move aren't wired for this buffer-
+        // backed form yet -- still available via the sidebar (`SPC e
+        // t`), which this doesn't touch.
+        if self.open().kind == BufferKind::Explorer {
+            match keypress.code {
+                KeyCode::Named(FenixNamedKey::Enter) => {
+                    self.dired_activate_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('-') if keypress.mods == Mods::default() => {
+                    self.dired_parent_dir();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('R') if keypress.mods == Mods::default() => {
+                    self.dired_refresh();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('.') if keypress.mods == Mods::default() => {
+                    self.dired_toggle_hidden();
+                    self.wake_caret();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -2426,7 +2606,16 @@ impl App {
         }
         let ob = self.open();
         let filename = ob.buffer.path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
-            if ob.kind == BufferKind::Dashboard { "*dashboard*".to_string() } else { "[No Name]".to_string() }
+            if ob.kind == BufferKind::Dashboard {
+                "*dashboard*".to_string()
+            } else if ob.kind == BufferKind::Explorer {
+                self.dired_states
+                    .get(&self.focused_buffer_id())
+                    .map(|s| s.cwd.display().to_string())
+                    .unwrap_or_else(|| "*dired*".to_string())
+            } else {
+                "[No Name]".to_string()
+            }
         });
         let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
@@ -2507,7 +2696,7 @@ impl App {
     /// buffer) so a split's every visible pane gets a gutter sized to
     /// *its own* buffer's line count, not just the focused one's.
     fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
-        if self.line_number_mode == LineNumberMode::Off || ob.kind == BufferKind::Dashboard {
+        if self.line_number_mode == LineNumberMode::Off || ob.kind == BufferKind::Dashboard || ob.kind == BufferKind::Explorer {
             return 0;
         }
         ob.buffer.visual_line_count().max(1).to_string().len() + 1
@@ -4503,28 +4692,28 @@ mod tests {
     }
 
     #[test]
-    fn explorer_jump_switches_to_explorer_view_without_touching_the_buffer() {
+    fn explorer_jump_opens_a_real_dired_buffer_in_the_focused_pane() {
         let dir = TempDir::new("jump_stashes");
         let file = dir.touch("a.txt");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.test_insert_str(" extra"); // dirty the buffer so "untouched" is checkable
-        let focused_before = app.focused_buffer_id();
+        app.test_insert_str(" extra"); // dirty the original buffer
+        let original_id = app.focused_buffer_id();
 
         app.explorer_jump();
-        assert_eq!(app.main_view, MainView::Explorer);
-        assert!(app.explorer.is_some());
-        // No stashing needed -- the focused pane's buffer id (and its
-        // content) is left exactly as it was; only `main_view` changed.
-        assert_eq!(app.focused_buffer_id(), focused_before);
-        assert_eq!(app.open().buffer.text(), " extrahello\n");
-        assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.path());
+
+        let dired_id = app.focused_buffer_id();
+        assert_ne!(dired_id, original_id, "a real, different buffer now occupies the pane");
+        assert_eq!(app.open().kind, BufferKind::Explorer);
+        assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, dir.path());
+        // The original file buffer is untouched, just no longer focused.
+        assert_eq!(app.buffers.get(original_id).unwrap().buffer.text(), " extrahello\n");
     }
 
     #[test]
-    fn full_buffer_jump_does_not_clobber_an_already_open_sidebar() {
-        // Regression test: `explorer` and `sidebar` used to be one shared
-        // field, which meant jumping to a full-buffer listing while a
-        // sidebar was open silently overwrote the sidebar's state.
+    fn explorer_jump_does_not_touch_an_already_open_sidebar() {
+        // Regression test: `explorer`/`sidebar` used to be candidates for
+        // one shared field/mechanism -- confirms the new real-buffer dired
+        // path still leaves the separate, unrelated sidebar untouched.
         let sidebar_dir = TempDir::new("jump_no_clobber_sidebar");
         let jump_dir = TempDir::new("jump_no_clobber_jump");
         let file = jump_dir.touch("a.txt");
@@ -4537,8 +4726,8 @@ mod tests {
         app.test_open_path(&file);
         app.explorer_jump();
 
-        assert_eq!(app.main_view, MainView::Explorer);
-        assert_eq!(app.explorer.as_ref().unwrap().cwd, jump_dir.path());
+        assert_eq!(app.open().kind, BufferKind::Explorer);
+        assert_eq!(app.dired_states.get(&app.focused_buffer_id()).unwrap().cwd, jump_dir.path());
         // The sidebar's own listing must be untouched by the jump.
         assert!(app.sidebar_open);
         assert_eq!(app.sidebar.as_ref().unwrap().cwd, sidebar_dir.path());
@@ -4698,6 +4887,28 @@ mod tests {
     }
 
     #[test]
+    fn explorer_dired_text_lists_one_line_per_entry_with_directory_slashes() {
+        let dir = TempDir::new("dired_text_basic");
+        dir.touch("a.txt");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let explorer = ExplorerState::open(dir.path()).unwrap();
+
+        let (text, lines) = explorer_dired_text(&explorer);
+        // Sorted directories-first: "sub/" then "a.txt".
+        assert_eq!(text, "sub/\na.txt");
+        assert_eq!(lines, vec![Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn explorer_dired_text_is_empty_for_an_empty_directory() {
+        let dir = TempDir::new("dired_text_empty");
+        let explorer = ExplorerState::open(dir.path()).unwrap();
+        let (text, lines) = explorer_dired_text(&explorer);
+        assert_eq!(text, "");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
     fn explorer_row_spans_marks_the_icon_span_and_flags_the_selected_row() {
         let dir = TempDir::new("row_spans_icon_selected");
         dir.touch("main.rs");
@@ -4761,19 +4972,80 @@ mod tests {
     }
 
     #[test]
-    fn quitting_full_buffer_explorer_leaves_the_buffer_exactly_as_it_was() {
-        let dir = TempDir::new("jump_quit_restores");
+    fn a_dired_buffer_can_be_closed_like_any_other_via_kill_buffer() {
+        // The actual "dired as a real buffer" feature: closable via `SPC
+        // b k` like any other buffer, falling back to whatever was
+        // focused before it, same as closing any other buffer would.
+        let dir = TempDir::new("dired_kill_buffer");
         let file = dir.touch("a.txt");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.test_insert_str(" extra");
-        let dirty_text = app.open().buffer.text();
+        let original_id = app.focused_buffer_id();
 
         app.explorer_jump();
-        app.explorer_quit();
+        let dired_id = app.focused_buffer_id();
+        assert_ne!(dired_id, original_id);
 
-        assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.explorer.is_none());
-        assert_eq!(app.open().buffer.text(), dirty_text);
+        app.kill_buffer();
+
+        assert!(app.buffers.get(dired_id).is_none(), "the dired buffer should be gone");
+        assert_eq!(app.focused_buffer_id(), original_id, "falls back to the buffer it was opened over");
+    }
+
+    #[test]
+    fn real_vim_motions_navigate_a_dired_buffer_for_free() {
+        let dir = TempDir::new("dired_vim_motions");
+        dir.touch("a.txt");
+        dir.touch("b.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+
+        assert_eq!(app.test_cursor().char_idx, 0);
+        app.test_vim_key(KeyPress::char('j')); // plain Vim motion, not an ExplorerAction
+        assert_ne!(app.test_cursor().char_idx, 0, "j should move the real cursor down a line");
+    }
+
+    #[test]
+    fn enter_on_a_file_line_opens_it_replacing_the_dired_buffer() {
+        let dir = TempDir::new("dired_enter_file");
+        let file = dir.touch("target.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+
+        app.dired_activate_selected();
+
+        assert_eq!(app.open().kind, BufferKind::Text);
+        assert_eq!(app.open().buffer.path(), Some(file.as_path()));
+    }
+
+    #[test]
+    fn enter_on_a_directory_line_navigates_into_it_reusing_the_same_buffer() {
+        let dir = TempDir::new("dired_enter_dir_parent");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("inner.txt"), b"hi\n").unwrap();
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let dired_id = app.focused_buffer_id();
+
+        app.dired_activate_selected(); // the only entry is "sub/"
+
+        assert_eq!(app.focused_buffer_id(), dired_id, "same buffer, not a new one");
+        assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, sub);
+        assert_eq!(app.open().buffer.text(), "inner.txt");
+    }
+
+    #[test]
+    fn dash_navigates_to_the_parent_directory() {
+        let dir = TempDir::new("dired_parent_dir");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = App::with_file(None);
+        app.open_dired_at(&sub);
+        let dired_id = app.focused_buffer_id();
+
+        app.dired_parent_dir();
+
+        assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, dir.path());
     }
 
     #[test]

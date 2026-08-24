@@ -20,6 +20,11 @@ pub enum BufferKind {
     /// like any other, just tagged so the host can special-case what
     /// `Enter` does on it and how it's colored.
     Dashboard,
+    /// A dired-style directory listing (`SPC f j`) -- a real buffer like
+    /// any other (splittable, closable via `SPC b k`, listed in `SPC b
+    /// b`), tagged so the host can special-case navigation/actions and
+    /// coloring the same way it already does for `Dashboard`.
+    Explorer,
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -96,6 +101,15 @@ impl BufferList {
     /// buffer.
     pub fn open_dashboard(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Dashboard)
+    }
+
+    /// A real buffer seeded with `text` (a rendered directory listing)
+    /// and tagged `Explorer` -- `SPC f j`. Same "real buffer, just
+    /// tagged" shape as `open_dashboard`; the host owns re-rendering
+    /// `text` (via `Buffer::replace_range`) whenever the underlying
+    /// listing changes (navigating into a directory, a refresh, ...).
+    pub fn open_explorer(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Explorer)
     }
 
     /// Opens `path`, reusing an already-open buffer for that exact path
@@ -226,6 +240,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "hello dashboard\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Dashboard);
+    }
+
+    #[test]
+    fn open_explorer_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_explorer("a.txt\nb.txt\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "a.txt\nb.txt\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Explorer);
     }
 
     #[test]

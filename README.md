@@ -24,9 +24,14 @@ for anyone curious to poke around or build on it.
   continuations as you type a sequence.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, Bash, and Tcl.
-- **File explorer** (dired-style): full-buffer (`SPC f j`) or a persistent
-  sidebar (`SPC e t`), with git-status badges, marking, batch
-  create/rename/copy/move/delete, and inline subtree expansion.
+- **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
+  buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
+  `Enter` opens a file or navigates into a directory, `-` goes up, `R`
+  refreshes, `.` toggles hidden files; ordinary motions (`j k gg G /`)
+  work for free since it's real text. A persistent sidebar (`SPC e t`)
+  is also available, with the fuller dired feature set (git-status
+  badges, marking, batch create/rename/copy/move/delete, inline subtree
+  expansion) -- those aren't yet wired up for the buffer-backed form.
 - **Project tooling**: fuzzy find-file (`SPC p f`), project-wide search via
   ripgrep (`SPC p s`), switch between known projects (`SPC p p`).
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
@@ -113,7 +118,7 @@ popup shows what keys continue it.
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
 | `SPC TAB d` | Remove the active workspace |
 
-### File explorer / sidebar
+### File explorer sidebar (`SPC e t`)
 
 | Keys | Action |
 |---|---|
@@ -130,6 +135,18 @@ popup shows what keys continue it.
 | `g r` | Refresh |
 | `S` | Select this directory (when picking a project root) |
 | `q` / `Esc` | Quit |
+
+### Dired buffer (`SPC f j`)
+
+A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`).
+Only these are special:
+
+| Keys | Action |
+|---|---|
+| `Enter` | Open the file, or navigate into the directory, at point |
+| `-` | Go to the parent directory |
+| `R` | Refresh |
+| `.` | Toggle hidden files |
 
 ### Autocompletion popup (Tcl, Insert mode)
 
