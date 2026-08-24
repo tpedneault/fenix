@@ -1,0 +1,6 @@
+[package]
+name = "fenix-git"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

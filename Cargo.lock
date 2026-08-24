@@ -528,6 +528,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-git"
+version = "0.0.1"
+
+[[package]]
 name = "fenix-gui"
 version = "0.0.1"
 dependencies = [
