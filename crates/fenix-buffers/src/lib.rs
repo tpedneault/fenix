@@ -123,6 +123,18 @@ impl BufferList {
         self.insert(Buffer::from_text(text), None, BufferKind::Docker)
     }
 
+    /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
+    /// e.g. `docker logs` output shown by the Docker panel's `l` action.
+    /// Unlike `open_dashboard`/`open_explorer`/`open_docker`, this is
+    /// tagged plain `Text`, not a bespoke kind: viewing generated,
+    /// read-only-ish content needs nothing beyond what an ordinary
+    /// buffer already gives for free (Vim motions, `/` search, closable
+    /// via `SPC b k`) -- no special key handling, no per-buffer
+    /// line-metadata side table.
+    pub fn open_text_view(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Text)
+    }
+
     /// Opens `path`, reusing an already-open buffer for that exact path
     /// instead of creating a duplicate -- matches Emacs: visiting a file
     /// that's already open shows the same buffer (same unsaved edits),
@@ -269,6 +281,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "containers\nimages\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn open_text_view_seeds_the_text_and_tags_it_plain_text() {
+        let mut list = BufferList::new();
+        let id = list.open_text_view("line one\nline two\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "line one\nline two\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Text);
     }
 
     #[test]

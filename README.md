@@ -54,10 +54,11 @@ for anyone curious to poke around or build on it.
 - **Docker panel** (Lazydocker-style): `SPC d d` opens a real,
   Vim-navigable buffer listing every container and image (via the
   `docker` CLI). `s`/`S`/`R` start/stop/restart the container under the
-  cursor, `r` runs a new container from the image under the cursor, `x`
-  removes the container/image under the cursor (with a `y`/`n`
-  confirmation), `u` refreshes. `SPC d b` builds an image from the
-  current project root's `Dockerfile`.
+  cursor, `r` runs a new container from the image under the cursor, `l`
+  opens that container's last 500 log lines into a real, searchable
+  buffer, `x` removes the container/image under the cursor (with a
+  `y`/`n` confirmation), `u` refreshes. `SPC d b` builds an image from
+  the current project root's `Dockerfile`.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
@@ -183,6 +184,7 @@ Only these are special:
 | `S` | Stop the container under the cursor |
 | `R` | Restart the container under the cursor |
 | `r` | Run a new detached container from the image under the cursor |
+| `l` | Open the container under the cursor's logs into the focused pane |
 | `x` | Remove the container/image under the cursor (`y`/`n` to confirm) |
 | `u` | Refresh the listing |
 

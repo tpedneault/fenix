@@ -30,6 +30,28 @@ pub(crate) fn run_action(args: &[String]) -> Result<String, String> {
     }
 }
 
+/// Same shape as `run_action`, but on success concatenates stdout *and*
+/// stderr instead of just stdout -- `docker logs` is the one command
+/// here whose actually-useful output can land on either stream
+/// (whichever the container's own process wrote to), unlike every other
+/// action, which only ever produces a status message on stdout.
+/// Disclosed simplification: stdout is appended before stderr, not
+/// truly interleaved by timestamp (`std::process::Command` gives each
+/// stream its own pipe, with no cheap portable way to merge them
+/// byte-for-byte in arrival order) -- fine for a one-shot log dump into
+/// a buffer, not a live `tail -f`.
+pub(crate) fn run_action_combined_output(args: &[String]) -> Result<String, String> {
+    match Command::new("docker").args(args).output() {
+        Ok(out) if out.status.success() => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            Ok(combined)
+        }
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+        Err(err) => Err(format!("couldn't run docker: {err}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +79,10 @@ mod tests {
         // just confirms run_action never panics and returns a Result
         // either way against whatever `docker` actually does here.
         let _ = run_action(&["--version".to_string()]);
+    }
+
+    #[test]
+    fn run_action_combined_output_never_panics_either() {
+        let _ = run_action_combined_output(&["--version".to_string()]);
     }
 }

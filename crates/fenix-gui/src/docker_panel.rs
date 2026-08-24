@@ -141,7 +141,7 @@ fn push_images(b: &mut Builder, images: &[Image]) {
 
 fn push_footer(b: &mut Builder) {
     b.push(
-        "  s start  S stop  R restart  r run image  x remove  u refresh",
+        "  s start  S stop  R restart  r run image  l logs  x remove  u refresh",
         Some(DockerLine { style: DockerLineStyle::Footer, entry: None, dim_from: None }),
     );
 }

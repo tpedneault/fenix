@@ -60,6 +60,13 @@ const SCROLL_SNAP_SCREENS: usize = 3;
 /// `text::PAD_LEFT` (8px) so it can never clip into body text.
 const BORDER_WIDTH: f32 = 3.0;
 
+/// How many trailing lines of `docker logs` the Docker panel's `l`
+/// action fetches -- generous enough to actually be useful (most
+/// container startup/error output fits well within this) without
+/// risking pulling in an unbounded amount of text from a chatty
+/// container.
+const DOCKER_LOG_TAIL_LINES: usize = 500;
+
 /// Vertical padding inside the which-key popup, above its first row and
 /// below its last -- factored into both its own height and `popup::
 /// max_rows`'s "how many rows actually fit" calculation, so the two stay
@@ -1755,6 +1762,24 @@ impl App {
         }
     }
 
+    /// `l` on a Docker buffer: opens the last `DOCKER_LOG_TAIL_LINES`
+    /// lines of the container under the cursor's log output into the
+    /// focused pane, as a real (plain `Text`-kind) buffer -- Vim-
+    /// navigable/searchable/closable for free, no bespoke viewer needed.
+    /// A no-op on an image row (images don't have logs) or a header/
+    /// footer line.
+    fn docker_view_logs_selected(&mut self) {
+        let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() else { return };
+        let text = match fenix_docker::container_logs(&id, DOCKER_LOG_TAIL_LINES) {
+            Ok(text) if text.is_empty() => "(no log output)\n".to_string(),
+            Ok(text) => text,
+            Err(err) => format!("fenix: couldn't fetch logs for {id}: {err}\n"),
+        };
+        let view_id = self.buffers.open_text_view(&text);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, view_id);
+    }
+
     /// `SPC d b`: builds an image from the current project root's
     /// `Dockerfile` (falling back to the process's cwd with no detected
     /// project) -- doesn't need a Docker buffer focused, unlike the
@@ -2679,7 +2704,8 @@ impl App {
         // search) reach Vim below unchanged -- only a small action-key
         // set is claimed here first, same shape as the dired buffer
         // above. `s`/`S`/`R` act on the container under the cursor, `r`
-        // runs a new container from the image under the cursor, `x` arms
+        // runs a new container from the image under the cursor, `l`
+        // opens that container's logs into the focused pane, `x` arms
         // a remove confirmation (`y`/anything to confirm/cancel, see
         // `docker_confirm_key`), `u` refreshes.
         if self.open().kind == BufferKind::Docker {
@@ -2701,6 +2727,11 @@ impl App {
                 }
                 KeyCode::Char('r') if keypress.mods == Mods::default() => {
                     self.docker_run_selected();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('l') if keypress.mods == Mods::default() => {
+                    self.docker_view_logs_selected();
                     self.wake_caret();
                     return;
                 }
@@ -6602,6 +6633,55 @@ mod tests {
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
 
         assert_eq!(app.docker_entry_at_cursor(), Some(docker_panel::DockerEntry::Container("abc123".to_string())));
+    }
+
+    #[test]
+    fn docker_view_logs_selected_opens_a_plain_text_buffer_in_the_focused_pane() {
+        // `docker logs` itself is unreachable in this sandboxed test
+        // environment (no daemon socket access) -- it'll come back an
+        // `Err`, which `docker_view_logs_selected` still renders into a
+        // real buffer rather than silently doing nothing. The point of
+        // this test is the navigation/buffer-kind wiring, not the
+        // specific log text.
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let docker_id = app.focused_buffer_id();
+        app.docker_lines.insert(
+            docker_id,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Container,
+                entry: Some(docker_panel::DockerEntry::Container("abc123".to_string())),
+                dim_from: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+
+        app.docker_view_logs_selected();
+
+        assert_ne!(app.focused_buffer_id(), docker_id);
+        assert_eq!(app.open().kind, BufferKind::Text);
+        assert!(!app.open().buffer.text().is_empty());
+    }
+
+    #[test]
+    fn docker_view_logs_selected_on_an_image_row_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let docker_id = app.focused_buffer_id();
+        app.docker_lines.insert(
+            docker_id,
+            vec![Some(docker_panel::DockerLine {
+                style: docker_panel::DockerLineStyle::Image,
+                entry: Some(docker_panel::DockerEntry::Image("sha256:dead".to_string())),
+                dim_from: None,
+            })],
+        );
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+
+        app.docker_view_logs_selected();
+
+        assert_eq!(app.focused_buffer_id(), docker_id);
+        assert_eq!(app.open().kind, BufferKind::Docker);
     }
 
     #[test]
