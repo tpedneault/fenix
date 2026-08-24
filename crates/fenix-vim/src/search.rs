@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use fenix_core::{Buffer, Cursor};
 use regex::Regex;
 
@@ -34,6 +36,31 @@ pub fn find_next(buffer: &Buffer, cursor: &Cursor, pattern: &str, forward: bool)
     };
 
     Ok(found.map(|m| buffer.byte_to_char(m.start())))
+}
+
+/// Every match of `pattern` whose start falls within `byte_range`
+/// (typically the currently-visible line range, converted to byte
+/// offsets by the caller the same way `fenix-syntax`'s highlight spans
+/// already are) -- the byte-range equivalent of `find_next`, but
+/// returning *every* match in the window instead of just the nearest
+/// one, for Vim's `hlsearch` (persistent match highlighting after a
+/// confirmed search). Unlike `find_next`, this only scans the given
+/// slice of `buffer.text()`, not the whole buffer -- called once per
+/// `redraw()` while a search is active, so it follows the same
+/// windowed-rendering discipline `syntax_highlights_for_visible_range`
+/// already established, not `find_next`'s own "not a per-frame path"
+/// whole-buffer scan. `byte_range` is clamped to the text's actual
+/// length; an out-of-order or empty range after clamping yields an
+/// empty `Vec` rather than a panic.
+pub fn all_matches_in_range(buffer: &Buffer, pattern: &str, byte_range: Range<usize>) -> Result<Vec<Range<usize>>, regex::Error> {
+    let re = Regex::new(pattern)?;
+    let text = buffer.text();
+    let start = byte_range.start.min(text.len());
+    let end = byte_range.end.min(text.len());
+    if start >= end {
+        return Ok(Vec::new());
+    }
+    Ok(re.find_iter(&text[start..end]).map(|m| (start + m.start())..(start + m.end())).collect())
 }
 
 /// The word under the cursor, as a whole-word regex pattern (`\b...\b`,
@@ -121,5 +148,48 @@ mod tests {
     fn word_under_cursor_pattern_is_none_on_whitespace() {
         let b = buf("foo   bar");
         assert_eq!(word_under_cursor_pattern(&b, &cur(4)), None);
+    }
+
+    #[test]
+    fn all_matches_in_range_finds_every_occurrence_in_the_slice() {
+        let b = buf("foo bar foo baz foo");
+        let matches = all_matches_in_range(&b, "foo", 0..b.text().len()).unwrap();
+        assert_eq!(matches, vec![0..3, 8..11, 16..19]);
+    }
+
+    #[test]
+    fn all_matches_in_range_excludes_matches_starting_outside_the_range() {
+        let b = buf("foo bar foo baz foo");
+        // Only the middle "foo" (bytes 8..11) starts inside [4, 15).
+        let matches = all_matches_in_range(&b, "foo", 4..15).unwrap();
+        assert_eq!(matches, vec![8..11]);
+    }
+
+    #[test]
+    fn all_matches_in_range_returns_empty_for_no_matches() {
+        let b = buf("bar baz");
+        let matches = all_matches_in_range(&b, "foo", 0..b.text().len()).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn all_matches_in_range_clamps_an_out_of_bounds_range_instead_of_panicking() {
+        let b = buf("foo");
+        let matches = all_matches_in_range(&b, "foo", 0..1000).unwrap();
+        assert_eq!(matches, vec![0..3]);
+    }
+
+    #[test]
+    fn all_matches_in_range_returns_empty_for_a_backwards_range() {
+        let b = buf("foo foo");
+        let (start, end) = (5, 2); // deliberately backwards, not a literal clippy would flag
+        let matches = all_matches_in_range(&b, "foo", start..end).unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn all_matches_in_range_propagates_an_invalid_pattern_as_an_error() {
+        let b = buf("foo");
+        assert!(all_matches_in_range(&b, "(unclosed", 0..3).is_err());
     }
 }

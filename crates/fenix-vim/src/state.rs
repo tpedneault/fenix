@@ -94,6 +94,16 @@ pub struct VimState {
     /// Pattern + direction of the most recently *confirmed* search (via
     /// Enter, or `*`/`#`), for `n`/`N` to repeat.
     last_search: Option<(String, bool)>,
+    /// Whether the host UI should be drawing `hlsearch`-style persistent
+    /// highlighting for `last_search`'s pattern -- set on every confirmed
+    /// search (`jump_to_search`), cleared in `handle_key` the moment a
+    /// real buffer edit happens (detected via `Buffer::edit_count`,
+    /// snapshotted before/after dispatch). Deliberately simpler than real
+    /// Vim's `:noh`/autocmd-driven clearing: "any edit clears it," a
+    /// disclosed simplification -- `last_search` itself is untouched by
+    /// this, so `n`/`N` keep repeating the same pattern even after its
+    /// highlighting has been cleared by an edit.
+    hlsearch_active: bool,
     /// Spaces per indent level for Tab, `>>`/`<<`, and the bracket-bump
     /// on Enter -- runtime-configurable via `:set shiftwidth=N`/`:set
     /// sw=N` (see `substitute::run_ex_command`), persisted by the host
@@ -125,6 +135,7 @@ impl VimState {
             search_query: String::new(),
             search_forward: true,
             last_search: None,
+            hlsearch_active: false,
             indent_width: indent::DEFAULT_INDENT_WIDTH,
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
@@ -176,6 +187,52 @@ impl VimState {
         self.search_forward
     }
 
+    /// Where the *in-progress* search query (`search_query`/
+    /// `search_forward`) would currently jump to, without moving the
+    /// cursor or recording anything to `last_search` -- incsearch's live
+    /// preview. `None` outside `Mode::Search`, on an empty query, on an
+    /// invalid pattern, or when nothing matches.
+    pub fn preview_match(&self, buffer: &Buffer, cursor: &Cursor) -> Option<usize> {
+        if self.mode != Mode::Search || self.search_query.is_empty() {
+            return None;
+        }
+        crate::search::find_next(buffer, cursor, &self.search_query, self.search_forward).ok().flatten()
+    }
+
+    /// Whether the host UI should render `hlsearch`-style persistent
+    /// highlighting for `last_search_pattern()`. See the `hlsearch_active`
+    /// field's own doc comment for when this turns on/off.
+    pub fn hlsearch_active(&self) -> bool {
+        self.hlsearch_active
+    }
+
+    /// The pattern `hlsearch_active`/`n`/`N` refer to, if any search has
+    /// ever been confirmed this session.
+    pub fn last_search_pattern(&self) -> Option<&str> {
+        self.last_search.as_ref().map(|(pattern, _)| pattern.as_str())
+    }
+
+    /// Every occurrence of `last_search_pattern()` within `byte_range`
+    /// (the caller's currently-visible line range, converted to bytes) --
+    /// `hlsearch`'s persistent match highlighting. Empty when `hlsearch_
+    /// active` is false, there's no confirmed search yet, or the pattern
+    /// no longer parses (can't happen today since a pattern only ever
+    /// gets here after `find_next` already accepted it, but `search::
+    /// all_matches_in_range` still returns `Result` since it re-compiles
+    /// the pattern -- degrading to "nothing highlighted" rather than
+    /// propagating an error keeps this a plain, infallible query for the
+    /// host UI, matching the "log and degrade" posture `jump_to_search`
+    /// already uses for a bad pattern).
+    pub fn hlsearch_matches(&self, buffer: &Buffer, byte_range: Range<usize>) -> Vec<Range<usize>> {
+        if !self.hlsearch_active {
+            return Vec::new();
+        }
+        let Some((pattern, _)) = &self.last_search else {
+            return Vec::new();
+        };
+        crate::search::all_matches_in_range(buffer, pattern, byte_range).unwrap_or_default()
+    }
+
     /// The char offset Visual mode's selection is anchored at. Only
     /// meaningful while `mode()` is `Visual`; the host UI uses this
     /// together with the cursor position to render the selection.
@@ -205,6 +262,7 @@ impl VimState {
     }
 
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
+        let edit_count_before = buffer.edit_count();
         let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
@@ -213,6 +271,14 @@ impl VimState {
             Mode::Visual => self.handle_visual_key(buffer, cursor, key),
             Mode::Search => self.handle_search_key(buffer, cursor, key),
         };
+        // hlsearch's persistent highlighting clears the moment a real
+        // edit happens, regardless of what mode/action caused it -- see
+        // `hlsearch_active`'s own doc comment for why this is simpler
+        // than real Vim's `:noh`-driven clearing, and why it doesn't
+        // touch `last_search` (`n`/`N` keep working afterward).
+        if buffer.edit_count() != edit_count_before {
+            self.hlsearch_active = false;
+        }
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
@@ -449,6 +515,7 @@ impl VimState {
     /// degrade, never crash" posture for a bad user-supplied pattern) on
     /// a regex compile error or no match found.
     fn jump_to_search(&mut self, buffer: &Buffer, cursor: &mut Cursor, pattern: &str, forward: bool) {
+        self.hlsearch_active = true;
         match crate::search::find_next(buffer, cursor, pattern, forward) {
             Ok(Some(idx)) => {
                 cursor.char_idx = idx;
@@ -1641,6 +1708,99 @@ mod tests {
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "*");
         assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn preview_match_finds_the_next_match_without_moving_the_cursor_or_recording_last_search() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        assert_eq!(vim.preview_match(&b, &c), Some(8));
+        // Neither the real cursor nor last_search were touched yet.
+        assert_eq!(c.char_idx, 0);
+        assert_eq!(vim.last_search_pattern(), None);
+        assert!(!vim.hlsearch_active());
+    }
+
+    #[test]
+    fn preview_match_is_none_outside_search_mode_or_with_an_empty_query() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.preview_match(&b, &c), None); // Normal mode
+        keys(&mut vim, &mut b, &mut c, "/");
+        assert_eq!(vim.preview_match(&b, &c), None); // Search mode, empty query
+    }
+
+    #[test]
+    fn confirming_a_search_activates_hlsearch_and_records_the_pattern() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert!(!vim.hlsearch_active());
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert!(vim.hlsearch_active());
+        assert_eq!(vim.last_search_pattern(), Some("foo"));
+    }
+
+    #[test]
+    fn an_edit_clears_hlsearch_but_not_last_search_pattern() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert!(vim.hlsearch_active());
+
+        keys(&mut vim, &mut b, &mut c, "x"); // a real edit
+        assert!(!vim.hlsearch_active());
+        assert_eq!(vim.last_search_pattern(), Some("foo")); // n/N still work afterward
+    }
+
+    #[test]
+    fn hlsearch_matches_lists_every_occurrence_in_the_given_byte_range_once_active() {
+        let mut b = buf("foo bar foo baz foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+
+        let matches = vim.hlsearch_matches(&b, 0..b.text().len());
+        assert_eq!(matches, vec![0..3, 8..11, 16..19]);
+    }
+
+    #[test]
+    fn hlsearch_matches_is_empty_before_any_search_or_after_hlsearch_is_cleared() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert!(vim.hlsearch_matches(&b, 0..b.text().len()).is_empty());
+
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        keys(&mut vim, &mut b, &mut c, "x"); // clears hlsearch_active
+        assert!(vim.hlsearch_matches(&b, 0..b.text().len()).is_empty());
+    }
+
+    #[test]
+    fn a_non_editing_motion_does_not_clear_hlsearch() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/");
+        keys(&mut vim, &mut b, &mut c, "foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert!(vim.hlsearch_active());
+
+        keys(&mut vim, &mut b, &mut c, "l"); // plain motion, no edit
+        assert!(vim.hlsearch_active());
     }
 
     #[test]

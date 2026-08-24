@@ -55,6 +55,12 @@ pub struct Theme {
     /// `hl_line` so it reads as its own thing even when it happens to
     /// land on the current line.
     pub bracket_match: [f32; 4],
+    /// `hlsearch`'s persistent match-highlight backdrop, drawn behind
+    /// every occurrence of the last confirmed search pattern -- a plain,
+    /// unremarkable overlay distinct from `selection`/`bracket_match` so
+    /// it doesn't compete with a real Visual selection or the bracket
+    /// highlight when they happen to coincide.
+    pub search_match: [f32; 4],
 
     /// Per-mode accent, matching orbit-emacs's own evil-state modeline
     /// colors (see its docs/design.org "Evil state colors" table) so the
@@ -199,6 +205,7 @@ pub const ORBIT_DARK: Theme = Theme {
     hl_line: rgba(0x292e42),
     selection: rgba_alpha(0xe0af68, 0.25),
     bracket_match: rgba_alpha(0x2ac3de, 0.35),
+    search_match: rgba_alpha(0xbb9af7, 0.3),
 
     mode_normal: rgba(0xe0af68),
     mode_insert: rgba(0x7dcfff),
@@ -282,6 +289,7 @@ pub const TEMPLEOS: Theme = Theme {
     // theme/highlight here uses actually produces visible contrast.
     selection: rgba_alpha(0x0000aa, 0.45),
     bracket_match: rgba_alpha(0x00aa00, 0.35),
+    search_match: rgba_alpha(0xff55ff, 0.35),
 
     mode_normal: rgba(0x55ff55),
     mode_insert: rgba(0x55ffff),

@@ -16,8 +16,10 @@ for anyone curious to poke around or build on it.
   operators (`d c y` composing with motions and text objects, plus the
   doubled `dd`/`cc`/`yy` forms), `iw`/`aw` text objects, numeric counts
   (`3dw`, `2dd`, ...), registers-free yank/paste, undo/redo, search
-  (`/`, `?`, `n`, `N`, `*`, `#`), `:s` substitute with backreferences,
-  indentation (`>>`/`<<`, auto-indent, `:set shiftwidth=N`).
+  (`/`, `?`, `n`, `N`, `*`, `#`) with a live incsearch preview and
+  persistent match highlighting while it's active, `:s` substitute with
+  backreferences, indentation (`>>`/`<<`, auto-indent, `:set
+  shiftwidth=N`).
 - **`SPC`-leader menu** with a live which-key popup showing available
   continuations as you type a sequence.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,

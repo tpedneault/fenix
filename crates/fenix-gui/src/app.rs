@@ -2577,6 +2577,65 @@ impl App {
         segments
     }
 
+    /// `hlsearch`'s persistent match-highlight segments -- every
+    /// occurrence of the last confirmed search pattern within the
+    /// visible range, empty whenever `VimState::hlsearch_active` is
+    /// false. Converts the visible line range to a byte range (`Buffer::
+    /// char_to_byte` at each line boundary) for `VimState::hlsearch_
+    /// matches`, then each match's byte range back to view segments via
+    /// `range_to_segments`, the same "windowed, computed fresh each
+    /// frame" discipline `bracket_match_segments`/`syntax_highlights_
+    /// for_visible_range` already use.
+    fn hlsearch_segments(&self, visible_lines: usize) -> Segments {
+        let buffer = &self.open().buffer;
+        let last_visible = (self.render_base_line() + visible_lines).min(buffer.line_count());
+        let start_char = buffer.line_start_char(self.render_base_line());
+        let end_char = if last_visible < buffer.line_count() {
+            buffer.line_start_char(last_visible)
+        } else {
+            buffer.len_chars()
+        };
+        let byte_range = buffer.char_to_byte(start_char)..buffer.char_to_byte(end_char);
+
+        let mut segments = Segments::new();
+        for m in self.vim.hlsearch_matches(buffer, byte_range) {
+            let start = buffer.byte_to_char(m.start);
+            let end = buffer.byte_to_char(m.end);
+            segments.extend(self.range_to_segments(start..end, visible_lines));
+        }
+        segments
+    }
+
+    /// The focused pane's caret position for this frame: normally
+    /// `hl_row`/the real cursor's column, but during `Mode::Search`
+    /// previews where the in-progress query would jump to instead
+    /// (incsearch) -- the real `Cursor`/`last_search` are untouched
+    /// until Enter confirms (see `VimState::preview_match`'s own doc
+    /// comment). The preview is only shown when it falls inside the
+    /// currently-fetched `[render_base_line, render_base_line +
+    /// pane_visible_lines]` window; a match outside it shows no caret
+    /// this frame rather than auto-scrolling to reveal it (a disclosed
+    /// simplification -- real incsearch also pans the viewport).
+    fn focused_caret(
+        &self,
+        hl_row: Option<usize>,
+        col: usize,
+        render_base_line: usize,
+        pane_visible_lines: usize,
+    ) -> Option<(usize, usize)> {
+        if self.vim.mode() != Mode::Search {
+            return hl_row.map(|row| (row, col));
+        }
+        self.vim.preview_match(&self.open().buffer, &self.open().cursor).and_then(|idx| {
+            let preview_cursor = Cursor { char_idx: idx, sticky_col: 0 };
+            let (preview_line, preview_col) = self.open().buffer.line_col(&preview_cursor);
+            preview_line
+                .checked_sub(render_base_line)
+                .filter(|&row| row <= pane_visible_lines)
+                .map(|row| (row, preview_col))
+        })
+    }
+
     /// Key/label pairs for whichever pending sequence is currently active
     /// (the leader menu takes priority, since it's the outermost one --
     /// Vim can't be mid-sequence while a leader sequence is in progress).
@@ -2913,6 +2972,7 @@ impl App {
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
             bracket_match_segments: Segments,
+            hlsearch_segments: Segments,
             caret: Option<(usize, usize)>,
             content_frac: f32,
             gutter_px: f32,
@@ -2943,6 +3003,7 @@ impl App {
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -2968,6 +3029,7 @@ impl App {
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -3046,15 +3108,16 @@ impl App {
             // a bug.
             let hl_row = line.checked_sub(render_base_line).filter(|&row| row <= pane_visible_lines);
 
-            let (selection_segments, pulse_overlay, bracket_match_segments, caret) = if is_focused {
+            let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused {
                 (
                     self.visual_selection_segments(pane_visible_lines + 1),
                     self.pulse_overlay(pane_visible_lines + 1),
                     self.bracket_match_segments(pane_visible_lines + 1),
-                    hl_row.map(|row| (row, col)),
+                    self.hlsearch_segments(pane_visible_lines + 1),
+                    self.focused_caret(hl_row, col, render_base_line, pane_visible_lines),
                 )
             } else {
-                (Segments::new(), None, Segments::new(), None)
+                (Segments::new(), None, Segments::new(), Segments::new(), None)
             };
 
             panes_render.push(PaneRender {
@@ -3067,6 +3130,7 @@ impl App {
                 selection_segments,
                 pulse_overlay,
                 bracket_match_segments,
+                hlsearch_segments,
                 caret,
                 content_frac: render_frac,
                 gutter_px,
@@ -3187,6 +3251,12 @@ impl App {
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, theme.bracket_match);
+            }
+            for &(row, col_start, col_end) in &pane.hlsearch_segments {
+                let x = content_x + col_start as f32 * char_width;
+                let y = row_y(row);
+                let w = (col_end - col_start) as f32 * char_width;
+                bg_rect.push_rect(gpu, x, y, w, line_height, theme.search_match);
             }
             if let Some((segments, alpha)) = &pane.pulse_overlay {
                 let [r, g, b, _] = theme.caret;
@@ -3732,6 +3802,61 @@ mod tests {
         app.test_insert_str("(hello");
         app.open_mut().cursor = Cursor::at_start();
         assert!(app.bracket_match_segments(10).is_empty());
+    }
+
+    #[test]
+    fn hlsearch_segments_covers_every_match_after_a_confirmed_search() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("foo bar foo baz foo");
+        app.open_mut().cursor = Cursor::at_start();
+        for ch in ['/', 'f', 'o', 'o'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.hlsearch_segments(10), vec![(0, 0, 3), (0, 8, 11), (0, 16, 19)]);
+    }
+
+    #[test]
+    fn hlsearch_segments_is_empty_before_any_search_is_confirmed() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("foo bar foo");
+        assert!(app.hlsearch_segments(10).is_empty());
+    }
+
+    #[test]
+    fn hlsearch_segments_clears_after_an_edit() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("foo bar foo");
+        app.open_mut().cursor = Cursor::at_start();
+        for ch in ['/', 'f', 'o', 'o'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
+        assert!(!app.hlsearch_segments(10).is_empty());
+
+        app.test_vim_key(KeyPress::char('x')); // a real edit, in Normal mode
+        assert!(app.hlsearch_segments(10).is_empty());
+    }
+
+    #[test]
+    fn focused_caret_previews_the_search_match_without_moving_the_real_cursor() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("foo bar foo");
+        app.open_mut().cursor = Cursor::at_start();
+        for ch in ['/', 'f', 'o', 'o'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        // The second "foo" starts at char 8, still line 0 -- row 0, col 8.
+        assert_eq!(app.focused_caret(None, 0, 0, 10), Some((0, 8)));
+        assert_eq!(app.open().cursor.char_idx, 0, "the real cursor must not move during preview");
+    }
+
+    #[test]
+    fn focused_caret_falls_back_to_hl_row_outside_search_mode() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("hello");
+        assert_eq!(app.focused_caret(Some(0), 3, 0, 10), Some((0, 3)));
     }
 
     #[test]

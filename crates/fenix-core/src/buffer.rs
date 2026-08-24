@@ -63,6 +63,15 @@ pub struct Buffer {
     redo_stack: Vec<Edit>,
     pending: Option<Pending>,
     pending_syntax_edits: Vec<EditDelta>,
+    /// Monotonically increasing on every real content mutation (insert,
+    /// delete, undo, redo) -- unlike `dirty` (which only ever flips
+    /// false-to-true once, until the next save), this changes on *every*
+    /// edit, so a caller can detect "did anything change since I last
+    /// checked" by comparing two snapshots of this value, without
+    /// consuming anything (unlike `drain_edits`, whose queue is reserved
+    /// for `fenix-syntax`'s incremental reparse). Used by `fenix-vim` to
+    /// know when to clear `hlsearch`'s persistent match highlighting.
+    edit_count: u64,
 }
 
 impl Buffer {
@@ -75,6 +84,7 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            edit_count: 0,
         }
     }
 
@@ -94,6 +104,7 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            edit_count: 0,
         }
     }
 
@@ -108,6 +119,7 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            edit_count: 0,
         })
     }
 
@@ -134,6 +146,13 @@ impl Buffer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Monotonic edit counter -- see the `edit_count` field's own doc
+    /// comment. Callers detect "did an edit happen" by snapshotting this
+    /// before and comparing after, not by consuming anything.
+    pub fn edit_count(&self) -> u64 {
+        self.edit_count
     }
 
     /// Byte offset of the `char_idx`-th char -- needed by consumers that
@@ -253,6 +272,7 @@ impl Buffer {
         self.rope.insert_char(at, ch);
         cursor.char_idx += 1;
         self.dirty = true;
+        self.edit_count += 1;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
         self.log_edit(at, String::new(), at + 1);
@@ -288,6 +308,7 @@ impl Buffer {
         self.rope.remove(removed_at..cursor.char_idx);
         cursor.char_idx = removed_at;
         self.dirty = true;
+        self.edit_count += 1;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
         self.log_edit(removed_at, removed_char.to_string(), removed_at);
@@ -323,6 +344,7 @@ impl Buffer {
 
         self.rope.remove(at..at + 1);
         self.dirty = true;
+        self.edit_count += 1;
         self.log_edit(at, removed_char.to_string(), at);
 
         match &mut self.pending {
@@ -359,6 +381,7 @@ impl Buffer {
         self.rope.remove(start..end);
         cursor.char_idx = start;
         self.dirty = true;
+        self.edit_count += 1;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
         self.log_edit(start, removed.clone(), start);
@@ -387,6 +410,7 @@ impl Buffer {
         self.rope.insert(at, text);
         cursor.char_idx = at + text.chars().count();
         self.dirty = true;
+        self.edit_count += 1;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
         self.log_edit(at, String::new(), cursor.char_idx);
@@ -421,6 +445,7 @@ impl Buffer {
         }
         cursor.char_idx = start + text.chars().count();
         self.dirty = true;
+        self.edit_count += 1;
         let (_, col) = self.line_col(cursor);
         cursor.sticky_col = col;
         self.log_edit(start, removed.clone(), cursor.char_idx);
@@ -480,6 +505,7 @@ impl Buffer {
         self.apply_inverse(&edit);
         *cursor = edit.cursor_before;
         self.dirty = true;
+        self.edit_count += 1;
         self.redo_stack.push(edit);
         true
     }
@@ -492,6 +518,7 @@ impl Buffer {
         self.apply_forward(&edit);
         *cursor = edit.cursor_after;
         self.dirty = true;
+        self.edit_count += 1;
         self.undo_stack.push(edit);
         true
     }
