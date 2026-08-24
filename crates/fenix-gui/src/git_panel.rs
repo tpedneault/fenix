@@ -1,11 +1,17 @@
+use std::collections::{BTreeMap, HashSet};
+
 use fenix_git::{Branch, Commit, FileEntry, RepoStatus, Stash};
 
 /// What a git-panel line represents -- what the per-pane action keys
 /// (see `app.rs`'s Git action routing) act on when the cursor is on
-/// this line. Mirrors `docker_panel::DockerEntry`.
+/// this line. Mirrors `docker_panel::DockerEntry`. `Dir` targets a
+/// whole directory (its full repo-relative path, no trailing slash) --
+/// stage/unstage/discard on it act on every file underneath, not just
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitEntry {
     File(String),
+    Dir(String),
     Branch(String),
     Commit(String),
     Stash(usize),
@@ -18,6 +24,11 @@ pub enum GitEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitLineStyle {
     File,
+    /// A directory row in the Files pane's tree (`> src/` collapsed,
+    /// `v src/` expanded) -- plain, undecorated text; unlike `File`,
+    /// there's no per-row git status badge to color (a directory
+    /// aggregates an unknown mix of statuses underneath it).
+    Dir,
     Branch,
     Commit,
     Stash,
@@ -130,29 +141,109 @@ fn status_color(c: char) -> GitBadgeColor {
     }
 }
 
-/// The Files pane's own content -- one row per changed/untracked path,
-/// in the same order `git status` itself already reports them (changed
-/// paths first, untracked last), each led by its `[XY]` badge.
-pub fn render_files(files: &[FileEntry]) -> GitPanel {
+/// A directory in the Files pane's tree, built from the flat list of
+/// changed paths `git status` reports (there's no real directory
+/// listing involved -- only directories that contain at least one
+/// changed/untracked file ever appear).
+#[derive(Default)]
+struct DirNode {
+    children: BTreeMap<String, DirNode>,
+    files: Vec<FileEntry>,
+}
+
+/// Groups `files` by their path components into a directory tree --
+/// `a/b/c.txt` walks/creates `a`, then `a/b`, then records `c.txt` as a
+/// leaf of `a/b`. A file directly at the repo root (no `/` in its path)
+/// is a leaf of the root node itself.
+fn build_file_tree(files: &[FileEntry]) -> DirNode {
+    let mut root = DirNode::default();
+    for f in files {
+        let segments: Vec<&str> = f.path.split('/').collect();
+        let mut node = &mut root;
+        for seg in &segments[..segments.len().saturating_sub(1)] {
+            node = node.children.entry((*seg).to_string()).or_default();
+        }
+        node.files.push(f.clone());
+    }
+    root
+}
+
+/// One flattened row of the Files pane's tree -- `file` is `Some` only
+/// for a file row (`is_dir` false).
+struct FileTreeRow {
+    depth: usize,
+    is_dir: bool,
+    path: String,
+    name: String,
+    file: Option<FileEntry>,
+}
+
+/// Depth-first flatten of `node`'s children into display rows,
+/// directories-first-then-alphabetical (case-insensitive) at each level
+/// -- mirrors `fenix_explorer`'s own directory-listing sort convention,
+/// so the two trees this editor shows feel consistent. Descends into a
+/// directory's own children only when its full path is in `expanded`,
+/// so a collapsed directory renders as exactly one row no matter how
+/// much it contains underneath.
+fn flatten_file_tree(node: &DirNode, prefix: &str, depth: usize, expanded: &HashSet<String>, out: &mut Vec<FileTreeRow>) {
+    let mut dir_names: Vec<&String> = node.children.keys().collect();
+    dir_names.sort_by_key(|n| n.to_lowercase());
+    for name in dir_names {
+        let child = &node.children[name];
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        out.push(FileTreeRow { depth, is_dir: true, path: path.clone(), name: name.clone(), file: None });
+        if expanded.contains(&path) {
+            flatten_file_tree(child, &path, depth + 1, expanded, out);
+        }
+    }
+    let mut files = node.files.clone();
+    files.sort_by_key(|f| f.path.to_lowercase());
+    for f in files {
+        let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
+        out.push(FileTreeRow { depth, is_dir: false, path: f.path.clone(), name, file: Some(f) });
+    }
+}
+
+/// The Files pane's own content -- changed/untracked paths grouped into
+/// a collapsible directory tree (`Tab` toggles a directory under the
+/// cursor, see `app.rs`'s `git_toggle_dir_expand`), each file row led
+/// by its `[XY]` badge. `expanded_dirs` is the session's own persisted
+/// set of expanded directory paths -- a fresh/never-toggled directory
+/// starts collapsed, showing just its name.
+pub fn render_files(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
     let mut b = Builder::new();
     if files.is_empty() {
         let (text, meta) = empty_line("Nothing to commit, working tree clean");
         b.push(&text, meta);
     } else {
-        for f in files {
-            let (letters, color) = file_status_badge(f);
-            let prefix = format!("  [{letters}] ");
-            let badge_len = prefix.chars().count();
-            let line = format!("{prefix}{}", f.path);
-            b.push(
-                &line,
-                Some(GitLine {
-                    style: GitLineStyle::File,
-                    entry: Some(GitEntry::File(f.path.clone())),
-                    dim_from: None,
-                    badge: Some((badge_len, color)),
-                }),
-            );
+        let tree = build_file_tree(files);
+        let mut rows = Vec::new();
+        flatten_file_tree(&tree, "", 0, expanded_dirs, &mut rows);
+        for row in rows {
+            let margin = "  ".repeat(row.depth + 1);
+            if row.is_dir {
+                let marker = if expanded_dirs.contains(&row.path) { "v" } else { ">" };
+                let line = format!("{margin}{marker} {}/", row.name);
+                b.push(
+                    &line,
+                    Some(GitLine { style: GitLineStyle::Dir, entry: Some(GitEntry::Dir(row.path)), dim_from: None, badge: None }),
+                );
+            } else {
+                let f = row.file.expect("file rows always carry a FileEntry");
+                let (letters, color) = file_status_badge(&f);
+                let prefix = format!("{margin}[{letters}] ");
+                let badge_len = prefix.chars().count();
+                let line = format!("{prefix}{}", row.name);
+                b.push(
+                    &line,
+                    Some(GitLine {
+                        style: GitLineStyle::File,
+                        entry: Some(GitEntry::File(row.path)),
+                        dim_from: None,
+                        badge: Some((badge_len, color)),
+                    }),
+                );
+            }
         }
     }
     b.finish()
@@ -341,7 +432,7 @@ mod tests {
 
     #[test]
     fn render_files_lists_entries_with_the_right_entry() {
-        let panel = render_files(&[file("a.txt", '.', 'M'), file("b.txt", 'A', '.')]);
+        let panel = render_files(&[file("a.txt", '.', 'M'), file("b.txt", 'A', '.')], &HashSet::new());
         let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry, Some(GitEntry::File("a.txt".to_string())));
@@ -349,20 +440,78 @@ mod tests {
 
     #[test]
     fn render_files_lines_stay_the_same_length_as_text() {
-        let panel = render_files(&[file("a.txt", '.', 'M')]);
+        let panel = render_files(&[file("a.txt", '.', 'M')], &HashSet::new());
         assert_eq!(panel.text.lines().count(), panel.lines.len());
     }
 
     #[test]
     fn render_files_empty_list_shows_a_placeholder() {
-        let panel = render_files(&[]);
+        let panel = render_files(&[], &HashSet::new());
         assert!(panel.text.contains("clean"));
     }
 
     #[test]
     fn render_files_shows_the_raw_status_letters_as_the_badge() {
-        let panel = render_files(&[file("a.txt", '.', 'M')]);
+        let panel = render_files(&[file("a.txt", '.', 'M')], &HashSet::new());
         assert!(panel.text.contains("[.M] a.txt"));
+    }
+
+    #[test]
+    fn render_files_groups_a_subdirectorys_files_under_one_collapsed_row() {
+        let panel = render_files(&[file("src/a.txt", '.', 'M'), file("src/b.txt", '?', '?')], &HashSet::new());
+        let lines: Vec<_> = panel.lines.iter().flatten().collect();
+        // Collapsed: just the one directory row, no file rows underneath.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].style, GitLineStyle::Dir);
+        assert_eq!(lines[0].entry, Some(GitEntry::Dir("src".to_string())));
+        assert!(panel.text.contains("> src/"));
+    }
+
+    #[test]
+    fn render_files_expanding_a_directory_reveals_its_files_indented_and_by_basename() {
+        let mut expanded = HashSet::new();
+        expanded.insert("src".to_string());
+        let panel = render_files(&[file("src/a.txt", '.', 'M'), file("root.txt", 'A', '.')], &expanded);
+
+        let lines: Vec<_> = panel.lines.iter().flatten().collect();
+        assert_eq!(lines.len(), 3); // src/ dir row + a.txt + root.txt
+
+        let dir_row = lines.iter().find(|l| l.style == GitLineStyle::Dir).unwrap();
+        assert_eq!(dir_row.entry, Some(GitEntry::Dir("src".to_string())));
+
+        let file_row = lines.iter().find(|l| l.entry == Some(GitEntry::File("src/a.txt".to_string()))).unwrap();
+        assert_eq!(file_row.style, GitLineStyle::File);
+
+        assert!(panel.text.contains("v src/"));
+        // The file row shows only its basename, indented deeper than
+        // its parent directory row, not the full "src/a.txt" path.
+        assert!(panel.text.contains("    [.M] a.txt"));
+        assert!(!panel.text.contains("src/a.txt"));
+        // A root-level file (no directory) renders exactly as before.
+        assert!(panel.text.contains("  [A.] root.txt"));
+    }
+
+    #[test]
+    fn render_files_nested_subdirectories_only_expand_one_level_at_a_time() {
+        let mut expanded = HashSet::new();
+        expanded.insert("src".to_string());
+        // "src/nested" itself is not in `expanded`, so its file stays
+        // collapsed behind its own directory row even though "src" is.
+        let panel = render_files(&[file("src/nested/deep.txt", '.', 'M')], &expanded);
+        let lines: Vec<_> = panel.lines.iter().flatten().collect();
+        assert_eq!(lines.len(), 2); // "src/" row, "src/nested/" row -- no file row yet
+        assert!(lines.iter().all(|l| l.style == GitLineStyle::Dir));
+        assert_eq!(lines[1].entry, Some(GitEntry::Dir("src/nested".to_string())));
+    }
+
+    #[test]
+    fn render_files_directories_sort_before_files_alphabetically_within_each_level() {
+        let panel = render_files(&[file("z.txt", '.', 'M'), file("a_dir/x.txt", '.', 'M')], &HashSet::new());
+        // "a_dir/" (a directory) sorts before "z.txt" despite the
+        // alphabetically-later name, matching `fenix_explorer`'s own
+        // directories-first convention.
+        let first_line = panel.text.lines().next().unwrap();
+        assert!(first_line.contains("a_dir/"), "expected the directory row first, got: {first_line:?}");
     }
 
     #[test]

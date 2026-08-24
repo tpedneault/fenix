@@ -274,15 +274,27 @@ Status`, `2. Files`, ...) and the focused one is shown in an accent
 color -- pressing that digit jumps straight to it. Only these are
 special, and only on the pane named:
 
+Files is a collapsible directory tree, not a flat list -- changed
+paths are grouped by directory (`> src/` collapsed, `v src/` expanded),
+so `Tab` on a directory reveals or hides its files, and every action
+key (`s`/`S`/`d`) works on a directory the same way it works on a
+single file: stage, unstage, or discard *everything underneath it* in
+one keypress. Discarding a directory runs both `git checkout --` (for
+tracked changes) and `git clean -fd --` (for untracked files) under it,
+since a real directory routinely holds a mix of both at once. Every
+directory starts collapsed; expansion state persists across `u`
+refreshes within the session.
+
 | Keys | Pane | Action |
 |---|---|---|
 | `1`-`6` | any | Jump to the pane numbered that in its title bar |
-| `s` | Files | Stage the file under the cursor |
-| `S` | Files | Unstage the file under the cursor |
+| `Tab` | Files | Expand/collapse the directory under the cursor |
+| `s` | Files | Stage the file (or every file under the directory) under the cursor |
+| `S` | Files | Unstage the file (or directory) under the cursor |
 | `a` | Files | Stage every changed file |
 | `A` | Files | Unstage every staged file |
 | `c` | Files | Commit (prompts for a message) |
-| `d` | Files | Discard the file under the cursor (`y`/`n` to confirm) |
+| `d` | Files | Discard the file (or directory) under the cursor (`y`/`n` to confirm) |
 | `z` | Files | Stash every change |
 | `P` / `p` | Files | Push / pull |
 | `c` | Branches | Checkout the branch under the cursor |

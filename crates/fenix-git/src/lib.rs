@@ -11,7 +11,7 @@ mod status;
 mod test_util;
 
 pub use actions::{
-    checkout_branch, commit, create_branch, delete_branch, discard_file, pull, push, stage_all, stage_file,
+    checkout_branch, commit, create_branch, delete_branch, discard_dir, discard_file, pull, push, stage_all, stage_file,
     stash_apply, stash_drop, stash_pop, stash_push, unstage_all, unstage_file,
 };
 pub use branch::{list_branches, Branch};

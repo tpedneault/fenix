@@ -56,6 +56,21 @@ pub fn discard_file(repo: &Path, path: &str, untracked: bool) -> Result<String, 
     run_action(repo, &args)
 }
 
+/// Directory-scoped discard. Unlike `discard_file`'s single-file
+/// tracked/untracked branch (a lone file is always purely one or the
+/// other), a directory routinely holds *both* kinds of change at once
+/// -- a full discard needs `checkout --` (restores every tracked file
+/// under it) followed by `clean -fd --` (removes every untracked file
+/// and subdirectory under it). `checkout`'s own error when nothing
+/// tracked needed restoring under the path is expected in the common
+/// case (an all-untracked directory) and silently ignored; `clean`'s
+/// result is the one returned, since it should never fail under normal
+/// conditions and is the more useful thing to surface if it does.
+pub fn discard_dir(repo: &Path, path: &str) -> Result<String, String> {
+    let _ = run_action(repo, &discard_tracked_args(path));
+    run_action(repo, &["clean".to_string(), "-fd".to_string(), "--".to_string(), path.to_string()])
+}
+
 pub fn commit(repo: &Path, message: &str) -> Result<String, String> {
     run_action(repo, &commit_args(message))
 }
@@ -157,6 +172,52 @@ mod tests {
         let path = dir.write("new.txt", "new\n");
         discard_file(dir.path(), "new.txt", true).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn stage_and_unstage_accept_a_directory_path() {
+        let dir = committed_repo("actions_stage_unstage_dir");
+        dir.write("sub/a.txt", "changed\n");
+        dir.write("sub/b.txt", "new\n");
+        git(dir.path(), &["add", "sub/a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "add sub/a.txt"]);
+        dir.write("sub/a.txt", "changed again\n");
+
+        stage_file(dir.path(), "sub").unwrap();
+        let files = list_files(dir.path());
+        assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should be staged: {files:?}");
+
+        unstage_file(dir.path(), "sub").unwrap();
+        let files = list_files(dir.path());
+        // `b.txt` is untracked, so "unstaged" for it means reverting to
+        // the `?`/`?` pair (its own distinct porcelain entry kind), not
+        // literally `.` -- both `.` and `?` mean "not currently staged."
+        assert!(
+            files.iter().all(|f| f.index_status == '.' || f.index_status == '?'),
+            "every file under sub/ should be unstaged: {files:?}"
+        );
+    }
+
+    #[test]
+    fn discard_dir_reverts_tracked_and_removes_untracked_files_under_it() {
+        let dir = committed_repo("actions_discard_dir");
+        dir.write("sub/a.txt", "v1\n");
+        git(dir.path(), &["add", "sub/a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "add sub/a.txt"]);
+        dir.write("sub/a.txt", "changed\n");
+        let untracked = dir.write("sub/new.txt", "new\n");
+
+        discard_dir(dir.path(), "sub").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("sub/a.txt")).unwrap(), "v1\n");
+        assert!(!untracked.exists());
+    }
+
+    #[test]
+    fn discard_dir_never_fails_when_the_directory_is_entirely_untracked() {
+        let dir = committed_repo("actions_discard_dir_all_untracked");
+        let untracked = dir.write("sub/new.txt", "new\n");
+        discard_dir(dir.path(), "sub").unwrap();
+        assert!(!untracked.exists());
     }
 
     #[test]

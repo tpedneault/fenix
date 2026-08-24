@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -398,6 +398,14 @@ struct GitSession {
     /// `DockerSession::stats_poller`.
     #[allow(dead_code)]
     status_poller: Option<GitStatusPoller>,
+    /// Full repo-relative paths of every directory currently expanded
+    /// in the Files pane's tree (`Tab` toggles membership, see
+    /// `git_toggle_dir_expand`) -- a directory not in here renders
+    /// collapsed, showing just its own row. Starts empty (every
+    /// directory collapsed) and persists across `git_refresh_session`,
+    /// so refreshing the session doesn't fold everything you'd opened
+    /// back up.
+    expanded_dirs: HashSet<String>,
 }
 
 /// A background `git status --porcelain=v2 --branch` poller for one open
@@ -466,6 +474,11 @@ enum GitPaneRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GitConfirmAction {
     DiscardFile { path: String, untracked: bool },
+    /// Discard every changed file under a directory (`fenix_git::
+    /// discard_dir`) -- unlike `DiscardFile`, no `untracked` flag: a
+    /// directory routinely holds both tracked and untracked changes at
+    /// once, so `discard_dir` always handles both.
+    DiscardDir { path: String },
     DeleteBranch { name: String },
     DropStash { index: usize },
 }
@@ -1076,6 +1089,11 @@ fn git_highlights_for_visible_range(
             git_panel::GitLineStyle::DiffAdd => ranges.push((line_start_byte..line_end_byte, theme.git_staged)),
             git_panel::GitLineStyle::DiffDel => ranges.push((line_start_byte..line_end_byte, theme.git_conflicted)),
             git_panel::GitLineStyle::DiffHunk => ranges.push((line_start_byte..line_end_byte, theme.gutter_fg)),
+            // Dimmed like `Empty`/`Detail`'s own dim portion -- a
+            // directory row has no per-row status badge (it aggregates
+            // an unknown mix underneath), so the whole row reads as
+            // secondary/structural rather than a real change.
+            git_panel::GitLineStyle::Dir => ranges.push((line_start_byte..line_end_byte, theme.gutter_fg)),
             git_panel::GitLineStyle::File | git_panel::GitLineStyle::Branch | git_panel::GitLineStyle::Commit | git_panel::GitLineStyle::Stash => {}
         }
         if let Some((badge_len, color)) = meta.badge {
@@ -2827,7 +2845,7 @@ impl App {
 
         let (staged, unstaged, untracked) = file_counts(&files);
         let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
-        let files_panel = git_panel::render_files(&files);
+        let files_panel = git_panel::render_files(&files, &HashSet::new());
         let branches_panel = git_panel::render_branches(&branches);
         let commits_panel = git_panel::render_commits(&commits);
         let stash_panel = git_panel::render_stash(&stashes);
@@ -2914,6 +2932,7 @@ impl App {
             stashes,
             status,
             status_poller,
+            expanded_dirs: HashSet::new(),
         });
 
         self.refresh_project_root();
@@ -2936,6 +2955,57 @@ impl App {
                 *ps = PaneState::seeded_at(Cursor::at_start());
             }
         }
+    }
+
+    /// Like `set_git_buffer` but keeps every pane's cursor on the same
+    /// *line index* instead of resetting to the top. Right for `Tab`'s
+    /// directory expand/collapse specifically: inserting or removing a
+    /// directory's children only ever changes lines *below* the row the
+    /// cursor is already sitting on (the toggled directory itself), so
+    /// "same line index" lands back on that exact row every time. Not
+    /// used for `git_refresh_session`'s own re-renders, which
+    /// intentionally reset to the top like every other refresh in this
+    /// session -- a real repo-status refresh can reorder or remove rows
+    /// anywhere in the list, where this shortcut wouldn't hold.
+    fn set_git_buffer_preserving_line(&mut self, id: BufferId, panel: git_panel::GitPanel) {
+        self.git_lines.insert(id, panel.lines);
+        let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state(pane);
+                if let Some(ob) = self.buffers.get(id) {
+                    let (line, _) = ob.buffer.line_col(&ps.cursor);
+                    old_lines.push((pane, line));
+                }
+            }
+        }
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+        let new_line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
+        for (pane, old_line) in old_lines {
+            let clamped = old_line.min(new_line_count.saturating_sub(1));
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let char_idx = ob.buffer.line_start_char(clamped);
+            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        }
+    }
+
+    /// `Tab` on Files: toggles whether the directory under the cursor is
+    /// expanded, then re-renders Files keeping the cursor on the same
+    /// row (see `set_git_buffer_preserving_line`). A no-op on a file row
+    /// or anywhere else -- only directories are expandable.
+    fn git_toggle_dir_expand(&mut self) {
+        let Some(git_panel::GitEntry::Dir(path)) = self.git_entry_at_cursor() else { return };
+        let Some(session) = self.git_session.as_mut() else { return };
+        if !session.expanded_dirs.remove(&path) {
+            session.expanded_dirs.insert(path);
+        }
+        let files_buffer = session.files_buffer;
+        let files_panel = git_panel::render_files(&session.files, &session.expanded_dirs);
+        self.set_git_buffer_preserving_line(files_buffer, files_panel);
     }
 
     /// `FenixUserEvent::GitStatusReady` handling: caches the fresh status
@@ -2966,7 +3036,7 @@ impl App {
         let stashes = fenix_git::list_stashes(&repo_root);
         let (staged, unstaged, untracked) = file_counts(&files);
         let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
-        let files_panel = git_panel::render_files(&files);
+        let files_panel = git_panel::render_files(&files, &session.expanded_dirs);
         let branches_panel = git_panel::render_branches(&branches);
         let commits_panel = git_panel::render_commits(&commits);
         let stash_panel = git_panel::render_stash(&stashes);
@@ -3070,7 +3140,9 @@ impl App {
             }
             Some(git_panel::GitEntry::Commit(hash)) => fenix_git::commit_diff(&repo_root, &hash).ok(),
             Some(git_panel::GitEntry::Stash(index)) => fenix_git::stash_diff(&repo_root, index).ok(),
-            Some(git_panel::GitEntry::Branch(_)) | None => return,
+            // A directory row aggregates an unknown mix of files, same
+            // reasoning `Branch` already has no single diff of its own.
+            Some(git_panel::GitEntry::Branch(_)) | Some(git_panel::GitEntry::Dir(_)) | None => return,
         };
         self.set_git_buffer(main_buffer, git_panel::render_main(diff.as_deref()));
     }
@@ -3079,24 +3151,33 @@ impl App {
     fn git_stage_selected(&mut self) {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
-        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
-            if let Err(err) = fenix_git::stage_file(&repo_root, &path) {
-                eprintln!("fenix: git stage failed: {err}");
-            }
-            self.git_refresh_session();
+        // `git add`/`git restore` are directory-transparent -- staging
+        // a `Dir` path stages every changed file underneath it in one
+        // call, same primitive as a single `File`, no separate function
+        // needed.
+        let path = match self.git_entry_at_cursor() {
+            Some(git_panel::GitEntry::File(path)) | Some(git_panel::GitEntry::Dir(path)) => path,
+            _ => return,
+        };
+        if let Err(err) = fenix_git::stage_file(&repo_root, &path) {
+            eprintln!("fenix: git stage failed: {err}");
         }
+        self.git_refresh_session();
     }
 
-    /// `S` on Files: unstages the file under the cursor.
+    /// `S` on Files: unstages the file (or every file under the
+    /// directory) under the cursor.
     fn git_unstage_selected(&mut self) {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
-        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
-            if let Err(err) = fenix_git::unstage_file(&repo_root, &path) {
-                eprintln!("fenix: git unstage failed: {err}");
-            }
-            self.git_refresh_session();
+        let path = match self.git_entry_at_cursor() {
+            Some(git_panel::GitEntry::File(path)) | Some(git_panel::GitEntry::Dir(path)) => path,
+            _ => return,
+        };
+        if let Err(err) = fenix_git::unstage_file(&repo_root, &path) {
+            eprintln!("fenix: git unstage failed: {err}");
         }
+        self.git_refresh_session();
     }
 
     /// `a` on Files: stages every changed file.
@@ -3207,6 +3288,7 @@ impl App {
                 let untracked = self.git_selected_file().is_some_and(|f| f.index_status == '?' && f.worktree_status == '?');
                 GitConfirmAction::DiscardFile { path, untracked }
             }
+            git_panel::GitEntry::Dir(path) => GitConfirmAction::DiscardDir { path },
             git_panel::GitEntry::Branch(name) => GitConfirmAction::DeleteBranch { name },
             git_panel::GitEntry::Stash(index) => GitConfirmAction::DropStash { index },
             git_panel::GitEntry::Commit(_) => return,
@@ -3239,6 +3321,7 @@ impl App {
         let action = self.git_confirm.as_ref()?;
         Some(match action {
             GitConfirmAction::DiscardFile { path, .. } => format!("Discard changes to {path}? (y/n)"),
+            GitConfirmAction::DiscardDir { path } => format!("Discard all changes under {path}/? (y/n)"),
             GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
             GitConfirmAction::DropStash { index } => format!("Drop stash@{{{index}}}? (y/n)"),
         })
@@ -3253,6 +3336,7 @@ impl App {
                 let repo_root = session.repo_root.clone();
                 let result = match action {
                     GitConfirmAction::DiscardFile { path, untracked } => fenix_git::discard_file(&repo_root, &path, untracked),
+                    GitConfirmAction::DiscardDir { path } => fenix_git::discard_dir(&repo_root, &path),
                     GitConfirmAction::DeleteBranch { name } => fenix_git::delete_branch(&repo_root, &name, false),
                     GitConfirmAction::DropStash { index } => fenix_git::stash_drop(&repo_root, index),
                 };
@@ -4359,6 +4443,11 @@ impl App {
                     self.wake_caret();
                     return;
                 }
+                (Files, KeyCode::Named(FenixNamedKey::Tab)) if keypress.mods == Mods::default() => {
+                    self.git_toggle_dir_expand();
+                    self.wake_caret();
+                    return;
+                }
                 (Branches, KeyCode::Char('c')) if keypress.mods == Mods::default() => {
                     self.git_checkout_selected_branch();
                     self.wake_caret();
@@ -5209,6 +5298,7 @@ impl App {
         }
         let bindings: &[(&str, &str)] = match self.git_focused_role()? {
             GitPaneRole::Files => &[
+                ("Tab", "expand/collapse"),
                 ("s", "stage"),
                 ("S", "unstage"),
                 ("a", "stage all"),
@@ -7087,6 +7177,9 @@ mod tests {
         }
         fn write(&self, name: &str, contents: &str) -> PathBuf {
             let path = self.0.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
             std::fs::write(&path, contents).unwrap();
             path
         }
@@ -7095,6 +7188,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A real temp git repo with one initial commit (`sub/a.txt`) --
+    /// mirrors `fenix_git`'s own private `committed_repo` test helper,
+    /// giving the Git-panel's `App`-level tests a real repo to shell
+    /// real `git` commands against (via `open_git_panel`/`fenix_git`
+    /// itself) rather than mocking already-tested plumbing.
+    fn fenix_git_test_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("sub/a.txt", "v1\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "initial"]);
+        dir
     }
 
     #[test]
@@ -8930,6 +9043,82 @@ mod tests {
 
         app.git_session_close();
         assert_eq!(app.git_pane_by_number(1), None);
+    }
+
+    #[test]
+    fn git_toggle_dir_expand_reveals_and_hides_a_directorys_files_preserving_the_cursor_line() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let files_buffer = app.git_session.as_ref().unwrap().files_buffer;
+
+        // Seed a deterministic file list (independent of whatever real
+        // `git status` returns for this sandboxed test env) with one
+        // file inside a subdirectory, and render it collapsed -- the
+        // directory row lands on line 0, matching `open_git_panel`'s
+        // own final focus on the Files pane.
+        let fake_files = vec![fenix_git::FileEntry { path: "sub/a.txt".to_string(), index_status: '.', worktree_status: 'M' }];
+        app.git_session.as_mut().unwrap().files = fake_files.clone();
+        app.set_git_buffer(files_buffer, git_panel::render_files(&fake_files, &HashSet::new()));
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+
+        app.git_toggle_dir_expand();
+
+        assert!(app.git_session.as_ref().unwrap().expanded_dirs.contains("sub"));
+        let text = app.buffers.get(files_buffer).unwrap().buffer.text();
+        assert!(text.contains("v sub/"), "expected an expanded marker, got: {text:?}");
+        assert!(text.contains("[.M] a.txt"), "expected the file shown by basename, got: {text:?}");
+        assert!(!text.contains("sub/a.txt"), "the file row should show only its basename: {text:?}");
+
+        // The cursor stayed on the directory's own row (line 0) even
+        // though a new line was inserted below it.
+        let focused = app.focused_pane_id();
+        let (line, _) = app.buffers.get(files_buffer).unwrap().buffer.line_col(&app.pane_state(focused).cursor);
+        assert_eq!(line, 0);
+
+        app.git_toggle_dir_expand();
+        assert!(!app.git_session.as_ref().unwrap().expanded_dirs.contains("sub"));
+        let text = app.buffers.get(files_buffer).unwrap().buffer.text();
+        assert!(text.contains("> sub/"));
+        assert!(!text.contains("a.txt"));
+    }
+
+    #[test]
+    fn git_toggle_dir_expand_is_a_no_op_on_a_file_row() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let files_buffer = app.git_session.as_ref().unwrap().files_buffer;
+
+        let fake_files = vec![fenix_git::FileEntry { path: "root.txt".to_string(), index_status: 'A', worktree_status: '.' }];
+        app.git_session.as_mut().unwrap().files = fake_files.clone();
+        app.set_git_buffer(files_buffer, git_panel::render_files(&fake_files, &HashSet::new()));
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // on the file row, not a directory
+
+        app.git_toggle_dir_expand();
+        assert!(app.git_session.as_ref().unwrap().expanded_dirs.is_empty());
+    }
+
+    #[test]
+    fn git_stage_selected_on_a_directory_entry_stages_every_file_under_it() {
+        let dir = fenix_git_test_repo("git_stage_dir");
+        dir.write("sub/a.txt", "changed\n");
+        dir.write("sub/b.txt", "new\n");
+
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        let session = app.git_session.as_ref().unwrap();
+        let (files_buffer, repo_root) = (session.files_buffer, session.repo_root.clone());
+        assert_eq!(repo_root, dir.path());
+
+        let files = fenix_git::list_files(&repo_root);
+        app.git_session.as_mut().unwrap().files = files.clone();
+        app.set_git_buffer(files_buffer, git_panel::render_files(&files, &HashSet::new()));
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // the "sub/" directory row
+
+        app.git_stage_selected();
+
+        let files = fenix_git::list_files(&repo_root);
+        assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should now be staged: {files:?}");
     }
 
     #[test]
