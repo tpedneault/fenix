@@ -24,6 +24,12 @@ pub enum LanguageId {
     C,
     Bash,
     Tcl,
+    /// Covers both `Dockerfile` and Podman's `Containerfile` (the same
+    /// format, different conventional name) -- see `detect_language_
+    /// from_path`, since neither is reliably named with an extension.
+    Dockerfile,
+    /// Windows Batch/CMD scripts (`.bat`/`.cmd`).
+    Batch,
 }
 
 /// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
@@ -49,6 +55,8 @@ impl LanguageId {
             LanguageId::C => tree_sitter_c::LANGUAGE.into(),
             LanguageId::Bash => tree_sitter_bash::LANGUAGE.into(),
             LanguageId::Tcl => tree_sitter_tcl::LANGUAGE.into(),
+            LanguageId::Dockerfile => tree_sitter_containerfile::LANGUAGE.into(),
+            LanguageId::Batch => tree_sitter_batch::LANGUAGE.into(),
         }
     }
 
@@ -65,6 +73,8 @@ impl LanguageId {
             LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
             LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
             LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
+            LanguageId::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY,
+            LanguageId::Batch => tree_sitter_batch::HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -87,8 +97,33 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "c" | "h" => Some(LanguageId::C),
         "sh" | "bash" => Some(LanguageId::Bash),
         "tcl" | "tm" => Some(LanguageId::Tcl),
+        "dockerfile" => Some(LanguageId::Dockerfile),
+        "bat" | "cmd" => Some(LanguageId::Batch),
         _ => None,
     }
+}
+
+/// Detects a language from a file's full name, not just its extension --
+/// needed for `Dockerfile`/`Containerfile`, which are conventionally
+/// named with no extension at all (or a per-stage suffix like
+/// `Dockerfile.prod`, still no real extension `Path::extension` would
+/// find). Checked first; anything that doesn't match one of those bare-
+/// name conventions falls back to `detect_language` on the extension,
+/// covering every other language exactly as before. Case-insensitive
+/// (`dockerfile`/`DOCKERFILE` are both common on case-insensitive
+/// filesystems).
+pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_ascii_lowercase();
+        if lower == "dockerfile"
+            || lower.starts_with("dockerfile.")
+            || lower == "containerfile"
+            || lower.starts_with("containerfile.")
+        {
+            return Some(LanguageId::Dockerfile);
+        }
+    }
+    path.extension().and_then(|e| e.to_str()).and_then(detect_language)
 }
 
 #[cfg(test)]
@@ -122,5 +157,28 @@ mod tests {
         assert_eq!(detect_language("sh"), Some(LanguageId::Bash));
         assert_eq!(detect_language("tcl"), Some(LanguageId::Tcl));
         assert_eq!(detect_language("tm"), Some(LanguageId::Tcl));
+        assert_eq!(detect_language("dockerfile"), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language("bat"), Some(LanguageId::Batch));
+        assert_eq!(detect_language("cmd"), Some(LanguageId::Batch));
+    }
+
+    #[test]
+    fn detects_dockerfile_and_containerfile_by_bare_filename() {
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("DOCKERFILE")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile.dev")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Containerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(
+            detect_language_from_path(std::path::Path::new("/some/dir/Dockerfile.prod")),
+            Some(LanguageId::Dockerfile)
+        );
+    }
+
+    #[test]
+    fn detect_language_from_path_falls_back_to_extension() {
+        assert_eq!(detect_language_from_path(std::path::Path::new("main.rs")), Some(LanguageId::Rust));
+        assert_eq!(detect_language_from_path(std::path::Path::new("script.bat")), Some(LanguageId::Batch));
+        assert_eq!(detect_language_from_path(std::path::Path::new("no_extension_or_match")), None);
     }
 }

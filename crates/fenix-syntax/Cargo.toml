@@ -16,3 +16,5 @@ tree-sitter-typescript = "0.23"
 tree-sitter-c = "0.24"
 tree-sitter-bash = "0.25"
 tree-sitter-tcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-tcl", rev = "850a72ab6436e06645b33b11cfa60cbdb04b1f01" }
+tree-sitter-containerfile = "0.9"
+tree-sitter-batch = "0.11"

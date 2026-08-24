@@ -132,9 +132,7 @@ impl BufferList {
         });
         let syntax = buffer
             .path()
-            .and_then(|p| p.extension())
-            .and_then(|ext| ext.to_str())
-            .and_then(fenix_syntax::detect_language)
+            .and_then(fenix_syntax::detect_language_from_path)
             .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
         self.insert(buffer, syntax, BufferKind::Text)
     }

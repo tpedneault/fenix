@@ -198,6 +198,16 @@ mod tests {
         smoke_test(LanguageId::Tcl, "proc greet {name} {\n    puts \"hello $name\"\n}\n");
     }
 
+    #[test]
+    fn dockerfile_highlights_something() {
+        smoke_test(LanguageId::Dockerfile, "FROM rust:1\nRUN cargo build\nCMD [\"./app\"]\n");
+    }
+
+    #[test]
+    fn batch_highlights_something() {
+        smoke_test(LanguageId::Batch, "@echo off\nset FOO=bar\necho %FOO%\n");
+    }
+
     /// Tcl is the primary language Fenix is meant to support well, and its
     /// vendored `highlights.scm` pairs several captures on the same node
     /// (`@repeat @keyword`, `@spell @comment`) -- confirms overlap
