@@ -143,6 +143,7 @@ popup shows what keys continue it.
 
 | Keys | Action |
 |---|---|
+| `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `SPC f j` | Open the file explorer at the current file's directory |
 | `SPC q q` | Quit |

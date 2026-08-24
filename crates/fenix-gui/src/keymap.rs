@@ -80,6 +80,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         let mut t = KeyTrie::new();
         let spc = KeyPress::char(' ');
         t.label_group(&[spc], "leader");
+        // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
+        // single most-used action" convention -- here, the same fuzzy
+        // find-file-in-project picker as `SPC p f`.
+        t.insert(&[spc, spc], "find file", "project.find_file");
 
         t.label_group(&[spc, KeyPress::char('f')], "files");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
@@ -277,6 +281,17 @@ mod tests {
         match m.feed(KeyPress::char('t')) {
             fenix_keymap::Step::Matched(&"explorer.toggle_sidebar") => {}
             _ => panic!("expected SPC e t to resolve to explorer.toggle_sidebar"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_double_space_to_find_file() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        match m.feed(KeyPress::char(' ')) {
+            fenix_keymap::Step::Matched(&"project.find_file") => {}
+            _ => panic!("expected SPC SPC to resolve to project.find_file"),
         }
     }
 
