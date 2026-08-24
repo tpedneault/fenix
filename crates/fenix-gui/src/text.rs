@@ -94,6 +94,15 @@ pub struct TextPipeline {
     /// only ever touches `popup_renderer`'s own buffer.
     popup_renderer: TextRenderer,
     content_buffers: HashMap<PaneId, GlyphBuffer>,
+    /// One single-line `GlyphBuffer` per pane that currently has a title
+    /// bar (`App::pane_titles`) -- same lazy-create/retain lifecycle as
+    /// `content_buffers`, just for the reserved strip at a pane's top
+    /// edge instead of its main content. Rendered in the same base-layer
+    /// `prepare`/`render` pass as pane content (not a separate pass like
+    /// popups need -- see `popup_renderer`'s own doc comment for why
+    /// popups specifically need that; titles have no such conflict since
+    /// nothing else destroys/resizes a title buffer mid-frame).
+    titles: HashMap<PaneId, GlyphBuffer>,
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
     sidebar: GlyphBuffer,
@@ -191,6 +200,7 @@ impl TextPipeline {
             renderer,
             popup_renderer,
             content_buffers: HashMap::new(),
+            titles: HashMap::new(),
             popups: HashMap::new(),
             modeline,
             sidebar,
@@ -362,6 +372,31 @@ impl TextPipeline {
         self.content_buffers.retain(|id, _| keep.contains(id));
     }
 
+    /// Sets one pane's title-bar text -- same rich-span/lazy-create
+    /// mechanism as `set_pane_rich`, but always exactly one line tall
+    /// (`h` isn't a parameter: a title strip is always `line_height`,
+    /// unlike a pane's own content area).
+    pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
+        let spans = self.rich_spans(segments);
+        let default_attrs = Attrs::new().family(self.content_family());
+
+        if !self.titles.contains_key(&pane) {
+            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
+            buf.set_wrap(Wrap::None);
+            self.titles.insert(pane, buf);
+        }
+        let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
+        buf.set_size(Some(w), Some(self.line_height));
+        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Drops every title `GlyphBuffer` not in `keep` -- same reasoning as
+    /// `retain_panes`.
+    pub fn retain_titles(&mut self, keep: &[PaneId]) {
+        self.titles.retain(|id, _| keep.contains(id));
+    }
+
     /// Sets the modeline text as a sequence of differently-colored spans
     /// (e.g. the mode badge in its own accent, the rest in the normal
     /// modeline color) -- a single flat color can't do that, so this
@@ -444,7 +479,14 @@ impl TextPipeline {
     /// them, rather than relying on `TextBounds` clipping (a single
     /// rectangle per pane can't carve a popup-shaped hole out of it) --
     /// see `App::redraw`'s two-pass render sequence for the full picture.
-    pub fn prepare(&mut self, gpu: &GpuState, theme: &Theme, panes: &[(PaneId, Rect, f32)], sidebar_open: bool) {
+    pub fn prepare(
+        &mut self,
+        gpu: &GpuState,
+        theme: &Theme,
+        panes: &[(PaneId, Rect, f32)],
+        titles: &[(PaneId, Rect)],
+        sidebar_open: bool,
+    ) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
@@ -452,7 +494,7 @@ impl TextPipeline {
 
         let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
-        let mut areas = Vec::with_capacity(panes.len() + 2);
+        let mut areas = Vec::with_capacity(panes.len() + titles.len() + 2);
         for &(pane, rect, content_frac) in panes {
             let Some(buffer) = self.content_buffers.get(&pane) else { continue };
             areas.push(TextArea {
@@ -467,6 +509,28 @@ impl TextPipeline {
                     bottom: (rect.y + rect.h) as i32,
                 },
                 default_color: theme.fg,
+                custom_glyphs: &[],
+            });
+        }
+
+        // A pane's title strip -- `rect` here is the *strip itself*
+        // (its own top-left/size, computed by the caller as `line_
+        // height`-tall and sitting just above that pane's now-shrunk
+        // content rect), not the pane's full original rect.
+        for &(pane, rect) in titles {
+            let Some(buffer) = self.titles.get(&pane) else { continue };
+            areas.push(TextArea {
+                buffer,
+                left: rect.x + PAD_LEFT,
+                top: rect.y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + rect.h) as i32,
+                },
+                default_color: theme.fg_modeline,
                 custom_glyphs: &[],
             });
         }

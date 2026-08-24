@@ -127,6 +127,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('d')], "docker");
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('d')], "open docker panel", "docker.open");
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('b')], "build image", "docker.build");
+        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('q')], "close docker panel", "docker.close");
 
         t.label_group(&[spc, KeyPress::char('c')], "completion");
         t.insert(
@@ -340,6 +341,14 @@ mod tests {
         match m.feed(KeyPress::char('b')) {
             fenix_keymap::Step::Matched(&"docker.build") => {}
             _ => panic!("expected SPC d b to resolve to docker.build"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('d'));
+        match m.feed(KeyPress::char('q')) {
+            fenix_keymap::Step::Matched(&"docker.close") => {}
+            _ => panic!("expected SPC d q to resolve to docker.close"),
         }
     }
 
