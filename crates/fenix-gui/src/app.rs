@@ -165,6 +165,11 @@ enum ActivePicker {
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
+    /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
+    /// filtered over `theme::ALL` -- confirming applies it exactly like
+    /// `cycle_theme` does. The quick `SPC t t` cycle stays too; this is
+    /// for "I know which one I want," not "just try the next one."
+    Theme(fenix_picker::PickerState<&'static Theme>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -178,6 +183,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchProject(s) => s.push_char(c),
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
+        ActivePicker::Theme(s) => s.push_char(c),
     }
 }
 
@@ -188,6 +194,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchProject(s) => s.backspace(),
         ActivePicker::SwitchBuffer(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
+        ActivePicker::Theme(s) => s.backspace(),
     }
 }
 
@@ -198,6 +205,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
+        ActivePicker::Theme(s) => s.move_selection(delta),
     }
 }
 
@@ -208,6 +216,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchProject(s) => s.query(),
         ActivePicker::SwitchBuffer(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
+        ActivePicker::Theme(s) => s.query(),
     }
 }
 
@@ -218,6 +227,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.len(),
         ActivePicker::SwitchBuffer(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
+        ActivePicker::Theme(s) => s.len(),
     }
 }
 
@@ -228,6 +238,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.selected_row(),
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
+        ActivePicker::Theme(s) => s.selected_row(),
     }
 }
 
@@ -242,6 +253,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -1377,6 +1389,12 @@ impl App {
                     eprintln!("fenix: couldn't save project history: {err}");
                 }
             }
+            Some(ActivePicker::Theme(state)) => {
+                let Some(theme) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.apply_theme(theme);
+            }
             None => {}
         }
         self.wake_caret();
@@ -1852,12 +1870,19 @@ impl App {
     /// `SPC t t`: cycles to the next theme in `theme::ALL` (wrapping) and
     /// persists the choice -- matched by `name`, not pointer identity,
     /// which Rust doesn't guarantee is stable across separate `&SOME_CONST`
-    /// expressions. Save failure is non-fatal, same posture as
-    /// `refresh_project_root`'s `known_projects.save()`.
+    /// expressions.
     pub(crate) fn cycle_theme(&mut self) {
         let current = theme::ALL.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
         let next = (current + 1) % theme::ALL.len();
-        self.theme = theme::ALL[next];
+        self.apply_theme(theme::ALL[next]);
+    }
+
+    /// Shared by `cycle_theme` and the theme picker's confirm (`SPC t p`):
+    /// sets the active theme, persists the choice, and requests a
+    /// redraw. Save failure is non-fatal, same posture as `refresh_
+    /// project_root`'s `known_projects.save()`.
+    fn apply_theme(&mut self, theme: &'static Theme) {
+        self.theme = theme;
         self.config.theme = Some(self.theme.name.to_string());
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save theme choice: {err}");
@@ -1865,6 +1890,15 @@ impl App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// `SPC t p`: a fuzzy picker over every shipped theme (`theme::ALL`),
+    /// for jumping straight to one by name rather than cycling through
+    /// them one at a time.
+    pub(crate) fn picker_pick_theme(&mut self) {
+        let candidates =
+            theme::ALL.iter().map(|t| fenix_picker::Candidate::new(t.name.to_string(), *t)).collect();
+        self.enter_picker(ActivePicker::Theme(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC t =`/`Ctrl-=`/`SPC t -`/`Ctrl--`/`SPC t 0`/`Ctrl-0`: grows,
@@ -2250,6 +2284,7 @@ impl App {
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return Some((label, format!("│ {count} matches ")));
@@ -4138,6 +4173,11 @@ mod tests {
         let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
         assert_eq!(reloaded.theme, Some("TempleOS".to_string())); // persisted
 
+        // Cycle through the rest of `theme::ALL` (Gruvbox Dark, Nord,
+        // Dracula, Solarized Dark, One Dark) to reach the wrap-around.
+        for _ in 0..5 {
+            app.cycle_theme();
+        }
         app.cycle_theme();
         assert_eq!(app.theme.name, "Orbit Dark"); // wrapped back around
         let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
@@ -5314,6 +5354,37 @@ mod tests {
 
         assert_eq!(app.main_view, MainView::Explorer, "a file open shouldn't leave the picker");
         assert_eq!(app.explorer_purpose, ExplorerPurpose::PickProjectDir);
+    }
+
+    #[test]
+    fn picker_pick_theme_lists_every_shipped_theme() {
+        let mut app = App::with_file(None);
+        app.picker_pick_theme();
+        match &app.active_picker {
+            Some(ActivePicker::Theme(state)) => assert_eq!(state.len(), theme::ALL.len()),
+            other => panic!("expected an open Theme picker, got is_some={}", other.is_some()),
+        }
+        assert_eq!(app.main_view, MainView::Picker);
+    }
+
+    #[test]
+    fn picker_confirm_on_theme_applies_it_persists_and_returns_to_the_editor() {
+        let dir = TempDir::new("picker_confirm_theme");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.theme = &theme::ORBIT_DARK;
+
+        app.picker_pick_theme();
+        for ch in "Nord".chars() {
+            picker_push_char(app.active_picker.as_mut().unwrap(), ch);
+        }
+        app.picker_confirm();
+
+        assert_eq!(app.theme.name, "Nord");
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.theme, Some("Nord".to_string())); // persisted
     }
 
     #[test]

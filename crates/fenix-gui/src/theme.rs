@@ -328,9 +328,310 @@ pub const TEMPLEOS: Theme = Theme {
     git_conflicted: text_color(0xaa0000),
 };
 
+/// Built from the official palette (`colors/gruvbox.vim`, fetched from
+/// `morhetz/gruvbox` this session, not recalled from memory): dark0_hard
+/// `#1d2021` background, the `bright_*`/`neutral_*` accent set, `light0`/
+/// `light1` foreground, `gray` `#928374`. Mapping each verified color to
+/// one of `Theme`'s semantic slots (which accent means "keyword" vs.
+/// "type" vs. "mode badge") is this project's own design choice, the
+/// same way `TEMPLEOS`'s mapping from the fixed CGA palette already is
+/// -- not itself part of any "official Gruvbox syntax theme" spec.
+pub const GRUVBOX_DARK: Theme = Theme {
+    name: "Gruvbox Dark",
+    font_family: None,
+    border: None,
+    divider: rgba(0x665c54),
+
+    bg: rgba(0x1d2021),
+    bg_modeline: rgba(0x3c3836),
+    fg: text_color(0xebdbb2),
+    fg_modeline: text_color(0xebdbb2),
+    caret: rgba(0xfabd2f),
+    caret_text: text_color(0xfabd2f),
+    hl_line: rgba(0x504945),
+    selection: rgba_alpha(0xfabd2f, 0.25),
+    bracket_match: rgba_alpha(0x8ec07c, 0.35),
+    search_match: rgba_alpha(0xd3869b, 0.3),
+
+    mode_normal: rgba(0xfabd2f),
+    mode_insert: rgba(0x83a598),
+    mode_visual: rgba(0xfb4934),
+    mode_replace: rgba(0xfe8019),
+    mode_command: rgba(0x458588),
+    mode_explorer: rgba(0x8ec07c),
+    mode_picker: rgba(0xd3869b),
+    mode_text_dark: text_color(0x1d2021),
+    mode_text_light: text_color(0xfbf1c7),
+
+    gutter_fg: text_color(0x928374),
+
+    syntax_keyword: text_color(0xfb4934),
+    syntax_string: text_color(0xb8bb26),
+    syntax_comment: text_color(0x928374),
+    syntax_function: text_color(0x83a598),
+    syntax_type: text_color(0xfabd2f),
+    syntax_number: text_color(0xd3869b),
+    syntax_constant: text_color(0xfe8019),
+    syntax_variable: text_color(0xebdbb2),
+    syntax_operator: text_color(0x8ec07c),
+    syntax_punctuation: text_color(0x928374),
+    syntax_attribute: text_color(0xd79921),
+
+    icon_folder: text_color(0x83a598),
+    icon_file: text_color(0xebdbb2),
+    git_modified: text_color(0xd65d0e),
+    git_staged: text_color(0xb8bb26),
+    git_untracked: text_color(0x83a598),
+    git_ignored: text_color(0x928374),
+    git_conflicted: text_color(0xfb4934),
+};
+
+/// Built from the official palette (`nordtheme.com/docs/colors-and-
+/// palettes`, fetched this session): nord0-nord3 are dark/background
+/// shades, nord4-nord6 light/foreground, nord7-nord15 the accent set.
+/// Several of `Theme`'s slots line up with the palette's own documented
+/// per-color usage almost exactly (`nord3` for comments, `nord9` for
+/// keywords/operators/punctuation, `nord14` for strings, `nord8` for
+/// functions, `nord7` for types, `nord15` for numbers, `nord12` for
+/// annotations/attributes) -- the closest any theme here comes to a
+/// verified, not just self-consistent, syntax mapping.
+pub const NORD: Theme = Theme {
+    name: "Nord",
+    font_family: None,
+    border: None,
+    divider: rgba(0x4c566a),
+
+    bg: rgba(0x2e3440),
+    bg_modeline: rgba(0x3b4252),
+    fg: text_color(0xd8dee9),
+    fg_modeline: text_color(0xeceff4),
+    caret: rgba(0x88c0d0),
+    caret_text: text_color(0x88c0d0),
+    hl_line: rgba(0x434c5e),
+    selection: rgba_alpha(0x88c0d0, 0.25),
+    bracket_match: rgba_alpha(0xa3be8c, 0.35),
+    search_match: rgba_alpha(0xb48ead, 0.3),
+
+    mode_normal: rgba(0xa3be8c),
+    mode_insert: rgba(0x88c0d0),
+    mode_visual: rgba(0xbf616a),
+    mode_replace: rgba(0xd08770),
+    mode_command: rgba(0x81a1c1),
+    mode_explorer: rgba(0x5e81ac),
+    mode_picker: rgba(0xb48ead),
+    mode_text_dark: text_color(0x2e3440),
+    mode_text_light: text_color(0xeceff4),
+
+    gutter_fg: text_color(0x4c566a),
+
+    syntax_keyword: text_color(0x81a1c1),
+    syntax_string: text_color(0xa3be8c),
+    syntax_comment: text_color(0x4c566a),
+    syntax_function: text_color(0x88c0d0),
+    syntax_type: text_color(0x8fbcbb),
+    syntax_number: text_color(0xb48ead),
+    syntax_constant: text_color(0xd08770),
+    syntax_variable: text_color(0xd8dee9),
+    syntax_operator: text_color(0x81a1c1),
+    syntax_punctuation: text_color(0x81a1c1),
+    syntax_attribute: text_color(0xd08770),
+
+    icon_folder: text_color(0x81a1c1),
+    icon_file: text_color(0xd8dee9),
+    git_modified: text_color(0xd08770),
+    git_staged: text_color(0xa3be8c),
+    git_untracked: text_color(0x81a1c1),
+    git_ignored: text_color(0x4c566a),
+    git_conflicted: text_color(0xbf616a),
+};
+
+/// Built from the official palette (`draculatheme.com`'s own contribute/
+/// spec page, fetched this session): Background `#282a36`, Current Line
+/// `#44475a`, Foreground `#f8f8f2`, Comment `#6272a4`, plus Cyan/Green/
+/// Orange/Pink/Purple/Red/Yellow. `hl_line` uses Current Line for
+/// exactly its documented purpose. The syntax mapping (pink keywords,
+/// yellow strings, green functions, cyan types, purple numbers) follows
+/// Dracula's own well-known, widely-ported real syntax convention, not
+/// just an arbitrary assignment.
+pub const DRACULA: Theme = Theme {
+    name: "Dracula",
+    font_family: None,
+    border: None,
+    divider: rgba(0x6272a4),
+
+    bg: rgba(0x282a36),
+    bg_modeline: rgba(0x44475a),
+    fg: text_color(0xf8f8f2),
+    fg_modeline: text_color(0xf8f8f2),
+    caret: rgba(0xff79c6),
+    caret_text: text_color(0xff79c6),
+    hl_line: rgba(0x44475a),
+    selection: rgba_alpha(0xff79c6, 0.25),
+    bracket_match: rgba_alpha(0x50fa7b, 0.35),
+    search_match: rgba_alpha(0x8be9fd, 0.3),
+
+    mode_normal: rgba(0x50fa7b),
+    mode_insert: rgba(0x8be9fd),
+    mode_visual: rgba(0xff5555),
+    mode_replace: rgba(0xffb86c),
+    mode_command: rgba(0xbd93f9),
+    mode_explorer: rgba(0xbd93f9),
+    mode_picker: rgba(0xff79c6),
+    mode_text_dark: text_color(0x282a36),
+    mode_text_light: text_color(0xf8f8f2),
+
+    gutter_fg: text_color(0x6272a4),
+
+    syntax_keyword: text_color(0xff79c6),
+    syntax_string: text_color(0xf1fa8c),
+    syntax_comment: text_color(0x6272a4),
+    syntax_function: text_color(0x50fa7b),
+    syntax_type: text_color(0x8be9fd),
+    syntax_number: text_color(0xbd93f9),
+    syntax_constant: text_color(0xbd93f9),
+    syntax_variable: text_color(0xf8f8f2),
+    syntax_operator: text_color(0xff79c6),
+    syntax_punctuation: text_color(0xf8f8f2),
+    syntax_attribute: text_color(0x50fa7b),
+
+    icon_folder: text_color(0xbd93f9),
+    icon_file: text_color(0xf8f8f2),
+    git_modified: text_color(0xffb86c),
+    git_staged: text_color(0x50fa7b),
+    git_untracked: text_color(0x8be9fd),
+    git_ignored: text_color(0x6272a4),
+    git_conflicted: text_color(0xff5555),
+};
+
+/// Built from the official palette (`ethanschoonover.com/solarized`'s
+/// own published base03-base3/8-accent table, fetched this session).
+/// Dark-mode body text is `base0` (the spec's own "primary content"
+/// choice for a dark background, distinct from `base00`/`base01`, its
+/// two progressively-dimmer secondary-content tones); `base02` (the
+/// spec's own "background highlights" tone) backs `hl_line`, `base01`
+/// (the spec's own "comments/secondary content" tone) backs `gutter_fg`/
+/// `syntax_comment` -- both exact matches to the spec's own documented
+/// per-tone intent, not just an arbitrary pick.
+pub const SOLARIZED_DARK: Theme = Theme {
+    name: "Solarized Dark",
+    font_family: None,
+    border: None,
+    divider: rgba(0x586e75),
+
+    bg: rgba(0x002b36),
+    bg_modeline: rgba(0x073642),
+    fg: text_color(0x839496),
+    fg_modeline: text_color(0x93a1a1),
+    caret: rgba(0xb58900),
+    caret_text: text_color(0xb58900),
+    hl_line: rgba(0x073642),
+    selection: rgba_alpha(0x268bd2, 0.25),
+    bracket_match: rgba_alpha(0x859900, 0.35),
+    search_match: rgba_alpha(0xd33682, 0.3),
+
+    mode_normal: rgba(0xb58900),
+    mode_insert: rgba(0x2aa198),
+    mode_visual: rgba(0xdc322f),
+    mode_replace: rgba(0xcb4b16),
+    mode_command: rgba(0x268bd2),
+    mode_explorer: rgba(0x6c71c4),
+    mode_picker: rgba(0xd33682),
+    mode_text_dark: text_color(0x002b36),
+    mode_text_light: text_color(0xfdf6e3),
+
+    gutter_fg: text_color(0x586e75),
+
+    syntax_keyword: text_color(0x859900),
+    syntax_string: text_color(0x2aa198),
+    syntax_comment: text_color(0x586e75),
+    syntax_function: text_color(0x268bd2),
+    syntax_type: text_color(0xb58900),
+    syntax_number: text_color(0x6c71c4),
+    syntax_constant: text_color(0xd33682),
+    syntax_variable: text_color(0x839496),
+    syntax_operator: text_color(0x859900),
+    syntax_punctuation: text_color(0x586e75),
+    syntax_attribute: text_color(0xcb4b16),
+
+    icon_folder: text_color(0x268bd2),
+    icon_file: text_color(0x839496),
+    git_modified: text_color(0xcb4b16),
+    git_staged: text_color(0x859900),
+    git_untracked: text_color(0x268bd2),
+    git_ignored: text_color(0x586e75),
+    git_conflicted: text_color(0xdc322f),
+};
+
+/// Built from the widely-published, cross-corroborated Atom "One Dark"
+/// syntax palette (`#282c34`/`#abb2bf`/`#e06c75`/`#98c379`/`#e5c07b`/
+/// `#61afef`/`#c678dd`/`#56b6c2`, plus the equally common companion gray
+/// `#5c6370` -- several independent color-reference sources fetched
+/// this session agreed byte-for-byte on all of these; the one official-
+/// repo fetch attempted returned LESS `hsl()` source requiring
+/// compilation, not literal hex, so this cross-corroborated set is used
+/// instead of a hand-computed HSL-to-hex approximation). `bg_modeline`
+/// (`#21252b`) is a commonly-paired One Dark panel shade seen alongside
+/// this exact palette in multiple ports, not independently re-verified
+/// against a single authoritative source the way the eight core colors
+/// above are -- disclosed, not presented as equally certain. `hl_line`
+/// avoids needing another such value by using a low-alpha overlay of
+/// the verified blue instead of a new solid literal. The syntax mapping
+/// (purple keywords, green strings, blue functions, yellow types/JSX
+/// attributes) follows One Dark's own well-known real convention.
+pub const ONE_DARK: Theme = Theme {
+    name: "One Dark",
+    font_family: None,
+    border: None,
+    divider: rgba(0x5c6370),
+
+    bg: rgba(0x282c34),
+    bg_modeline: rgba(0x21252b),
+    fg: text_color(0xabb2bf),
+    fg_modeline: text_color(0xabb2bf),
+    caret: rgba(0xe5c07b),
+    caret_text: text_color(0xe5c07b),
+    hl_line: rgba_alpha(0x61afef, 0.12),
+    selection: rgba_alpha(0x61afef, 0.25),
+    bracket_match: rgba_alpha(0x98c379, 0.35),
+    search_match: rgba_alpha(0xc678dd, 0.3),
+
+    mode_normal: rgba(0x98c379),
+    mode_insert: rgba(0x56b6c2),
+    mode_visual: rgba(0xe06c75),
+    mode_replace: rgba(0xe5c07b),
+    mode_command: rgba(0x61afef),
+    mode_explorer: rgba(0xc678dd),
+    mode_picker: rgba(0x56b6c2),
+    mode_text_dark: text_color(0x282c34),
+    mode_text_light: text_color(0xabb2bf),
+
+    gutter_fg: text_color(0x5c6370),
+
+    syntax_keyword: text_color(0xc678dd),
+    syntax_string: text_color(0x98c379),
+    syntax_comment: text_color(0x5c6370),
+    syntax_function: text_color(0x61afef),
+    syntax_type: text_color(0xe5c07b),
+    syntax_number: text_color(0x56b6c2),
+    syntax_constant: text_color(0xe06c75),
+    syntax_variable: text_color(0xabb2bf),
+    syntax_operator: text_color(0xabb2bf),
+    syntax_punctuation: text_color(0x5c6370),
+    syntax_attribute: text_color(0xe5c07b),
+
+    icon_folder: text_color(0x61afef),
+    icon_file: text_color(0xabb2bf),
+    git_modified: text_color(0xe5c07b),
+    git_staged: text_color(0x98c379),
+    git_untracked: text_color(0x61afef),
+    git_ignored: text_color(0x5c6370),
+    git_conflicted: text_color(0xe06c75),
+};
+
 /// Every theme Fenix ships, in cycling order. `App::cycle_theme` and
 /// `by_name` both work off this.
-pub const ALL: &[&Theme] = &[&ORBIT_DARK, &TEMPLEOS];
+pub const ALL: &[&Theme] =
+    &[&ORBIT_DARK, &TEMPLEOS, &GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK];
 
 /// Case-insensitive lookup by `Theme::name` -- used for persistence
 /// (the saved file just holds a name) and is the reason `name` exists
@@ -393,9 +694,34 @@ mod tests {
     }
 
     #[test]
-    fn all_contains_exactly_orbit_dark_and_templeos_by_name() {
+    fn all_contains_every_shipped_theme_by_name_in_cycling_order() {
         let names: Vec<&str> = ALL.iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["Orbit Dark", "TempleOS"]);
+        assert_eq!(
+            names,
+            vec!["Orbit Dark", "TempleOS", "Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark"]
+        );
+    }
+
+    #[test]
+    fn every_new_theme_resolves_syntax_and_git_colors_the_same_generic_way() {
+        // Mirrors `templeos_syntax_and_git_colors_resolve_the_same_generic_way`
+        // -- confirms each new const is a well-formed plain data value,
+        // no special-casing needed anywhere `syntax_color`/`git_status_
+        // color` are called.
+        use fenix_explorer::GitStatus;
+        for theme in [&GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK] {
+            assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
+            assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
+            assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
+            assert_eq!(theme.git_status_color(GitStatus::Staged), theme.git_staged, "{}", theme.name);
+        }
+    }
+
+    #[test]
+    fn by_name_resolves_every_new_theme_case_insensitively() {
+        for name in ["Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark"] {
+            assert_eq!(by_name(&name.to_lowercase()).map(|t| t.name), Some(name));
+        }
     }
 
     #[test]

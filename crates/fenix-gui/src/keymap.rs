@@ -95,6 +95,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "view.cycle_line_numbers",
         );
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('t')], "theme", "view.cycle_theme");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('p')], "pick theme", "view.pick_theme");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('=')], "font size +", "view.increase_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
@@ -206,6 +207,18 @@ mod tests {
         match m.feed(KeyPress::char('t')) {
             fenix_keymap::Step::Matched(&"view.cycle_theme") => {}
             _ => panic!("expected SPC t t to resolve to view.cycle_theme"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_theme_picker() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('t'));
+        match m.feed(KeyPress::char('p')) {
+            fenix_keymap::Step::Matched(&"view.pick_theme") => {}
+            _ => panic!("expected SPC t p to resolve to view.pick_theme"),
         }
     }
 

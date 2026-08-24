@@ -38,8 +38,10 @@ for anyone curious to poke around or build on it.
 - **Autocompletion** for Tcl: a popup sourced from a built-in keyword
   list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
   and an optional external symbols file (see [Configuration](#configuration)).
-- **Themes**: `Orbit Dark` and a `TempleOS`-styled palette, switchable at
-  runtime (`SPC t t`) and persisted.
+- **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
+  `Solarized Dark`, and `One Dark`, cycled at runtime (`SPC t t`) or
+  jumped to directly by name with a fuzzy picker (`SPC t p`), persisted
+  either way.
 
 ## Building
 
@@ -89,6 +91,7 @@ popup shows what keys continue it.
 | `SPC q q` | Quit |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t t` | Cycle theme |
+| `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
@@ -163,7 +166,7 @@ symbols_file = /home/you/tcl-symbols.txt
 
 | Section | Key | Meaning |
 |---|---|---|
-| `editor` | `theme` | `Orbit Dark` or `TempleOS` (case-insensitive) |
+| `editor` | `theme` | `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`, `Solarized Dark`, or `One Dark` (case-insensitive) |
 | `editor` | `font_size` | Body text size in points |
 | `editor` | `font_family` | Body text font family, by name, as installed on your system. Overrides whatever the active theme names; unset falls back to the theme's own choice (and from there to your system's default monospace font) |
 | `editor` | `indent_width` | Spaces per indent level (`>>`/`<<`, Tab, auto-indent) |

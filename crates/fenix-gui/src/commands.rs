@@ -39,6 +39,7 @@ impl CommandRegistry {
             cmd_cycle_line_numbers,
         );
         registry.register("view.cycle_theme", "Cycle to the next theme", cmd_cycle_theme);
+        registry.register("view.pick_theme", "Pick a theme by name", cmd_pick_theme);
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",
@@ -122,6 +123,10 @@ fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
 
 fn cmd_cycle_theme(ctx: &mut CommandCtx) {
     ctx.app.cycle_theme();
+}
+
+fn cmd_pick_theme(ctx: &mut CommandCtx) {
+    ctx.app.picker_pick_theme();
 }
 
 fn cmd_explorer_jump(ctx: &mut CommandCtx) {
