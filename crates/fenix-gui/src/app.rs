@@ -772,6 +772,31 @@ struct JumpEntry {
     char_idx: usize,
 }
 
+/// One active `CDF_GRPSIZE` repeating group -- the SCOS-2000 MIB's own
+/// way of saying "the next `group_width` parameters repeat, however
+/// many times the value typed for *this* parameter says." Pushed onto
+/// `MibInsertState.repeat_stack` by `next_argument_cursor` the moment
+/// a counter parameter's own value is collected, popped once every
+/// repetition's been walked. See `next_argument_cursor`'s own doc
+/// comment for the full state machine, including how nesting works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GroupRepeat {
+    /// Index into `variable_params` where the group's rows begin
+    /// (right after the counter parameter itself).
+    group_start: usize,
+    /// `CDF_GRPSIZE`'s own value -- slots per repetition. A nested
+    /// group's own counter row counts as exactly one slot here, not
+    /// however many rows that nested group itself expands into (see
+    /// `next_argument_cursor`'s doc comment).
+    group_width: usize,
+    /// `N` -- the counter parameter's own typed value.
+    total: usize,
+    /// 1-based: which repetition is being filled right now.
+    current: usize,
+    /// 0-based: position within the current repetition.
+    offset: usize,
+}
+
 /// The active `SPC m i` telecommand-insert wizard: build (or skip)
 /// engineering values for a telecommand's variable parameters, preview
 /// the rendered command plus any validation warnings, then insert it at
@@ -787,9 +812,21 @@ struct MibInsertState {
     /// started" role `JumpEntry` already plays for the jumplist.
     origin: JumpEntry,
     /// This telecommand's non-fixed (`CDF_VALUE` empty) parameters, in
-    /// order -- `collected.len()` is always the index of whichever one
-    /// is currently being prompted for.
+    /// order.
     variable_params: Vec<fenix_mib::telecommand::TcParameter>,
+    /// Index into `variable_params` of whichever one is currently being
+    /// prompted for -- *not* always `collected.len()`: a `CDF_GRPSIZE`
+    /// repeating group re-visits the same span of `variable_params`
+    /// `N` times (`N` being the value typed for the group's own counter
+    /// parameter), so more values can be collected than there are
+    /// distinct indices. See `next_argument_cursor`/`repeat_stack`.
+    cursor: usize,
+    /// Every `CDF_GRPSIZE` repeating group currently being walked
+    /// through, outermost first -- empty outside any group, more than
+    /// one entry only when one group is nested inside another. See
+    /// `next_argument_cursor`'s own doc comment for the exact state
+    /// machine and the assumption it makes about nested groups.
+    repeat_stack: Vec<GroupRepeat>,
     collected: Vec<(String, String)>,
     stage: MibInsertStage,
     /// The current parameter's mnemonic + description, e.g. `"GAIN --
@@ -1715,9 +1752,15 @@ fn mib_row_fields_inline(row: &fenix_mib::Row) -> String {
 
 /// A helpful modeline prompt for one telecommand argument -- name plus,
 /// in parens, whatever's known about it (description, allowed engineering
-/// aliases or numeric range, unit, default), ported from the reference
-/// elisp implementation's own `mod-mib--tc-argument-prompt`.
-fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain) -> String {
+/// aliases or numeric range, unit, default, and -- if `group` is
+/// non-empty, e.g. `"group 2 of 3"` from `mib_group_suffix` -- which
+/// repetition of a `CDF_GRPSIZE` group this is), ported from the
+/// reference elisp implementation's own `mod-mib--tc-argument-prompt`
+/// (the group part is new, `mib_group_suffix`'s own doc comment
+/// explains why). Takes `group` as a plain string rather than
+/// `&[GroupRepeat]` so this stays unaware of that type -- one more
+/// optional "part" like all the others here, not a special case.
+fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain, group: &str) -> String {
     let mut parts = Vec::new();
     if !domain.description.is_empty() {
         parts.push(domain.description.clone());
@@ -1734,6 +1777,9 @@ fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain)
     if !domain.default.is_empty() {
         parts.push(format!("default {}", domain.default));
     }
+    if !group.is_empty() {
+        parts.push(group.to_string());
+    }
     if parts.is_empty() {
         format!("{name}: ")
     } else {
@@ -1746,16 +1792,109 @@ fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain)
 /// (`CDF_DESCR`, falling back to `CPC_DESCR` -- see `parameter_domain`;
 /// SCOS-2000's `PCF_DESCR` is the *TM* parameter table's description
 /// field, not joined here at all, since telecommand arguments are
-/// `CDF`/`CPC` rows). Deliberately not the full `mib_argument_prompt`
-/// (which also lists allowed values/range/unit/default): the picker's
-/// own candidate list already *is* the allowed-values list, so
-/// repeating it here would just be noise.
-fn mib_argument_context(name: &str, domain: &fenix_mib::telecommand::ParamDomain) -> String {
-    if domain.description.is_empty() {
+/// `CDF`/`CPC` rows) and, if `group` is non-empty, which repetition of
+/// a `CDF_GRPSIZE` group this is. Deliberately not the full `mib_
+/// argument_prompt` (which also lists allowed values/range/unit/
+/// default): the picker's own candidate list already *is* the
+/// allowed-values list, so repeating it here would just be noise.
+fn mib_argument_context(name: &str, domain: &fenix_mib::telecommand::ParamDomain, group: &str) -> String {
+    let parts: Vec<&str> = [domain.description.as_str(), group].into_iter().filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
         name.to_string()
     } else {
-        format!("{name} -- {}", domain.description)
+        format!("{name} -- {}", parts.join("; "))
     }
+}
+
+/// Given the index just finished (`cursor`) and the value just typed
+/// for it, decides which `variable_params` index comes next and what
+/// repeat stack that leaves behind. Reaching `variable_params.len()`
+/// itself means "on to Confirm."
+///
+/// A `CDF_GRPSIZE` row is a counter: its own typed value (`N`) is how
+/// many times the next `CDF_GRPSIZE` parameters repeat. Detected fresh
+/// every call (not cached anywhere) by reading `cursor`'s own CDF row
+/// -- cheap, and keeps this function the single source of truth for
+/// "does this parameter start a group," with no separate bookkeeping
+/// to keep in sync.
+///
+/// Groups can nest: a repeating group's own block can contain another
+/// `CDF_GRPSIZE` counter starting a sub-group, tracked as one more
+/// `GroupRepeat` pushed onto `stack` (last = innermost). The key
+/// assumption, unverifiable without real MIB data: a nested group's
+/// own counter row occupies exactly *one* slot of its parent's
+/// `CDF_GRPSIZE` width -- the parent's width counts that counter row
+/// itself, not however many rows the nested group itself expands into.
+fn next_argument_cursor(
+    variable_params: &[fenix_mib::telecommand::TcParameter],
+    cursor: usize,
+    just_typed_value: &str,
+    mut stack: Vec<GroupRepeat>,
+) -> (usize, Vec<GroupRepeat>) {
+    let grpsize = variable_params.get(cursor).and_then(|p| p.cdf.clean("CDF_GRPSIZE").parse::<usize>().ok()).filter(|w| *w > 0);
+    if let Some(width) = grpsize {
+        let total = just_typed_value.trim().parse::<usize>().ok().filter(|n| *n > 0);
+        if let Some(total) = total {
+            if cursor + 1 + width <= variable_params.len() {
+                stack.push(GroupRepeat { group_start: cursor + 1, group_width: width, total, current: 1, offset: 0 });
+                return (cursor + 1, stack); // dive straight into the new (possibly nested) group
+            }
+        }
+        // 0 reps, non-numeric, or the group would run past the end of
+        // variable_params (malformed data) -- skip this group's own
+        // listing rather than guessing. Still counts as one slot
+        // consumed in whatever frame (if any) governs `cursor` itself.
+        eprintln!("fenix: couldn't resolve a repeat count for a CDF_GRPSIZE row (typed {just_typed_value:?}) -- skipping its group");
+        return mib_advance_group_stack(stack, cursor + 1 + width);
+    }
+    mib_advance_group_stack(stack, cursor + 1)
+}
+
+/// Registers that one slot of whichever frame governs the current
+/// position was just consumed, cascading through any frames that
+/// finish as a result.
+///
+/// `fallback` is the caller's own already-correct "natural next
+/// position" (`cursor + 1`, ordinarily) -- returned as-is whenever
+/// nothing needs restarting, at *any* depth of the cascade, not just
+/// once the stack goes empty. It has to stay a passed-in value rather
+/// than a formula like `group_start + group_width`: once a slot
+/// earlier in the same repetition was itself a nested group, that
+/// group can have expanded into any number of physical rows, so
+/// there's no fixed arithmetic relationship between a slot count and a
+/// `variable_params` index any more. But this also means a fully-
+/// finished frame doesn't need to compute anything special for its
+/// parent either -- "the row right after whatever was just answered"
+/// is exactly as true for the parent as it was for the frame that just
+/// popped, so the same `fallback` just keeps propagating unchanged.
+fn mib_advance_group_stack(mut stack: Vec<GroupRepeat>, fallback: usize) -> (usize, Vec<GroupRepeat>) {
+    let Some(top) = stack.last_mut() else { return (fallback, stack) };
+    top.offset += 1;
+    if top.offset < top.group_width {
+        return (fallback, stack); // mid-repetition -- the caller's own next position is already correct
+    }
+    top.current += 1;
+    top.offset = 0;
+    if top.current <= top.total {
+        return (top.group_start, stack); // start this frame's next repetition
+    }
+    stack.pop();
+    mib_advance_group_stack(stack, fallback)
+}
+
+/// `"group 2 of 3"`, or `"group 2 of 3 > 1 of 4"` for a nested group
+/// (outermost first) -- empty once `stack` is empty. Bare text, no
+/// surrounding parens/space: `mib_argument_prompt`/`mib_argument_
+/// context` fold this in as one more optional "part" alongside
+/// description/range/unit/default, so it lands *inside* their own
+/// parenthetical rather than after the trailing `": "` a typed value
+/// gets appended to.
+fn mib_group_suffix(stack: &[GroupRepeat]) -> String {
+    if stack.is_empty() {
+        return String::new();
+    }
+    let levels = stack.iter().map(|r| format!("{} of {}", r.current, r.total)).collect::<Vec<_>>().join(" > ");
+    format!("group {levels}")
 }
 
 fn docker_highlights_for_visible_range(
@@ -4088,6 +4227,8 @@ impl App {
             ccf,
             origin,
             variable_params,
+            cursor: 0,
+            repeat_stack: Vec::new(),
             collected: Vec::new(),
             stage: MibInsertStage::ChooseArgumentMode,
             current_argument_context: String::new(),
@@ -4105,18 +4246,19 @@ impl App {
     /// once every parameter's been collected.
     fn mib_prompt_next_argument(&mut self) {
         let Some(insert) = &self.mib_insert else { return };
-        if insert.collected.len() >= insert.variable_params.len() {
+        if insert.cursor >= insert.variable_params.len() {
             self.mib_enter_confirm_stage();
             return;
         }
-        let param = insert.variable_params[insert.collected.len()].clone();
+        let param = insert.variable_params[insert.cursor].clone();
+        let group_suffix = mib_group_suffix(&insert.repeat_stack);
         let Some(index) = self.mib_index() else { return };
         let domain = fenix_mib::telecommand::parameter_domain(index, &param);
         if let Some(insert) = &mut self.mib_insert {
-            insert.current_argument_context = mib_argument_context(&param.name, &domain);
+            insert.current_argument_context = mib_argument_context(&param.name, &domain, &group_suffix);
         }
         if domain.aliases.is_empty() {
-            let prompt = mib_argument_prompt(&param.name, &domain);
+            let prompt = mib_argument_prompt(&param.name, &domain, &group_suffix);
             if let Some(insert) = &mut self.mib_insert {
                 insert.stage = MibInsertStage::ArgumentText { input: String::new(), prompt };
             }
@@ -4139,11 +4281,15 @@ impl App {
     fn mib_resume_insert(&mut self, alias: String) {
         self.main_view = MainView::Editor;
         let Some(insert) = &self.mib_insert else { return };
-        let idx = insert.collected.len();
+        let idx = insert.cursor;
         let Some(param) = insert.variable_params.get(idx) else { return };
         let name = param.name.clone();
         if let Some(insert) = &mut self.mib_insert {
-            insert.collected.push((name, alias));
+            insert.collected.push((name, alias.clone()));
+            let (cursor, stack) =
+                next_argument_cursor(&insert.variable_params, idx, &alias, std::mem::take(&mut insert.repeat_stack));
+            insert.cursor = cursor;
+            insert.repeat_stack = stack;
         }
         self.mib_prompt_next_argument();
     }
@@ -4254,10 +4400,14 @@ impl App {
             Action::EnterConfirm => self.mib_enter_confirm_stage(),
             Action::PushArgument(value) => {
                 if let Some(insert) = &mut self.mib_insert {
-                    let idx = insert.collected.len();
+                    let idx = insert.cursor;
                     if let Some(param) = insert.variable_params.get(idx) {
                         let name = param.name.clone();
-                        insert.collected.push((name, value));
+                        insert.collected.push((name, value.clone()));
+                        let (cursor, stack) =
+                            next_argument_cursor(&insert.variable_params, idx, &value, std::mem::take(&mut insert.repeat_stack));
+                        insert.cursor = cursor;
+                        insert.repeat_stack = stack;
                     }
                 }
                 self.mib_prompt_next_argument();
@@ -12015,6 +12165,174 @@ mod tests {
         assert!(app.marks.contains_key(&'a')); // left untouched, not dropped either
     }
 
+    /// A minimal synthetic `TcParameter` for `next_argument_cursor`
+    /// tests -- just enough (`CDF_PNAME`/`CDF_GRPSIZE`) to exercise the
+    /// group state machine without a real MIB fixture. `grpsize` is the
+    /// raw field text (`""` for a plain, non-counter parameter).
+    fn tc_param(name: &str, grpsize: &str) -> fenix_mib::telecommand::TcParameter {
+        let cdf = fenix_mib::Row {
+            table: "cdf".to_string(),
+            fields: vec![("CDF_PNAME".to_string(), name.to_string()), ("CDF_GRPSIZE".to_string(), grpsize.to_string())],
+            source: fenix_mib::RowSource {
+                root_index: 0,
+                root_label: "TEST".to_string(),
+                table: "cdf".to_string(),
+                file: PathBuf::from("cdf.dat"),
+                line: 1,
+            },
+        };
+        fenix_mib::telecommand::TcParameter { name: name.to_string(), cdf, cpc: None, fixed: false }
+    }
+
+    #[test]
+    fn next_argument_cursor_with_no_grpsize_just_advances() {
+        let params = vec![tc_param("A", ""), tc_param("B", "")];
+        let (next, stack) = next_argument_cursor(&params, 0, "5", Vec::new());
+        assert_eq!(next, 1);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_walks_a_flat_repeating_group() {
+        // N1 (GRPSIZE=2, typed "3") repeats {A, B} 3 times, then C.
+        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
+        let mut stack = Vec::new();
+        let mut cursor = 0;
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "3", stack); // typed N1=3
+        assert_eq!(cursor, 1); // A, repetition 1
+        assert_eq!(stack, vec![GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 1, offset: 0 }]);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "10", stack); // A=10
+        assert_eq!(cursor, 2); // B, repetition 1
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "20", stack); // B=20
+        assert_eq!(cursor, 1); // A, repetition 2
+        assert_eq!(stack[0].current, 2);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "11", stack); // A=11
+        (cursor, stack) = next_argument_cursor(&params, cursor, "21", stack); // B=21
+        assert_eq!(cursor, 1); // A, repetition 3
+        assert_eq!(stack[0].current, 3);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "12", stack); // A=12
+        (cursor, stack) = next_argument_cursor(&params, cursor, "22", stack); // B=22 -- group done
+        assert_eq!(cursor, 3); // C, right after the group's own listing
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_with_zero_repeats_skips_the_group_entirely() {
+        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
+        let (next, stack) = next_argument_cursor(&params, 0, "0", Vec::new());
+        assert_eq!(next, 3); // straight to C
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_with_a_non_numeric_count_skips_the_group() {
+        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
+        let (next, stack) = next_argument_cursor(&params, 0, "not a number", Vec::new());
+        assert_eq!(next, 3);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_with_grpsize_overflowing_the_list_skips_the_group() {
+        // GRPSIZE=5 but only 1 param follows -- malformed data.
+        let params = vec![tc_param("N1", "5"), tc_param("A", "")];
+        let (next, stack) = next_argument_cursor(&params, 0, "2", Vec::new());
+        assert_eq!(next, 6); // 0 + 1 + 5 -- past the whole list, on to Confirm
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_handles_two_independent_sequential_groups() {
+        // N1 (GRPSIZE=1, typed "1") repeats {A} once, then N2 (GRPSIZE=1, typed "2") repeats {B} twice.
+        let params = vec![tc_param("N1", "1"), tc_param("A", ""), tc_param("N2", "1"), tc_param("B", "")];
+        let mut stack = Vec::new();
+        let mut cursor = 0;
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "1", stack); // N1=1
+        assert_eq!(cursor, 1); // A
+        (cursor, stack) = next_argument_cursor(&params, cursor, "10", stack); // A=10 -- N1's single rep done
+        assert_eq!(cursor, 2); // N2
+        assert!(stack.is_empty());
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N2=2
+        assert_eq!(cursor, 3); // B, rep 1
+        (cursor, stack) = next_argument_cursor(&params, cursor, "20", stack); // B=20
+        assert_eq!(cursor, 3); // B, rep 2 (group_start == group's only slot)
+        assert_eq!(stack[0].current, 2);
+        (cursor, stack) = next_argument_cursor(&params, cursor, "21", stack); // B=21 -- N2 done
+        assert_eq!(cursor, 4); // past the end -- Confirm
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn next_argument_cursor_handles_a_nested_group() {
+        // Outer: N1 (GRPSIZE=2, typed "2") repeats {N2, X} twice.
+        // Inner: N2 (GRPSIZE=1, typed varies) repeats {Y} that many times.
+        let params = vec![
+            tc_param("N1", "2"), // 0
+            tc_param("N2", "1"), // 1
+            tc_param("Y", ""),   // 2
+            tc_param("X", ""),   // 3
+        ];
+        let mut stack = Vec::new();
+        let mut cursor = 0;
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N1=2 (outer: 2 reps)
+        assert_eq!(cursor, 1); // N2, outer rep 1
+        assert_eq!(stack.len(), 1);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N2=2 (inner: 2 reps)
+        assert_eq!(cursor, 2); // Y, inner rep 1
+        assert_eq!(stack.len(), 2);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "100", stack); // Y=100
+        assert_eq!(cursor, 2); // Y, inner rep 2
+        assert_eq!(stack[1].current, 2);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "101", stack); // Y=101 -- inner group done
+        assert_eq!(cursor, 3); // X, outer rep 1 (inner's counter row was one outer slot)
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].current, 1);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "200", stack); // X=200 -- outer rep 1 done
+        assert_eq!(cursor, 1); // N2 again, outer rep 2
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].current, 2);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "1", stack); // N2=1 (inner: 1 rep)
+        assert_eq!(cursor, 2); // Y, inner rep 1
+        assert_eq!(stack.len(), 2);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "102", stack); // Y=102 -- inner done (only 1 rep)
+        assert_eq!(cursor, 3); // X, outer rep 2
+        assert_eq!(stack.len(), 1);
+
+        (cursor, stack) = next_argument_cursor(&params, cursor, "201", stack); // X=201 -- outer done (2 reps)
+        assert_eq!(cursor, 4); // past the end -- Confirm
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn mib_group_suffix_formats_flat_and_nested_stacks() {
+        assert_eq!(mib_group_suffix(&[]), "");
+        assert_eq!(
+            mib_group_suffix(&[GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 2, offset: 0 }]),
+            "group 2 of 3"
+        );
+        assert_eq!(
+            mib_group_suffix(&[
+                GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 2, offset: 0 },
+                GroupRepeat { group_start: 2, group_width: 1, total: 4, current: 1, offset: 0 },
+            ]),
+            "group 2 of 3 > 1 of 4"
+        );
+    }
+
     /// A small, realistic SCOS-2000 MIB: two telecommands (`AAA001` with
     /// a fixed subtype, an aliased `MODE` argument, and a ranged `GAIN`
     /// argument; `AAA002` with no parameters at all), one TM packet
@@ -12143,6 +12461,97 @@ mod tests {
             }
             other => panic!("expected the wizard to go straight to Confirm, got a different stage: {other:?}"),
         }
+    }
+
+    /// A minimal, purpose-built MIB with exactly one telecommand,
+    /// `GRP001`: `N1` (a `CDF_GRPSIZE=2` counter) repeating `{A, B}`
+    /// however many times `N1` is typed as. Kept separate from
+    /// `mib_fixture_root` (which several other tests already share)
+    /// rather than extending it, to keep this test's own fixture
+    /// isolated and easy to reason about.
+    fn mib_fixture_root_with_group(dir: &TempDir, label: &str) -> fenix_mib::MibRoot {
+        dir.write("ccf.dat", "GRP001\tRepeat test\t\tA\t0\t3\t8\t3\t100\t3\t\t\t\t\tTEST\n");
+        dir.write(
+            "cdf.dat",
+            "GRP001\tA\tRepeat count\t8\t0\t2\tN1\t\t\t\n\
+             GRP001\tA\tParam A\t8\t8\t0\tA\t\t\t\n\
+             GRP001\tA\tParam B\t8\t16\t0\tB\t\t\t\n",
+        );
+        fenix_mib::MibRoot { label: label.to_string(), path: dir.path().to_path_buf() }
+    }
+
+    #[test]
+    fn mib_insert_walks_a_real_repeating_group_end_to_end() {
+        let dir = TempDir::new("mib_insert_group_e2e");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root_with_group(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("GRP001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::char('y')); // build arguments -- lands on N1
+
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "N1 -- Repeat count");
+        for ch in "2".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter)); // N1 = 2
+
+        // A, repetition 1.
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "A -- Param A; group 1 of 2");
+        for ch in "10".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        // B, repetition 1.
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "B -- Param B; group 1 of 2");
+        for ch in "20".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        // A, repetition 2.
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "A -- Param A; group 2 of 2");
+        for ch in "11".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        // B, repetition 2.
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "B -- Param B; group 2 of 2");
+        for ch in "21".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        // Both repetitions done -- straight to Confirm.
+        let MibInsertStage::Confirm { rendered, warnings } = &app.mib_insert.as_ref().unwrap().stage else {
+            panic!("expected Confirm, got {:?}", app.mib_insert.as_ref().unwrap().stage);
+        };
+        assert!(warnings.is_empty());
+        assert!(rendered.contains("N1=2"));
+        assert!(rendered.contains("A=10"));
+        assert!(rendered.contains("B=20"));
+        assert!(rendered.contains("A=11"));
+        assert!(rendered.contains("B=21"));
+        assert_eq!(
+            app.mib_insert.as_ref().unwrap().collected,
+            vec![
+                ("N1".to_string(), "2".to_string()),
+                ("A".to_string(), "10".to_string()),
+                ("B".to_string(), "20".to_string()),
+                ("A".to_string(), "11".to_string()),
+                ("B".to_string(), "21".to_string()),
+            ]
+        );
+
+        app.mib_insert_key(KeyPress::char('y')); // commit
+        assert!(app.mib_insert.is_none());
+        let text = app.open().buffer.text();
+        assert!(text.contains("A=10"));
+        assert!(text.contains("A=11"));
     }
 
     #[test]
