@@ -40,7 +40,24 @@ pub struct TagEntry {
 /// definitions found" apart from "ctags never actually ran."
 pub fn run(root: &Path, language: &str) -> Vec<TagEntry> {
     let mut cmd = Command::new("ctags");
-    cmd.arg("--fields=+n").arg(format!("--languages={language}")).arg("-R").arg("-f").arg("-").arg(root);
+    cmd.arg("--fields=+n").arg(format!("--languages={language}"));
+    // Universal Ctags' own default file mapping for Tcl is `*.tcl *.tk
+    // *.wish *.exp` -- notably missing `.tm` (Tcl Modules, a common
+    // real-world packaging convention: a namespace's procs defined at
+    // the top level with fully-qualified names, e.g. `proc ns::sns::
+    // name {...}`, in a file literally named after that path). `fenix-
+    // syntax::detect_language` already treats `.tm` as Tcl for editing/
+    // highlighting purposes -- without this, a project built entirely
+    // out of `.tm` files gets silently skipped here: `ctags` exits 0
+    // having genuinely found nothing to parse, not failed, so nothing
+    // else in `run` (the "0 parsed but real tag lines came back" check
+    // included) has anything to flag. Must come before the positional
+    // `root` path below -- confirmed empirically that `ctags` silently
+    // ignores an option placed after it instead of erroring.
+    if language == "Tcl" {
+        cmd.arg("--langmap=Tcl:+.tm");
+    }
+    cmd.arg("-R").arg("-f").arg("-").arg(root);
     // Windows-only: without this, every shell-out here (and there are a
     // lot -- once per `SPC c r`, once per project root change) briefly
     // flashes a console window, since `fenix-gui` itself has no console
@@ -193,6 +210,47 @@ mod tests {
 
         let inner = entries.iter().find(|e| e.name.ends_with("inner")).expect("expected an 'inner' entry");
         assert_eq!(inner.name, "outer::inner");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fully_qualified_proc_names_are_found_even_with_an_empty_namespace_eval() {
+        // A common real-world Tcl idiom: `namespace eval ns {}` just to
+        // declare the namespace exists, then every proc defined at the
+        // top level using its own fully-qualified `ns::sns::name` --
+        // never nested inside the `namespace eval` block itself.
+        let dir = temp_dir("empty-namespace-eval");
+        fs::write(
+            dir.join("foo.tcl"),
+            "namespace eval ns {}\n\nproc ns::sns::proc_name {arg1} {\n    return $arg1\n}\n\nproc ns::other_proc {} {\n    return 1\n}\n",
+        )
+        .unwrap();
+
+        let mut entries = run(&dir, "Tcl");
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(entries.len(), 3, "expected ns, ns::other_proc, ns::sns::proc_name -- got {entries:?}");
+        assert_eq!(entries[0].name, "ns");
+        assert_eq!(entries[1].name, "ns::other_proc");
+        assert_eq!(entries[2].name, "ns::sns::proc_name");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finds_definitions_in_a_tm_file_not_just_tcl() {
+        // Universal Ctags' own default Tcl file mapping doesn't include
+        // `.tm` (Tcl Modules) -- `fenix-syntax::detect_language` treats
+        // it as Tcl for editing, so `run` needs to as well, or a
+        // project built out of `.tm` files reports zero definitions
+        // with no error (a real, reported bug -- see `--langmap` above).
+        let dir = temp_dir("tm-extension");
+        fs::write(dir.join("foo.tm"), "proc ns::sns::proc_name {arg1} {\n    return $arg1\n}\n").unwrap();
+
+        let entries = run(&dir, "Tcl");
+        assert_eq!(entries.len(), 1, "expected ns::sns::proc_name to be found in a .tm file -- got {entries:?}");
+        assert_eq!(entries[0].name, "ns::sns::proc_name");
 
         fs::remove_dir_all(&dir).ok();
     }
