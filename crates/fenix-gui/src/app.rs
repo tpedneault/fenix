@@ -792,6 +792,17 @@ struct MibInsertState {
     variable_params: Vec<fenix_mib::telecommand::TcParameter>,
     collected: Vec<(String, String)>,
     stage: MibInsertStage,
+    /// The current parameter's mnemonic + description, e.g. `"GAIN --
+    /// Gain setting"` -- set by `mib_prompt_next_argument` right
+    /// alongside `stage`'s own `ArgumentText.prompt` (which already
+    /// carries this for the free-text case), so `ActivePicker::
+    /// MibArgumentAlias` -- an aliased parameter's own value picker,
+    /// which otherwise shows nothing but a bare list of alias strings
+    /// with no indication of *which parameter* they're for -- has
+    /// something to show too. Read from `modeline_pieces` (`&self`,
+    /// can't call `mib_index`/`parameter_domain` itself) rather than
+    /// recomputed there.
+    current_argument_context: String,
 }
 
 #[derive(Debug)]
@@ -1727,6 +1738,23 @@ fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain)
         format!("{name}: ")
     } else {
         format!("{name} ({}): ", parts.join("; "))
+    }
+}
+
+/// A short "which parameter is this" label for `ActivePicker::
+/// MibArgumentAlias`'s modeline suffix -- mnemonic plus description
+/// (`CDF_DESCR`, falling back to `CPC_DESCR` -- see `parameter_domain`;
+/// SCOS-2000's `PCF_DESCR` is the *TM* parameter table's description
+/// field, not joined here at all, since telecommand arguments are
+/// `CDF`/`CPC` rows). Deliberately not the full `mib_argument_prompt`
+/// (which also lists allowed values/range/unit/default): the picker's
+/// own candidate list already *is* the allowed-values list, so
+/// repeating it here would just be noise.
+fn mib_argument_context(name: &str, domain: &fenix_mib::telecommand::ParamDomain) -> String {
+    if domain.description.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} -- {}", domain.description)
     }
 }
 
@@ -4056,8 +4084,14 @@ impl App {
         let variable_params: Vec<_> = fenix_mib::telecommand::tc_parameters(index, &ccf).into_iter().filter(|p| !p.fixed).collect();
         let origin = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         let has_variable_params = !variable_params.is_empty();
-        self.mib_insert =
-            Some(MibInsertState { ccf, origin, variable_params, collected: Vec::new(), stage: MibInsertStage::ChooseArgumentMode });
+        self.mib_insert = Some(MibInsertState {
+            ccf,
+            origin,
+            variable_params,
+            collected: Vec::new(),
+            stage: MibInsertStage::ChooseArgumentMode,
+            current_argument_context: String::new(),
+        });
         self.main_view = MainView::Editor;
         if !has_variable_params {
             self.mib_enter_confirm_stage();
@@ -4078,6 +4112,9 @@ impl App {
         let param = insert.variable_params[insert.collected.len()].clone();
         let Some(index) = self.mib_index() else { return };
         let domain = fenix_mib::telecommand::parameter_domain(index, &param);
+        if let Some(insert) = &mut self.mib_insert {
+            insert.current_argument_context = mib_argument_context(&param.name, &domain);
+        }
         if domain.aliases.is_empty() {
             let prompt = mib_argument_prompt(&param.name, &domain);
             if let Some(insert) = &mut self.mib_insert {
@@ -4247,9 +4284,21 @@ impl App {
     }
 
     /// What to show in place of the modeline while `mib_insert` is active
-    /// -- mirrors `explorer_prompt_text`/`git_prompt_text`.
+    /// -- mirrors `explorer_prompt_text`/`git_prompt_text`. Takes
+    /// priority over `modeline_pieces`'s own picker-badge/count display
+    /// (`mib_insert.is_some()` is one of that function's own early-
+    /// return conditions), so while `ActivePicker::MibArgumentAlias` is
+    /// open (`mib_prompt_next_argument`'s alias branch enters it without
+    /// changing `insert.stage`, which just stays whatever the *previous*
+    /// parameter left it as -- there's no dedicated stage for "a picker
+    /// is choosing this one's value") this needs its own check first,
+    /// or the modeline would show stale wizard-stage text instead of
+    /// anything about the picker actually on screen.
     fn mib_insert_text(&self) -> Option<String> {
         let insert = self.mib_insert.as_ref()?;
+        if matches!(self.active_picker, Some(ActivePicker::MibArgumentAlias(_))) {
+            return Some(format!("{} -- choose a value", insert.current_argument_context));
+        }
         Some(match &insert.stage {
             MibInsertStage::ChooseArgumentMode => {
                 let n = insert.variable_params.len();
@@ -12094,6 +12143,23 @@ mod tests {
             }
             other => panic!("expected the wizard to go straight to Confirm, got a different stage: {other:?}"),
         }
+    }
+
+    #[test]
+    fn mib_insert_shows_the_mnemonic_and_description_while_picking_an_aliased_value() {
+        let dir = TempDir::new("mib_insert_alias_context");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::char('y')); // build arguments -- lands on MODE, which is aliased
+
+        assert!(matches!(app.active_picker, Some(ActivePicker::MibArgumentAlias(_))));
+        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "MODE -- mode");
+        assert_eq!(app.mib_insert_text(), Some("MODE -- mode -- choose a value".to_string()));
     }
 
     #[test]
