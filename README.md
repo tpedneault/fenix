@@ -512,10 +512,11 @@ Fenix reads a single INI-format settings file:
   `$XDG_CONFIG_HOME`/the platform's config directory points)
 
 It's created automatically the first time you change a setting at
-runtime (theme cycling, font size, `:set shiftwidth=N`); you can also
+runtime (picking a theme, font size, `:set shiftwidth=N`); you can also
 hand-edit it directly. Every key is optional — a missing or unparsable
 value just falls back to the built-in default instead of failing to
-load.
+load. A value's surrounding whitespace is always trimmed; wrap it in
+double quotes (`key = " "`) to keep whitespace that actually matters.
 
 ```ini
 [editor]
@@ -533,7 +534,7 @@ root1 = MIB-A|C:\data\mib-a
 root2 = MIB-B|C:\data\mib-b
 telecommand_template = telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]
 telecommand_argument_template = {name}={value}
-telecommand_argument_separator = ,
+telecommand_argument_separator = ", "
 ```
 
 | Section | Key | Meaning |
@@ -547,7 +548,7 @@ telecommand_argument_separator = ,
 | `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
 | `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
-| `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together (surrounding whitespace is stripped like every other INI value here, so a separator that depends on it -- `", "` -- won't round-trip through hand-editing; `","` will) |
+| `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path

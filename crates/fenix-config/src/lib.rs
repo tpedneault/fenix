@@ -121,13 +121,13 @@ impl Config {
         let mut out = String::new();
         out.push_str("[editor]\n");
         if let Some(theme) = &self.theme {
-            out.push_str(&format!("theme = {theme}\n"));
+            out.push_str(&format!("theme = {}\n", ini::quote_if_needed(theme)));
         }
         if let Some(font_size) = self.font_size {
             out.push_str(&format!("font_size = {font_size}\n"));
         }
         if let Some(font_family) = &self.font_family {
-            out.push_str(&format!("font_family = {font_family}\n"));
+            out.push_str(&format!("font_family = {}\n", ini::quote_if_needed(font_family)));
         }
         if let Some(indent_width) = self.indent_width {
             out.push_str(&format!("indent_width = {indent_width}\n"));
@@ -146,13 +146,13 @@ impl Config {
             out.push_str(&format!("root{} = {label}|{}\n", i + 1, root_path.display()));
         }
         if let Some(template) = &self.mib_telecommand_template {
-            out.push_str(&format!("telecommand_template = {template}\n"));
+            out.push_str(&format!("telecommand_template = {}\n", ini::quote_if_needed(template)));
         }
         if let Some(template) = &self.mib_telecommand_argument_template {
-            out.push_str(&format!("telecommand_argument_template = {template}\n"));
+            out.push_str(&format!("telecommand_argument_template = {}\n", ini::quote_if_needed(template)));
         }
         if let Some(separator) = &self.mib_telecommand_argument_separator {
-            out.push_str(&format!("telecommand_argument_separator = {separator}\n"));
+            out.push_str(&format!("telecommand_argument_separator = {}\n", ini::quote_if_needed(separator)));
         }
         std::fs::write(&self.path, out)
     }
@@ -254,10 +254,6 @@ mod tests {
         ];
         config.mib_telecommand_template = Some("TC {mnemo}".to_string());
         config.mib_telecommand_argument_template = Some("{name}:{value}".to_string());
-        // No leading/trailing whitespace -- the INI parser trims every
-        // value (see `ini::parse`), so a separator that depends on
-        // surrounding spaces wouldn't round-trip; that's a property of
-        // the shared INI format, not something to work around here.
         config.mib_telecommand_argument_separator = Some(";".to_string());
         config.save().unwrap();
 
@@ -269,6 +265,29 @@ mod tests {
         assert_eq!(reloaded.mib_telecommand_template, Some("TC {mnemo}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_template, Some("{name}:{value}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_separator, Some(";".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_whitespace_only_argument_separator_round_trips_through_save_and_load() {
+        // The specific gap `ini::quote_if_needed`/`ini::parse`'s quote
+        // handling exists to close: a separator that's pure whitespace
+        // (a single space, here) previously trimmed away to nothing on
+        // every save/load round trip -- there was no way to configure
+        // one at all.
+        let path = temp_path("whitespace_separator_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.mib_telecommand_argument_separator = Some(" ".to_string());
+        config.save().unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("telecommand_argument_separator = \" \""),
+            "expected the written value to be quoted, got:\n{contents}"
+        );
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.mib_telecommand_argument_separator, Some(" ".to_string()));
         std::fs::remove_file(&path).ok();
     }
 
