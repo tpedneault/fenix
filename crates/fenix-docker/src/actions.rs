@@ -22,6 +22,16 @@ fn remove_image_args(id: &str) -> Vec<String> {
     vec!["rmi".to_string(), id.to_string()]
 }
 
+/// No `-f`, unlike `remove_container_args` -- a network doesn't need
+/// force-stop-then-remove semantics, so this matches `remove_image_
+/// args`'s plain no-flag shape instead. An in-use or predefined
+/// (`bridge`/`host`/`none`, Podman's own default `podman` network)
+/// network's removal failure just flows through `run_action`'s existing
+/// `Err(stderr)` path -- no special-casing needed here.
+fn remove_network_args(id: &str) -> Vec<String> {
+    vec!["network".to_string(), "rm".to_string(), id.to_string()]
+}
+
 fn run_image_args(image: &str) -> Vec<String> {
     vec!["run".to_string(), "-d".to_string(), image.to_string()]
 }
@@ -54,6 +64,10 @@ pub fn remove_container(id: &str) -> Result<String, String> {
 
 pub fn remove_image(id: &str) -> Result<String, String> {
     run_action(&remove_image_args(id))
+}
+
+pub fn remove_network(id: &str) -> Result<String, String> {
+    run_action(&remove_network_args(id))
 }
 
 /// Creates and starts a detached container from `image` -- the "run"
@@ -98,6 +112,11 @@ mod tests {
     }
 
     #[test]
+    fn remove_network_args_targets_the_given_network_with_no_force_flag() {
+        assert_eq!(remove_network_args("abc123"), vec!["network", "rm", "abc123"]);
+    }
+
+    #[test]
     fn run_image_args_runs_detached() {
         assert_eq!(run_image_args("nginx:latest"), vec!["run", "-d", "nginx:latest"]);
     }
@@ -119,6 +138,7 @@ mod tests {
         let _ = restart_container("nonexistent");
         let _ = remove_container("nonexistent");
         let _ = remove_image("nonexistent");
+        let _ = remove_network("nonexistent");
         let _ = run_image("nonexistent");
         let _ = build_image(Path::new("/nonexistent"), None);
     }

@@ -1,4 +1,4 @@
-use fenix_docker::{Container, ContainerStat, Image, Volume};
+use fenix_docker::{Container, ContainerStat, Image, Network, Volume};
 
 /// What a docker-panel line represents -- what the per-pane action keys
 /// (`s`/`S`/`R`/`r`/`d`, see `app.rs`'s Docker action routing) act on
@@ -8,6 +8,10 @@ pub enum DockerEntry {
     Container(String),
     Image(String),
     Volume(String),
+    /// Keyed by the network's `id`, like `Container`/`Image` -- unlike
+    /// `Volume`, a `Network` has a real distinct id field, not just a
+    /// name.
+    Network(String),
 }
 
 /// How one generated line should be colored -- same role as
@@ -17,6 +21,7 @@ pub enum DockerLineStyle {
     Container,
     Image,
     Volume,
+    Network,
     /// A `label: value` row in the Status pane -- no `entry` (nothing to
     /// act on), just a dimmable label prefix like `Container`/`Image`
     /// rows already have.
@@ -66,6 +71,7 @@ pub enum DockerDetail {
     Container(Container),
     Image(Image),
     Volume(Volume),
+    Network(Network),
 }
 
 /// Per-line metadata for one line of `DockerPanel::text`, at the matching
@@ -213,6 +219,32 @@ pub fn render_volumes(volumes: &[Volume]) -> DockerPanel {
     b.finish()
 }
 
+/// The Networks pane's own content -- same "no in-buffer header" shape
+/// as `render_volumes`, but unlike Volumes, `d` genuinely removes here
+/// (see `fenix_docker::remove_network`).
+pub fn render_networks(networks: &[Network]) -> DockerPanel {
+    let mut b = Builder::new();
+    if networks.is_empty() {
+        b.push("    No networks found", Some(DockerLine { style: DockerLineStyle::Empty, entry: None, dim_from: None, badge: None }));
+    } else {
+        for n in networks {
+            let prefix = format!("  {}  ", n.name);
+            let dim_from = prefix.chars().count();
+            let line = format!("{prefix}{}  {}", n.driver, n.scope);
+            b.push(
+                &line,
+                Some(DockerLine {
+                    style: DockerLineStyle::Network,
+                    entry: Some(DockerEntry::Network(n.id.clone())),
+                    dim_from: Some(dim_from),
+                    badge: None,
+                }),
+            );
+        }
+    }
+    b.finish()
+}
+
 /// The Status pane's own content: plain `label: value` rows from
 /// whichever resource is currently selected in the focused left pane
 /// (`None` while nothing's been navigated to yet) -- pure formatting of
@@ -250,6 +282,12 @@ pub fn render_details(detail: Option<&DockerDetail>, stat: Option<&ContainerStat
             push_detail_line(&mut b, "Driver", &v.driver);
             push_detail_line(&mut b, "Mountpoint", &v.mountpoint);
         }
+        Some(DockerDetail::Network(n)) => {
+            push_detail_line(&mut b, "ID", &n.id);
+            push_detail_line(&mut b, "Name", &n.name);
+            push_detail_line(&mut b, "Driver", &n.driver);
+            push_detail_line(&mut b, "Scope", &n.scope);
+        }
     }
     b.finish()
 }
@@ -281,6 +319,10 @@ mod tests {
 
     fn volume(name: &str) -> Volume {
         Volume { name: name.to_string(), driver: "local".to_string(), mountpoint: format!("/var/lib/docker/volumes/{name}/_data") }
+    }
+
+    fn network(id: &str, name: &str) -> Network {
+        Network { id: id.to_string(), name: name.to_string(), driver: "bridge".to_string(), scope: "local".to_string() }
     }
 
     fn stat(container_id: &str) -> ContainerStat {
@@ -388,6 +430,20 @@ mod tests {
     }
 
     #[test]
+    fn render_networks_lists_entries_with_the_right_entry() {
+        let panel = render_networks(&[network("id1", "bridge")]);
+        let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == DockerLineStyle::Network).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry, Some(DockerEntry::Network("id1".to_string())));
+    }
+
+    #[test]
+    fn render_networks_empty_list_shows_a_placeholder() {
+        let panel = render_networks(&[]);
+        assert!(panel.text.contains("No networks found"));
+    }
+
+    #[test]
     fn render_details_none_shows_nothing_selected() {
         let panel = render_details(None, None);
         assert!(panel.text.contains("Nothing selected"));
@@ -427,6 +483,15 @@ mod tests {
         let panel = render_details(Some(&DockerDetail::Volume(volume("myvol"))), None);
         assert!(panel.text.contains("Name: myvol"));
         assert!(panel.text.contains("Driver: local"));
+    }
+
+    #[test]
+    fn render_details_network_shows_its_fields() {
+        let panel = render_details(Some(&DockerDetail::Network(network("id1", "bridge"))), None);
+        assert!(panel.text.contains("ID: id1"));
+        assert!(panel.text.contains("Name: bridge"));
+        assert!(panel.text.contains("Driver: bridge"));
+        assert!(panel.text.contains("Scope: local"));
     }
 
     #[test]

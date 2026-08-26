@@ -33,8 +33,16 @@ fn parse_container(v: &serde_json::Value) -> Option<Container> {
         serde_json::Value::Array(names) => names.first()?.as_str()?.to_string(),
         _ => return None,
     };
+    // `ID` today (containers/podman#6980 -- Podman briefly shipped `Id`
+    // here too, same class of bug as `image.rs`'s own `image_id`, fixed
+    // for `ps` specifically by #7261), but the two commands' JSON is
+    // built by unrelated code paths in Podman with a documented history
+    // of drifting independently -- tolerating `Id` here too is cheap
+    // insurance against an older Podman or a future regression, the same
+    // posture `Names`' own array/string tolerance right above takes.
+    let id = v.get("ID").or_else(|| v.get("Id"))?.as_str()?.to_string();
     Some(Container {
-        id: v.get("ID")?.as_str()?.to_string(),
+        id,
         name,
         image: v.get("Image")?.as_str()?.to_string(),
         status: v.get("Status").and_then(|s| s.as_str()).unwrap_or_default().to_string(),
@@ -69,6 +77,18 @@ mod tests {
         assert_eq!(c.id, "abc123");
         assert_eq!(c.name, "web");
         assert_eq!(c.state, "running");
+    }
+
+    #[test]
+    fn parses_a_podman_ps_json_line_with_id_instead_of_uppercase_id() {
+        // Some Podman versions have shipped `Id` here instead of `ID`
+        // (the same bug class `images` still has today, see `image.rs`'s
+        // `image_id`) -- tolerated defensively even though current
+        // Podman ships `ID` for `ps` specifically.
+        let line = r#"{"Id":"abc123","Image":"nginx:latest","Names":["web"],"State":"running","Status":"Up 3 days"}"#;
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        let c = parse_container(&v).unwrap();
+        assert_eq!(c.id, "abc123");
     }
 
     #[test]
