@@ -725,6 +725,27 @@ pub enum FenixUserEvent {
     /// (kept single-threaded on purpose, see `TerminalReader`'s own doc
     /// comment).
     TerminalOutput(Vec<u8>),
+    /// The result of `fenix_terminal::Terminal::spawn`, from the one-
+    /// shot background thread `toggle_terminal` spawns it on -- see
+    /// that function's own doc comment for why spawning can't happen
+    /// synchronously on the main thread. Wrapped (`TerminalSpawnResult`)
+    /// purely so this enum can keep deriving `Debug`: `fenix_terminal::
+    /// Terminal` (holding `Box<dyn Child>` et al.) has no `Debug` impl
+    /// of its own, and doesn't need one anywhere else.
+    TerminalSpawned(TerminalSpawnResult),
+}
+
+/// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
+/// wrapper exists.
+pub struct TerminalSpawnResult(std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)>);
+
+impl std::fmt::Debug for TerminalSpawnResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Ok(_) => write!(f, "TerminalSpawnResult(Ok(..))"),
+            Err(err) => write!(f, "TerminalSpawnResult(Err({err:?}))"),
+        }
+    }
 }
 
 /// The autocompletion popup's live state -- see `App::completion`'s own
@@ -2446,6 +2467,13 @@ pub struct App {
     /// closing (mirrors Neovim's own `:terminal` convention), letting
     /// the panel stay visible-but-unfocused while editing elsewhere.
     terminal_focused: bool,
+    /// `true` from the moment `toggle_terminal` kicks off a background
+    /// shell spawn until `apply_terminal_spawned` hears back -- lets
+    /// `redraw`'s own `terminal_render` show a "starting shell..."
+    /// placeholder instead of an unexplained blank panel for however
+    /// long that takes (see `toggle_terminal`'s own doc comment for why
+    /// it can take a while on Windows specifically).
+    terminal_spawning: bool,
     /// Latest known cursor position, in physical window pixels -- `None`
     /// until the first `CursorMoved`. `MouseWheel`/`MouseInput` carry no
     /// position of their own in `winit`, so this is what click-to-focus
@@ -2969,6 +2997,7 @@ impl App {
             terminal: None,
             terminal_open: false,
             terminal_focused: false,
+            terminal_spawning: false,
             cursor_pos: None,
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
@@ -3739,47 +3768,106 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC o t`: toggles the terminal panel's visibility. Opening (for
-    /// the first time, or after the previous shell exited -- `Terminal::
-    /// is_alive` catches both) spawns a fresh shell and focuses it
-    /// immediately, same "just asked for it, so focus it" reasoning as
-    /// `toggle_sidebar`. Hiding it is purely a layout/rendering concern
-    /// (`terminal_open = false`, unfocus) -- deliberately does *not*
-    /// touch `self.terminal` itself, unlike `toggle_sidebar`'s own
-    /// `self.sidebar = None`, since the whole point is that the shell
-    /// (and anything running in it) keeps going while hidden.
+    /// `SPC o t`: toggles the terminal panel's visibility. Hiding it is
+    /// purely a layout/rendering concern (`terminal_open = false`,
+    /// unfocus) -- deliberately does *not* touch `self.terminal` itself,
+    /// unlike `toggle_sidebar`'s own `self.sidebar = None`, since the
+    /// whole point is that the shell (and anything running in it) keeps
+    /// going while hidden.
+    ///
+    /// Opening (for the first time, or after the previous shell exited
+    /// -- `Terminal::is_alive` catches both) spawns a fresh shell on a
+    /// **background thread**, reported back via `FenixUserEvent::
+    /// TerminalSpawned` (`apply_terminal_spawned`) -- deliberately *not*
+    /// a direct, synchronous `fenix_terminal::Terminal::spawn` call on
+    /// this (the main UI) thread the way an earlier version of this
+    /// function did. `Terminal::spawn` itself (the PTY/process-creation
+    /// call) tends to return quickly even here; the actual reported bug
+    /// ("nothing shows up in the panel, and SPC is stuck until I click
+    /// something") traces to what happens *after*: the previous version
+    /// focused the terminal immediately, right when the (fast) spawn
+    /// call returned, before the shell had produced a single byte of
+    /// output -- and a freshly spawned interactive shell can take a genuinely
+    /// long time to print its first prompt on this class of environment
+    /// (60-90+ seconds under antivirus/EDR-style scanning of the child
+    /// process, confirmed via `fenix-terminal`'s own `spawn_write_and_
+    /// read_a_real_shell_round_trip` test). With nothing rendered and no
+    /// indication a terminal now owns every keystroke, `SPC` (and
+    /// everything else) silently vanishes into that empty shell for as
+    /// long as it stays silent -- indistinguishable from the app being
+    /// broken. Backgrounding the spawn is cheap insurance against a
+    /// slow `Terminal::spawn` call too, but the real fix is pairing the
+    /// focus-grab with immediate, honest feedback: the panel opens (and
+    /// shows a "Starting shell..." placeholder -- `terminal_panel_
+    /// render`) right away, and only *focuses* once `apply_terminal_
+    /// spawned` confirms the shell process actually exists -- so `SPC`
+    /// still worked as the leader key for the (usually brief) gap
+    /// before that, and once focus does land, the placeholder makes it
+    /// obvious a terminal now owns the keyboard, however long it stays
+    /// quiet after that (real Vim/Neovim's own `:terminal` convention --
+    /// `Ctrl-\` -- gets the user back out).
     pub(crate) fn toggle_terminal(&mut self) {
         if self.terminal_open {
             self.terminal_open = false;
             self.terminal_focused = false;
-        } else {
-            let needs_spawn = self.terminal.as_mut().is_none_or(|t| !t.session.is_alive());
-            if needs_spawn {
-                let cols = self.terminal_cols();
-                match self.spawn_terminal(text::TERMINAL_ROWS as u16, cols) {
-                    Ok(state) => self.terminal = Some(state),
-                    Err(err) => {
-                        eprintln!("fenix: couldn't start a terminal: {err}");
-                        return;
-                    }
+            self.wake_caret();
+            return;
+        }
+        self.terminal_open = true;
+        let needs_spawn = self.terminal.as_mut().is_none_or(|t| !t.session.is_alive());
+        if needs_spawn {
+            self.terminal_focused = false;
+            self.terminal_spawning = true;
+            let rows = text::TERMINAL_ROWS as u16;
+            let cols = self.terminal_cols();
+            match self.event_proxy.clone() {
+                Some(proxy) => {
+                    std::thread::spawn(move || {
+                        let result = fenix_terminal::Terminal::spawn(rows, cols);
+                        let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalSpawnResult(result)));
+                    });
+                }
+                None => {
+                    // No event loop to report back through (every test)
+                    // -- run synchronously and apply the result directly,
+                    // same "no fake event loop needed" posture `git_
+                    // refresh_session`'s own `None` branch already has.
+                    let result = fenix_terminal::Terminal::spawn(rows, cols);
+                    self.apply_terminal_spawned(result);
                 }
             }
-            self.terminal_open = true;
+        } else {
             self.terminal_focused = true;
         }
         self.wake_caret();
     }
 
-    /// Spawns a fresh shell and wires its reader thread -- factored out
-    /// of `toggle_terminal` so it's directly callable, without going
-    /// through the toggle's own open/closed branching, for whatever
-    /// eventually needs a fresh session (today: just the one call site,
-    /// but matches `GitStatusPoller::spawn`'s own "small, focused
-    /// constructor" shape).
-    fn spawn_terminal(&mut self, rows: u16, cols: u16) -> std::io::Result<TerminalState> {
-        let (session, reader) = fenix_terminal::Terminal::spawn(rows, cols)?;
-        let terminal_reader = self.event_proxy.clone().map(|proxy| TerminalReader::spawn(reader, move |event| proxy.send_event(event).is_ok()));
-        Ok(TerminalState { session, reader: terminal_reader })
+    /// `FenixUserEvent::TerminalSpawned` handling: wires the freshly
+    /// spawned shell's reader thread and, if the panel's still open
+    /// (the user could have closed it again while the spawn was in
+    /// flight -- the shell keeps running regardless, same "runs on
+    /// while hidden" posture `toggle_terminal`'s own doc comment
+    /// already describes), focuses it now that it's actually ready. A
+    /// spawn failure closes the panel back up and surfaces the error
+    /// via the status-message system rather than leaving an inert,
+    /// permanently-empty panel open.
+    fn apply_terminal_spawned(&mut self, result: std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)>) {
+        self.terminal_spawning = false;
+        match result {
+            Ok((session, reader)) => {
+                let terminal_reader =
+                    self.event_proxy.clone().map(|proxy| TerminalReader::spawn(reader, move |event| proxy.send_event(event).is_ok()));
+                self.terminal = Some(TerminalState { session, reader: terminal_reader });
+                if self.terminal_open {
+                    self.terminal_focused = true;
+                }
+            }
+            Err(err) => {
+                self.terminal_open = false;
+                self.set_error(format!("couldn't start a terminal: {err}"));
+            }
+        }
+        self.wake_caret();
     }
 
     /// Terminal columns that fit the current window width -- rows are
@@ -7613,6 +7701,7 @@ impl App {
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(bytes) => self.apply_terminal_output(bytes),
+            FenixUserEvent::TerminalSpawned(result) => self.apply_terminal_spawned(result.0),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -9781,6 +9870,32 @@ impl App {
     /// span background, so a non-default one is painted as its own
     /// backdrop rect first, the exact same mechanism `hl_line`/selection
     /// already use (see `App::redraw`'s own `row_y`-keyed segment loop).
+    /// What the terminal panel should render this frame -- `None` while
+    /// it's closed, the live shell's own screen content once `self.
+    /// terminal` exists, or (the case that motivated pulling this out
+    /// of `redraw` into its own directly-testable method) a "starting
+    /// shell..." placeholder for the window between `toggle_terminal`
+    /// kicking off a background spawn and `apply_terminal_spawned`
+    /// hearing back -- see `toggle_terminal`'s own doc comment for why
+    /// that gap can be long enough to matter, particularly on Windows.
+    fn terminal_panel_render(&self) -> Option<(RowSpans, Vec<(usize, usize, usize, [f32; 4])>)> {
+        if !self.terminal_open {
+            return None;
+        }
+        if let Some(t) = &self.terminal {
+            return Some(self.terminal_row_spans(t.session.screen()));
+        }
+        if self.terminal_spawning {
+            // The "Ctrl-\ to unfocus" reminder rides along here since
+            // this placeholder is the first thing shown right as the
+            // panel grabs focus -- there's no other UI surface that
+            // mentions the chord at all, and this is exactly the moment
+            // a user unfamiliar with it needs to see it.
+            return Some((vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], Vec::new()));
+        }
+        None
+    }
+
     fn terminal_row_spans(&self, screen: &vt100::Screen) -> (RowSpans, Vec<(usize, usize, usize, [f32; 4])>) {
         let theme = self.theme;
         let default_fg = (theme.fg.r(), theme.fg.g(), theme.fg.b());
@@ -10153,8 +10268,7 @@ impl App {
         // splits") named no such exception.
         let show_terminal = self.terminal_open;
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
-        let terminal_render =
-            if show_terminal { self.terminal.as_ref().map(|t| self.terminal_row_spans(t.session.screen())) } else { None };
+        let terminal_render = self.terminal_panel_render();
 
         let modeline_top = window_height - modeline_height;
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
@@ -13648,9 +13762,16 @@ mod tests {
     fn toggle_terminal_opens_then_hides_without_dropping_the_session() {
         let mut app = App::with_file(None);
 
+        // No `event_proxy` in a test (see its own doc comment), so
+        // `toggle_terminal`'s spawn runs synchronously via `apply_
+        // terminal_spawned` instead of a background thread -- same
+        // "no fake event loop needed" posture every other background-
+        // spawning path in this file already has, and lets this test
+        // assert the *end state* directly without waiting on a channel.
         app.toggle_terminal();
         assert!(app.terminal_open);
         assert!(app.terminal_focused);
+        assert!(!app.terminal_spawning);
         assert!(app.terminal.is_some(), "expected a real shell to have been spawned");
 
         // Unlike `toggle_sidebar`, hiding must NOT drop the session --
@@ -13660,6 +13781,70 @@ mod tests {
         assert!(!app.terminal_open);
         assert!(!app.terminal_focused);
         assert!(app.terminal.is_some(), "the session should still be alive after hiding the panel");
+    }
+
+    #[test]
+    fn terminal_panel_render_is_none_while_closed() {
+        let app = App::with_file(None);
+        assert!(app.terminal_panel_render().is_none());
+    }
+
+    #[test]
+    fn terminal_panel_render_shows_a_placeholder_while_spawning() {
+        // Simulates the real gap between `toggle_terminal` kicking off a
+        // background spawn and `apply_terminal_spawned` hearing back --
+        // this exact state (open, no session yet, but already focused)
+        // is what used to render as an unexplained blank panel.
+        let mut app = App::with_file(None);
+        app.terminal_open = true;
+        app.terminal_spawning = true;
+        let (spans, bg_segments) = app.terminal_panel_render().expect("expected a placeholder while spawning");
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("Starting shell"));
+        assert!(bg_segments.is_empty());
+    }
+
+    #[test]
+    fn terminal_panel_render_shows_real_content_once_a_session_exists() {
+        let mut app = App::with_file(None);
+        app.toggle_terminal(); // synchronous spawn in a test, see the test above
+        let (spans, _) = app.terminal_panel_render().expect("expected real terminal content");
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(!joined.contains("Starting shell"), "a live session must not still show the placeholder");
+    }
+
+    #[test]
+    fn apply_terminal_spawned_error_closes_the_panel_and_surfaces_a_message() {
+        let mut app = App::with_file(None);
+        app.terminal_open = true;
+        app.terminal_spawning = true;
+
+        app.apply_terminal_spawned(Err(std::io::Error::other("no shell for you")));
+
+        assert!(!app.terminal_open);
+        assert!(!app.terminal_spawning);
+        assert!(app.terminal.is_none());
+        assert!(app.modeline_pieces().unwrap().1.contains("couldn't start a terminal"));
+    }
+
+    #[test]
+    fn apply_terminal_spawned_does_not_reopen_a_panel_the_user_already_closed() {
+        // The shell keeps starting up in the background even if the
+        // user closes the panel before it's ready (same "runs on while
+        // hidden" posture `toggle_terminal` already has for an already-
+        // open session) -- but it must not force the panel back open or
+        // steal focus once it finally does report back.
+        let mut app = App::with_file(None);
+        app.terminal_open = true;
+        app.terminal_spawning = true;
+        app.terminal_open = false; // user closed it while the spawn was in flight
+
+        let (session, reader) = fenix_terminal::Terminal::spawn(text::TERMINAL_ROWS as u16, 80).expect("failed to spawn a real shell");
+        app.apply_terminal_spawned(Ok((session, reader)));
+
+        assert!(!app.terminal_open);
+        assert!(!app.terminal_focused);
+        assert!(app.terminal.is_some(), "the session should still be kept, just not shown/focused");
     }
 
     #[test]
