@@ -11527,6 +11527,39 @@ mod tests {
     }
 
     #[test]
+    fn accept_completion_on_a_namespace_qualified_prefix_replaces_the_whole_thing() {
+        // Regression: `is_ident_char` used to stop at `:`, so typing
+        // `myns::gr` only fed "gr" to the completion prefix -- widening
+        // the match to anything containing "gr" anywhere, and (the
+        // actually-broken part) making `accept_completion` replace only
+        // "gr" with the confirmed label, leaving the typed `myns::` in
+        // place and producing a duplicated `myns::myns::greet`.
+        let dir = TempDir::new("completion_accept_namespaced");
+        let file = dir.write("foo.tcl", "myns::greet\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let end = app.open().buffer.len_chars();
+        app.test_set_cursor(Cursor { char_idx: end, sticky_col: 0 });
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("myns::gr");
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("myns::gr should match the myns::greet buffer word");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"myns::greet".to_string()), "expected myns::greet among {labels:?}");
+        // Confirming `myns::greet` specifically (not whatever the picker's
+        // own default selection happens to be, e.g. the just-typed
+        // "myns::gr" token itself, which trivially self-matches too).
+        let selected_label = |app: &App| app.completion.as_ref().unwrap().picker.selected().unwrap().payload.label.clone();
+        while selected_label(&app) != "myns::greet" {
+            app.completion.as_mut().unwrap().picker.move_selection(1);
+        }
+
+        app.accept_completion();
+
+        assert_eq!(app.open().buffer.text(), "myns::greet\nmyns::greet");
+    }
+
+    #[test]
     fn force_open_completion_shows_the_full_list_even_with_an_empty_prefix() {
         let dir = TempDir::new("completion_force_open");
         let file = dir.write("foo.tcl", "");

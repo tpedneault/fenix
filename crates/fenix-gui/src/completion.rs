@@ -11,25 +11,31 @@ use std::collections::HashSet;
 
 use fenix_core::{Buffer, Cursor};
 
+/// `:` is included specifically for Tcl's `::` namespace separator --
+/// ctags-sourced candidates are labeled with their fully-qualified name
+/// (`myns::greet`), so `ns::gr` needs to survive as one prefix, not get
+/// truncated to just `gr` after the last `::` (which would both widen
+/// the fuzzy match to anything containing "gr" anywhere, and -- worse --
+/// make `accept_completion` replace only the `gr` part, leaving the
+/// typed `ns::` in place and producing a duplicated `ns::myns::greet`).
+/// A lone `:` has no meaning in Tcl outside that pair, so there's no
+/// real string this could misinterpret.
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    c.is_alphanumeric() || c == '_' || c == ':'
 }
 
 /// The identifier prefix ending exactly at the cursor -- e.g. with the
 /// cursor right after `se` in `se|t`, returns `(prefix_start_char_idx,
-/// "se")`. Scans backward only: unlike `fenix-vim`'s `textobject::span`
-/// (built for Normal-mode text objects, where the cursor sits *inside* a
-/// word and both directions matter), nothing after the cursor in Insert
-/// mode is part of what's being typed. `None` when the cursor isn't
-/// immediately preceded by an identifier char (on whitespace, punctuation,
-/// buffer start, or an empty buffer) -- the completion popup has nothing
-/// to filter by and should stay closed.
-///
-/// Deliberately not `::`-aware (a plain alnum-or-underscore classifier,
-/// the same "Word" class `fenix-vim`'s own `charclass::classify` uses
-/// elsewhere, just not reused directly since that's crate-private) -- a
-/// namespace-qualified prefix like `myns::gr` only completes the `gr`
-/// part after the last `::`. A disclosed simplification, not a bug.
+/// "se")`, or after `gr` in `myns::gr|` returns the whole `myns::gr`
+/// (see `is_ident_char`'s own doc comment for why `::` stays part of
+/// the prefix rather than resetting at each `:`). Scans backward only:
+/// unlike `fenix-vim`'s `textobject::span` (built for Normal-mode text
+/// objects, where the cursor sits *inside* a word and both directions
+/// matter), nothing after the cursor in Insert mode is part of what's
+/// being typed. `None` when the cursor isn't immediately preceded by an
+/// identifier char (on whitespace, punctuation, buffer start, or an
+/// empty buffer) -- the completion popup has nothing to filter by and
+/// should stay closed.
 pub fn prefix_at_cursor(buffer: &Buffer, cursor: &Cursor) -> Option<(usize, String)> {
     let end = cursor.char_idx.min(buffer.len_chars());
     let mut start = end;
@@ -107,8 +113,8 @@ mod tests {
 
     #[test]
     fn cursor_right_after_punctuation_returns_none() {
-        let buffer = buf("foo::");
-        assert!(prefix_at_cursor(&buffer, &cur(5)).is_none());
+        let buffer = buf("foo.");
+        assert!(prefix_at_cursor(&buffer, &cur(4)).is_none());
     }
 
     #[test]
@@ -124,11 +130,19 @@ mod tests {
     }
 
     #[test]
-    fn namespace_qualified_prefix_only_completes_after_the_last_separator() {
+    fn namespace_qualified_prefix_keeps_the_double_colon_and_everything_before_it() {
         let buffer = buf("myns::gr");
         let (start, prefix) = prefix_at_cursor(&buffer, &cur(8)).unwrap();
-        assert_eq!(start, 6);
-        assert_eq!(prefix, "gr");
+        assert_eq!(start, 0);
+        assert_eq!(prefix, "myns::gr");
+    }
+
+    #[test]
+    fn namespace_qualified_prefix_with_multiple_levels_keeps_the_whole_path() {
+        let buffer = buf("outer::inner::pr");
+        let (start, prefix) = prefix_at_cursor(&buffer, &cur(17)).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(prefix, "outer::inner::pr");
     }
 
     #[test]
@@ -167,8 +181,15 @@ mod tests {
 
     #[test]
     fn buffer_words_ignores_punctuation_and_whitespace_boundaries() {
-        let buffer = buf("foo::bar, baz.qux(quux)");
+        let buffer = buf("baz.qux(quux)");
         let words = buffer_words(&buffer);
-        assert_eq!(words, HashSet::from(["foo", "bar", "baz", "qux", "quux"].map(str::to_string)));
+        assert_eq!(words, HashSet::from(["baz", "qux", "quux"].map(str::to_string)));
+    }
+
+    #[test]
+    fn buffer_words_keeps_a_namespace_qualified_name_as_one_token() {
+        let buffer = buf("foo::bar, baz");
+        let words = buffer_words(&buffer);
+        assert_eq!(words, HashSet::from(["foo::bar", "baz"].map(str::to_string)));
     }
 }
