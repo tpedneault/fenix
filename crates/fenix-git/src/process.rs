@@ -1,6 +1,23 @@
 use std::path::Path;
 use std::process::Command;
 
+/// `git` on Windows, run with this flag, doesn't flash a console window
+/// per spawn -- `fenix-gui` has no console of its own to inherit, same
+/// reasoning as `fenix-completion::ctags::run`'s own use of this flag.
+/// Purely cosmetic (no bearing on why a run fails), but real spam
+/// reduction given how often this crate's callers shell out.
+fn git_command(repo: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Shells `git args...` with its working directory set to `repo` (every
 /// operation here targets a *specific* repository, unlike `fenix-docker`,
 /// which talks to one daemon regardless of cwd -- mirrors `fenix-project`'s
@@ -8,7 +25,7 @@ use std::process::Command;
 /// into lines on success, or empty on any failure (missing binary,
 /// non-zero exit, not a repo) -- never a hard error.
 pub(crate) fn run_lines(repo: &Path, args: &[&str]) -> Vec<String> {
-    let Ok(output) = Command::new("git").current_dir(repo).args(args).output() else { return Vec::new() };
+    let Ok(output) = git_command(repo, args).output() else { return Vec::new() };
     if !output.status.success() {
         return Vec::new();
     }
@@ -21,7 +38,8 @@ pub(crate) fn run_lines(repo: &Path, args: &[&str]) -> Vec<String> {
 /// buffer, show as an error, etc.). Same shape as `fenix-docker::process::
 /// run_action`.
 pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String> {
-    match Command::new("git").current_dir(repo).args(args).output() {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match git_command(repo, &args).output() {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(err) => Err(format!("couldn't run git: {err}")),

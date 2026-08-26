@@ -2,6 +2,22 @@ use std::process::Command;
 
 use crate::engine;
 
+/// `docker`/`podman` on Windows, run with this flag, doesn't flash a
+/// console window per spawn -- same reasoning and exact flag as
+/// `fenix-git::process::git_command`/`fenix-completion::ctags::run`.
+/// Purely cosmetic (no bearing on why a run fails).
+fn command(cmd: &str, args: &[&str]) -> Command {
+    let mut c = Command::new(cmd);
+    c.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 /// Shells `cmd args...` and parses stdout as newline-delimited JSON
 /// objects (what `docker ... --format '{{json .}}'` produces -- one flat
 /// JSON object per line, not a JSON array). Never fails: a missing
@@ -9,7 +25,7 @@ use crate::engine;
 /// doesn't parse all just drop out of the result silently, mirroring
 /// `ctags::run`'s "empty on any failure, never a hard error" posture.
 pub(crate) fn run_ndjson<T>(cmd: &str, args: &[&str], parse: impl Fn(&serde_json::Value) -> Option<T>) -> Vec<T> {
-    let Ok(output) = Command::new(cmd).args(args).output() else { return Vec::new() };
+    let Ok(output) = command(cmd, args).output() else { return Vec::new() };
     if !output.status.success() {
         return Vec::new();
     }
@@ -26,7 +42,8 @@ pub(crate) fn run_ndjson<T>(cmd: &str, args: &[&str], parse: impl Fn(&serde_json
 /// do with either (render into a buffer, ignore, etc.).
 pub(crate) fn run_action(args: &[String]) -> Result<String, String> {
     let bin = engine::resolve();
-    match Command::new(bin).args(args).output() {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match command(bin, &args).output() {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(err) => Err(format!("couldn't run {bin}: {err}")),
@@ -45,7 +62,8 @@ pub(crate) fn run_action(args: &[String]) -> Result<String, String> {
 /// a buffer, not a live `tail -f`.
 pub(crate) fn run_action_combined_output(args: &[String]) -> Result<String, String> {
     let bin = engine::resolve();
-    match Command::new(bin).args(args).output() {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match command(bin, &args).output() {
         Ok(out) if out.status.success() => {
             let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
             combined.push_str(&String::from_utf8_lossy(&out.stderr));
