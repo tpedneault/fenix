@@ -31,6 +31,21 @@ pub enum BufferKind {
     /// A Lazygit-style repo status/files/branches/commits/stash panel
     /// (`SPC g g`) -- same "real buffer, just tagged" shape as `Docker`.
     Git,
+    /// A tab-separated `Text` buffer toggled into elastic-column table
+    /// view (`SPC f t`) -- unlike `Dashboard`/`Explorer`/`Docker`/`Git`,
+    /// this isn't a distinct generated buffer: it's the *same* buffer,
+    /// same path, same undo history, just retagged in place (see
+    /// `fenix-gui`'s `App::toggle_table_view`), because the whole point
+    /// is that the file's real content stays genuinely tab-separated at
+    /// all times -- the alignment is purely a rendering effect
+    /// (`fenix-gui`'s `tabstops` module), never baked into the text.
+    Table,
+    /// The project-wide search-and-replace review list (`SPC s p`) --
+    /// same "real buffer, just tagged" shape as `Dashboard`/`Docker`/
+    /// `Git`: a real, Vim-navigable, generated listing of every file a
+    /// pending replace would touch, one row each, toggle-able before
+    /// anything is actually written to disk.
+    SearchReplace,
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -169,6 +184,34 @@ impl BufferList {
             .and_then(fenix_syntax::detect_language_from_path)
             .map(|lang| fenix_syntax::SyntaxState::new(lang, &buffer.text()));
         self.insert(buffer, syntax, BufferKind::Text)
+    }
+
+    /// The buffer already open for `path`, if any -- lets a caller that's
+    /// about to write to `path` on disk (project-wide search-and-replace
+    /// apply, `fenix-gui`'s `SPC s p`) check first and route the edit
+    /// through the real in-memory `Buffer` instead, so it never clobbers
+    /// an open, possibly-dirty buffer's content out from under it.
+    pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
+        self.path_index.get(path).copied()
+    }
+
+    /// Keeps `path_index` in sync after `id`'s underlying file was
+    /// renamed out from under it (`fenix-gui`'s `SPC f R`) -- `Buffer::
+    /// save_as` already updates the buffer's own `path()`, this just
+    /// makes the registry's own index (what `open_path`/`id_for_path`
+    /// use to detect an already-open buffer for a path) agree with it:
+    /// removes `old_path`'s entry and re-inserts under the buffer's
+    /// current path. A no-op for either half if there's nothing to do
+    /// (e.g. `old_path` was `None` -- the buffer was never saved
+    /// before), matching this registry's existing graceful-by-default
+    /// posture elsewhere.
+    pub fn path_changed(&mut self, id: BufferId, old_path: Option<&Path>) {
+        if let Some(old) = old_path {
+            self.path_index.remove(old);
+        }
+        if let Some(new_path) = self.buffers.get(&id).and_then(|ob| ob.buffer.path()) {
+            self.path_index.insert(new_path.to_path_buf(), id);
+        }
     }
 
     pub fn get(&self, id: BufferId) -> Option<&OpenBuffer> {
@@ -354,6 +397,34 @@ mod tests {
         let mut list = BufferList::new();
         let id = list.open_path(&dir.0.join("does-not-exist.txt"));
         assert_eq!(list.get(id).unwrap().buffer.text(), "");
+    }
+
+    #[test]
+    fn path_changed_moves_the_registry_entry_from_old_to_new_path() {
+        let dir = TempDir::new("path_changed");
+        let old_path = dir.write("old.txt", "hi\n");
+        let new_path = dir.0.join("new.txt");
+        let mut list = BufferList::new();
+        let id = list.open_path(&old_path);
+        list.get_mut(id).unwrap().buffer.save_as(&new_path).unwrap();
+
+        list.path_changed(id, Some(&old_path));
+
+        assert_eq!(list.id_for_path(&old_path), None);
+        assert_eq!(list.id_for_path(&new_path), Some(id));
+    }
+
+    #[test]
+    fn path_changed_with_no_old_path_just_inserts_the_current_one() {
+        let dir = TempDir::new("path_changed_no_old");
+        let new_path = dir.0.join("brand_new.txt");
+        let mut list = BufferList::new();
+        let id = list.open_scratch();
+        list.get_mut(id).unwrap().buffer.save_as(&new_path).unwrap();
+
+        list.path_changed(id, None);
+
+        assert_eq!(list.id_for_path(&new_path), Some(id));
     }
 
     #[test]

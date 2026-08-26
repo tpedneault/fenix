@@ -15,20 +15,40 @@ const WALK_IGNORE: &[&str] = &[".git", "node_modules", "target", ".venv", "__pyc
 /// always produces something, even if slower and less precise than the
 /// other two.
 pub fn list_project_files(root: &Path) -> Vec<PathBuf> {
+    list_project_files_impl(root, false)
+}
+
+/// Same three-backend fallback as `list_project_files`, but every
+/// backend that normally respects `.gitignore` is told not to (`git
+/// ls-files --cached --others` with no `--exclude-standard`; `fd
+/// --no-ignore`) -- the raw-walk fallback needs no change, since it
+/// never parsed `.gitignore` in the first place (`WALK_IGNORE` is a
+/// small hardcoded list, not real ignore-file support). For a host UI
+/// that wants to fuzzy-find a file `list_project_files` would silently
+/// hide -- `.env`, a build artifact, anything else gitignored -- by
+/// name instead of needing to already know its exact path.
+pub fn list_project_files_including_ignored(root: &Path) -> Vec<PathBuf> {
+    list_project_files_impl(root, true)
+}
+
+fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
     if root.join(".git").exists() {
-        if let Some(files) = git_ls_files(root) {
+        if let Some(files) = git_ls_files(root, include_ignored) {
             return files;
         }
     }
-    if let Some(files) = fd_list_files(root) {
+    if let Some(files) = fd_list_files(root, include_ignored) {
         return files;
     }
     walk_files(root)
 }
 
-fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
-    let output =
-        Command::new("git").args(["ls-files", "--cached", "--others", "--exclude-standard"]).current_dir(root).output().ok()?;
+fn git_ls_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
+    let mut args = vec!["ls-files", "--cached", "--others"];
+    if !include_ignored {
+        args.push("--exclude-standard");
+    }
+    let output = Command::new("git").args(&args).current_dir(root).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -36,8 +56,12 @@ fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
     Some(stdout.lines().map(|line| root.join(line)).collect())
 }
 
-fn fd_list_files(root: &Path) -> Option<Vec<PathBuf>> {
-    let output = Command::new("fd").args(["--type", "f", "--hidden", "--exclude", ".git"]).current_dir(root).output().ok()?;
+fn fd_list_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
+    let mut args = vec!["--type", "f", "--hidden", "--exclude", ".git"];
+    if include_ignored {
+        args.push("--no-ignore");
+    }
+    let output = Command::new("fd").args(&args).current_dir(root).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -94,11 +118,48 @@ mod tests {
         dir.write(".gitignore", "ignored.txt\n");
         dir.write("ignored.txt", "x");
 
-        let files = git_ls_files(dir.path()).expect("git available");
+        let files = git_ls_files(dir.path(), false).expect("git available");
         let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
         assert!(names.contains(&"tracked.txt".to_string()));
         assert!(names.contains(&"untracked.txt".to_string()));
         assert!(!names.contains(&"ignored.txt".to_string()));
+    }
+
+    #[test]
+    fn git_ls_files_with_include_ignored_still_returns_the_ignored_file() {
+        let dir = TempDir::new("git_ls_files_include_ignored");
+        init_repo(dir.path());
+        dir.write("tracked.txt", "x");
+        git(dir.path(), &["add", "tracked.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir.write(".gitignore", "ignored.txt\n");
+        dir.write("ignored.txt", "x");
+
+        let files = git_ls_files(dir.path(), true).expect("git available");
+        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        assert!(names.contains(&"tracked.txt".to_string()));
+        assert!(names.contains(&"ignored.txt".to_string()));
+    }
+
+    #[test]
+    fn list_project_files_including_ignored_finds_a_gitignored_file() {
+        let dir = TempDir::new("list_project_files_including_ignored");
+        init_repo(dir.path());
+        dir.write("tracked.txt", "x");
+        git(dir.path(), &["add", "tracked.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir.write(".gitignore", ".env\n");
+        dir.write(".env", "SECRET=1");
+
+        let plain = list_project_files(dir.path());
+        let plain_names: Vec<String> =
+            plain.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        assert!(!plain_names.contains(&".env".to_string()), "list_project_files should still exclude it");
+
+        let all = list_project_files_including_ignored(dir.path());
+        let all_names: Vec<String> =
+            all.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        assert!(all_names.contains(&".env".to_string()), "list_project_files_including_ignored should find it");
     }
 
     #[test]
