@@ -121,6 +121,8 @@ impl CommandRegistry {
         registry.register("mib.lookup_tm_parameter", "Fuzzy-find a MIB TM parameter and view its details", cmd_mib_lookup_tm_parameter);
         registry.register("mib.lookup_calibration", "Fuzzy-find a MIB calibration definition and view its details", cmd_mib_lookup_calibration);
         registry.register("mib.refresh_index", "Reparse the configured MIB roots from disk", cmd_mib_refresh_index);
+        registry.register("mib.add_root", "Browse to and register a new MIB root directory", cmd_mib_add_root);
+        registry.register("mib.delete_root", "Fuzzy-find and remove a configured MIB root", cmd_mib_delete_root);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -400,6 +402,14 @@ fn cmd_mib_lookup_calibration(ctx: &mut CommandCtx) {
 
 fn cmd_mib_refresh_index(ctx: &mut CommandCtx) {
     ctx.app.mib_refresh_index();
+}
+
+fn cmd_mib_add_root(ctx: &mut CommandCtx) {
+    ctx.app.picker_add_mib_root_prompt();
+}
+
+fn cmd_mib_delete_root(ctx: &mut CommandCtx) {
+    ctx.app.picker_delete_mib_root();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {

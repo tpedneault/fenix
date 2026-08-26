@@ -747,10 +747,14 @@ enum MainView {
 /// `Open`/`Enter`/`l` on a *file* doing nothing instead of opening it
 /// into the editor (there's nothing sensible to do with a file when
 /// what's being picked is a directory). See `picker_add_project_prompt`.
+/// `PickMibRootDir` is the same idea for `SPC m a`, except `S` starts
+/// `mib_root_prompt` (a label to go with the browsed directory) instead
+/// of registering anything directly -- see `start_mib_root_label_prompt`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExplorerPurpose {
     Browse,
     PickProjectDir,
+    PickMibRootDir,
 }
 
 /// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
@@ -860,6 +864,11 @@ enum ActivePicker {
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
+    /// `SPC m d`: same "list what's configured, confirming removes it"
+    /// shape as `DeleteProject`, for `config.mib_roots` instead of
+    /// `known_projects` -- payload is the full `(label, path)` pair,
+    /// see `mib_root_candidates`.
+    DeleteMibRoot(fenix_picker::PickerState<(String, PathBuf)>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -925,6 +934,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchProject(s) => s.push_char(c),
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
+        ActivePicker::DeleteMibRoot(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
@@ -945,6 +955,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchProject(s) => s.backspace(),
         ActivePicker::SwitchBuffer(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
+        ActivePicker::DeleteMibRoot(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibTelecommandLookup(s) => s.backspace(),
@@ -965,6 +976,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
+        ActivePicker::DeleteMibRoot(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
@@ -985,6 +997,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchProject(s) => s.query(),
         ActivePicker::SwitchBuffer(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
+        ActivePicker::DeleteMibRoot(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibTelecommandLookup(s) => s.query(),
@@ -1005,6 +1018,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.len(),
         ActivePicker::SwitchBuffer(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
+        ActivePicker::DeleteMibRoot(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibTelecommandLookup(s) => s.len(),
@@ -1025,6 +1039,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.selected_row(),
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
+        ActivePicker::DeleteMibRoot(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
@@ -1049,6 +1064,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::DeleteMibRoot(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2478,17 +2494,28 @@ pub struct App {
     /// size`, `VimEvent::IndentWidthChanged`).
     config: fenix_config::Config,
 
-    /// Configured SCOS-2000 MIB roots (`config.mib_roots`, built once at
-    /// startup -- the user hand-edits `config.ini`'s `[mib]` section to
-    /// change these, so re-deriving on every access would be pointless).
+    /// Configured SCOS-2000 MIB roots (`config.mib_roots`), rebuilt
+    /// (`persist_mib_roots`) whenever `SPC m a`/`SPC m d` changes the
+    /// underlying config, not just once at startup -- re-deriving on
+    /// every access would still be pointless, but this list can now
+    /// change during a running session, not just via a hand-edit to
+    /// `config.ini`'s `[mib]` section between runs.
     mib_roots: Vec<fenix_mib::MibRoot>,
     /// The parsed MIB data, lazily built (and `refresh()`'d) the first
     /// time any `SPC m ...` command needs it -- same "expensive work
     /// only on real state changes" deferral `tcl_tags`'s own cache
     /// already uses for `ctags`, just gated on first-use instead of
     /// project-root-change. `None` until then, or if `mib_roots` is
-    /// empty (nothing configured -- see `mib_index`).
+    /// empty (nothing configured -- see `mib_index`), or right after
+    /// `persist_mib_roots` invalidates it so the next command rebuilds
+    /// against the new root set instead of a stale one.
     mib_index: Option<fenix_mib::MibIndex>,
+    /// `SPC m a`'s in-progress label prompt: the already-browsed-to
+    /// directory (picked via the explorer, see `start_mib_root_label_
+    /// prompt`) paired with the label text typed so far. `Some` from
+    /// `S` on that explorer until Enter (registers it, see `add_mib_
+    /// root`) or Escape (cancels).
+    mib_root_prompt: Option<(PathBuf, String)>,
     /// The active `SPC m i` telecommand-insert wizard, if any -- `Some`
     /// from the moment a telecommand's picked until it's inserted or
     /// cancelled. See `MibInsertState`'s own doc comment.
@@ -2728,6 +2755,7 @@ impl App {
             config,
             mib_roots,
             mib_index: None,
+            mib_root_prompt: None,
             mib_insert: None,
             replace_wizard: None,
             project_replace: None,
@@ -3630,6 +3658,123 @@ impl App {
         if let Some(index) = self.mib_index() {
             index.refresh();
         }
+    }
+
+    /// Rebuilds `self.mib_roots` from `self.config.mib_roots` and drops
+    /// the parsed index so the next `SPC m ...` command rebuilds it
+    /// against the new root set (same lazy-rebuild the index already
+    /// gets from `mib_refresh_index`) -- called after `SPC m a`/`SPC m
+    /// d` mutate `config.mib_roots`, right before saving it, so a save
+    /// failure still leaves in-memory state consistent with what's
+    /// configured even if the file on disk didn't catch up.
+    fn persist_mib_roots(&mut self) {
+        if let Err(err) = self.config.save() {
+            eprintln!("fenix: couldn't save config: {err}");
+        }
+        self.mib_roots =
+            self.config.mib_roots.iter().map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() }).collect();
+        self.mib_index = None;
+    }
+
+    /// `SPC m a`: opens the full-buffer file explorer, in "pick a
+    /// directory" mode, to browse to and register a new MIB root --
+    /// same flow as `picker_add_project_prompt`, just landing in `S` on
+    /// `start_mib_root_label_prompt` instead of registering directly
+    /// (a MIB root needs a label, a project root doesn't).
+    pub(crate) fn picker_add_mib_root_prompt(&mut self) {
+        let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let explorer = match ExplorerState::open(&start) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("fenix: couldn't list {} ({err})", start.display());
+                return;
+            }
+        };
+        self.explorer = Some(explorer);
+        self.explorer_purpose = ExplorerPurpose::PickMibRootDir;
+        self.main_view = MainView::Explorer;
+        self.wake_caret();
+    }
+
+    /// `S` on the add-MIB-root explorer (`ExplorerAction::SelectCwd`):
+    /// closes the explorer and starts `mib_root_prompt` for the browsed
+    /// directory, mirroring `register_project_dir`'s own canonicalize-
+    /// before-persisting step, but not registering anything until the
+    /// label prompt resolves.
+    fn start_mib_root_label_prompt(&mut self, dir: &Path) {
+        let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        self.mib_root_prompt = Some((root, String::new()));
+        self.main_view = MainView::Editor;
+        self.explorer = None;
+        self.explorer_purpose = ExplorerPurpose::Browse;
+    }
+
+    /// Routes one keypress to the in-progress `mib_root_prompt` -- same
+    /// shape as `find_file_prompt_key`, including its `Ctrl-V` paste
+    /// handling.
+    fn mib_root_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some((_, label)), Some(text)) = (&mut self.mib_root_prompt, pasted) {
+                label.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some((_, label)) = &mut self.mib_root_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.mib_root_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let (path, label) = self.mib_root_prompt.take().unwrap();
+                let label = label.trim();
+                if !label.is_empty() {
+                    self.add_mib_root(path, label.to_string());
+                }
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                label.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => label.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `mib_root_prompt` is
+    /// active -- mirrors `find_file_prompt_text`.
+    fn mib_root_prompt_text(&self) -> Option<String> {
+        self.mib_root_prompt.as_ref().map(|(path, label)| format!("MIB label for {}: {label}", path.display()))
+    }
+
+    /// `Enter` on `mib_root_prompt` with a non-empty label: registers
+    /// `(label, path)` as a new `[mib]` root, persists it, and rebuilds
+    /// `mib_roots`/invalidates the parsed index (`persist_mib_roots`)
+    /// so it's usable by `SPC m t`/etc. immediately, not just after the
+    /// next restart.
+    fn add_mib_root(&mut self, path: PathBuf, label: String) {
+        self.config.mib_roots.push((label, path));
+        self.persist_mib_roots();
+    }
+
+    /// Candidates for `SPC m d` -- one per configured `[mib]` root,
+    /// keyed by the full `(label, path)` pair (not a list position, so
+    /// a fuzzy-filtered/reordered selection still removes the right
+    /// entry -- same reasoning `known_project_candidates`'/`DeleteProject`'s
+    /// own `PathBuf` keying already uses).
+    fn mib_root_candidates(&self) -> Vec<fenix_picker::Candidate<(String, PathBuf)>> {
+        self.config
+            .mib_roots
+            .iter()
+            .map(|(label, path)| fenix_picker::Candidate::new(format!("{label}  {}", path.display()), (label.clone(), path.clone())))
+            .collect()
+    }
+
+    /// `SPC m d`: same candidate list as the roots currently configured,
+    /// but confirming a selection removes it instead of doing anything
+    /// else -- mirrors `picker_delete_project` exactly.
+    pub(crate) fn picker_delete_mib_root(&mut self) {
+        let candidates = self.mib_root_candidates();
+        self.enter_picker(ActivePicker::DeleteMibRoot(fenix_picker::PickerState::new(candidates)));
     }
 
     fn mib_tc_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
@@ -5958,6 +6103,13 @@ impl App {
                     eprintln!("fenix: couldn't save project history: {err}");
                 }
             }
+            Some(ActivePicker::DeleteMibRoot(state)) => {
+                let Some(target) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.config.mib_roots.retain(|entry| entry != &target);
+                self.persist_mib_roots();
+            }
             Some(ActivePicker::Theme(state)) => {
                 let Some(theme) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -6568,9 +6720,12 @@ impl App {
                 if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickProjectDir {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.register_project_dir(&cwd);
+                } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickMibRootDir {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.start_mib_root_label_prompt(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
-                // `S` only means something while picking a project dir.
+                // `S` only means something while picking a project/MIB dir.
             }
         }
         self.wake_caret();
@@ -6592,7 +6747,10 @@ impl App {
         let path = entry.path.clone();
         let is_dir = entry.is_dir;
 
-        if !is_dir && self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickProjectDir {
+        if !is_dir
+            && self.main_view == MainView::Explorer
+            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir)
+        {
             return;
         }
 
@@ -7079,6 +7237,11 @@ impl App {
         }
         if self.rename_file_prompt.is_some() {
             self.rename_file_prompt_key(keypress);
+            return;
+        }
+        // `SPC m a`'s label step -- same capturing-prompt tier.
+        if self.mib_root_prompt.is_some() {
+            self.mib_root_prompt_key(keypress);
             return;
         }
         if self.delete_file_confirm {
@@ -7925,6 +8088,7 @@ impl App {
             || self.project_replace.as_ref().is_some_and(|s| s.confirming)
             || self.find_file_prompt.is_some()
             || self.rename_file_prompt.is_some()
+            || self.mib_root_prompt.is_some()
             || self.delete_file_confirm
         {
             return None;
@@ -7941,6 +8105,9 @@ impl App {
                         ExplorerPurpose::PickProjectDir => {
                             format!("│ {}   S to add as a project, q to cancel ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::PickMibRootDir => {
+                            format!("│ {}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
+                        }
                     }
                 }
                 None => String::new(),
@@ -7948,6 +8115,7 @@ impl App {
             let badge = match self.explorer_purpose {
                 ExplorerPurpose::Browse => "EXPLORE",
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
+                ExplorerPurpose::PickMibRootDir => "ADDMIB",
             };
             return Some((badge, suffix));
         }
@@ -7958,6 +8126,7 @@ impl App {
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -9617,6 +9786,8 @@ impl App {
         } else if let Some(prompt_text) = self.find_file_prompt_text() {
             Some(prompt_text)
         } else if let Some(prompt_text) = self.rename_file_prompt_text() {
+            Some(prompt_text)
+        } else if let Some(prompt_text) = self.mib_root_prompt_text() {
             Some(prompt_text)
         } else if let Some(confirm_text) = self.delete_file_confirm_text() {
             Some(confirm_text)
@@ -13289,6 +13460,160 @@ mod tests {
 
         assert!(app.known_projects.roots().is_empty());
         assert_eq!(app.main_view, MainView::Explorer, "browsing should be untouched by a stray S");
+    }
+
+    #[test]
+    fn picker_add_mib_root_prompt_opens_the_explorer_at_the_current_project_root() {
+        let root_dir = TempDir::new("add_mib_root_prompt_root");
+        let mut app = App::with_file(None);
+        app.project_root = Some(root_dir.path().to_path_buf());
+
+        app.picker_add_mib_root_prompt();
+
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickMibRootDir);
+        assert_eq!(app.explorer.as_ref().map(|e| e.cwd.as_path()), Some(root_dir.path()));
+    }
+
+    #[test]
+    fn select_cwd_starts_the_mib_root_label_prompt_instead_of_registering_directly() {
+        let mib_dir = TempDir::new("select_cwd_mib_target");
+        let config_dir = TempDir::new("select_cwd_mib_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.project_root = Some(mib_dir.path().to_path_buf());
+
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.explorer.is_none());
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
+        let canonical = std::fs::canonicalize(mib_dir.path()).unwrap();
+        assert_eq!(app.mib_root_prompt, Some((canonical, String::new())));
+        // Nothing registered yet -- only the label prompt started.
+        assert!(app.config.mib_roots.is_empty());
+    }
+
+    #[test]
+    fn mib_root_prompt_enter_with_a_label_registers_and_persists_the_root() {
+        let mib_dir = TempDir::new("mib_root_prompt_enter_target");
+        let config_dir = TempDir::new("mib_root_prompt_enter_config");
+        let mut app = App::with_file(None);
+        let config_path = config_dir.path().join("config.ini");
+        app.config = fenix_config::Config::load_or_default(config_path.clone());
+        app.project_root = Some(mib_dir.path().to_path_buf());
+
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        for ch in "TEST-MIB".chars() {
+            app.mib_root_prompt_key(KeyPress::char(ch));
+        }
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.mib_root_prompt.is_none());
+        let canonical = std::fs::canonicalize(mib_dir.path()).unwrap();
+        assert_eq!(app.config.mib_roots, vec![("TEST-MIB".to_string(), canonical.clone())]);
+        assert_eq!(app.mib_roots, vec![fenix_mib::MibRoot { label: "TEST-MIB".to_string(), path: canonical.clone() }]);
+        assert!(app.mib_index.is_none(), "the stale index should be invalidated, not just left as-is");
+
+        // Persisted, not just held in memory.
+        let reloaded = fenix_config::Config::load_or_default(config_path);
+        assert_eq!(reloaded.mib_roots, vec![("TEST-MIB".to_string(), canonical)]);
+    }
+
+    #[test]
+    fn mib_root_prompt_enter_with_an_empty_label_registers_nothing() {
+        let mib_dir = TempDir::new("mib_root_prompt_empty_target");
+        let config_dir = TempDir::new("mib_root_prompt_empty_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.project_root = Some(mib_dir.path().to_path_buf());
+
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter)); // never typed a label
+
+        assert!(app.mib_root_prompt.is_none());
+        assert!(app.config.mib_roots.is_empty());
+    }
+
+    #[test]
+    fn mib_root_prompt_escape_cancels_without_changing_config() {
+        let mib_dir = TempDir::new("mib_root_prompt_escape_target");
+        let config_dir = TempDir::new("mib_root_prompt_escape_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.project_root = Some(mib_dir.path().to_path_buf());
+
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        app.mib_root_prompt_key(KeyPress::char('x'));
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.mib_root_prompt.is_none());
+        assert!(app.config.mib_roots.is_empty());
+    }
+
+    #[test]
+    fn mib_root_prompt_ctrl_v_pastes_the_clipboard() {
+        let mib_dir = TempDir::new("mib_root_prompt_paste_target");
+        let config_dir = TempDir::new("mib_root_prompt_paste_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+
+        if let Some(_guard) = test_set_clipboard(&mut app, "PASTED-LABEL") {
+            app.mib_root_prompt_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(app.mib_root_prompt.as_ref().map(|(_, label)| label.as_str()), Some("PASTED-LABEL"));
+        }
+    }
+
+    #[test]
+    fn picker_delete_mib_root_lists_configured_roots() {
+        let config_dir = TempDir::new("delete_mib_root_list_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
+
+        app.picker_delete_mib_root();
+
+        match &app.active_picker {
+            Some(ActivePicker::DeleteMibRoot(state)) => assert_eq!(state.len(), 2),
+            other => panic!("expected an open DeleteMibRoot picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_delete_mib_root_removes_it_and_persists() {
+        let config_dir = TempDir::new("delete_mib_root_confirm_config");
+        let mut app = App::with_file(None);
+        let config_path = config_dir.path().join("config.ini");
+        app.config = fenix_config::Config::load_or_default(config_path.clone());
+        app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
+        app.mib_roots =
+            app.config.mib_roots.iter().map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() }).collect();
+
+        app.picker_delete_mib_root();
+        // Pick a specific entry rather than relying on whatever the
+        // picker's own default selection happens to be.
+        if let Some(ActivePicker::DeleteMibRoot(state)) = &mut app.active_picker {
+            while state.selected().map(|c| &c.payload.0) != Some(&"A".to_string()) {
+                state.move_selection(1);
+            }
+        }
+        app.picker_confirm();
+
+        assert_eq!(app.config.mib_roots, vec![("B".to_string(), PathBuf::from("/mib/b"))]);
+        assert_eq!(app.mib_roots, vec![fenix_mib::MibRoot { label: "B".to_string(), path: PathBuf::from("/mib/b") }]);
+        assert!(app.mib_index.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+
+        let reloaded = fenix_config::Config::load_or_default(config_path);
+        assert_eq!(reloaded.mib_roots, vec![("B".to_string(), PathBuf::from("/mib/b"))]);
     }
 
     #[test]

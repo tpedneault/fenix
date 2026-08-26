@@ -216,6 +216,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "mib.lookup_calibration",
         );
         t.insert(&[spc, KeyPress::char('m'), KeyPress::char('r')], "refresh MIB index", "mib.refresh_index");
+        // Same letters `SPC p a`/`SPC p d` already use for the identical
+        // add/delete-from-a-persisted-list pattern.
+        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('a')], "add MIB root", "mib.add_root");
+        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('d')], "delete MIB root", "mib.delete_root");
 
         t.label_group(&[spc, KeyPress::char('w')], "window");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
@@ -535,6 +539,8 @@ mod tests {
             ('p', "mib.lookup_tm_parameter"),
             ('c', "mib.lookup_calibration"),
             ('r', "mib.refresh_index"),
+            ('a', "mib.add_root"),
+            ('d', "mib.delete_root"),
         ];
         for &(key, expected) in cases {
             let mut m = trie.matcher();

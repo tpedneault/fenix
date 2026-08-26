@@ -212,8 +212,12 @@ for anyone curious to poke around or build on it.
   aliases offers a picker of them; one with a known numeric range warns,
   without blocking, if the typed value falls outside it), review the
   rendered command, confirm to insert at wherever the wizard started.
-  `SPC m r` reparses the configured MIB directories from disk. Ported
-  from an ICD 7.2 SCOS-2000 MIB workflow in the author's previous
+  `SPC m r` reparses the configured MIB directories from disk. `SPC m
+  a` registers a new MIB directory without leaving the editor: browse
+  to it in the file explorer, `S` to select it, then type a label --
+  persisted to `config.ini` immediately, same as everything else here.
+  `SPC m d` fuzzy-finds a configured directory to remove the same way.
+  Ported from an ICD 7.2 SCOS-2000 MIB workflow in the author's previous
   (Emacs) config -- see that config's own
   [MIB module](https://github.com/tpedneault/orbit-emacs/blob/master/modules/mod-mib.el)
   for the original.
@@ -346,6 +350,8 @@ popup shows what keys continue it.
 | `SPC m p` | Fuzzy-find a MIB TM parameter and view its details |
 | `SPC m c` | Fuzzy-find a MIB calibration definition and view its details |
 | `SPC m r` | Reparse the configured MIB directories from disk |
+| `SPC m a` | Browse to and register a new MIB root directory |
+| `SPC m d` | Fuzzy-find and remove a configured MIB root |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
 | `SPC w h/j/k/l` | Move focus between windows |
 | `SPC w w` | Cycle to the next window |
