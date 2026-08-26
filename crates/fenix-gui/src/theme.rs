@@ -278,7 +278,22 @@ pub const TEMPLEOS: Theme = Theme {
     // it stays inside the fixed 16-color CGA/EGA set this theme is
     // built from rather than introducing a new hue.
     caret: rgba(0x5555ff),
-    caret_text: text_color(0x5555ff),
+    // Deliberately NOT the same hex as `caret` above, despite this
+    // field's own doc comment generally expecting "same hue as caret" --
+    // `caret_text` is never actually rendered over the same background
+    // `caret` is. Every real use (the completion popup's Keyword rows,
+    // the which-key key column, the focused-pane title) draws it as text
+    // over `bg_modeline`, never as a block over `bg`/`hl_line`. Most
+    // themes' `bg`/`bg_modeline` are close enough in shade that one hue
+    // reads fine against both, so sharing a hex was harmless there --
+    // but TempleOS pairs a stark white `bg` with a solid dark-blue
+    // `bg_modeline`, so the two roles need genuinely different colors.
+    // Light Blue on `bg_modeline`'s dark blue (`0x0000aa`) is barely
+    // readable (~2.6:1 contrast) -- restoring the original Yellow here
+    // (high contrast against dark blue, and never rendered as a block
+    // caret, so the harshness complaint that moved `caret` off it
+    // doesn't apply to this field).
+    caret_text: text_color(0xffff55),
     // 0.15 alpha (this field's original value) was too faint to actually
     // read against a pure-white `bg`: blue's channels are far enough from
     // white's that the hue itself isn't the problem (unlike the old
