@@ -25,6 +25,31 @@ pub struct Rect {
     pub h: f32,
 }
 
+impl Rect {
+    /// Point-in-rect hit test -- left/top edges inclusive, right/bottom
+    /// exclusive, so two adjacent rects sharing an edge never both
+    /// claim the same pixel.
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::Rect;
+
+    #[test]
+    fn contains_point_is_true_inside_and_false_outside() {
+        let r = Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 };
+        assert!(r.contains_point(10.0, 20.0)); // top-left corner, inclusive
+        assert!(r.contains_point(50.0, 40.0)); // interior
+        assert!(!r.contains_point(110.0, 40.0)); // right edge, exclusive
+        assert!(!r.contains_point(50.0, 70.0)); // bottom edge, exclusive
+        assert!(!r.contains_point(9.9, 40.0)); // just left of the rect
+        assert!(!r.contains_point(50.0, 19.9)); // just above the rect
+    }
+}
+
 enum Node<T> {
     Leaf { id: WindowId, content: T },
     Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },

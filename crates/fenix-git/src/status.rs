@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::files::{parse_files, FileEntry};
 use crate::process::run_lines;
 
 /// The current branch plus its upstream tracking state -- mirrors
@@ -25,6 +26,18 @@ pub struct RepoStatus {
 pub fn status(repo: &Path) -> Option<RepoStatus> {
     let lines = run_lines(repo, &["status", "--porcelain=v2", "--branch"]);
     parse_status(&lines)
+}
+
+/// `status()` and `files::list_files()` combined into one shell-out --
+/// `--branch`'s header lines are strictly additive on top of plain
+/// `--porcelain=v2`'s entry lines, so the two never needed separate
+/// `git status` invocations in the first place. Callers that used to
+/// call both (`fenix-gui`'s panel open/refresh) should use this instead;
+/// `status()`/`list_files()` themselves are unchanged for anyone still
+/// calling just one.
+pub fn status_and_files(repo: &Path) -> (Option<RepoStatus>, Vec<FileEntry>) {
+    let lines = run_lines(repo, &["status", "--porcelain=v2", "--branch"]);
+    (parse_status(&lines), parse_files(&lines))
 }
 
 /// Verified against real `git status --porcelain=v2 --branch` output
@@ -59,6 +72,22 @@ fn parse_status(lines: &[String]) -> Option<RepoStatus> {
 mod tests {
     use super::*;
     use crate::test_util::{git, init_repo, TempDir};
+
+    #[test]
+    fn status_and_files_matches_the_two_separate_calls() {
+        let dir = TempDir::new("status_and_files");
+        init_repo(dir.path());
+        dir.write("committed.txt", "v1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir.write("committed.txt", "v2");
+        dir.write("untracked.txt", "new");
+
+        let (s, files) = status_and_files(dir.path());
+        assert_eq!(s, status(dir.path()));
+        assert_eq!(files, crate::files::list_files(dir.path()));
+        assert_eq!(files.len(), 2);
+    }
 
     #[test]
     fn none_outside_a_git_repo() {

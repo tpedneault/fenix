@@ -105,7 +105,6 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "line numbers",
             "view.cycle_line_numbers",
         );
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('t')], "theme", "view.cycle_theme");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('p')], "pick theme", "view.pick_theme");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('=')], "font size +", "view.increase_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
@@ -155,6 +154,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         t.label_group(&[spc, KeyPress::char('o')], "open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
+        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('t')], "toggle terminal", "terminal.toggle");
 
         // Reserved entirely for Docker (Lazydocker-style) -- the
         // dashboard used to live at `SPC d d` but moved to `SPC o d`
@@ -284,18 +284,6 @@ mod tests {
         match m.feed(KeyPress::char('n')) {
             fenix_keymap::Step::Matched(&"view.cycle_line_numbers") => {}
             _ => panic!("expected SPC t n to resolve to view.cycle_line_numbers"),
-        }
-    }
-
-    #[test]
-    fn leader_trie_resolves_theme_cycle() {
-        let trie = leader_trie();
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('t'));
-        match m.feed(KeyPress::char('t')) {
-            fenix_keymap::Step::Matched(&"view.cycle_theme") => {}
-            _ => panic!("expected SPC t t to resolve to view.cycle_theme"),
         }
     }
 
@@ -449,6 +437,18 @@ mod tests {
         match m.feed(KeyPress::char('d')) {
             fenix_keymap::Step::Matched(&"dashboard.open") => {}
             _ => panic!("expected SPC o d to resolve to dashboard.open"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_terminal_toggle() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('o'));
+        match m.feed(KeyPress::char('t')) {
+            fenix_keymap::Step::Matched(&"terminal.toggle") => {}
+            _ => panic!("expected SPC o t to resolve to terminal.toggle"),
         }
     }
 

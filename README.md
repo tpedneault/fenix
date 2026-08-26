@@ -147,30 +147,37 @@ for anyone curious to poke around or build on it.
   the very next keypress, which still does whatever it would normally
   do. `SPC d b` builds an image from the current project root's
   `Dockerfile`; `SPC d q` closes the whole session.
-- **Git panel** (Lazygit-style): `SPC g g` opens a real, six-pane
-  workspace -- Status/Files/Branches/Commits/Stash stacked on the left
-  (each its own real, Vim-navigable buffer with a title bar), Main on
-  the right showing a diff of whatever's under the cursor in Files/
-  Commits/Stash. Status is a fixed repo-overview summary (branch,
-  upstream, ahead/behind, staged/unstaged/untracked counts) that live-
-  updates on its own every ~2s via a background poller, independent of
-  cursor movement -- the inverse of the Docker panel's Status/Logs
-  split, same pattern, roles swapped to match what's actually true of
-  each domain. On Files: `s`/`S` stage/unstage the file under the
-  cursor, `a`/`A` stage/unstage everything, `c` commits (prompts for a
-  message), `d` discards the file under the cursor (`y`/`n` confirm,
+- **Git panel** (Lazygit-style): `SPC g g` opens a real, seven-pane
+  workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
+  the left (each its own real, Vim-navigable buffer with a title bar),
+  Main on the right showing a diff of whatever's under the cursor in
+  Staged/Unstaged/Commits/Stash. Staged and Unstaged are two independent
+  views of the same file list (a file that's both staged *and* further
+  modified appears in both, since git tracks the two halves separately)
+  -- `s`/`S` stage/unstage the file under the cursor from either pane,
+  `a`/`A` stage/unstage everything, `c` commits (prompts for a message),
+  `d` on Unstaged discards the file under the cursor (`y`/`n` confirm,
   handling untracked files correctly via `git clean` rather than `git
-  checkout`), `z` stashes every change, `P`/`p` push/pull. On Branches:
-  `c` checks out the branch under the cursor, `n` creates a new one
-  (prompts for a name), `d` deletes it (confirm). On Stash: `a` applies
-  the entry under the cursor, `g` pops it, `d` drops it (confirm). `u`
-  refreshes the whole session from any pane; `x` on Files/Branches/
-  Commits/Stash shows a contextual popup of that pane's keys, same
-  dismiss-on-next-keypress convention as Docker's. Real lazygit's own
-  `<space>` stage-toggle isn't used here -- `SPC` is already Fenix's
-  global leader-key trigger -- so Files uses separate `s`/`S` keys
+  checkout`), `z` stashes every change, `P`/`p` push/pull. Status is a
+  fixed repo-overview summary (branch, upstream, ahead/behind, staged/
+  unstaged/untracked counts) that live-updates on its own every ~2s via
+  a background poller, independent of cursor movement -- the inverse of
+  the Docker panel's Status/Logs split, same pattern, roles swapped to
+  match what's actually true of each domain. On Branches: `c` checks out
+  the branch under the cursor, `n` creates a new one (prompts for a
+  name), `d` deletes it (confirm). On Stash: `a` applies the entry under
+  the cursor, `g` pops it, `d` drops it (confirm). `u` refreshes the
+  whole session from any pane; `x` on Staged/Unstaged/Branches/Commits/
+  Stash shows a contextual popup of that pane's keys, same dismiss-on-
+  next-keypress convention as Docker's. Real lazygit's own `<space>`
+  stage-toggle isn't used here -- `SPC` is already Fenix's global
+  leader-key trigger -- so Staged/Unstaged use separate `s`/`S` keys
   instead, matching the Docker panel's own `s`/`S`/`R` precedent.
-  `SPC g q` closes the whole session.
+  Main's diff fetch runs off the input thread (a background thread posts
+  the result back when it lands, discarding a slow one a faster later
+  selection already superseded) so scrolling through many files never
+  blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
+  whole session.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -211,9 +218,21 @@ for anyone curious to poke around or build on it.
   [MIB module](https://github.com/tpedneault/orbit-emacs/blob/master/modules/mod-mib.el)
   for the original.
 - **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
-  `Solarized Dark`, and `One Dark`, cycled at runtime (`SPC t t`) or
-  jumped to directly by name with a fuzzy picker (`SPC t p`), persisted
-  either way.
+  `Solarized Dark`, and `One Dark`, jumped to directly by name with a
+  fuzzy picker (`SPC t p`), persisted.
+- **Terminal panel**: `SPC o t` toggles a real, interactive terminal --
+  `powershell.exe` on Windows, `$SHELL` (falling back to `/bin/sh`)
+  elsewhere -- as a full-width strip along the bottom of the window,
+  under every existing split, with full ANSI color support (16-color,
+  256-color, and RGB foreground/background). Toggling it off only hides
+  it: the shell process, and anything running in it, keeps running in
+  the background, and reopening shows it caught up to wherever it got
+  to. `Ctrl-\` unfocuses the terminal without hiding it (mirrors
+  Neovim's own `:terminal` convention), so normal Vim window navigation
+  (`SPC w ...`) can move focus elsewhere while it stays visible. v1
+  limitations: no mouse reporting, no bracketed paste, no F-keys, no
+  application-cursor-mode variants -- covers ordinary shell/REPL/pager
+  use, not a full terminfo-correct implementation.
 - **Table/spreadsheet view**: `SPC f t` toggles the focused buffer
   between plain text and an elastic-column table view of its own,
   genuinely tab-separated content -- real elastic tabstops, not a
@@ -236,7 +255,7 @@ Requires a recent stable Rust toolchain (edition 2021).
 cargo build --release
 ```
 
-The binary is `target/release/fenix-gui`. To run without building a
+The binary is `target/release/fenix`. To run without building a
 release binary first:
 
 ```bash
@@ -298,7 +317,6 @@ popup shows what keys continue it.
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC q q` | Quit |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
-| `SPC t t` | Cycle theme |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
@@ -312,6 +330,7 @@ popup shows what keys continue it.
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |
 | `SPC o d` | Open the startup dashboard |
+| `SPC o t` | Toggle the terminal panel |
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
@@ -551,6 +570,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-config` | The unified `config.ini` reader/writer |
+| `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) for the terminal panel — no thread/event-loop knowledge of its own |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 
 ## License

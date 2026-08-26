@@ -19,4 +19,4 @@ pub use commit::{list_commits, Commit};
 pub use diff::{commit_diff, file_diff, stash_diff};
 pub use files::{list_files, FileEntry};
 pub use stash::{list_stashes, Stash};
-pub use status::{status, RepoStatus};
+pub use status::{status, status_and_files, RepoStatus};

@@ -24,6 +24,16 @@ pub fn list_files(repo: &Path) -> Vec<FileEntry> {
     run_lines(repo, &["status", "--porcelain=v2"]).iter().filter_map(|l| parse_line(l)).collect()
 }
 
+/// Parses entry lines out of a `status --porcelain=v2 --branch` output
+/// (or plain `--porcelain=v2`, since the header lines this skips simply
+/// don't match any of the four line-kind prefixes below) -- shared with
+/// `status::status_and_files`, which shells the `--branch` form once and
+/// needs both the header lines *and* these entry lines from the same
+/// output.
+pub(crate) fn parse_files(lines: &[String]) -> Vec<FileEntry> {
+    lines.iter().filter_map(|l| parse_line(l)).collect()
+}
+
 /// Verified against real `git status --porcelain=v2` output (run
 /// directly in this repo this session) and `git help status`'s own
 /// documented Porcelain Format Version 2 field layout for each of the

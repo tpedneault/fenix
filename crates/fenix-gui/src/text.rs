@@ -47,6 +47,11 @@ pub const WHICH_KEY_MARGIN: f32 = 12.0;
 pub const MODE_BADGE_CHARS: usize = 8;
 /// Width of the file-explorer sidebar panel.
 pub const SIDEBAR_WIDTH: f32 = 240.0;
+/// Height, in rows, of the terminal panel -- fixed (not user-resizable
+/// in v1), same posture as `SIDEBAR_WIDTH`. Kept as a row count rather
+/// than a raw pixel height since the real PTY underneath needs an exact
+/// row count to stay in sync with what's rendered.
+pub const TERMINAL_ROWS: usize = 12;
 
 /// A community TTF conversion (github.com/rendello/templeos_font) of
 /// TempleOS's actual 8x8 bitmap font, embedded so the TempleOS theme
@@ -125,6 +130,7 @@ pub struct TextPipeline {
     /// advances" bugs instead of chasing another one.
     clock: GlyphBuffer,
     sidebar: GlyphBuffer,
+    terminal: GlyphBuffer,
     /// Effective body-text font family: a `config.ini` `font_family`
     /// override, or else the active theme's own `Theme::font_family` --
     /// whichever `App::redraw` resolved and passed to `set_font_family`.
@@ -213,6 +219,10 @@ impl TextPipeline {
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
 
+        let mut terminal = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        terminal.set_wrap(Wrap::None);
+        terminal.set_size(Some(gpu.size.width as f32), Some(terminal_height(LINE_HEIGHT)));
+
         let char_width = Self::measure_char_width(&mut font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
 
         Self {
@@ -228,6 +238,7 @@ impl TextPipeline {
             modeline,
             clock,
             sidebar,
+            terminal,
             content_family: None,
             default_family,
             char_width,
@@ -499,6 +510,15 @@ impl TextPipeline {
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Sets the terminal panel's rows -- same mechanism as `set_sidebar_
+    /// rich`, into its own independent glyph buffer.
+    pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)]) {
+        let default_attrs = Attrs::new().family(self.content_family());
+        let spans = self.rich_spans(segments);
+        self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.terminal.shape_until_scroll(&mut self.font_system, false);
+    }
+
     pub fn resize(&mut self, width: f32, height: f32) {
         // Pane buffers are resized every frame in `set_pane_rich` (their
         // rect comes from `WindowTree::layout`, recomputed each redraw
@@ -512,6 +532,11 @@ impl TextPipeline {
         self.modeline.shape_until_scroll(&mut self.font_system, false);
         self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height, self.modeline_height())));
         self.sidebar.shape_until_scroll(&mut self.font_system, false);
+        // The width-vs-height mirror of the sidebar's own resize just
+        // above: fixed height (`TERMINAL_ROWS`), full width instead of
+        // fixed width/remaining height.
+        self.terminal.set_size(Some(width), Some(terminal_height(self.line_height)));
+        self.terminal.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// One pane's render info for `prepare`: its id (to look up the right
@@ -537,6 +562,7 @@ impl TextPipeline {
         panes: &[(PaneId, Rect, f32)],
         titles: &[(PaneId, Rect)],
         sidebar_open: bool,
+        terminal_open: bool,
     ) {
         self.viewport.update(
             &gpu.queue,
@@ -621,6 +647,19 @@ impl TextPipeline {
                 top: PAD_TOP,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: 0, right: SIDEBAR_WIDTH as i32, bottom: modeline_top as i32 },
+                default_color: theme.fg,
+                custom_glyphs: &[],
+            });
+        }
+
+        if terminal_open {
+            let top = modeline_top - terminal_height(self.line_height);
+            areas.push(TextArea {
+                buffer: &self.terminal,
+                left: PAD_LEFT,
+                top: top + PAD_TOP,
+                scale: 1.0,
+                bounds: TextBounds { left: 0, top: top as i32, right: gpu.config.width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
                 custom_glyphs: &[],
             });
@@ -712,6 +751,13 @@ fn content_height(window_height: f32, modeline_height: f32) -> f32 {
     (window_height - modeline_height).max(0.0)
 }
 
+/// Pixel height of the terminal panel's `TERMINAL_ROWS` rows, at the
+/// given `line_height` -- mirrors `content_height`'s role for the
+/// sidebar, just for a row count instead of "whatever's left."
+pub fn terminal_height(line_height: f32) -> f32 {
+    TERMINAL_ROWS as f32 * line_height + PAD_TOP * 2.0
+}
+
 /// How many full text lines fit in a content area of the given pixel
 /// height (already excluding the modeline, e.g. a pane's own rect
 /// height) at the given `line_height` -- used both for the whole-window
@@ -721,8 +767,25 @@ fn content_height(window_height: f32, modeline_height: f32) -> f32 {
 /// `TextPipeline::line_height()` (or `text::LINE_HEIGHT` as a fallback
 /// when no pipeline exists yet, e.g. a `redraw()` before the GPU is
 /// ready).
+///
+/// Reserves `PAD_TOP` off the top before dividing -- every caller of
+/// this (pane content, the sidebar, the explorer/picker overlay) draws
+/// its first row starting `PAD_TOP` down from the container's own top
+/// (`row_y`/`sidebar_row_y`/`caret_pixel_pos` all add it), so the *last*
+/// row this claims fits needs `PAD_TOP` counted against the available
+/// height too, or its bottom edge lands `PAD_TOP` past the container's
+/// real bottom. Without this, whenever `height` happened to be an exact
+/// or near-exact multiple of `line_height` (common at ordinary window
+/// sizes, not a rare fraction), one row too many was reported as
+/// fitting -- harmless for a lightly-colored highlight lost among real
+/// text above it, but glaring for the current line's own highlight/
+/// caret specifically (drawn as solid, undamped rects, not clipped text)
+/// when that line was also the *last* visible row: reported bug was the
+/// caret visibly bleeding a few pixels into the modeline while sitting
+/// on a file's last line, which is exactly the "current line = last
+/// reported-fitting row" case this always could have hit.
 pub fn lines_that_fit(height: f32, line_height: f32) -> usize {
-    (height / line_height).floor().max(1.0) as usize
+    ((height - PAD_TOP) / line_height).floor().max(1.0) as usize
 }
 
 /// How many full text lines fit in the content area above the modeline,
@@ -797,6 +860,27 @@ mod tests {
         let font_system = FontSystem::new();
         let resolved = font_system.db().family_name(&Family::Monospace);
         assert!(!resolved.is_empty(), "expected fontdb to resolve Family::Monospace to a real family name");
+    }
+
+    #[test]
+    fn lines_that_fit_reserves_pad_top_so_the_last_rows_bottom_edge_never_exceeds_height() {
+        // A height that's an exact multiple of line_height is exactly
+        // the case that used to overreport by one row (see this
+        // function's own doc comment) -- confirmed here by checking the
+        // actual geometric claim, not just a specific returned number:
+        // PAD_TOP + n * line_height must never exceed height. Excludes
+        // heights small enough that the pre-existing "always at least 1
+        // row" floor (below) is the binding constraint instead -- that
+        // floor deliberately trades a bit of overflow for never
+        // reporting zero rows, a different, unrelated tradeoff.
+        for height in [400.0, 400.0 + PAD_TOP, 800.0] {
+            let n = lines_that_fit(height, LINE_HEIGHT);
+            assert!(
+                PAD_TOP + n as f32 * LINE_HEIGHT <= height,
+                "height {height}: {n} rows claims to fit, but PAD_TOP + {n} * {LINE_HEIGHT} = {} > {height}",
+                PAD_TOP + n as f32 * LINE_HEIGHT
+            );
+        }
     }
 
     #[test]

@@ -38,7 +38,6 @@ impl CommandRegistry {
             "Cycle the line-number gutter: off, absolute, relative",
             cmd_cycle_line_numbers,
         );
-        registry.register("view.cycle_theme", "Cycle to the next theme", cmd_cycle_theme);
         registry.register("view.pick_theme", "Pick a theme by name", cmd_pick_theme);
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register(
@@ -77,6 +76,7 @@ impl CommandRegistry {
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
+        registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
@@ -166,10 +166,6 @@ fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
     ctx.app.cycle_line_number_mode();
 }
 
-fn cmd_cycle_theme(ctx: &mut CommandCtx) {
-    ctx.app.cycle_theme();
-}
-
 fn cmd_pick_theme(ctx: &mut CommandCtx) {
     ctx.app.picker_pick_theme();
 }
@@ -256,6 +252,10 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
 
 fn cmd_dashboard_open(ctx: &mut CommandCtx) {
     ctx.app.open_dashboard();
+}
+
+fn cmd_toggle_terminal(ctx: &mut CommandCtx) {
+    ctx.app.toggle_terminal();
 }
 
 fn cmd_docker_open(ctx: &mut CommandCtx) {

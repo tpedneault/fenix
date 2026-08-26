@@ -651,8 +651,7 @@ pub const ONE_DARK: Theme = Theme {
     git_conflicted: text_color(0xe06c75),
 };
 
-/// Every theme Fenix ships, in cycling order. `App::cycle_theme` and
-/// `by_name` both work off this.
+/// Every theme Fenix ships. `by_name` works off this.
 pub const ALL: &[&Theme] =
     &[&ORBIT_DARK, &TEMPLEOS, &GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK];
 

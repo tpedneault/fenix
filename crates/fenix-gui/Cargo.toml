@@ -3,6 +3,10 @@ name = "fenix-gui"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "fenix"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3"
@@ -23,9 +27,15 @@ fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-table = { path = "../fenix-table" }
+fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
+image = { version = "0.25", default-features = false, features = ["ico"] }
 pollster = "1.0.1"
+vt100 = "0.16"
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+[build-dependencies]
+winresource = "0.1"

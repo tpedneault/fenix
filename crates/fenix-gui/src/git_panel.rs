@@ -204,16 +204,35 @@ fn flatten_file_tree(node: &DirNode, prefix: &str, depth: usize, expanded: &Hash
     }
 }
 
-/// The Files pane's own content -- changed/untracked paths grouped into
-/// a collapsible directory tree (`Tab` toggles a directory under the
+/// The Staged pane's own content -- every entry with a real index
+/// (staged) half, same predicate `app.rs`'s `file_counts` helper already
+/// establishes. A file that's both staged *and* further modified
+/// (`MM`) appears here too (and in `render_unstaged`) -- `FileEntry`
+/// already carries both halves independently, there's nothing to
+/// reconcile.
+pub fn render_staged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
+    let staged: Vec<FileEntry> = files.iter().filter(|f| f.index_status != '.' && f.index_status != '?').cloned().collect();
+    render_file_tree(&staged, expanded_dirs, "Nothing staged")
+}
+
+/// The Unstaged pane's own content -- every entry with a real worktree
+/// half, which covers both a plain unstaged modification *and* an
+/// untracked file (synthesized `worktree_status: '?'`, also `!= '.'`).
+pub fn render_unstaged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
+    let unstaged: Vec<FileEntry> = files.iter().filter(|f| f.worktree_status != '.').cloned().collect();
+    render_file_tree(&unstaged, expanded_dirs, "Nothing to commit, working tree clean")
+}
+
+/// Shared by `render_staged`/`render_unstaged`: `files` grouped into a
+/// collapsible directory tree (`Tab` toggles a directory under the
 /// cursor, see `app.rs`'s `git_toggle_dir_expand`), each file row led
-/// by its `[XY]` badge. `expanded_dirs` is the session's own persisted
-/// set of expanded directory paths -- a fresh/never-toggled directory
-/// starts collapsed, showing just its name.
-pub fn render_files(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
+/// by its `[XY]` badge. `expanded_dirs` is the pane's own persisted set
+/// of expanded directory paths -- a fresh/never-toggled directory starts
+/// collapsed, showing just its name.
+fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_message: &str) -> GitPanel {
     let mut b = Builder::new();
     if files.is_empty() {
-        let (text, meta) = empty_line("Nothing to commit, working tree clean");
+        let (text, meta) = empty_line(empty_message);
         b.push(&text, meta);
     } else {
         let tree = build_file_tree(files);
@@ -431,34 +450,69 @@ mod tests {
     }
 
     #[test]
-    fn render_files_lists_entries_with_the_right_entry() {
-        let panel = render_files(&[file("a.txt", '.', 'M'), file("b.txt", 'A', '.')], &HashSet::new());
+    fn render_unstaged_lists_entries_with_the_right_entry() {
+        let panel = render_unstaged(&[file("a.txt", '.', 'M'), file("b.txt", '?', '?')], &HashSet::new());
         let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry, Some(GitEntry::File("a.txt".to_string())));
     }
 
     #[test]
-    fn render_files_lines_stay_the_same_length_as_text() {
-        let panel = render_files(&[file("a.txt", '.', 'M')], &HashSet::new());
-        assert_eq!(panel.text.lines().count(), panel.lines.len());
+    fn render_staged_lists_entries_with_the_right_entry() {
+        let panel = render_staged(&[file("a.txt", 'M', '.'), file("b.txt", 'A', '.')], &HashSet::new());
+        let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry, Some(GitEntry::File("a.txt".to_string())));
     }
 
     #[test]
-    fn render_files_empty_list_shows_a_placeholder() {
-        let panel = render_files(&[], &HashSet::new());
+    fn render_unstaged_excludes_a_staged_only_file() {
+        let panel = render_unstaged(&[file("a.txt", 'A', '.')], &HashSet::new());
         assert!(panel.text.contains("clean"));
     }
 
     #[test]
-    fn render_files_shows_the_raw_status_letters_as_the_badge() {
-        let panel = render_files(&[file("a.txt", '.', 'M')], &HashSet::new());
+    fn render_staged_excludes_an_unstaged_only_file() {
+        let panel = render_staged(&[file("a.txt", '.', 'M')], &HashSet::new());
+        assert!(panel.text.contains("Nothing staged"));
+    }
+
+    #[test]
+    fn a_partially_staged_file_appears_in_both_panes() {
+        let files = [file("a.txt", 'M', 'M')]; // staged AND further modified
+        let staged = render_staged(&files, &HashSet::new());
+        let unstaged = render_unstaged(&files, &HashSet::new());
+        assert_eq!(staged.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).count(), 1);
+        assert_eq!(unstaged.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).count(), 1);
+    }
+
+    #[test]
+    fn render_unstaged_lines_stay_the_same_length_as_text() {
+        let panel = render_unstaged(&[file("a.txt", '.', 'M')], &HashSet::new());
+        assert_eq!(panel.text.lines().count(), panel.lines.len());
+    }
+
+    #[test]
+    fn render_unstaged_empty_list_shows_a_placeholder() {
+        let panel = render_unstaged(&[], &HashSet::new());
+        assert!(panel.text.contains("clean"));
+    }
+
+    #[test]
+    fn render_staged_empty_list_shows_a_placeholder() {
+        let panel = render_staged(&[], &HashSet::new());
+        assert!(panel.text.contains("Nothing staged"));
+    }
+
+    #[test]
+    fn render_unstaged_shows_the_raw_status_letters_as_the_badge() {
+        let panel = render_unstaged(&[file("a.txt", '.', 'M')], &HashSet::new());
         assert!(panel.text.contains("[.M] a.txt"));
     }
 
     #[test]
-    fn render_files_groups_a_subdirectorys_files_under_one_collapsed_row() {
-        let panel = render_files(&[file("src/a.txt", '.', 'M'), file("src/b.txt", '?', '?')], &HashSet::new());
+    fn render_unstaged_groups_a_subdirectorys_files_under_one_collapsed_row() {
+        let panel = render_unstaged(&[file("src/a.txt", '.', 'M'), file("src/b.txt", '?', '?')], &HashSet::new());
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         // Collapsed: just the one directory row, no file rows underneath.
         assert_eq!(lines.len(), 1);
@@ -468,10 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn render_files_expanding_a_directory_reveals_its_files_indented_and_by_basename() {
+    fn render_unstaged_expanding_a_directory_reveals_its_files_indented_and_by_basename() {
         let mut expanded = HashSet::new();
         expanded.insert("src".to_string());
-        let panel = render_files(&[file("src/a.txt", '.', 'M'), file("root.txt", 'A', '.')], &expanded);
+        let panel = render_unstaged(&[file("src/a.txt", '.', 'M'), file("root.txt", '.', 'D')], &expanded);
 
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(lines.len(), 3); // src/ dir row + a.txt + root.txt
@@ -488,16 +542,16 @@ mod tests {
         assert!(panel.text.contains("    [.M] a.txt"));
         assert!(!panel.text.contains("src/a.txt"));
         // A root-level file (no directory) renders exactly as before.
-        assert!(panel.text.contains("  [A.] root.txt"));
+        assert!(panel.text.contains("  [.D] root.txt"));
     }
 
     #[test]
-    fn render_files_nested_subdirectories_only_expand_one_level_at_a_time() {
+    fn render_unstaged_nested_subdirectories_only_expand_one_level_at_a_time() {
         let mut expanded = HashSet::new();
         expanded.insert("src".to_string());
         // "src/nested" itself is not in `expanded`, so its file stays
         // collapsed behind its own directory row even though "src" is.
-        let panel = render_files(&[file("src/nested/deep.txt", '.', 'M')], &expanded);
+        let panel = render_unstaged(&[file("src/nested/deep.txt", '.', 'M')], &expanded);
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(lines.len(), 2); // "src/" row, "src/nested/" row -- no file row yet
         assert!(lines.iter().all(|l| l.style == GitLineStyle::Dir));
@@ -505,8 +559,8 @@ mod tests {
     }
 
     #[test]
-    fn render_files_directories_sort_before_files_alphabetically_within_each_level() {
-        let panel = render_files(&[file("z.txt", '.', 'M'), file("a_dir/x.txt", '.', 'M')], &HashSet::new());
+    fn render_unstaged_directories_sort_before_files_alphabetically_within_each_level() {
+        let panel = render_unstaged(&[file("z.txt", '.', 'M'), file("a_dir/x.txt", '.', 'M')], &HashSet::new());
         // "a_dir/" (a directory) sorts before "z.txt" despite the
         // alphabetically-later name, matching `fenix_explorer`'s own
         // directories-first convention.

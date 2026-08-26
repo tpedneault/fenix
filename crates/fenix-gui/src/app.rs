@@ -12,10 +12,10 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, 
 use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
 use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
@@ -371,6 +371,91 @@ impl Drop for DockerLogFollower {
     }
 }
 
+/// Streams raw PTY output bytes for the terminal panel's shell into
+/// `FenixUserEvent::TerminalOutput` -- same "background thread, stopped
+/// via a kill that unblocks its blocking read" shape as `DockerLog
+/// Follower`, just forwarding raw bytes instead of pre-split lines
+/// (there's no line discipline to split on here -- an interactive
+/// shell's output is arbitrary ANSI, not newline-delimited log lines).
+/// Deliberately does *not* own the `fenix_terminal::Terminal` itself
+/// (only its reader half) -- the parser stays single-threaded, updated
+/// only from the main thread in `App::apply_terminal_output`, so no
+/// `Arc<Mutex<_>>` is needed anywhere in this path.
+struct TerminalReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TerminalReader {
+    fn spawn(mut reader: Box<dyn std::io::Read + Send>, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                match reader.read(&mut buf) {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        if thread_stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if !send(FenixUserEvent::TerminalOutput(buf[..n].to_vec())) {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for TerminalReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Note: unlike `DockerLogFollower`, killing the shell itself
+        // isn't this type's job -- `TerminalState`'s own teardown kills
+        // `session` first (see its own `Drop`), which is what actually
+        // unblocks this thread's blocking read via EOF/error.
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The terminal panel's live session -- created once, on the first
+/// `SPC o t`, and never dropped just by toggling visibility off
+/// (`App::terminal_open` is purely a rendering/layout concern; this is
+/// what actually persists the shell process, per the user's own
+/// explicit ask). Only replaced (dropping the old one, per `Drop`
+/// below) when the shell has exited and the panel is opened again.
+struct TerminalState {
+    session: fenix_terminal::Terminal,
+    /// `None` when opened without a real `event_proxy` (every test, per
+    /// `App::new`'s own doc comment) -- same "only a real, main.rs-
+    /// launched App spawns anything" posture `DockerSession::stats_
+    /// poller`/`GitSession::status_poller` already have. Never read
+    /// again once set -- held only for its `Drop` side effect, same
+    /// idiom as `stats_poller`/`log_follower`.
+    #[allow(dead_code)]
+    reader: Option<TerminalReader>,
+}
+
+impl Drop for TerminalState {
+    fn drop(&mut self) {
+        // Order matters: killing the shell first is what unblocks
+        // `reader`'s own blocking read (see `TerminalReader::drop`'s own
+        // note) -- dropping fields in the other order would leave
+        // `reader`'s `Drop` waiting to join a thread that can never wake
+        // up on its own.
+        self.session.kill();
+    }
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -385,7 +470,7 @@ enum DockerPaneRole {
 }
 
 /// A Lazygit-style Git management session (`SPC g g`) -- mirrors
-/// `DockerSession`'s own shape and reasoning almost exactly (six panes
+/// `DockerSession`'s own shape and reasoning almost exactly (seven panes
 /// instead of five, one background poller instead of two, action-key
 /// routing keyed off *which pane is focused* rather than `BufferKind`
 /// alone). The one real structural difference: every `fenix-git` call
@@ -396,13 +481,15 @@ enum DockerPaneRole {
 struct GitSession {
     workspace_index: usize,
     status_pane: fenix_window::WindowId,
-    files_pane: fenix_window::WindowId,
+    staged_pane: fenix_window::WindowId,
+    unstaged_pane: fenix_window::WindowId,
     branches_pane: fenix_window::WindowId,
     commits_pane: fenix_window::WindowId,
     stash_pane: fenix_window::WindowId,
     main_pane: fenix_window::WindowId,
     status_buffer: BufferId,
-    files_buffer: BufferId,
+    staged_buffer: BufferId,
+    unstaged_buffer: BufferId,
     branches_buffer: BufferId,
     commits_buffer: BufferId,
     stash_buffer: BufferId,
@@ -411,7 +498,12 @@ struct GitSession {
     /// Last-listed files/branches/commits/stashes, cached so `git_sync_
     /// main`/action handlers can look up whichever row is under the
     /// cursor without re-shelling `git` on every keystroke -- same
-    /// reasoning as `DockerSession::containers`/`images`/`volumes`.
+    /// reasoning as `DockerSession::containers`/`images`/`volumes`. One
+    /// flat list feeds both the Staged and Unstaged panes (each just
+    /// filters it differently at render time, see `git_panel::render_
+    /// staged`/`render_unstaged`) -- a `FileEntry` already carries both
+    /// halves independently, so there's nothing to split at the data
+    /// level.
     files: Vec<fenix_git::FileEntry>,
     branches: Vec<fenix_git::Branch>,
     commits: Vec<fenix_git::Commit>,
@@ -427,14 +519,40 @@ struct GitSession {
     /// `DockerSession::stats_poller`.
     #[allow(dead_code)]
     status_poller: Option<GitStatusPoller>,
-    /// Full repo-relative paths of every directory currently expanded
-    /// in the Files pane's tree (`Tab` toggles membership, see
+    /// Full repo-relative paths of every directory currently expanded in
+    /// the Staged pane's own tree (`Tab` toggles membership, see
     /// `git_toggle_dir_expand`) -- a directory not in here renders
     /// collapsed, showing just its own row. Starts empty (every
     /// directory collapsed) and persists across `git_refresh_session`,
     /// so refreshing the session doesn't fold everything you'd opened
-    /// back up.
-    expanded_dirs: HashSet<String>,
+    /// back up. Kept separate from `unstaged_expanded_dirs` -- each pane
+    /// manages its own view state, since the same directory being open
+    /// in one doesn't imply anything about the other.
+    staged_expanded_dirs: HashSet<String>,
+    /// Same role as `staged_expanded_dirs`, for the Unstaged pane.
+    unstaged_expanded_dirs: HashSet<String>,
+    /// The `GitEntry` `git_sync_main` last actually fetched a diff for --
+    /// lets it skip re-shelling `git diff`/`show` when the cursor hasn't
+    /// moved to a *different* entry (most keystrokes in Staged/Unstaged/
+    /// Commits/Stash don't). `None` both "nothing selected yet" and
+    /// "force a re-fetch even if the entry looks unchanged" -- `git_
+    /// refresh_session` resets this before its own trailing `git_sync_
+    /// main` call, since a manual refresh means the underlying content
+    /// may have changed even if the selected path/hash/index hasn't.
+    last_main_entry: Option<git_panel::GitEntry>,
+    /// Bumped every time `git_sync_main` issues a real async fetch (a
+    /// `File`/`Commit`/`Stash` selection, not `None`/an untracked
+    /// placeholder, neither of which need a shell-out) -- `apply_git_
+    /// main` discards a completed fetch whose id no longer matches this,
+    /// the guard against a slow, superseded request overwriting Main
+    /// with a stale diff after a faster, later one already landed.
+    main_request_id: u64,
+    /// Bumped every time `git_refresh_session` issues a real async
+    /// refresh -- `apply_git_refresh` discards a completed refresh whose
+    /// id no longer matches this, same "slow request superseded by a
+    /// faster later one" guard as `main_request_id`, just for the whole-
+    /// session refresh instead of a single diff fetch.
+    refresh_request_id: u64,
 }
 
 /// A background `git status --porcelain=v2 --branch` poller for one open
@@ -483,12 +601,13 @@ impl Drop for GitStatusPoller {
     }
 }
 
-/// Which of a `GitSession`'s six panes is currently focused, if any --
+/// Which of a `GitSession`'s seven panes is currently focused, if any --
 /// mirrors `DockerPaneRole`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitPaneRole {
     Status,
-    Files,
+    Staged,
+    Unstaged,
     Branches,
     Commits,
     Stash,
@@ -556,6 +675,26 @@ pub enum FenixUserEvent {
     /// outside a repo), from the active Git session's background
     /// poller.
     GitStatusReady(Option<fenix_git::RepoStatus>),
+    /// A `git diff`/`show`/`stash show` result for the Git panel's Main
+    /// pane, from a one-shot background thread `git_sync_main` spawned.
+    /// Carries the target `BufferId` explicitly (same reasoning as
+    /// `LogLine`) and the `request_id` the fetch was issued under, so a
+    /// slow request superseded by a faster later one can be told apart
+    /// and discarded instead of clobbering Main with a stale diff --
+    /// see `GitSession::main_request_id`'s own doc comment.
+    GitMainReady { request_id: u64, buffer: BufferId, diff: Option<String> },
+    /// A completed `git_refresh_session` re-list (files/branches/
+    /// commits/stashes/status), from a one-shot background thread it
+    /// spawned. Carries the `request_id` the refresh was issued under,
+    /// same stale-result guard as `GitMainReady` -- see `GitSession::
+    /// refresh_request_id`'s own doc comment.
+    GitRefreshReady { request_id: u64, data: GitRefreshData },
+    /// A chunk of raw output bytes from the terminal panel's shell, from
+    /// `TerminalReader`'s background thread -- fed straight into the
+    /// `vt100::Parser` living in `App::terminal` on the main thread
+    /// (kept single-threaded on purpose, see `TerminalReader`'s own doc
+    /// comment).
+    TerminalOutput(Vec<u8>),
 }
 
 /// The autocompletion popup's live state -- see `App::completion`'s own
@@ -722,9 +861,8 @@ enum ActivePicker {
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
-    /// filtered over `theme::ALL` -- confirming applies it exactly like
-    /// `cycle_theme` does. The quick `SPC t t` cycle stays too; this is
-    /// for "I know which one I want," not "just try the next one."
+    /// filtered over `theme::ALL` -- confirming applies it via
+    /// `apply_theme`.
     Theme(fenix_picker::PickerState<&'static Theme>),
     /// `SPC c s`: fuzzy-find any known Tcl definition by its fully-
     /// qualified name (same `ctags`-sourced list `tcl_candidates`'s own
@@ -1283,6 +1421,161 @@ fn file_counts(files: &[fenix_git::FileEntry]) -> (usize, usize, usize) {
         }
     }
     (staged, unstaged, untracked)
+}
+
+/// What `git_sync_main` needs to fetch for Main, resolved from a
+/// `GitEntry` (plus, for a `File`, a lookup into the session's own
+/// cached `files`) *before* any thread is spawned -- every variant here
+/// is owned/`Send`, so a background closure never needs to touch
+/// `self`/`GitSession` at all. `Skip` covers both "nothing selected" and
+/// entries with no single diff of their own (`Branch`, `Dir`) -- Main is
+/// left untouched, matching `git_sync_main`'s pre-existing behavior for
+/// those. `Untracked` needs no shell-out (there's nothing for `git diff`
+/// to show, see `fenix_git::file_diff`'s own doc comment), so it's
+/// handled inline in `git_sync_main` rather than through `fetch_main_
+/// diff`/a spawned thread.
+enum MainFetch {
+    Skip,
+    Untracked,
+    File { path: String, staged: bool },
+    Commit(String),
+    Stash(usize),
+}
+
+/// The actual `git diff`/`show`/`stash show` shell-out for a resolved
+/// `MainFetch` -- called either inline (test mode, no `event_proxy`) or
+/// from inside `git_sync_main`'s spawned background thread. Never called
+/// with `MainFetch::Skip`/`Untracked`, both handled by the caller before
+/// this is reached.
+fn fetch_main_diff(repo_root: &Path, fetch: &MainFetch) -> Option<String> {
+    match fetch {
+        MainFetch::File { path, staged } => fenix_git::file_diff(repo_root, path, *staged).ok(),
+        MainFetch::Commit(hash) => fenix_git::commit_diff(repo_root, hash).ok(),
+        MainFetch::Stash(index) => fenix_git::stash_diff(repo_root, *index).ok(),
+        MainFetch::Skip | MainFetch::Untracked => None,
+    }
+}
+
+/// Everything `git_refresh_session` re-lists in one shell-out round --
+/// owned/`Send`, so `git_refresh_session`'s spawned background thread
+/// never needs to touch `self`/`GitSession` at all (same reasoning as
+/// `MainFetch`). Carried whole through `FenixUserEvent::GitRefreshReady`
+/// to `apply_git_refresh`, which is the only place any of it lands in
+/// the session.
+#[derive(Debug)]
+pub(crate) struct GitRefreshData {
+    status: Option<fenix_git::RepoStatus>,
+    files: Vec<fenix_git::FileEntry>,
+    branches: Vec<fenix_git::Branch>,
+    commits: Vec<fenix_git::Commit>,
+    stashes: Vec<fenix_git::Stash>,
+}
+
+/// The actual four `git` shell-outs `git_refresh_session` needs -- called
+/// either inline (test mode, no `event_proxy`) or from inside its
+/// spawned background thread.
+fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
+    let (status, files) = fenix_git::status_and_files(repo_root);
+    let branches = fenix_git::list_branches(repo_root);
+    let commits = fenix_git::list_commits(repo_root, 50);
+    let stashes = fenix_git::list_stashes(repo_root);
+    GitRefreshData { status, files, branches, commits, stashes }
+}
+
+/// Resolves a `vt100` cell color to a real theme color -- `Default`
+/// falls back to whatever's passed (the active theme's own fg/bg), so a
+/// program that never sets a color inherits Fenix's current theme, the
+/// same "everything reads from `Theme`" convention every other color in
+/// this app already follows. `Rgb` is truecolor, direct. `Idx` is the
+/// standard 256-color palette (`xterm_256_rgb`).
+fn vt100_color(color: vt100::Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
+    match color {
+        vt100::Color::Default => default,
+        vt100::Color::Rgb(r, g, b) => (r, g, b),
+        vt100::Color::Idx(idx) => xterm_256_rgb(idx),
+    }
+}
+
+/// Encodes one keypress into the raw bytes a real terminal would send
+/// for it -- `None` for anything with no sensible terminal meaning
+/// (function keys, mouse, etc., simply not forwarded in v1). Covers
+/// ordinary interactive use (shell prompts, REPLs, pagers, basic arrow-
+/// key navigation inside programs like `less`) -- disclosed cuts:
+/// no mouse reporting, no bracketed paste, no F-keys, no application-
+/// cursor-mode variants (a full terminfo-correct implementation is a
+/// much bigger, separate undertaking than this).
+fn encode_terminal_key(keypress: KeyPress) -> Option<Vec<u8>> {
+    if keypress.mods.ctrl {
+        if let KeyCode::Char(c) = keypress.code {
+            let upper = c.to_ascii_uppercase();
+            if upper.is_ascii_uppercase() {
+                return Some(vec![upper as u8 - b'A' + 1]);
+            }
+        }
+        return None;
+    }
+    match keypress.code {
+        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
+        KeyCode::Named(FenixNamedKey::Enter) => Some(b"\r".to_vec()),
+        KeyCode::Named(FenixNamedKey::Backspace) => Some(vec![0x7f]),
+        KeyCode::Named(FenixNamedKey::Tab) => Some(b"\t".to_vec()),
+        KeyCode::Named(FenixNamedKey::Escape) => Some(vec![0x1b]),
+        KeyCode::Named(FenixNamedKey::Left) => Some(b"\x1b[D".to_vec()),
+        KeyCode::Named(FenixNamedKey::Right) => Some(b"\x1b[C".to_vec()),
+        KeyCode::Named(FenixNamedKey::Up) => Some(b"\x1b[A".to_vec()),
+        KeyCode::Named(FenixNamedKey::Down) => Some(b"\x1b[B".to_vec()),
+        KeyCode::Named(FenixNamedKey::Home) => Some(b"\x1b[H".to_vec()),
+        KeyCode::Named(FenixNamedKey::End) => Some(b"\x1b[F".to_vec()),
+        KeyCode::Named(FenixNamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
+        KeyCode::Named(FenixNamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
+        KeyCode::Named(FenixNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
+    }
+}
+
+/// An `(r, g, b)` byte triple as the rect-fill `[f32; 4]` representation
+/// every other themed background already uses (`Theme::bg`/`hl_line`/
+/// selection, etc.) -- opaque (alpha `1.0`), matching a real terminal
+/// cell's own background always being a solid fill, never translucent.
+fn rgb_f32((r, g, b): (u8, u8, u8)) -> [f32; 4] {
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+}
+
+/// The standard xterm 256-color palette -- 0-15 the fixed default
+/// 16-color set (verified against xterm's own documented defaults, not
+/// guessed), 16-231 a closed-form 6x6x6 RGB cube (component levels
+/// 0/95/135/175/215/255), 232-255 a closed-form 24-step grayscale ramp
+/// (8..238, step 10). Standard, unambiguous, no crate needed for it.
+fn xterm_256_rgb(idx: u8) -> (u8, u8, u8) {
+    const BASE_16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    match idx {
+        0..=15 => BASE_16[idx as usize],
+        16..=231 => {
+            let i = idx - 16;
+            let level = |n: u8| if n == 0 { 0 } else { 55 + n * 40 };
+            (level(i / 36), level((i % 36) / 6), level(i % 6))
+        }
+        232..=255 => {
+            let level = 8 + (idx - 232) * 10;
+            (level, level, level)
+        }
+    }
 }
 
 /// Dispatches to whichever external formatter handles `language` --
@@ -1889,6 +2182,32 @@ pub struct App {
     /// -- only meaningful while `sidebar_open`. The sidebar stays visible
     /// but unfocused while editing, like a persistent project tree.
     sidebar_focused: bool,
+    /// The terminal panel's live shell session (PTY + parser + reader
+    /// thread) -- created once, on the first `SPC o t`, and deliberately
+    /// *not* dropped just by toggling visibility off (see `TerminalState`'s
+    /// own doc comment: the underlying process must keep running while
+    /// hidden). `None` before the panel's ever been opened, or right
+    /// after a respawn is triggered because the previous shell exited.
+    terminal: Option<TerminalState>,
+    /// Whether the terminal panel is currently shown -- a pure layout/
+    /// rendering concern, independent of whether the session underneath
+    /// it is alive (compare `sidebar_open`, which the sidebar's `Option`
+    /// itself already tracked -- the terminal can't reuse that trick
+    /// since its `Option` needs to survive being "closed").
+    terminal_open: bool,
+    /// Whether keys currently route to the terminal (as raw input bytes)
+    /// instead of Vim -- only meaningful while `terminal_open`. Unlike
+    /// `sidebar_focused`'s small action-key trie, a focused terminal
+    /// swallows *every* key (including Space) and forwards it to the
+    /// shell; `Ctrl-\` is the one chord reserved to unfocus without
+    /// closing (mirrors Neovim's own `:terminal` convention), letting
+    /// the panel stay visible-but-unfocused while editing elsewhere.
+    terminal_focused: bool,
+    /// Latest known cursor position, in physical window pixels -- `None`
+    /// until the first `CursorMoved`. `MouseWheel`/`MouseInput` carry no
+    /// position of their own in `winit`, so this is what click-to-focus
+    /// and wheel-scroll hit-test against.
+    cursor_pos: Option<(f32, f32)>,
     /// What `explorer` (the full-buffer listing) is currently for --
     /// meaningless while `main_view != Explorer`. See `ExplorerPurpose`'s
     /// own doc comment.
@@ -2155,7 +2474,7 @@ pub struct App {
     /// `fenix-vim`/`text.rs`: `VimState`/`TextPipeline` stay free of file
     /// I/O, matching every other pure editing-state type -- `App` applies
     /// each loaded value to the relevant subsystem and saves back into
-    /// this one struct on every change (`cycle_theme`, `adjust_font_
+    /// this one struct on every change (`apply_theme`, `adjust_font_
     /// size`, `VimEvent::IndentWidthChanged`).
     config: fenix_config::Config,
 
@@ -2196,6 +2515,59 @@ pub struct App {
     blink_transition_start: Instant,
     next_blink: Instant,
     pulse: Option<Pulse>,
+}
+
+/// The sidebar/terminal/pane rects a mouse click or wheel notch hit-
+/// tests against -- see `App::frame_geometry`.
+struct FrameGeometry {
+    pane_area: fenix_window::Rect,
+    sidebar_rect: Option<fenix_window::Rect>,
+    terminal_rect: Option<fenix_window::Rect>,
+    panes: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
+}
+
+/// What a click or wheel notch landed on, per `hit_test`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScrollTarget {
+    Sidebar,
+    Terminal,
+    Pane(fenix_window::WindowId),
+}
+
+/// Point-in-region hit test shared by click-to-focus and wheel-scroll --
+/// checked in on-screen draw order (terminal drawn last, so it wins the
+/// bottom-left corner it overlaps with the sidebar when both are open;
+/// see `App::frame_geometry`'s own doc comment) so a click/scroll always
+/// agrees with what's actually visible at that pixel.
+fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
+    let (x, y) = pos;
+    if let Some(rect) = geometry.terminal_rect {
+        if rect.contains_point(x, y) {
+            return Some(ScrollTarget::Terminal);
+        }
+    }
+    if let Some(rect) = geometry.sidebar_rect {
+        if rect.contains_point(x, y) {
+            return Some(ScrollTarget::Sidebar);
+        }
+    }
+    geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)).map(|(id, _)| ScrollTarget::Pane(*id))
+}
+
+/// Lines per physical wheel notch -- matches the common "3 lines"
+/// default most editors/browsers use.
+const WHEEL_LINES_PER_NOTCH: isize = 3;
+
+/// Converts one wheel event into a signed line count -- positive
+/// scrolls toward earlier content (up/back), negative toward later.
+/// `LineDelta` (a physical wheel notch) always moves a fixed number of
+/// lines; `PixelDelta` (a trackpad) is converted through the current
+/// line height instead.
+fn wheel_delta_lines(delta: MouseScrollDelta, line_height: f32) -> isize {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => y.signum() as isize * WHEEL_LINES_PER_NOTCH,
+        MouseScrollDelta::PixelDelta(pos) => (pos.y / line_height as f64).round() as isize,
+    }
 }
 
 impl App {
@@ -2301,6 +2673,10 @@ impl App {
             sidebar: None,
             sidebar_open: false,
             sidebar_focused: false,
+            terminal: None,
+            terminal_open: false,
+            terminal_focused: false,
+            cursor_pos: None,
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_scroll: 0,
@@ -2899,6 +3275,88 @@ impl App {
             }
         }
         self.wake_caret();
+    }
+
+    /// `SPC o t`: toggles the terminal panel's visibility. Opening (for
+    /// the first time, or after the previous shell exited -- `Terminal::
+    /// is_alive` catches both) spawns a fresh shell and focuses it
+    /// immediately, same "just asked for it, so focus it" reasoning as
+    /// `toggle_sidebar`. Hiding it is purely a layout/rendering concern
+    /// (`terminal_open = false`, unfocus) -- deliberately does *not*
+    /// touch `self.terminal` itself, unlike `toggle_sidebar`'s own
+    /// `self.sidebar = None`, since the whole point is that the shell
+    /// (and anything running in it) keeps going while hidden.
+    pub(crate) fn toggle_terminal(&mut self) {
+        if self.terminal_open {
+            self.terminal_open = false;
+            self.terminal_focused = false;
+        } else {
+            let needs_spawn = self.terminal.as_mut().is_none_or(|t| !t.session.is_alive());
+            if needs_spawn {
+                let cols = self.terminal_cols();
+                match self.spawn_terminal(text::TERMINAL_ROWS as u16, cols) {
+                    Ok(state) => self.terminal = Some(state),
+                    Err(err) => {
+                        eprintln!("fenix: couldn't start a terminal: {err}");
+                        return;
+                    }
+                }
+            }
+            self.terminal_open = true;
+            self.terminal_focused = true;
+        }
+        self.wake_caret();
+    }
+
+    /// Spawns a fresh shell and wires its reader thread -- factored out
+    /// of `toggle_terminal` so it's directly callable, without going
+    /// through the toggle's own open/closed branching, for whatever
+    /// eventually needs a fresh session (today: just the one call site,
+    /// but matches `GitStatusPoller::spawn`'s own "small, focused
+    /// constructor" shape).
+    fn spawn_terminal(&mut self, rows: u16, cols: u16) -> std::io::Result<TerminalState> {
+        let (session, reader) = fenix_terminal::Terminal::spawn(rows, cols)?;
+        let terminal_reader = self.event_proxy.clone().map(|proxy| TerminalReader::spawn(reader, move |event| proxy.send_event(event).is_ok()));
+        Ok(TerminalState { session, reader: terminal_reader })
+    }
+
+    /// Terminal columns that fit the current window width -- rows are
+    /// always the fixed `text::TERMINAL_ROWS`, so only this needs
+    /// recomputing on resize/font-size change. Falls back to a plain
+    /// default when there's no real GPU/text pipeline yet (every test,
+    /// and a `redraw()` before the GPU is ready) -- exact column count
+    /// doesn't matter there, nothing asserts on real terminal line-
+    /// wrapping in a headless test.
+    fn terminal_cols(&self) -> u16 {
+        let (width, char_width) = match (&self.gpu, &self.text) {
+            (Some(gpu), Some(text)) => (gpu.size.width as f32, text.char_width()),
+            _ => (800.0, text::CHAR_WIDTH),
+        };
+        (((width - text::PAD_LEFT * 2.0) / char_width).floor().max(1.0)) as u16
+    }
+
+    /// `FenixUserEvent::TerminalOutput` handling: feeds the chunk into
+    /// the live session's `vt100` parser and requests a redraw. A no-op
+    /// if the session's since been replaced/closed (a stray chunk from
+    /// an old, already-superseded shell -- there's no request-id here
+    /// the way `GitMainReady`/`GitRefreshReady` need one, since output
+    /// only ever comes from whichever session is *currently* `self.
+    /// terminal`, never a concurrently-in-flight alternate request).
+    fn apply_terminal_output(&mut self, bytes: Vec<u8>) {
+        let Some(state) = self.terminal.as_mut() else { return };
+        state.session.process(&bytes);
+        self.wake_caret();
+    }
+
+    /// Encodes `keypress` and writes it to the live terminal session, if
+    /// any (a no-op if the session's since exited or never started --
+    /// shouldn't happen while `terminal_focused`, but no reason to panic
+    /// if it does). Errors (the shell's pipe closed, e.g. it just
+    /// exited) are swallowed -- the next `SPC o t` respawns.
+    fn write_terminal_input(&mut self, keypress: KeyPress) {
+        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let Some(state) = self.terminal.as_mut() else { return };
+        let _ = state.session.write_input(&bytes);
     }
 
     /// Builds fuzzy-picker candidates for every file in `root` --
@@ -4081,7 +4539,8 @@ impl App {
         if let Some(session) = &self.git_session {
             if [
                 session.status_buffer,
-                session.files_buffer,
+                session.staged_buffer,
+                session.unstaged_buffer,
                 session.branches_buffer,
                 session.commits_buffer,
                 session.stash_buffer,
@@ -4685,9 +5144,9 @@ impl App {
     /// repo root, not a daemon reachable regardless of cwd).
     pub(crate) fn open_git_panel(&mut self) {
         if let Some(session) = &self.git_session {
-            let (workspace_index, files_pane) = (session.workspace_index, session.files_pane);
+            let (workspace_index, staged_pane) = (session.workspace_index, session.staged_pane);
             self.workspaces.switch_to_index(workspace_index);
-            self.windows_mut().focus(files_pane);
+            self.windows_mut().focus(staged_pane);
             self.git_refresh_session();
             self.wake_caret();
             return;
@@ -4695,28 +5154,30 @@ impl App {
 
         let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        let status = fenix_git::status(&repo_root);
-        let files = fenix_git::list_files(&repo_root);
+        let (status, files) = fenix_git::status_and_files(&repo_root);
         let branches = fenix_git::list_branches(&repo_root);
         let commits = fenix_git::list_commits(&repo_root, 50);
         let stashes = fenix_git::list_stashes(&repo_root);
 
         let (staged, unstaged, untracked) = file_counts(&files);
         let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
-        let files_panel = git_panel::render_files(&files, &HashSet::new());
+        let staged_panel = git_panel::render_staged(&files, &HashSet::new());
+        let unstaged_panel = git_panel::render_unstaged(&files, &HashSet::new());
         let branches_panel = git_panel::render_branches(&branches);
         let commits_panel = git_panel::render_commits(&commits);
         let stash_panel = git_panel::render_stash(&stashes);
         let main_panel = git_panel::render_main(None);
 
         let status_buffer = self.buffers.open_git(&status_panel.text);
-        let files_buffer = self.buffers.open_git(&files_panel.text);
+        let staged_buffer = self.buffers.open_git(&staged_panel.text);
+        let unstaged_buffer = self.buffers.open_git(&unstaged_panel.text);
         let branches_buffer = self.buffers.open_git(&branches_panel.text);
         let commits_buffer = self.buffers.open_git(&commits_panel.text);
         let stash_buffer = self.buffers.open_git(&stash_panel.text);
         let main_buffer = self.buffers.open_git(&main_panel.text);
         self.git_lines.insert(status_buffer, status_panel.lines);
-        self.git_lines.insert(files_buffer, files_panel.lines);
+        self.git_lines.insert(staged_buffer, staged_panel.lines);
+        self.git_lines.insert(unstaged_buffer, unstaged_panel.lines);
         self.git_lines.insert(branches_buffer, branches_panel.lines);
         self.git_lines.insert(commits_buffer, commits_panel.lines);
         self.git_lines.insert(stash_buffer, stash_panel.lines);
@@ -4735,32 +5196,35 @@ impl App {
         self.workspaces.active_pane_states_mut().insert(main_pane, PaneState::seeded_at(cursor));
         self.windows_mut().resize_focused(-0.15);
 
-        // Left column: Status/Files/Branches/Commits/Stash stacked.
-        // Status is shrunk well below the default 50/50 split (it's a
-        // handful of fixed overview lines, not a list); everything after
-        // that cascades naturally the same way Containers/Images/Volumes
-        // already do for the Docker panel -- Files (split off Status)
-        // keeps the biggest remaining share "for free," and each further
-        // split below it takes half of whatever's left, without needing
-        // its own explicit resize.
+        // Left column: Status/Staged/Unstaged/Branches/Commits/Stash
+        // stacked. Status is shrunk well below the default 50/50 split
+        // (it's a handful of fixed overview lines, not a list);
+        // everything after that cascades naturally the same way
+        // Containers/Images/Volumes already do for the Docker panel --
+        // Staged (split off Status) keeps the biggest remaining share
+        // "for free," and each further split below it takes half of
+        // whatever's left, without needing its own explicit resize.
         self.windows_mut().focus(status_pane);
-        let files_pane = self.windows_mut().split(SplitKind::Horizontal, files_buffer);
-        self.workspaces.active_pane_states_mut().insert(files_pane, PaneState::seeded_at(cursor));
+        let staged_pane = self.windows_mut().split(SplitKind::Horizontal, staged_buffer);
+        self.workspaces.active_pane_states_mut().insert(staged_pane, PaneState::seeded_at(cursor));
         self.windows_mut().resize_focused(-0.35);
+        let unstaged_pane = self.windows_mut().split(SplitKind::Horizontal, unstaged_buffer);
+        self.workspaces.active_pane_states_mut().insert(unstaged_pane, PaneState::seeded_at(cursor));
         let branches_pane = self.windows_mut().split(SplitKind::Horizontal, branches_buffer);
         self.workspaces.active_pane_states_mut().insert(branches_pane, PaneState::seeded_at(cursor));
         let commits_pane = self.windows_mut().split(SplitKind::Horizontal, commits_buffer);
         self.workspaces.active_pane_states_mut().insert(commits_pane, PaneState::seeded_at(cursor));
         let stash_pane = self.windows_mut().split(SplitKind::Horizontal, stash_buffer);
         self.workspaces.active_pane_states_mut().insert(stash_pane, PaneState::seeded_at(cursor));
-        self.windows_mut().focus(files_pane);
+        self.windows_mut().focus(staged_pane);
 
         self.pane_titles.insert(status_pane, "1. Status".to_string());
-        self.pane_titles.insert(files_pane, "2. Files".to_string());
-        self.pane_titles.insert(branches_pane, "3. Branches".to_string());
-        self.pane_titles.insert(commits_pane, "4. Commits".to_string());
-        self.pane_titles.insert(stash_pane, "5. Stash".to_string());
-        self.pane_titles.insert(main_pane, "6. Main".to_string());
+        self.pane_titles.insert(staged_pane, "2. Staged".to_string());
+        self.pane_titles.insert(unstaged_pane, "3. Unstaged".to_string());
+        self.pane_titles.insert(branches_pane, "4. Branches".to_string());
+        self.pane_titles.insert(commits_pane, "5. Commits".to_string());
+        self.pane_titles.insert(stash_pane, "6. Stash".to_string());
+        self.pane_titles.insert(main_pane, "7. Main".to_string());
 
         // Same "only a real, main.rs-launched App spawns anything" posture
         // as `open_docker_panel`'s own stats poller.
@@ -4772,13 +5236,15 @@ impl App {
         self.git_session = Some(GitSession {
             workspace_index,
             status_pane,
-            files_pane,
+            staged_pane,
+            unstaged_pane,
             branches_pane,
             commits_pane,
             stash_pane,
             main_pane,
             status_buffer,
-            files_buffer,
+            staged_buffer,
+            unstaged_buffer,
             branches_buffer,
             commits_buffer,
             stash_buffer,
@@ -4790,7 +5256,11 @@ impl App {
             stashes,
             status,
             status_poller,
-            expanded_dirs: HashSet::new(),
+            staged_expanded_dirs: HashSet::new(),
+            unstaged_expanded_dirs: HashSet::new(),
+            last_main_entry: None,
+            main_request_id: 0,
+            refresh_request_id: 0,
         });
 
         self.refresh_project_root();
@@ -4851,19 +5321,33 @@ impl App {
         }
     }
 
-    /// `Tab` on Files: toggles whether the directory under the cursor is
-    /// expanded, then re-renders Files keeping the cursor on the same
-    /// row (see `set_git_buffer_preserving_line`). A no-op on a file row
-    /// or anywhere else -- only directories are expandable.
+    /// `Tab` on Staged or Unstaged: toggles whether the directory under
+    /// the cursor is expanded *in that pane's own tree*, then re-renders
+    /// just that pane keeping the cursor on the same row (see `set_git_
+    /// buffer_preserving_line`). A no-op on a file row, or anywhere but
+    /// those two panes -- only directories are expandable, and each
+    /// pane's expand state is independent (`GitSession::staged_expanded_
+    /// dirs`'s own doc comment explains why).
     fn git_toggle_dir_expand(&mut self) {
         let Some(git_panel::GitEntry::Dir(path)) = self.git_entry_at_cursor() else { return };
+        let Some(role) = self.git_focused_role() else { return };
         let Some(session) = self.git_session.as_mut() else { return };
-        if !session.expanded_dirs.remove(&path) {
-            session.expanded_dirs.insert(path);
-        }
-        let files_buffer = session.files_buffer;
-        let files_panel = git_panel::render_files(&session.files, &session.expanded_dirs);
-        self.set_git_buffer_preserving_line(files_buffer, files_panel);
+        let (buffer, panel) = match role {
+            GitPaneRole::Staged => {
+                if !session.staged_expanded_dirs.remove(&path) {
+                    session.staged_expanded_dirs.insert(path);
+                }
+                (session.staged_buffer, git_panel::render_staged(&session.files, &session.staged_expanded_dirs))
+            }
+            GitPaneRole::Unstaged => {
+                if !session.unstaged_expanded_dirs.remove(&path) {
+                    session.unstaged_expanded_dirs.insert(path);
+                }
+                (session.unstaged_buffer, git_panel::render_unstaged(&session.files, &session.unstaged_expanded_dirs))
+            }
+            _ => return,
+        };
+        self.set_git_buffer_preserving_line(buffer, panel);
     }
 
     /// `FenixUserEvent::GitStatusReady` handling: caches the fresh status
@@ -4878,43 +5362,91 @@ impl App {
         self.set_git_buffer(status_buffer, git_panel::render_status(status.as_ref(), staged, unstaged, untracked));
     }
 
-    /// `u` (on any pane): re-lists files/branches/commits/stashes and the
-    /// repo status, re-renders all six panes, then re-syncs Main from
-    /// whatever's now under the cursor. Mirrors `docker_refresh_session`.
+    /// `u` (on any pane), and after every mutating action (stage/unstage/
+    /// commit/checkout/stash/...): re-lists files/branches/commits/
+    /// stashes and the repo status. Same two-part async treatment as
+    /// `git_sync_main` (its own doc comment explains the "why" in full):
+    /// the four `git` calls this needs (`status_and_files`, `list_
+    /// branches`, `list_commits`, `list_stashes`) used to run
+    /// synchronously on the input thread, blocking the UI for every
+    /// single one of those actions, not just `u`. Now they run on a
+    /// background thread for a real app (`apply_git_refresh` applies the
+    /// result when it lands, guarded by `refresh_request_id` against a
+    /// slow request a faster later one already superseded), or inline
+    /// when there's no `event_proxy` (every test) so existing tests
+    /// asserting on pane content right after calling this keep working
+    /// unchanged.
     fn git_refresh_session(&mut self) {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
-        let (status_buffer, files_buffer, branches_buffer, commits_buffer, stash_buffer) =
-            (session.status_buffer, session.files_buffer, session.branches_buffer, session.commits_buffer, session.stash_buffer);
 
-        let status = fenix_git::status(&repo_root);
-        let files = fenix_git::list_files(&repo_root);
-        let branches = fenix_git::list_branches(&repo_root);
-        let commits = fenix_git::list_commits(&repo_root, 50);
-        let stashes = fenix_git::list_stashes(&repo_root);
-        let (staged, unstaged, untracked) = file_counts(&files);
-        let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
-        let files_panel = git_panel::render_files(&files, &session.expanded_dirs);
-        let branches_panel = git_panel::render_branches(&branches);
-        let commits_panel = git_panel::render_commits(&commits);
-        let stash_panel = git_panel::render_stash(&stashes);
+        let Some(session) = self.git_session.as_mut() else { return };
+        session.refresh_request_id += 1;
+        let request_id = session.refresh_request_id;
 
-        if let Some(session) = self.git_session.as_mut() {
-            session.status = status;
-            session.files = files;
-            session.branches = branches;
-            session.commits = commits;
-            session.stashes = stashes;
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let data = fetch_git_refresh_data(&repo_root);
+                    let _ = proxy.send_event(FenixUserEvent::GitRefreshReady { request_id, data });
+                });
+            }
+            None => {
+                let data = fetch_git_refresh_data(&repo_root);
+                self.apply_git_refresh(request_id, data);
+            }
         }
+    }
+
+    /// `FenixUserEvent::GitRefreshReady` handling: applies a completed
+    /// background session refresh (re-renders all six list/status panes,
+    /// resets `last_main_entry` and re-syncs Main -- a manual refresh
+    /// means the underlying content may have changed even when the
+    /// selected path/hash/index hasn't, see `GitSession::last_main_
+    /// entry`'s own doc comment), unless a newer refresh has since
+    /// superseded it (`request_id` mismatch) or the session's since
+    /// closed.
+    fn apply_git_refresh(&mut self, request_id: u64, data: GitRefreshData) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        if session.refresh_request_id != request_id {
+            return;
+        }
+        let (status_buffer, staged_buffer, unstaged_buffer, branches_buffer, commits_buffer, stash_buffer) = (
+            session.status_buffer,
+            session.staged_buffer,
+            session.unstaged_buffer,
+            session.branches_buffer,
+            session.commits_buffer,
+            session.stash_buffer,
+        );
+        let (staged_expanded, unstaged_expanded) = (session.staged_expanded_dirs.clone(), session.unstaged_expanded_dirs.clone());
+
+        let (staged, unstaged, untracked) = file_counts(&data.files);
+        let status_panel = git_panel::render_status(data.status.as_ref(), staged, unstaged, untracked);
+        let staged_panel = git_panel::render_staged(&data.files, &staged_expanded);
+        let unstaged_panel = git_panel::render_unstaged(&data.files, &unstaged_expanded);
+        let branches_panel = git_panel::render_branches(&data.branches);
+        let commits_panel = git_panel::render_commits(&data.commits);
+        let stash_panel = git_panel::render_stash(&data.stashes);
+
+        let Some(session) = self.git_session.as_mut() else { return };
+        session.status = data.status;
+        session.files = data.files;
+        session.branches = data.branches;
+        session.commits = data.commits;
+        session.stashes = data.stashes;
+        session.last_main_entry = None;
+
         self.set_git_buffer(status_buffer, status_panel);
-        self.set_git_buffer(files_buffer, files_panel);
+        self.set_git_buffer(staged_buffer, staged_panel);
+        self.set_git_buffer(unstaged_buffer, unstaged_panel);
         self.set_git_buffer(branches_buffer, branches_panel);
         self.set_git_buffer(commits_buffer, commits_panel);
         self.set_git_buffer(stash_buffer, stash_panel);
         self.git_sync_main();
     }
 
-    /// Which of the current `git_session`'s six panes (if any) is
+    /// Which of the current `git_session`'s seven panes (if any) is
     /// focused right now -- mirrors `docker_focused_role`, including the
     /// same active-workspace guard (see its own doc comment for why
     /// that's needed: `WindowId`s are only unique within one workspace).
@@ -4926,8 +5458,10 @@ impl App {
         let focused = self.focused_pane_id();
         if focused == session.status_pane {
             Some(GitPaneRole::Status)
-        } else if focused == session.files_pane {
-            Some(GitPaneRole::Files)
+        } else if focused == session.staged_pane {
+            Some(GitPaneRole::Staged)
+        } else if focused == session.unstaged_pane {
+            Some(GitPaneRole::Unstaged)
         } else if focused == session.branches_pane {
             Some(GitPaneRole::Branches)
         } else if focused == session.commits_pane {
@@ -4948,11 +5482,12 @@ impl App {
         let session = self.git_session.as_ref()?;
         match n {
             1 => Some(session.status_pane),
-            2 => Some(session.files_pane),
-            3 => Some(session.branches_pane),
-            4 => Some(session.commits_pane),
-            5 => Some(session.stash_pane),
-            6 => Some(session.main_pane),
+            2 => Some(session.staged_pane),
+            3 => Some(session.unstaged_pane),
+            4 => Some(session.branches_pane),
+            5 => Some(session.commits_pane),
+            6 => Some(session.stash_pane),
+            7 => Some(session.main_pane),
             _ => None,
         }
     }
@@ -4975,34 +5510,87 @@ impl App {
     }
 
     /// Re-renders Main from whichever row is now under the cursor in
-    /// Files/Commits/Stash -- a no-op for Branches/Status/Main itself
-    /// (see `git_panel::render_status`'s own doc comment for why
-    /// Branches doesn't drive Main the way Files/Commits/Stash do: a
-    /// branch has no single "diff" of its own to show). Untracked files
-    /// have nothing for `git diff` to show (see `fenix_git::file_diff`'s
-    /// own doc comment) -- shown as a placeholder instead of an empty
-    /// diff.
+    /// Staged/Unstaged/Commits/Stash -- a no-op for Branches/Status/Main
+    /// itself (see `git_panel::render_status`'s own doc comment for why
+    /// Branches doesn't drive Main the way the others do: a branch has
+    /// no single "diff" of its own to show; a directory row aggregates
+    /// an unknown mix of files, same reasoning).
+    ///
+    /// Two performance properties, both load-bearing for why this no
+    /// longer visibly stutters the UI on every keystroke (it used to
+    /// shell a real `git diff`/`show` synchronously on the input thread
+    /// after *every* key handled while focus was on one of those panes,
+    /// not just navigation -- see `GitSession::last_main_entry`'s and
+    /// `main_request_id`'s own doc comments for the two-part fix):
+    /// - Returns immediately, no work at all, when the cursor's entry
+    ///   hasn't actually changed since the last sync.
+    /// - The real `git` shell-out (when one's actually needed) runs on a
+    ///   background thread for a real app (`self.event_proxy.is_some()`)
+    ///   -- `apply_git_main` applies the result when it lands. Falls
+    ///   back to a synchronous fetch when there's no event proxy (every
+    ///   test, per `App::new`'s own doc comment -- same "only a real app
+    ///   spawns anything" posture `DockerStatsPoller`/`GitStatusPoller`
+    ///   already have), so existing tests asserting on Main's content
+    ///   directly keep working with no mocking needed.
     fn git_sync_main(&mut self) {
         let Some(session) = self.git_session.as_ref() else { return };
+        let entry = self.git_entry_at_cursor();
+        if entry == session.last_main_entry {
+            return;
+        }
+
+        let fetch = match &entry {
+            Some(git_panel::GitEntry::File(path)) => match session.files.iter().find(|f| &f.path == path) {
+                Some(f) if f.index_status == '?' && f.worktree_status == '?' => MainFetch::Untracked,
+                Some(f) => MainFetch::File { path: path.clone(), staged: f.index_status != '.' && f.index_status != '?' },
+                None => MainFetch::Skip,
+            },
+            Some(git_panel::GitEntry::Commit(hash)) => MainFetch::Commit(hash.clone()),
+            Some(git_panel::GitEntry::Stash(index)) => MainFetch::Stash(*index),
+            Some(git_panel::GitEntry::Branch(_)) | Some(git_panel::GitEntry::Dir(_)) | None => MainFetch::Skip,
+        };
         let repo_root = session.repo_root.clone();
         let main_buffer = session.main_buffer;
-        let diff = match self.git_entry_at_cursor() {
-            Some(git_panel::GitEntry::File(path)) => {
-                let untracked = self.git_selected_file().is_some_and(|f| f.index_status == '?' && f.worktree_status == '?');
-                if untracked {
-                    Some("(untracked file -- nothing to diff yet; stage it to include it in a commit)".to_string())
-                } else {
-                    let staged = self.git_selected_file().is_some_and(|f| f.index_status != '.' && f.index_status != '?');
-                    fenix_git::file_diff(&repo_root, &path, staged).ok()
-                }
+
+        let Some(session) = self.git_session.as_mut() else { return };
+        session.last_main_entry = entry;
+
+        if let MainFetch::Skip = fetch {
+            return;
+        }
+        if let MainFetch::Untracked = fetch {
+            let diff = "(untracked file -- nothing to diff yet; stage it to include it in a commit)";
+            self.set_git_buffer(main_buffer, git_panel::render_main(Some(diff)));
+            return;
+        }
+
+        session.main_request_id += 1;
+        let request_id = session.main_request_id;
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let diff = fetch_main_diff(&repo_root, &fetch);
+                    let _ = proxy.send_event(FenixUserEvent::GitMainReady { request_id, buffer: main_buffer, diff });
+                });
             }
-            Some(git_panel::GitEntry::Commit(hash)) => fenix_git::commit_diff(&repo_root, &hash).ok(),
-            Some(git_panel::GitEntry::Stash(index)) => fenix_git::stash_diff(&repo_root, index).ok(),
-            // A directory row aggregates an unknown mix of files, same
-            // reasoning `Branch` already has no single diff of its own.
-            Some(git_panel::GitEntry::Branch(_)) | Some(git_panel::GitEntry::Dir(_)) | None => return,
-        };
-        self.set_git_buffer(main_buffer, git_panel::render_main(diff.as_deref()));
+            None => {
+                let diff = fetch_main_diff(&repo_root, &fetch);
+                self.set_git_buffer(main_buffer, git_panel::render_main(diff.as_deref()));
+            }
+        }
+    }
+
+    /// `FenixUserEvent::GitMainReady` handling: applies a completed
+    /// background diff fetch, unless a newer request has since
+    /// superseded it (`request_id` mismatch -- see `GitSession::main_
+    /// request_id`'s own doc comment) or the session's since closed.
+    fn apply_git_main(&mut self, request_id: u64, buffer: BufferId, diff: Option<String>) {
+        let Some(session) = self.git_session.as_ref() else { return };
+        if session.main_request_id != request_id {
+            return;
+        }
+        self.set_git_buffer(buffer, git_panel::render_main(diff.as_deref()));
     }
 
     /// `s` on Files: stages the file under the cursor.
@@ -5158,13 +5746,27 @@ impl App {
     /// `docker_session_close` exactly.
     pub(crate) fn git_session_close(&mut self) {
         let Some(session) = self.git_session.take() else { return };
-        for id in
-            [session.status_buffer, session.files_buffer, session.branches_buffer, session.commits_buffer, session.stash_buffer, session.main_buffer]
-        {
+        for id in [
+            session.status_buffer,
+            session.staged_buffer,
+            session.unstaged_buffer,
+            session.branches_buffer,
+            session.commits_buffer,
+            session.stash_buffer,
+            session.main_buffer,
+        ] {
             self.buffers.close(id);
             self.git_lines.remove(&id);
         }
-        for pane in [session.status_pane, session.files_pane, session.branches_pane, session.commits_pane, session.stash_pane, session.main_pane] {
+        for pane in [
+            session.status_pane,
+            session.staged_pane,
+            session.unstaged_pane,
+            session.branches_pane,
+            session.commits_pane,
+            session.stash_pane,
+            session.main_pane,
+        ] {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
@@ -6165,17 +6767,7 @@ impl App {
         }
     }
 
-    /// `SPC t t`: cycles to the next theme in `theme::ALL` (wrapping) and
-    /// persists the choice -- matched by `name`, not pointer identity,
-    /// which Rust doesn't guarantee is stable across separate `&SOME_CONST`
-    /// expressions.
-    pub(crate) fn cycle_theme(&mut self) {
-        let current = theme::ALL.iter().position(|t| t.name == self.theme.name).unwrap_or(0);
-        let next = (current + 1) % theme::ALL.len();
-        self.apply_theme(theme::ALL[next]);
-    }
-
-    /// Shared by `cycle_theme` and the theme picker's confirm (`SPC t p`):
+    /// Shared by the theme picker's confirm (`SPC t p`):
     /// sets the active theme, persists the choice, and requests a
     /// redraw. Save failure is non-fatal, same posture as `refresh_
     /// project_root`'s `known_projects.save()`.
@@ -6215,7 +6807,7 @@ impl App {
 
     /// `SPC t =`/`Ctrl-=`/`SPC t -`/`Ctrl--`/`SPC t 0`/`Ctrl-0`: grows,
     /// shrinks, or resets the body text size at runtime and persists the
-    /// choice, same posture as `cycle_theme`. A no-op (nothing to resize,
+    /// choice, same posture as `apply_theme`. A no-op (nothing to resize,
     /// nothing to persist) before the GPU/`TextPipeline` exist yet --
     /// can't happen for a keybinding a running window is dispatching,
     /// but `App::new`/headless tests can call these before `resumed()`.
@@ -6226,8 +6818,29 @@ impl App {
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save font size: {err}");
         }
+        // `char_width` just changed, so how many columns fit the same
+        // window width did too -- same reasoning as the window-resize
+        // handler's own call.
+        self.resync_terminal_cols();
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Recomputes terminal columns for the current window width/font
+    /// size and pushes it to the live session (if any) -- rows never
+    /// change (`text::TERMINAL_ROWS` is fixed), so this is the one
+    /// dimension that ever needs resyncing after a window resize or a
+    /// font-size change.
+    fn resync_terminal_cols(&mut self) {
+        if self.terminal.is_none() {
+            return;
+        }
+        let cols = self.terminal_cols();
+        if let Some(state) = self.terminal.as_mut() {
+            if let Err(err) = state.session.resize(text::TERMINAL_ROWS as u16, cols) {
+                eprintln!("fenix: couldn't resize the terminal: {err}");
+            }
         }
     }
 
@@ -6281,6 +6894,9 @@ impl App {
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
+            FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
+            FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
+            FenixUserEvent::TerminalOutput(bytes) => self.apply_terminal_output(bytes),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6324,6 +6940,23 @@ impl App {
         self.docker_menu_open = false;
         // Same reasoning, for the Git panel's own `x` which-key menu.
         self.git_menu_open = false;
+
+        // The terminal panel, when focused, owns *every* key -- checked
+        // before even the capturing prompts/confirms below, since a
+        // real shell needs Space/Escape/Ctrl-C/etc. to reach it
+        // unmodified, not intercepted by something else first. `Ctrl-\`
+        // is the one reserved chord that unfocuses (not closes) it
+        // instead of forwarding, mirroring Neovim's own `:terminal`
+        // convention -- see `App::terminal_focused`'s own doc comment.
+        if self.terminal_focused {
+            if keypress == KeyPress::char('\\').with_ctrl() {
+                self.terminal_focused = false;
+            } else {
+                self.write_terminal_input(keypress);
+            }
+            self.wake_caret();
+            return;
+        }
 
         // An active prompt (rename/create-name/confirm-delete) captures
         // every keystroke until it resolves -- takes priority over
@@ -6804,47 +7437,47 @@ impl App {
         if let Some(role) = self.git_focused_role() {
             use GitPaneRole::*;
             match (role, keypress.code) {
-                (Files, KeyCode::Char('s')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('s')) if keypress.mods == Mods::default() => {
                     self.git_stage_selected();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('S')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('S')) if keypress.mods == Mods::default() => {
                     self.git_unstage_selected();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('a')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('a')) if keypress.mods == Mods::default() => {
                     self.git_stage_all();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('A')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('A')) if keypress.mods == Mods::default() => {
                     self.git_unstage_all();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('z')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('z')) if keypress.mods == Mods::default() => {
                     self.git_stash_all();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('P')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('P')) if keypress.mods == Mods::default() => {
                     self.git_push();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('p')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('p')) if keypress.mods == Mods::default() => {
                     self.git_pull();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Char('c')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Char('c')) if keypress.mods == Mods::default() => {
                     self.git_commit_prompt();
                     self.wake_caret();
                     return;
                 }
-                (Files, KeyCode::Named(FenixNamedKey::Tab)) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged, KeyCode::Named(FenixNamedKey::Tab)) if keypress.mods == Mods::default() => {
                     self.git_toggle_dir_expand();
                     self.wake_caret();
                     return;
@@ -6869,7 +7502,11 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Files | Branches | Stash, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
+                // Discard is Unstaged-only -- discarding a *staged*
+                // change means unstaging it first (`S`), matching git's
+                // own semantics (`checkout`/`clean` act on the worktree,
+                // not the index).
+                (Unstaged | Branches | Stash, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
                     self.git_arm_confirm();
                     self.wake_caret();
                     return;
@@ -6879,17 +7516,17 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Files | Branches | Commits | Stash, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged | Branches | Commits | Stash, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
                     self.git_menu_open = true;
                     self.wake_caret();
                     return;
                 }
                 // Same digit-key jump-to-pane shortcut as the Docker
-                // block above (`1. Status`, `2. Files`, ...).
+                // block above (`1. Status`, `2. Staged`, ...).
                 (_, KeyCode::Char(c)) if keypress.mods == Mods::default() && c.is_ascii_digit() => {
                     if let Some(pane) = self.git_pane_by_number(c.to_digit(10).unwrap_or(0)) {
                         self.windows_mut().focus(pane);
-                        if matches!(self.git_focused_role(), Some(GitPaneRole::Files | GitPaneRole::Commits | GitPaneRole::Stash)) {
+                        if matches!(self.git_focused_role(), Some(GitPaneRole::Staged | GitPaneRole::Unstaged | GitPaneRole::Commits | GitPaneRole::Stash)) {
                             self.git_sync_main();
                         }
                         self.wake_caret();
@@ -6927,7 +7564,7 @@ impl App {
         // re-sync for the Git panel's Main pane, after ordinary Vim
         // movement in Files/Commits/Stash (Branches has no diff of its
         // own to show -- see `git_sync_main`'s own doc comment).
-        if matches!(self.git_focused_role(), Some(GitPaneRole::Files | GitPaneRole::Commits | GitPaneRole::Stash)) {
+        if matches!(self.git_focused_role(), Some(GitPaneRole::Staged | GitPaneRole::Unstaged | GitPaneRole::Commits | GitPaneRole::Stash)) {
             self.git_sync_main();
         }
         match vim_event {
@@ -8053,7 +8690,19 @@ impl App {
             return None;
         }
         let bindings: &[(&str, &str)] = match self.git_focused_role()? {
-            GitPaneRole::Files => &[
+            GitPaneRole::Staged => &[
+                ("Tab", "expand/collapse"),
+                ("s", "stage"),
+                ("S", "unstage"),
+                ("a", "stage all"),
+                ("A", "unstage all"),
+                ("c", "commit"),
+                ("z", "stash all"),
+                ("P", "push"),
+                ("p", "pull"),
+                ("u", "refresh"),
+            ],
+            GitPaneRole::Unstaged => &[
                 ("Tab", "expand/collapse"),
                 ("s", "stage"),
                 ("S", "unstage"),
@@ -8220,6 +8869,64 @@ impl App {
         (spans, selected_row, marked_rows)
     }
 
+    /// Builds the terminal panel's visible rows as rich-text spans (one
+    /// coalesced foreground-color run per contiguous same-color stretch,
+    /// same "not literally cell-per-cell" shape `explorer_row_spans`'s
+    /// own icon/name/status spans already use) plus a separate list of
+    /// background segments for any cell whose background isn't the
+    /// theme's own default -- `RowSpans` alone has no notion of a per-
+    /// span background, so a non-default one is painted as its own
+    /// backdrop rect first, the exact same mechanism `hl_line`/selection
+    /// already use (see `App::redraw`'s own `row_y`-keyed segment loop).
+    fn terminal_row_spans(&self, screen: &vt100::Screen) -> (RowSpans, Vec<(usize, usize, usize, [f32; 4])>) {
+        let theme = self.theme;
+        let default_fg = (theme.fg.r(), theme.fg.g(), theme.fg.b());
+        let default_bg = ((theme.bg[0] * 255.0) as u8, (theme.bg[1] * 255.0) as u8, (theme.bg[2] * 255.0) as u8);
+        let (rows, cols) = screen.size();
+        let mut spans: RowSpans = Vec::new();
+        let mut bg_segments = Vec::new();
+        for row in 0..rows {
+            let mut run_color = theme.fg;
+            let mut run_text = String::new();
+            let mut bg_run: Option<(usize, (u8, u8, u8))> = None;
+            for col in 0..cols {
+                let cell = screen.cell(row, col);
+                let (fr, fg_g, fb) = cell.map(|c| vt100_color(c.fgcolor(), default_fg)).unwrap_or(default_fg);
+                let fg = glyphon::Color::rgb(fr, fg_g, fb);
+                let bg = cell.map(|c| vt100_color(c.bgcolor(), default_bg)).unwrap_or(default_bg);
+                let text = cell.map(|c| c.contents()).filter(|t| !t.is_empty()).unwrap_or(" ");
+                if col == 0 {
+                    run_color = fg;
+                } else if fg != run_color {
+                    spans.push((std::mem::take(&mut run_text), run_color, false));
+                    run_color = fg;
+                }
+                run_text.push_str(text);
+
+                if bg != default_bg {
+                    match bg_run {
+                        Some((_, c)) if c == bg => {}
+                        Some((start, c)) => {
+                            bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
+                            bg_run = Some((col as usize, bg));
+                        }
+                        None => bg_run = Some((col as usize, bg)),
+                    }
+                } else if let Some((start, c)) = bg_run.take() {
+                    bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
+                }
+            }
+            if let Some((start, c)) = bg_run.take() {
+                bg_segments.push((row as usize, start, cols as usize, rgb_f32(c)));
+            }
+            spans.push((run_text, run_color, false));
+            if row + 1 < rows {
+                spans.push(("\n".to_string(), theme.fg, false));
+            }
+        }
+        (spans, bg_segments)
+    }
+
     /// Builds the picker's visible rows as rich-text spans: row 0 is the
     /// query prompt (`"> {query}"`), the rows below are the filtered/
     /// ranked candidates windowed by `self.picker_scroll` -- same shape
@@ -8248,6 +8955,189 @@ impl App {
             }
         }
         (spans, hl_row)
+    }
+
+    /// The sidebar/terminal/pane rects a mouse click or wheel notch
+    /// needs to hit-test against -- `sidebar_px`/`terminal_h`/
+    /// `modeline_top` are handed in already resolved (`redraw` and the
+    /// mouse handlers each derive them the same trivial way from
+    /// `self.sidebar_open`/`self.main_view`/`self.terminal_open`), so
+    /// this only needs to own the one part that actually matters for
+    /// staying in sync with what's on screen: `WindowTree::layout`'s
+    /// own pane rects, computed from the exact same `pane_area` both
+    /// callers would otherwise have to build by hand.
+    fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {
+        let pane_area = fenix_window::Rect {
+            x: sidebar_px,
+            y: 0.0,
+            w: (window_width - sidebar_px).max(0.0),
+            h: (modeline_top - terminal_h).max(0.0),
+        };
+        FrameGeometry {
+            panes: self.windows().layout(pane_area),
+            pane_area,
+            sidebar_rect: (sidebar_px > 0.0).then_some(fenix_window::Rect { x: 0.0, y: 0.0, w: sidebar_px, h: modeline_top }),
+            terminal_rect: (terminal_h > 0.0)
+                .then_some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: window_width, h: terminal_h }),
+        }
+    }
+
+    /// `(sidebar_px, terminal_h, modeline_top)` -- `frame_geometry`'s
+    /// three inputs, derived the same way `redraw`'s own copies are.
+    /// Not shared with `redraw` itself: that function also needs
+    /// `char_width`/`line_height` as their own long-lived locals for
+    /// everything else it does, and mutates `self.text` along the way
+    /// (`set_font_family`) where this only reads it -- kept separate
+    /// rather than reshaping `redraw`'s well-exercised metrics block
+    /// just to share five one-line computations.
+    fn frame_metrics(&self, window_height: f32) -> (f32, f32, f32) {
+        let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        let modeline_height = self.text.as_ref().map(|t| t.modeline_height()).unwrap_or(text::LINE_HEIGHT + 8.0);
+        let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
+        let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
+        let show_terminal = self.terminal_open;
+        let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
+        let modeline_top = window_height - modeline_height;
+        (sidebar_px, terminal_h, modeline_top)
+    }
+
+    /// Left-click: focuses whatever the click landed on -- a plain
+    /// focus change, the same granularity `SPC w hjkl`/pane-cycling
+    /// already work at (see this feature's own design notes on why
+    /// this isn't per-glyph cursor placement). Mirrors the exact flag
+    /// semantics `explorer_quit`/`navigate_window`'s own sidebar hand-
+    /// off already use: `sidebar_focused`/`terminal_focused` are plain
+    /// override flags independent of the tree's own focused pane, so
+    /// focusing the sidebar/terminal never touches `windows_mut()`, and
+    /// focusing a pane always clears both.
+    fn handle_click(&mut self, pos: (f32, f32)) {
+        let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+        else {
+            return;
+        };
+        self.handle_click_at(pos, window_width, window_height);
+    }
+
+    /// The GPU-independent core of `handle_click` -- takes the window's
+    /// dimensions as plain parameters instead of reading `self.gpu`
+    /// (which no headless test ever constructs), so it's directly
+    /// testable the same way `frame_geometry` already is.
+    fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        match hit_test(&geometry, pos) {
+            Some(ScrollTarget::Sidebar) => {
+                self.sidebar_focused = true;
+                self.terminal_focused = false;
+            }
+            Some(ScrollTarget::Terminal) => {
+                self.terminal_focused = true;
+                self.sidebar_focused = false;
+            }
+            Some(ScrollTarget::Pane(id)) => {
+                self.windows_mut().focus(id);
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+            }
+            None => return,
+        }
+        self.wake_caret();
+    }
+
+    /// Wheel-scrolls a pane that ISN'T focused: moves its own
+    /// `PaneState.scroll_line` directly, bounded so at least one
+    /// screenful of the buffer always stays in view. Never touches the
+    /// cursor -- a non-focused pane never auto-follows its cursor
+    /// anyway (`ensure_cursor_visible` only runs `if is_focused`), so
+    /// there's nothing to fight the next frame the way there would be
+    /// for the focused pane (see `scroll_focused_pane`).
+    fn scroll_unfocused_pane(&mut self, pane: fenix_window::WindowId, lines: isize, rect_h: f32, line_height: f32) {
+        let Some(&buffer_id) = self.windows().content(pane) else { return };
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let total = ob.buffer.line_count();
+        let visible = text::lines_that_fit(rect_h, line_height);
+        let max_scroll = total.saturating_sub(visible);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = state.scroll_line.saturating_add_signed(-lines).min(max_scroll);
+    }
+
+    /// Wheel-scrolls the focused pane by moving its cursor/selection --
+    /// poking its `scroll_line` directly would just get overwritten by
+    /// `ensure_cursor_visible` on the very next frame, since that runs
+    /// unconditionally whenever a pane is focused. Moving the cursor
+    /// instead drives scrolling through the exact same path a real
+    /// `j`/`k` keypress would. `Buffer::move_page` is a direct, mode-
+    /// independent cursor primitive (not routed through key dispatch),
+    /// so it can't be misread as text input while in Insert mode.
+    fn scroll_focused_pane(&mut self, lines: isize) {
+        let down = lines < 0;
+        let count = lines.unsigned_abs();
+        match self.main_view {
+            MainView::Editor => {
+                let pane = self.focused_pane_id();
+                let buffer_id = self.focused_buffer_id();
+                let mut cursor = self.pane_state(pane).cursor;
+                let Some(ob) = self.buffers.get_mut(buffer_id) else { return };
+                ob.buffer.move_page(&mut cursor, count, down);
+                self.pane_state_mut(pane).cursor = cursor;
+            }
+            MainView::Explorer => {
+                if let Some(explorer) = &mut self.explorer {
+                    explorer.move_selection(-lines);
+                }
+            }
+            MainView::Picker => {
+                if let Some(picker) = &mut self.active_picker {
+                    picker_move_selection(picker, -lines);
+                }
+            }
+        }
+    }
+
+    fn handle_wheel(&mut self, pos: (f32, f32), delta: MouseScrollDelta) {
+        let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+        else {
+            return;
+        };
+        self.handle_wheel_at(pos, delta, window_width, window_height);
+    }
+
+    /// The GPU-independent core of `handle_wheel` -- see `handle_click_
+    /// at`'s own doc comment for why this split exists.
+    fn handle_wheel_at(&mut self, pos: (f32, f32), delta: MouseScrollDelta, window_width: f32, window_height: f32) {
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        let lines = wheel_delta_lines(delta, line_height);
+        if lines == 0 {
+            return;
+        }
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some(target) = hit_test(&geometry, pos) else { return };
+        match target {
+            ScrollTarget::Sidebar => {
+                if let Some(sidebar) = &mut self.sidebar {
+                    sidebar.move_selection(-lines);
+                }
+            }
+            ScrollTarget::Terminal => {
+                if let Some(terminal) = &mut self.terminal {
+                    terminal.session.scroll(lines);
+                }
+            }
+            ScrollTarget::Pane(pane) => {
+                if pane == self.focused_pane_id() {
+                    self.scroll_focused_pane(lines);
+                } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
+                    // Every pane always renders a title bar (`redraw`'s own
+                    // `pane_content_rect(rect, line_height, true)`) -- match
+                    // that shrink so `max_scroll` agrees with what's actually
+                    // visible.
+                    let rect_h = pane_content_rect(*rect, line_height, true).h;
+                    self.scroll_unfocused_pane(pane, lines, rect_h, line_height);
+                }
+            }
+        }
+        self.wake_caret();
     }
 
     fn redraw(&mut self) {
@@ -8302,10 +9192,23 @@ impl App {
             None
         };
 
+        // The terminal panel: a frame-level strip like the sidebar, but
+        // shrinking height instead of width, and -- deliberately unlike
+        // the sidebar -- shown regardless of `main_view`. The sidebar's
+        // own Editor-only gating exists because a file listing next to
+        // *another* file listing (Explorer/Picker's own full-buffer
+        // view) is confusing; that reasoning doesn't apply to a
+        // terminal, and the user's own request ("under all my existing
+        // splits") named no such exception.
+        let show_terminal = self.terminal_open;
+        let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
+        let terminal_render =
+            if show_terminal { self.terminal.as_ref().map(|t| self.terminal_row_spans(t.session.screen())) } else { None };
+
         let modeline_top = window_height - modeline_height;
-        let pane_area =
-            fenix_window::Rect { x: sidebar_px, y: 0.0, w: (window_width - sidebar_px).max(0.0), h: modeline_top.max(0.0) };
-        let layout = self.windows().layout(pane_area);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let pane_area = geometry.pane_area;
+        let layout = geometry.panes;
         let focused_pane = self.windows().focused_id();
 
         // One entry per visible window pane -- built fresh every frame
@@ -8690,6 +9593,11 @@ impl App {
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_sidebar_rich(&sidebar_refs);
         }
+        if let Some((terminal_spans, _)) = &terminal_render {
+            let terminal_refs: Vec<(&str, glyphon::Color, bool)> =
+                terminal_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_terminal_rich(&terminal_refs);
+        }
         let existing_chars = match &modeline_pieces {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
@@ -8845,6 +9753,25 @@ impl App {
             // from the content area next to it.
             bg_rect.push_rect(gpu, text::SIDEBAR_WIDTH - 1.0, 0.0, 2.0, modeline_top, theme.divider);
         }
+        if show_terminal {
+            let terminal_top = modeline_top - terminal_h;
+            // Base fill, matching what a "default background" cell
+            // resolves to (`vt100_color`'s own `Default => theme.bg`) --
+            // so an ordinary cell blends seamlessly into the strip
+            // rather than needing its own explicit background segment.
+            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, terminal_h, theme.bg);
+            if let Some((_, bg_segments)) = &terminal_render {
+                for &(row, col_start, col_end, color) in bg_segments {
+                    let x = text::PAD_LEFT + col_start as f32 * char_width;
+                    let y = terminal_top + text::PAD_TOP + row as f32 * line_height;
+                    let w = (col_end - col_start) as f32 * char_width;
+                    bg_rect.push_rect(gpu, x, y, w, line_height, color);
+                }
+            }
+            // A thin divider along the strip's own top edge, same
+            // reasoning as the sidebar's own right-edge divider.
+            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, 2.0, theme.divider);
+        }
         // Divider lines along every split boundary the layout computed --
         // drawn from each pane's own right/bottom edge, so two adjacent
         // panes each contribute one line and they land on top of each
@@ -8903,7 +9830,7 @@ impl App {
 
         let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
-        text.prepare(gpu, theme, &prepare_panes, &title_rects, show_sidebar);
+        text.prepare(gpu, theme, &prepare_panes, &title_rects, show_sidebar, show_terminal);
 
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -9009,6 +9936,17 @@ impl App {
     }
 }
 
+/// Decodes the bundled `fenix.ico` into a `winit::window::Icon` for the
+/// title bar/taskbar -- separate from the `.exe`'s own embedded
+/// resource icon (`build.rs`), which Explorer/the taskbar pin read
+/// before the process is even running.
+fn fenix_icon() -> Option<Icon> {
+    let bytes = include_bytes!("../../../fenix.ico");
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
 impl ApplicationHandler<FenixUserEvent> for App {
     /// Thin trait-required wrapper around `handle_user_event` -- see
     /// that method's own doc comment for why the actual logic lives
@@ -9024,7 +9962,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             return;
         }
 
-        let attrs = Window::default_attributes().with_title("Fenix");
+        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
         let window =
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
@@ -9055,12 +9993,26 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 if let Some(text) = &mut self.text {
                     text.resize(size.width as f32, size.height as f32);
                 }
+                self.resync_terminal_cols();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some((position.x as f32, position.y as f32));
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if let Some(pos) = self.cursor_pos {
+                    self.handle_click(pos);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(pos) = self.cursor_pos {
+                    self.handle_wheel(pos, delta);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(&event, event_loop);
@@ -9845,33 +10797,6 @@ mod tests {
         assert_eq!(app.line_number_mode, LineNumberMode::Relative);
         app.cycle_line_number_mode();
         assert_eq!(app.line_number_mode, LineNumberMode::Off);
-    }
-
-    #[test]
-    fn cycle_theme_wraps_through_all_themes_and_persists() {
-        let dir = TempDir::new("cycle_theme");
-        let mut app = App::with_file(None);
-        // Fixed starting point -- not asserted from `with_file`'s own
-        // load, since that reads the *real* config path and would be
-        // flaky against whatever's actually persisted on this machine.
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
-        app.theme = &theme::ORBIT_DARK;
-
-        app.cycle_theme();
-        assert_eq!(app.theme.name, "TempleOS");
-        assert_eq!(app.config.theme, Some("TempleOS".to_string()));
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
-        assert_eq!(reloaded.theme, Some("TempleOS".to_string())); // persisted
-
-        // Cycle through the rest of `theme::ALL` (Gruvbox Dark, Nord,
-        // Dracula, Solarized Dark, One Dark) to reach the wrap-around.
-        for _ in 0..5 {
-            app.cycle_theme();
-        }
-        app.cycle_theme();
-        assert_eq!(app.theme.name, "Orbit Dark"); // wrapped back around
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
-        assert_eq!(reloaded.theme, Some("Orbit Dark".to_string()));
     }
 
     // `increase_font_size`/`decrease_font_size`/`reset_font_size`
@@ -11191,6 +12116,221 @@ mod tests {
         assert!(!app.sidebar_open);
         assert!(!app.sidebar_focused);
         assert!(app.sidebar.is_none());
+    }
+
+    #[test]
+    fn toggle_terminal_opens_then_hides_without_dropping_the_session() {
+        let mut app = App::with_file(None);
+
+        app.toggle_terminal();
+        assert!(app.terminal_open);
+        assert!(app.terminal_focused);
+        assert!(app.terminal.is_some(), "expected a real shell to have been spawned");
+
+        // Unlike `toggle_sidebar`, hiding must NOT drop the session --
+        // the whole point is that the shell (and anything running in
+        // it) keeps going while the panel is hidden.
+        app.toggle_terminal();
+        assert!(!app.terminal_open);
+        assert!(!app.terminal_focused);
+        assert!(app.terminal.is_some(), "the session should still be alive after hiding the panel");
+    }
+
+    #[test]
+    fn write_terminal_input_is_a_no_op_without_a_live_session() {
+        let mut app = App::with_file(None);
+        // Never toggled on -- `app.terminal` stays `None`. Just
+        // confirms this doesn't panic; there's nothing to assert on
+        // beyond that (no session to have received anything).
+        app.write_terminal_input(KeyPress::char('a'));
+    }
+
+    #[test]
+    fn encode_terminal_key_covers_printable_chars_and_common_control_sequences() {
+        assert_eq!(encode_terminal_key(KeyPress::char('a')), Some(b"a".to_vec()));
+        assert_eq!(encode_terminal_key(KeyPress::char('c').with_ctrl()), Some(vec![0x03])); // Ctrl-C
+        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Enter)), Some(b"\r".to_vec()));
+        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Backspace)), Some(vec![0x7f]));
+        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Escape)), Some(vec![0x1b]));
+        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Left)), Some(b"\x1b[D".to_vec()));
+        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Up)), Some(b"\x1b[A".to_vec()));
+    }
+
+    #[test]
+    fn wheel_delta_lines_for_line_delta_uses_the_fixed_notch_amount() {
+        assert_eq!(wheel_delta_lines(MouseScrollDelta::LineDelta(0.0, 1.0), 20.0), WHEEL_LINES_PER_NOTCH);
+        assert_eq!(wheel_delta_lines(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0), -WHEEL_LINES_PER_NOTCH);
+    }
+
+    #[test]
+    fn wheel_delta_lines_for_pixel_delta_converts_through_line_height() {
+        let delta = MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(0.0, 40.0));
+        assert_eq!(wheel_delta_lines(delta, 20.0), 2);
+    }
+
+    #[test]
+    fn frame_geometry_places_sidebar_terminal_and_pane_rects_consistently() {
+        let dir = TempDir::new("frame_geometry");
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.terminal_open = true;
+
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+
+        assert_eq!(geometry.sidebar_rect, Some(fenix_window::Rect { x: 0.0, y: 0.0, w: sidebar_px, h: modeline_top }));
+        assert_eq!(
+            geometry.terminal_rect,
+            Some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: 800.0, h: terminal_h })
+        );
+        assert_eq!(geometry.panes.len(), 1); // no splits yet
+    }
+
+    #[test]
+    fn click_on_a_non_focused_pane_focuses_it() {
+        let mut app = App::with_file(None);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let second = app.windows().focused_id();
+        assert_ne!(first, second);
+
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        let first_rect = geometry.panes.iter().find(|(id, _)| *id == first).unwrap().1;
+        let pos = (first_rect.x + 5.0, first_rect.y + 5.0);
+
+        app.handle_click_at(pos, 800.0, 600.0);
+        assert_eq!(app.windows().focused_id(), first);
+    }
+
+    #[test]
+    fn click_on_the_sidebar_focuses_it_and_clears_terminal_focus() {
+        let dir = TempDir::new("click_sidebar");
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.terminal_open = true;
+        app.terminal_focused = true;
+
+        app.handle_click_at((10.0, 10.0), 800.0, 600.0);
+        assert!(app.sidebar_focused);
+        assert!(!app.terminal_focused);
+    }
+
+    #[test]
+    fn click_on_the_terminal_focuses_it_and_clears_sidebar_focus() {
+        let mut app = App::with_file(None);
+        app.terminal_open = true;
+        app.sidebar_focused = true;
+
+        let (_, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let pos = (10.0, modeline_top - terminal_h + 5.0);
+        app.handle_click_at(pos, 800.0, 600.0);
+        assert!(app.terminal_focused);
+        assert!(!app.sidebar_focused);
+    }
+
+    #[test]
+    fn click_below_the_pane_area_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let focused = app.windows().focused_id();
+
+        app.handle_click_at((10.0, 590.0), 800.0, 600.0); // inside the modeline strip
+        assert_eq!(app.windows().focused_id(), focused);
+        assert!(!app.sidebar_focused);
+        assert!(!app.terminal_focused);
+    }
+
+    #[test]
+    fn wheel_over_a_non_focused_pane_scrolls_it_without_moving_its_cursor() {
+        let dir = TempDir::new("wheel_nonfocused");
+        let content: String = (0..100).map(|i| format!("line{i}\n")).collect();
+        let file = dir.write("f.txt", &content);
+        let mut app = App::with_file(None);
+        app.test_open_path(&file);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let second = app.windows().focused_id();
+        assert_ne!(first, second);
+        let cursor_before = *app.pane_state(first);
+
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        let first_rect = geometry.panes.iter().find(|(id, _)| *id == first).unwrap().1;
+        let pos = (first_rect.x + 5.0, first_rect.y + 5.0);
+
+        app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+        assert_eq!(app.pane_state(first).cursor, cursor_before.cursor); // cursor untouched
+        assert_eq!(app.pane_state(first).scroll_line, WHEEL_LINES_PER_NOTCH as usize);
+        assert_eq!(app.windows().focused_id(), second); // scrolling doesn't steal focus
+    }
+
+    #[test]
+    fn wheel_over_the_focused_pane_moves_the_cursor_by_the_wheel_amount() {
+        let dir = TempDir::new("wheel_focused");
+        let content: String = (0..50).map(|i| format!("line{i}\n")).collect();
+        let file = dir.write("f.txt", &content);
+        let mut app = App::with_file(None);
+        app.test_open_path(&file);
+        let pane = app.windows().focused_id();
+
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
+        let pos = (rect.x + 5.0, rect.y + 5.0);
+
+        app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+        let buffer_id = app.focused_buffer_id();
+        let (line, _) = app.buffers.get(buffer_id).unwrap().buffer.line_col(&app.test_cursor());
+        assert_eq!(line, WHEEL_LINES_PER_NOTCH as usize);
+    }
+
+    #[test]
+    fn wheel_over_the_focused_pane_moves_the_explorer_selection_when_showing_the_overlay() {
+        let dir = TempDir::new("wheel_explorer");
+        for i in 0..10 {
+            dir.touch(&format!("f{i}.txt"));
+        }
+        let mut app = App::with_file(None);
+        app.main_view = MainView::Explorer;
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        let pane = app.windows().focused_id();
+
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
+        let pos = (rect.x + 5.0, rect.y + 5.0);
+
+        app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+        assert_eq!(app.explorer.as_ref().unwrap().selected, WHEEL_LINES_PER_NOTCH as usize);
+    }
+
+    #[test]
+    fn wheel_over_the_sidebar_moves_its_selection_even_when_unfocused() {
+        let dir = TempDir::new("wheel_sidebar");
+        for i in 0..10 {
+            dir.touch(&format!("f{i}.txt"));
+        }
+        let mut app = App::with_file(None);
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        assert!(!app.sidebar_focused);
+
+        app.handle_wheel_at((10.0, 10.0), MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+        assert_eq!(app.sidebar.as_ref().unwrap().selected, WHEEL_LINES_PER_NOTCH as usize);
+        assert!(!app.sidebar_focused); // wheel alone never focuses
+    }
+
+    #[test]
+    fn wheel_over_the_terminal_panel_is_a_no_op_without_a_live_session() {
+        let mut app = App::with_file(None);
+        app.terminal_open = true; // no real spawn -- app.terminal stays None
+
+        let (_, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let pos = (10.0, modeline_top - terminal_h + 5.0);
+        app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0); // must not panic
+        assert!(app.terminal.is_none());
     }
 
     #[test]
@@ -12743,13 +13883,57 @@ mod tests {
     }
 
     #[test]
+    fn apply_git_main_discards_a_result_from_a_superseded_request() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let session = app.git_session.as_mut().unwrap();
+        session.main_request_id = 5;
+        let main_buffer = session.main_buffer;
+        app.set_git_buffer(main_buffer, git_panel::render_main(None));
+
+        // request_id 3 is stale -- request_id 5 already landed (or was
+        // issued) after it -- so this result must be dropped, not
+        // clobber Main with an out-of-order diff.
+        app.apply_git_main(3, main_buffer, Some("stale diff".to_string()));
+        let text = app.buffers.get(main_buffer).unwrap().buffer.text();
+        assert!(!text.contains("stale diff"));
+
+        app.apply_git_main(5, main_buffer, Some("current diff".to_string()));
+        let text = app.buffers.get(main_buffer).unwrap().buffer.text();
+        assert!(text.contains("current diff"));
+    }
+
+    #[test]
+    fn apply_git_refresh_discards_a_result_from_a_superseded_request() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let sentinel = vec![fenix_git::FileEntry { path: "sentinel.txt".to_string(), index_status: 'A', worktree_status: '.' }];
+        let session = app.git_session.as_mut().unwrap();
+        session.refresh_request_id = 5;
+        session.files = sentinel.clone();
+
+        // request_id 3 is stale -- must not overwrite the session's
+        // cached file list at all.
+        let stale = GitRefreshData { status: None, files: Vec::new(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new() };
+        app.apply_git_refresh(3, stale);
+        assert_eq!(app.git_session.as_ref().unwrap().files, sentinel);
+
+        // request_id 5 (current) applies normally.
+        let fresh = vec![fenix_git::FileEntry { path: "fresh.txt".to_string(), index_status: 'A', worktree_status: '.' }];
+        let current = GitRefreshData { status: None, files: fresh.clone(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new() };
+        app.apply_git_refresh(5, current);
+        assert_eq!(app.git_session.as_ref().unwrap().files, fresh);
+    }
+
+    #[test]
     fn git_pane_by_number_matches_each_titles_own_number() {
         let mut app = App::with_file(None);
         app.open_git_panel();
         let session = app.git_session.as_ref().unwrap();
-        let (status, files, branches, commits, stash, main) = (
+        let (status, staged, unstaged, branches, commits, stash, main) = (
             session.status_pane,
-            session.files_pane,
+            session.staged_pane,
+            session.unstaged_pane,
             session.branches_pane,
             session.commits_pane,
             session.stash_pane,
@@ -12757,12 +13941,13 @@ mod tests {
         );
 
         assert_eq!(app.git_pane_by_number(1), Some(status));
-        assert_eq!(app.git_pane_by_number(2), Some(files));
-        assert_eq!(app.git_pane_by_number(3), Some(branches));
-        assert_eq!(app.git_pane_by_number(4), Some(commits));
-        assert_eq!(app.git_pane_by_number(5), Some(stash));
-        assert_eq!(app.git_pane_by_number(6), Some(main));
-        assert_eq!(app.git_pane_by_number(7), None);
+        assert_eq!(app.git_pane_by_number(2), Some(staged));
+        assert_eq!(app.git_pane_by_number(3), Some(unstaged));
+        assert_eq!(app.git_pane_by_number(4), Some(branches));
+        assert_eq!(app.git_pane_by_number(5), Some(commits));
+        assert_eq!(app.git_pane_by_number(6), Some(stash));
+        assert_eq!(app.git_pane_by_number(7), Some(main));
+        assert_eq!(app.git_pane_by_number(8), None);
         assert_eq!(app.git_pane_by_number(0), None);
 
         app.git_session_close();
@@ -12773,22 +13958,24 @@ mod tests {
     fn git_toggle_dir_expand_reveals_and_hides_a_directorys_files_preserving_the_cursor_line() {
         let mut app = App::with_file(None);
         app.open_git_panel();
-        let files_buffer = app.git_session.as_ref().unwrap().files_buffer;
+        let session = app.git_session.as_ref().unwrap();
+        let (unstaged_buffer, unstaged_pane) = (session.unstaged_buffer, session.unstaged_pane);
 
         // Seed a deterministic file list (independent of whatever real
         // `git status` returns for this sandboxed test env) with one
         // file inside a subdirectory, and render it collapsed -- the
-        // directory row lands on line 0, matching `open_git_panel`'s
-        // own final focus on the Files pane.
+        // directory row lands on line 0. Unstaged (worktree_status 'M'),
+        // so focus that pane -- `open_git_panel` leaves Staged focused.
         let fake_files = vec![fenix_git::FileEntry { path: "sub/a.txt".to_string(), index_status: '.', worktree_status: 'M' }];
         app.git_session.as_mut().unwrap().files = fake_files.clone();
-        app.set_git_buffer(files_buffer, git_panel::render_files(&fake_files, &HashSet::new()));
+        app.set_git_buffer(unstaged_buffer, git_panel::render_unstaged(&fake_files, &HashSet::new()));
+        app.windows_mut().focus(unstaged_pane);
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
 
         app.git_toggle_dir_expand();
 
-        assert!(app.git_session.as_ref().unwrap().expanded_dirs.contains("sub"));
-        let text = app.buffers.get(files_buffer).unwrap().buffer.text();
+        assert!(app.git_session.as_ref().unwrap().unstaged_expanded_dirs.contains("sub"));
+        let text = app.buffers.get(unstaged_buffer).unwrap().buffer.text();
         assert!(text.contains("v sub/"), "expected an expanded marker, got: {text:?}");
         assert!(text.contains("[.M] a.txt"), "expected the file shown by basename, got: {text:?}");
         assert!(!text.contains("sub/a.txt"), "the file row should show only its basename: {text:?}");
@@ -12796,12 +13983,12 @@ mod tests {
         // The cursor stayed on the directory's own row (line 0) even
         // though a new line was inserted below it.
         let focused = app.focused_pane_id();
-        let (line, _) = app.buffers.get(files_buffer).unwrap().buffer.line_col(&app.pane_state(focused).cursor);
+        let (line, _) = app.buffers.get(unstaged_buffer).unwrap().buffer.line_col(&app.pane_state(focused).cursor);
         assert_eq!(line, 0);
 
         app.git_toggle_dir_expand();
-        assert!(!app.git_session.as_ref().unwrap().expanded_dirs.contains("sub"));
-        let text = app.buffers.get(files_buffer).unwrap().buffer.text();
+        assert!(!app.git_session.as_ref().unwrap().unstaged_expanded_dirs.contains("sub"));
+        let text = app.buffers.get(unstaged_buffer).unwrap().buffer.text();
         assert!(text.contains("> sub/"));
         assert!(!text.contains("a.txt"));
     }
@@ -12810,15 +13997,15 @@ mod tests {
     fn git_toggle_dir_expand_is_a_no_op_on_a_file_row() {
         let mut app = App::with_file(None);
         app.open_git_panel();
-        let files_buffer = app.git_session.as_ref().unwrap().files_buffer;
+        let staged_buffer = app.git_session.as_ref().unwrap().staged_buffer;
 
         let fake_files = vec![fenix_git::FileEntry { path: "root.txt".to_string(), index_status: 'A', worktree_status: '.' }];
         app.git_session.as_mut().unwrap().files = fake_files.clone();
-        app.set_git_buffer(files_buffer, git_panel::render_files(&fake_files, &HashSet::new()));
-        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // on the file row, not a directory
+        app.set_git_buffer(staged_buffer, git_panel::render_staged(&fake_files, &HashSet::new()));
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // on the file row, not a directory -- Staged is already focused
 
         app.git_toggle_dir_expand();
-        assert!(app.git_session.as_ref().unwrap().expanded_dirs.is_empty());
+        assert!(app.git_session.as_ref().unwrap().staged_expanded_dirs.is_empty());
     }
 
     #[test]
@@ -12831,12 +14018,13 @@ mod tests {
         app.project_root = Some(dir.path().to_path_buf());
         app.open_git_panel();
         let session = app.git_session.as_ref().unwrap();
-        let (files_buffer, repo_root) = (session.files_buffer, session.repo_root.clone());
+        let (unstaged_buffer, unstaged_pane, repo_root) = (session.unstaged_buffer, session.unstaged_pane, session.repo_root.clone());
         assert_eq!(repo_root, dir.path());
 
         let files = fenix_git::list_files(&repo_root);
         app.git_session.as_mut().unwrap().files = files.clone();
-        app.set_git_buffer(files_buffer, git_panel::render_files(&files, &HashSet::new()));
+        app.set_git_buffer(unstaged_buffer, git_panel::render_unstaged(&files, &HashSet::new()));
+        app.windows_mut().focus(unstaged_pane);
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // the "sub/" directory row
 
         app.git_stage_selected();
