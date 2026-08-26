@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-core", "crates/fenix-docker", "crates/fenix-explorer", "crates/fenix-git", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-syntax", "crates/fenix-vim", "crates/fenix-window"]
+members = ["crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-core", "crates/fenix-docker", "crates/fenix-explorer", "crates/fenix-git", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-mib", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-syntax", "crates/fenix-vim", "crates/fenix-window"]
 
 [workspace.package]
 version = "0.0.1"
