@@ -15,13 +15,44 @@ for anyone curious to poke around or build on it.
   modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),
   operators (`d c y` composing with motions and text objects, plus the
   doubled `dd`/`cc`/`yy` forms), `iw`/`aw` text objects, numeric counts
-  (`3dw`, `2dd`, ...), registers-free yank/paste, undo/redo, search
+  (`3dw`, `2dd`, ...), yank/paste mirrored onto the OS clipboard (the
+  unnamed register only -- `y`/`d`/`c` push to it, `p`/`P` pull from it
+  first, so copying in Fenix and pasting elsewhere -- or vice versa --
+  just works), named registers (`"a`-`"z`/`"A`-`"Z` to select one for the
+  next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends), undo/redo, search
   (`/`, `?`, `n`, `N`, `*`, `#`) with a live incsearch preview and
   persistent match highlighting while it's active, `:s` substitute with
   backreferences, indentation (`>>`/`<<`, auto-indent, `:set
   shiftwidth=N`).
+- **Macros** (`q{a-zA-Z}` to record, a second bare `q` to stop, `@
+  {register}` to replay, `@@` to repeat whichever was last played,
+  `3@a`-style count prefix): real Vim's own model, not a separate
+  storage -- a macro is just a named register's text (Vim's own keycode
+  notation, `<Esc>`, `<C-r>`, ...), so `"ap` pastes a recorded macro's
+  literal keystrokes as text and yanking text into a register makes it
+  `@`-executable. Recording captures every keystroke, including
+  `SPC`-leader sequences and prompts, not just what reaches Vim's own
+  motion/operator dispatch. A self-referential macro is bailed out by a
+  depth/key-count guard rather than actually hanging, unlike real Vim.
+- **Jumplist** (`Ctrl-O`/`Ctrl-I`): back/forward through recent cursor
+  positions, recorded on `gg`/`G`/`%`/a confirmed search/`*`/`#` and on
+  jumping to a symbol definition, a grep match, a quickfix entry, or a
+  mark -- so jumping to a definition (`SPC c s`), a search hit
+  (`SPC p s`), or a mark (`` `a ``) and hitting `Ctrl-O` takes you right
+  back, even across files. A single global back/forward pair of stacks
+  (like a browser's history), not real Vim's per-window circular list --
+  a disclosed simplification.
+- **Marks** (`m{a-zA-Z}` to set, `` `{mark} ``/`'{mark}` to jump --
+  exact position vs. the mark's line's first non-blank, real Vim's own
+  split): named position bookmarks that work across files, unlike real
+  Vim's lowercase-is-buffer-local/uppercase-is-global distinction, which
+  Fenix doesn't replicate -- every mark can jump to wherever it was set,
+  any file. Not composable with operators (no `` d`a `` / `d'a`) --
+  jump-only.
 - **`SPC`-leader menu** with a live which-key popup showing available
-  continuations as you type a sequence.
+  continuations as you type a sequence -- reachable from Visual mode as
+  well as Normal, so e.g. `SPC c f` (format the selection) can act on an
+  active selection without leaving it first.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, Bash, Tcl, Dockerfile/
   Containerfile, and Batch (`.bat`/`.cmd`). Docker Compose files already
@@ -42,8 +73,37 @@ for anyone curious to poke around or build on it.
   is also available, with the fuller dired feature set (git-status
   badges, marking, batch create/rename/copy/move/delete, inline subtree
   expansion) -- those aren't yet wired up for the buffer-backed form.
+- **Files menu** (`SPC f ...`): `SPC f f` opens a file by typing its
+  path (`~` expands to home, a relative path resolves against the
+  project root) -- unlike every fuzzy finder here, it doesn't enumerate
+  anything, so a `.gitignore`'d file (`.env`, say) opens exactly like
+  any other, and a path that doesn't exist yet opens an empty buffer to
+  save later. `SPC f a` is `SPC p f`'s fuzzy-find sibling but *including*
+  gitignored files, for when you want to search by name rather than type
+  the exact path. `SPC f r` fuzzy-finds a recently-opened file. `SPC f
+  R`/`SPC f D`/`SPC f y` rename/delete (with confirmation)/copy-the-path
+  of the file currently open.
 - **Project tooling**: fuzzy find-file (`SPC p f`), project-wide search via
-  ripgrep (`SPC p s`), switch between known projects (`SPC p p`).
+  ripgrep (`SPC p s`) with the result list kept around afterward as a
+  quickfix list -- `SPC p n`/`SPC p N` step to the next/previous match
+  directly in the editor without reopening the picker or re-running the
+  search, clamping (not wrapping) at either end -- switch between known
+  projects (`SPC p p`).
+- **Search and replace** (`SPC s ...`): `SPC s s` fuzzy-finds any line in
+  the current buffer (live-filtered as you type). `SPC s r` prompts for a
+  pattern then a replacement and shows the match count before applying --
+  a real UI over the same regex engine `:s` already uses, scoped to the
+  current Visual selection's lines if invoked from Visual mode (mirroring
+  real Vim's own `:'<,'>s`), the whole buffer otherwise. `SPC s p` does
+  the same across the whole project: searches with ripgrep (respecting
+  `.gitignore` by default, so build/generated files never show up),
+  groups matches by file, and opens a real, navigable review buffer --
+  toggle files out with `Space`, apply with `a`/`Enter` behind a y/n
+  confirmation. An already-open file is edited in memory (left dirty, for
+  you to review/save); anything else is edited on disk directly. One
+  fresh regex pass per included file, not a snapshot from search time --
+  a file that changed since the search is safely skipped rather than
+  misapplied.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
@@ -64,29 +124,29 @@ for anyone curious to poke around or build on it.
 - **Startup dashboard**: a real, Vim-navigable buffer listing known
   projects and recent files, shown when Fenix is launched with no file
   argument (`SPC o d` to reopen it later).
-- **Docker panel** (Lazydocker-style): `SPC d d` opens a real, five-pane
-  workspace -- Containers/Images/Volumes on the left (each its own real,
-  Vim-navigable buffer with a title bar), Status and Logs stacked on the
-  right. Status live-updates to whatever's under the cursor in the
-  focused left pane, including a selected container's CPU/MEM (which
-  also ticks on its own every ~2s without a keypress); Logs is a
-  dedicated pane for streamed log output. Each Containers row is just
-  `[X] name`, prefixed with a one-letter, color-coded status badge
-  (`R` running, `P` paused, `X` exited, etc.) instead of inline text
-  that used to clip at small font sizes. `s`/`S`/`R` start/stop/restart
-  the container under the cursor, `r` runs a new container from the
-  image under the cursor, `d` removes the container/image under the
-  cursor (with a `y`/`n` confirmation), `u` refreshes. `l` switches Logs
-  into a live tail of that container's logs (`docker logs -f`),
-  streaming new lines in and auto-scrolling to the bottom while you're
-  already there -- scroll up to read earlier output and it leaves you
-  alone until you navigate back to the end. Per-pane keybinding hints no
-  longer clip inline either -- press `x` on a Containers/Images/Volumes
-  pane for a Lazydocker-style contextual popup listing that pane's
-  available keys; it's purely informational and dismisses on the very
-  next keypress, which still does whatever it would normally do. `SPC d
-  b` builds an image from the current project root's `Dockerfile`;
-  `SPC d q` closes the whole session.
+- **Docker panel** (Lazydocker-style): `SPC d d` opens a real, six-pane
+  workspace -- Containers/Images/Volumes/Networks on the left (each its
+  own real, Vim-navigable buffer with a title bar), Status and Logs
+  stacked on the right. Status live-updates to whatever's under the
+  cursor in the focused left pane, including a selected container's
+  CPU/MEM (which also ticks on its own every ~2s without a keypress);
+  Logs is a dedicated pane for streamed log output. Each Containers row
+  is just `[X] name`, prefixed with a one-letter, color-coded status
+  badge (`R` running, `P` paused, `X` exited, etc.) instead of inline
+  text that used to clip at small font sizes. `s`/`S`/`R` start/stop/
+  restart the container under the cursor, `r` runs a new container from
+  the image under the cursor, `d` removes the container/image/network
+  under the cursor (with a `y`/`n` confirmation), `u` refreshes. `l`
+  switches Logs into a live tail of that container's logs (`docker logs
+  -f`), streaming new lines in and auto-scrolling to the bottom while
+  you're already there -- scroll up to read earlier output and it leaves
+  you alone until you navigate back to the end. Per-pane keybinding
+  hints no longer clip inline either -- press `x` on a Containers/Images/
+  Volumes/Networks pane for a Lazydocker-style contextual popup listing
+  that pane's available keys; it's purely informational and dismisses on
+  the very next keypress, which still does whatever it would normally
+  do. `SPC d b` builds an image from the current project root's
+  `Dockerfile`; `SPC d q` closes the whole session.
 - **Git panel** (Lazygit-style): `SPC g g` opens a real, six-pane
   workspace -- Status/Files/Branches/Commits/Stash stacked on the left
   (each its own real, Vim-navigable buffer with a title bar), Main on
@@ -111,15 +171,62 @@ for anyone curious to poke around or build on it.
   global leader-key trigger -- so Files uses separate `s`/`S` keys
   instead, matching the Docker panel's own `s`/`S`/`R` precedent.
   `SPC g q` closes the whole session.
-- **Autocompletion** for Tcl: a popup sourced from a built-in keyword
-  list, [Universal Ctags](https://ctags.io/)-scanned project definitions,
-  and an optional external symbols file (see [Configuration](#configuration)).
-  Namespaced procs show their fully-qualified path (`myns::subns::proc`,
-  no leading `::`), not just the bare proc name.
+- **Autocompletion**: a popup that's always available, sourced from
+  whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
+  style buffer-word completion, any language) -- layered, for Tcl
+  specifically, with a built-in keyword list,
+  [Universal Ctags](https://ctags.io/)-scanned project definitions, and
+  an optional external symbols file (see
+  [Configuration](#configuration)). Namespaced procs show their fully-
+  qualified path (`myns::subns::proc`, no leading `::`), not just the
+  bare proc name.
+- **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
+  known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
+  sourced from the same [Universal Ctags](https://ctags.io/) scan
+  autocompletion draws on -- confirming a selection opens the file it's
+  defined in (if not already open) and jumps straight to that line.
+- **Formatting**: `SPC c f` formats the active Visual selection, `SPC c
+  F` the whole buffer, by shelling out to an external formatter for the
+  buffer's language -- currently just Tcl, via
+  [`tclfmt`](https://github.com/nmoroze/tclint) (see
+  [Optional external tools](#optional-external-tools)). `SPC` reaches
+  the leader menu from Visual mode as well as Normal for this reason, so
+  `SPC c f` can act on a selection without leaving it first.
+- **SCOS-2000 MIB** (`SPC m ...`): fuzzy-find and inspect telecommands
+  (`SPC m t`), TM packets (`SPC m k`), TM parameters (`SPC m p`), and
+  calibration definitions (`SPC m c`, numeric curves/status
+  enumerations/range checks) from one or more configured MIB directories
+  (see [Configuration](#configuration)) -- each opens a real, Vim-
+  navigable buffer with the definition's summary, related rows (a
+  telecommand's parameters with their calibration references, a TM
+  packet's parameters, a TM parameter's packet occurrences), and raw
+  fields. `SPC m i` builds and inserts a telecommand: pick one, build or
+  skip its variable arguments (an argument with known engineering
+  aliases offers a picker of them; one with a known numeric range warns,
+  without blocking, if the typed value falls outside it), review the
+  rendered command, confirm to insert at wherever the wizard started.
+  `SPC m r` reparses the configured MIB directories from disk. Ported
+  from an ICD 7.2 SCOS-2000 MIB workflow in the author's previous
+  (Emacs) config -- see that config's own
+  [MIB module](https://github.com/tpedneault/orbit-emacs/blob/master/modules/mod-mib.el)
+  for the original.
 - **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
   `Solarized Dark`, and `One Dark`, cycled at runtime (`SPC t t`) or
   jumped to directly by name with a fuzzy picker (`SPC t p`), persisted
   either way.
+- **Table/spreadsheet view**: `SPC f t` toggles the focused buffer
+  between plain text and an elastic-column table view of its own,
+  genuinely tab-separated content -- real elastic tabstops, not a
+  padding trick: the renderer expands each real `\t` to the visual
+  column its column needs (computed from the widest value currently in
+  it, re-measured after every edit), so the file on disk stays exactly
+  what you see, always genuinely tab-separated, and ordinary Vim editing
+  (`i`, `cw`, ...) between two tabs just works. `]`/`[` jump to the
+  next/previous column, `c` fuzzy-finds one by name, and `j`/`k` are
+  reinterpreted to move a row while staying in the same visual column --
+  plain char-based motion doesn't track "same column" once rows have
+  different raw lengths up to it. Built for browsing MIB `.dat` files
+  and any other TSV data, but general-purpose.
 
 ## Building
 
@@ -146,7 +253,14 @@ and degrade gracefully (never a hard error) if they're not:
   search (`SPC p s`).
 - [`git`](https://git-scm.com/) — git-status badges in the file explorer.
 - [`Universal Ctags`](https://ctags.io/) (`ctags`) — project-definition
-  completion for Tcl.
+  completion for Tcl (`SPC c s`, `SPC c r`). If it's missing, exits
+  non-zero, or produces output this parser doesn't recognize, the
+  reason is logged to stderr rather than just silently yielding no
+  definitions — check the terminal Fenix was launched from.
+- [`tclfmt`](https://github.com/nmoroze/tclint) (part of the `tclint`
+  project — `pip install tclint`) — formatting Tcl buffers/selections
+  (`SPC c f`/`SPC c F`). Without it on `PATH`, those keys are a no-op
+  (logged to stderr) instead of a hard error.
 - [`docker`](https://docs.docker.com/engine/) or [`podman`](https://podman.io/)
   — the Docker panel (`SPC d d`). Fenix probes `docker` first and falls
   back to `podman` if `docker` isn't runnable (auto-detected once per
@@ -175,6 +289,13 @@ popup shows what keys continue it.
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `SPC f j` | Open the file explorer at the current file's directory |
+| `SPC f t` | Toggle the focused buffer between plain text and table view |
+| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
+| `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
+| `SPC f r` | Fuzzy-find a recently-opened file |
+| `SPC f R` | Rename the current file on disk |
+| `SPC f D` | Delete the current file (with confirmation) |
+| `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC q q` | Quit |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t t` | Cycle theme |
@@ -184,8 +305,12 @@ popup shows what keys continue it.
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |
+| `SPC p n` / `SPC p N` | Next / previous match in the last project search (quickfix) |
 | `SPC p p` | Switch project |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
+| `SPC s s` | Fuzzy-find a line in the current buffer |
+| `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
+| `SPC s p` | Search and replace across the project |
 | `SPC o d` | Open the startup dashboard |
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
@@ -193,6 +318,15 @@ popup shows what keys continue it.
 | `SPC g g` | Open (or refocus/refresh) the Git panel |
 | `SPC g q` | Close the Git panel session |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
+| `SPC c f` | Format the active Visual selection |
+| `SPC c F` | Format the whole focused buffer |
+| `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
+| `SPC m i` | Build and insert a telecommand from the MIB |
+| `SPC m t` | Fuzzy-find a MIB telecommand and view its details |
+| `SPC m k` | Fuzzy-find a MIB TM packet and view its details |
+| `SPC m p` | Fuzzy-find a MIB TM parameter and view its details |
+| `SPC m c` | Fuzzy-find a MIB calibration definition and view its details |
+| `SPC m r` | Reparse the configured MIB directories from disk |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
 | `SPC w h/j/k/l` | Move focus between windows |
 | `SPC w w` | Cycle to the next window |
@@ -235,31 +369,55 @@ Only these are special:
 | `R` | Refresh |
 | `.` | Toggle hidden files |
 
+### Table view (`SPC f t`)
+
+Toggles the focused buffer in place -- same file, same undo history,
+just rendered with elastic-column alignment instead of plain text.
+Every ordinary Vim motion and edit works (`j`/`k` and `c` are
+reinterpreted, everything else is unchanged):
+
+| Keys | Action |
+|---|---|
+| `]` / `[` | Jump to the start of the next / previous column |
+| `j` / `k` | Move a row, staying in the same visual column |
+| `c` | Fuzzy-find a column by name and jump to it |
+
+### Search & replace review buffer (`SPC s p`)
+
+A real, Vim-navigable buffer listing every file a pending project-wide
+replace would touch, one row each (`j k gg G / n N ...` all work):
+
+| Keys | Action |
+|---|---|
+| `Space` / `t` | Toggle the file under the cursor in/out of the replace |
+| `a` / `Enter` | Arm the apply confirmation (`y`/`n`), or apply if already armed |
+| `q` / `Esc` | Cancel -- closes the buffer, writes nothing |
+
 ### Docker panel (`SPC d d`)
 
-Opens its own workspace with five real, titled panes -- Containers,
-Images, and Volumes stacked on the left, Status and Logs stacked on the
-right. Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...`
-all work); moving the cursor in a left pane live-updates Status with
-that row's info. A Containers row is just a color-coded status badge
-plus the container's name (`[R]` green for running, `[P]` yellow for
-paused, `[X]` red for exited, etc.) -- press `x` on a pane for a
-which-key-style popup of its available keys instead. Each title bar is
+Opens its own workspace with six real, titled panes -- Containers,
+Images, Volumes, and Networks stacked on the left, Status and Logs
+stacked on the right. Each is an ordinary Vim-navigable buffer (`j k gg
+G / n N ...` all work); moving the cursor in a left pane live-updates
+Status with that row's info. A Containers row is just a color-coded
+status badge plus the container's name (`[R]` green for running, `[P]`
+yellow for paused, `[X]` red for exited, etc.) -- press `x` on a pane for
+a which-key-style popup of its available keys instead. Each title bar is
 numbered (`1. Containers`, `2. Images`, ...) and the focused one is
 shown in an accent color -- pressing that digit jumps straight to it.
 Only these are special, and only on the pane named:
 
 | Keys | Pane | Action |
 |---|---|---|
-| `1`-`5` | any | Jump to the pane numbered that in its title bar |
+| `1`-`6` | any | Jump to the pane numbered that in its title bar |
 | `s` | Containers | Start the container under the cursor |
 | `S` | Containers | Stop the container under the cursor |
 | `R` | Containers | Restart the container under the cursor |
 | `l` | Containers | Stream that container's logs live into the Logs pane (`docker logs -f`) |
 | `r` | Images | Run a new detached container from the image under the cursor |
-| `d` | Containers, Images | Remove the entry under the cursor (`y`/`n` to confirm) |
+| `d` | Containers, Images, Networks | Remove the entry under the cursor (`y`/`n` to confirm) |
 | `u` | any | Refresh the whole session |
-| `x` | Containers, Images, Volumes | Show this pane's available keys |
+| `x` | Containers, Images, Volumes, Networks | Show this pane's available keys |
 
 ### Git panel (`SPC g g`)
 
@@ -340,9 +498,17 @@ theme = TempleOS
 font_size = 16
 font_family = Fira Code
 indent_width = 4
+tab_width = 8
 
 [completion]
 symbols_file = /home/you/tcl-symbols.txt
+
+[mib]
+root1 = MIB-A|C:\data\mib-a
+root2 = MIB-B|C:\data\mib-b
+telecommand_template = telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]
+telecommand_argument_template = {name}={value}
+telecommand_argument_separator = ,
 ```
 
 | Section | Key | Meaning |
@@ -351,7 +517,12 @@ symbols_file = /home/you/tcl-symbols.txt
 | `editor` | `font_size` | Body text size in points |
 | `editor` | `font_family` | Body text font family, by name, as installed on your system. Overrides whatever the active theme names; unset falls back to the theme's own choice (and from there to your system's default monospace font) |
 | `editor` | `indent_width` | Spaces per indent level (`>>`/`<<`, Tab, auto-indent) |
+| `editor` | `tab_width` | Visual columns a literal tab character expands to when rendered (real Vim's own `:set tabstop`) -- distinct from `indent_width`, which governs what Tab/`>>`/`<<` actually insert (always spaces) |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
+| `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
+| `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
+| `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
+| `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together (surrounding whitespace is stripped like every other INI value here, so a separator that depends on it -- `", "` -- won't round-trip through hand-editing; `","` will) |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path
@@ -375,6 +546,9 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-picker` | Generic fuzzy matching + live-filtered candidate list, used by every fuzzy-finder |
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
 | `fenix-completion` | Completion sources: Tcl keywords, ctags-scanned definitions, external symbols file |
+| `fenix-format` | External formatter shelling (`tclfmt` for Tcl today) — `SPC c f`/`SPC c F` |
+| `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` |
+| `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
