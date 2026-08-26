@@ -24,6 +24,30 @@ pub struct TagEntry {
     pub line: usize,
 }
 
+/// Strips a Windows "verbatim"/extended-length path prefix (`\\?\`, or
+/// its UNC-path sibling `\\?\UNC\`) if present -- `std::fs::canonicalize`
+/// unconditionally adds this on Windows, so `root` can arrive already
+/// in this form however Fenix got handed the path (`fenix-project::
+/// find_project_root` itself doesn't canonicalize, but whatever the
+/// original file path came from further upstream might have). Confirmed
+/// empirically against a real Universal Ctags install: the *identical*
+/// directory, scanned once with a plain path and once with its `\\?\`-
+/// prefixed form, produces every real tag line vs. none at all -- no
+/// error, no warning, just silently empty output, which is why this
+/// needed to be tracked down as a real bug rather than assumed to be
+/// cosmetic. A no-op on every other platform (the prefix can't occur
+/// there) and for a `root` that was never canonicalized to begin with.
+fn windows_friendly_path(root: &Path) -> PathBuf {
+    let s = root.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        root.to_path_buf()
+    }
+}
+
 /// Shells `ctags --fields=+n --languages={language} -R -f - {root}` and
 /// parses the tab-separated vi-compatible output. Never fails outright
 /// -- a missing `ctags` binary, a non-zero exit, or a directory with no
@@ -57,7 +81,7 @@ pub fn run(root: &Path, language: &str) -> Vec<TagEntry> {
     if language == "Tcl" {
         cmd.arg("--langmap=Tcl:+.tm");
     }
-    cmd.arg("-R").arg("-f").arg("-").arg(root);
+    cmd.arg("-R").arg("-f").arg("-").arg(windows_friendly_path(root));
     // Windows-only: without this, every shell-out here (and there are a
     // lot -- once per `SPC c r`, once per project root change) briefly
     // flashes a console window, since `fenix-gui` itself has no console
@@ -169,6 +193,40 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn windows_friendly_path_strips_the_verbatim_prefix() {
+        assert_eq!(windows_friendly_path(Path::new(r"\\?\C:\Users\thoma\project")), Path::new(r"C:\Users\thoma\project"));
+    }
+
+    #[test]
+    fn windows_friendly_path_strips_the_verbatim_unc_prefix() {
+        assert_eq!(windows_friendly_path(Path::new(r"\\?\UNC\server\share\project")), Path::new(r"\\server\share\project"));
+    }
+
+    #[test]
+    fn windows_friendly_path_leaves_a_plain_path_untouched() {
+        let plain = Path::new(r"C:\Users\thoma\project");
+        assert_eq!(windows_friendly_path(plain), plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finds_definitions_when_the_root_is_a_canonicalized_verbatim_path() {
+        // The actual reported bug: `std::fs::canonicalize` always
+        // returns a `\\?\`-prefixed path on Windows, and Universal
+        // Ctags silently scans nothing when handed one directly.
+        let dir = temp_dir("verbatim-root");
+        fs::write(dir.join("foo.tcl"), "proc top_level_proc {} {\n    return 1\n}\n").unwrap();
+        let canonical = fs::canonicalize(&dir).unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"), "expected canonicalize to add the verbatim prefix");
+
+        let entries = run(&canonical, "Tcl");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "top_level_proc");
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
