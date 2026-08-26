@@ -4,8 +4,9 @@ use std::ops::Range;
 use fenix_core::{Buffer, Cursor};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
+use crate::bracket;
 use crate::indent;
-use crate::keymaps::{self, InsertEntry, PendingTarget, VimAction, VisualAction};
+use crate::keymaps::{self, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
 use crate::keynotation;
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
@@ -21,7 +22,13 @@ use crate::textobject;
 pub enum VimEvent {
     None,
     RequestSave,
+    /// `:q`/`SPC q q` -- the host should quit, but only after checking
+    /// for unsaved changes first (unlike `RequestForceQuit`).
     RequestQuit,
+    /// `:q!` -- quit unconditionally, bypassing the unsaved-changes
+    /// check `RequestQuit` triggers on the host side. Real Vim's own
+    /// `!` convention for "I know, do it anyway."
+    RequestForceQuit,
     RequestSaveAndQuit,
     /// A yank or paste just happened over this char range -- modeled on
     /// orbit-emacs's own yank/paste pulse feature, for the host UI to
@@ -79,6 +86,23 @@ pub enum VimEvent {
     /// A no-op if the register (or, for `@@`, "last played") is empty/
     /// unknown, same graceful posture as `JumpToMark`.
     MacroPlay { register: char, count: u32 },
+    /// A user-facing error the host should surface (invalid search
+    /// pattern, `:s` failure) -- `fenix-vim` has no UI of its own (see
+    /// this enum's own doc comment), so this is the same "escape hatch"
+    /// every other variant here already is, just carrying a message
+    /// instead of an instruction. Replaces what used to be a silent
+    /// `eprintln!` at each of these two call sites.
+    Error(String),
+    /// `zz`/`zt`/`zb` -- asks the host to scroll the focused pane so the
+    /// cursor's line lands at `target`. Host-resolved since only it
+    /// knows pane geometry (visible-line count).
+    ScrollWindow(ScrollTarget),
+    /// `.` -- asks the host to replay whatever it last recorded as a
+    /// repeatable change. The host owns that capture (raw keystrokes
+    /// since the last idle point that produced a real edit), the same
+    /// reason it owns macro storage/replay (`MacroPlay`'s own doc
+    /// comment) -- `fenix-vim` only ever sees one key at a time.
+    RepeatLastChange,
 }
 
 struct Register {
@@ -96,6 +120,29 @@ struct Register {
 enum PendingMark {
     Set,
     Jump { linewise: bool },
+}
+
+/// vim-surround/evil-surround's own three commands (`ys`/`ds`/`cs`),
+/// reached via `y`/`d`/`c` (the ordinary operator triggers) followed by
+/// `s` -- see `handle_operator_pending_key`'s own entry-point check for
+/// how that's detected. Doesn't fit `Operator`/`PendingTarget` (each
+/// command needs a different shape of follow-up keys), so it's its own
+/// small pending-state machine, same "next raw key(s) are special"
+/// posture as `PendingMark`/`pending_find`/`pending_replace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurroundPending {
+    /// `ys{motion}` -- awaiting the motion/text-object naming what to
+    /// wrap (or a second `s` for `yss`, "the whole line").
+    Target,
+    /// The target range resolved; awaiting the one char naming what to
+    /// wrap it in.
+    AddChar { start: usize, end: usize },
+    /// `ds{char}` -- awaiting which surround to delete.
+    Delete,
+    /// `cs{old}` -- awaiting the *old* surround char.
+    ChangeOld,
+    /// The old pair was found; awaiting the *new* surround char.
+    ChangeNew { open_idx: usize, close_idx: usize },
 }
 
 /// What `"`/`q`/`@` are waiting on their next raw key to do -- same
@@ -200,6 +247,10 @@ pub struct VimState {
     /// consumed by `handle_key` right after dispatch and turned into
     /// `VimEvent::JumpRecorded` -- see that variant's own doc comment.
     pending_jump: Option<usize>,
+    /// Set by `jump_to_search` on an invalid pattern; consumed by
+    /// `handle_key` and turned into `VimEvent::Error` -- same drain-chain
+    /// shape as `pending_pulse`/`pending_jump`.
+    pending_error: Option<String>,
     /// Set by `m`/`` ` ``/`'`: the *next* key names the mark, not a trie
     /// key -- same "one more raw key" shape as `pending_find`.
     pending_mark: Option<PendingMark>,
@@ -209,6 +260,25 @@ pub struct VimState {
     /// Set once the mark name arrives after `` ` ``/`'`; consumed by
     /// `handle_key` and turned into `VimEvent::JumpToMark`.
     pending_mark_jump: Option<(char, bool)>,
+    /// Set by `zz`/`zt`/`zb`; consumed by `handle_key` and turned into
+    /// `VimEvent::ScrollWindow` -- same drain-chain shape as
+    /// `pending_jump`.
+    pending_scroll: Option<ScrollTarget>,
+    /// Set by `.`; consumed by `handle_key` and turned into `VimEvent::
+    /// RepeatLastChange` -- same drain-chain shape as `pending_scroll`,
+    /// just with no payload to carry.
+    pending_repeat_last_change: bool,
+    /// `y`/`d`/`c` followed by `s` (`ys`/`ds`/`cs`) -- vim-surround's own
+    /// pending-state machine, driving `ys{motion}{char}`, `ds{char}`,
+    /// `cs{old}{new}`. `Copy`, so read via `if let Some(pending) = self.
+    /// pending_surround` without `.take()` -- exactly mirrors how
+    /// `pending_op` stays live across multiple keys until explicitly
+    /// cleared by whichever phase resolves. See `SurroundPending`'s own
+    /// doc comment for each phase.
+    pending_surround: Option<SurroundPending>,
+    /// Visual mode's `S`: the *next* key is the surround char -- same
+    /// "next key is special" shape as `pending_visual_replace`.
+    pending_visual_surround: bool,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -262,6 +332,7 @@ impl VimState {
             pending_op_count: 1,
             pending_replace: None,
             pending_visual_replace: false,
+            pending_visual_surround: false,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
@@ -269,9 +340,13 @@ impl VimState {
             block_insert: None,
             pending_pulse: None,
             pending_jump: None,
+            pending_error: None,
             pending_mark: None,
             pending_mark_set: None,
             pending_mark_jump: None,
+            pending_scroll: None,
+            pending_repeat_last_change: false,
+            pending_surround: None,
             command_line: String::new(),
             pending_find: None,
             last_find: None,
@@ -414,6 +489,29 @@ impl VimState {
         self.recording_register
     }
 
+    /// No command is currently "in progress" -- Normal mode, no pending
+    /// operator/register/replace/find/mark/surround, no count prefix
+    /// typed. The boundary a repeatable command's key-capture starts and
+    /// ends at: the host (`App::dispatch_keypress`) watches this to know
+    /// when to reset its capture buffer and when a just-completed span
+    /// is a candidate for `.` to replay -- see that function's own doc
+    /// comment. Doesn't need to check `pending_scroll`/`pending_pulse`/
+    /// etc: those are transient output flags, always drained back to
+    /// `None` by the end of the very `handle_key` call that set them
+    /// (see its own doc comment), never still-`Some` by the time a
+    /// caller could observe `is_idle` from outside.
+    pub fn is_idle(&self) -> bool {
+        self.mode == Mode::Normal
+            && self.count.is_none()
+            && self.pending_op.is_none()
+            && self.pending_prefix.is_none()
+            && self.active_register.is_none()
+            && self.pending_replace.is_none()
+            && self.pending_find.is_none()
+            && self.pending_mark.is_none()
+            && self.pending_surround.is_none()
+    }
+
     /// Register `name`'s content, decoded (`keynotation::decode`) back
     /// into keystrokes to replay -- for a host handling `VimEvent::
     /// MacroPlay`. Works uniformly regardless of how the register got
@@ -514,40 +612,35 @@ impl VimState {
         // even though nothing today sets more than one in the same call.
         let pulse = self.pending_pulse.take();
         let jump = self.pending_jump.take();
+        let error = self.pending_error.take();
         let mark_set = self.pending_mark_set.take();
         let mark_jump = self.pending_mark_jump.take();
         let macro_start = self.pending_macro_start.take();
         let macro_stop = self.pending_macro_stop.take();
         let macro_play = self.pending_macro_play.take();
+        let scroll = self.pending_scroll.take();
+        let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
         // RequestSave/Quit. The rest take the next priority for the same
         // reason -- every key that sets one of these only ever returns
         // `VimEvent::None` itself, so there's nothing real underneath to
-        // shadow.
-        match pulse {
-            Some(range) => VimEvent::Pulse(range),
-            None => match jump {
-                Some(from) => VimEvent::JumpRecorded(from),
-                None => match mark_set {
-                    Some((name, char_idx)) => VimEvent::MarkSet(name, char_idx),
-                    None => match mark_jump {
-                        Some((name, linewise)) => VimEvent::JumpToMark { name, linewise },
-                        None => match macro_start {
-                            Some(name) => VimEvent::MacroRecordStart(name),
-                            None => match macro_stop {
-                                Some(name) => VimEvent::MacroRecordStop(name),
-                                None => match macro_play {
-                                    Some((register, count)) => VimEvent::MacroPlay { register, count },
-                                    None => event,
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        }
+        // shadow. Flattened into an `Option::or` priority chain (same
+        // order the old nested-match version had) rather than nesting
+        // yet another level per new pending kind.
+        pulse
+            .map(VimEvent::Pulse)
+            .or_else(|| jump.map(VimEvent::JumpRecorded))
+            .or_else(|| error.map(VimEvent::Error))
+            .or_else(|| mark_set.map(|(name, char_idx)| VimEvent::MarkSet(name, char_idx)))
+            .or_else(|| mark_jump.map(|(name, linewise)| VimEvent::JumpToMark { name, linewise }))
+            .or_else(|| macro_start.map(VimEvent::MacroRecordStart))
+            .or_else(|| macro_stop.map(VimEvent::MacroRecordStop))
+            .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
+            .or_else(|| scroll.map(VimEvent::ScrollWindow))
+            .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
+            .unwrap_or(event)
     }
 
     fn handle_insert_key(
@@ -732,7 +825,8 @@ impl VimState {
             KeyCode::Named(NamedKey::Enter) => {
                 let cmd = std::mem::take(&mut self.command_line);
                 self.mode = Mode::Normal;
-                return crate::substitute::run_ex_command(&cmd, buffer, cursor, &mut self.indent_width);
+                let last_search = self.last_search.as_ref().map(|(pattern, _)| pattern.as_str());
+                return crate::substitute::run_ex_command(&cmd, buffer, cursor, &mut self.indent_width, last_search);
             }
             KeyCode::Named(NamedKey::Backspace) => {
                 self.command_line.pop();
@@ -792,7 +886,7 @@ impl VimState {
                 cursor.sticky_col = col;
             }
             Ok(None) => {}
-            Err(err) => eprintln!("fenix: invalid search pattern: {err}"),
+            Err(err) => self.pending_error = Some(format!("invalid search pattern: {err}")),
         }
     }
 
@@ -850,6 +944,16 @@ impl VimState {
         // `Register` can ever be pending there) via `resolve_pending_prefix`.
         if let Some(pending) = self.pending_prefix.take() {
             self.resolve_pending_prefix(pending, key);
+            return VimEvent::None;
+        }
+
+        // vim-surround's `ys`/`ds`/`cs` -- not `.take()`n, since `Target`
+        // needs to stay live across multiple keys (a motion/text-object
+        // can itself be multi-key, `ysiw"`) until `handle_surround_key`
+        // itself explicitly resolves or cancels it, exactly how
+        // `pending_op` stays live across `handle_operator_pending_key`.
+        if let Some(pending) = self.pending_surround {
+            self.handle_surround_key(buffer, cursor, pending, key);
             return VimEvent::None;
         }
 
@@ -1119,6 +1223,14 @@ impl VimState {
             }
             VimAction::MarkSetPrompt => self.pending_mark = Some(PendingMark::Set),
             VimAction::MarkJumpPrompt { linewise } => self.pending_mark = Some(PendingMark::Jump { linewise }),
+            VimAction::ScrollWindow(target) => self.pending_scroll = Some(target),
+            VimAction::IncrementNumber { delta } => self.increment_number(buffer, cursor, delta * count as i64),
+            // No buffer mutation here -- replay is host-driven (mirrors
+            // `VimEvent::MacroPlay`), since only the host owns the raw-
+            // keystroke capture this replays. Plain `.` only for v1: no
+            // count-override semantics (`3.` isn't "repeat with count 3
+            // instead" the way real Vim's is) -- out of scope for now.
+            VimAction::RepeatLastChange => self.pending_repeat_last_change = true,
         }
     }
 
@@ -1201,6 +1313,34 @@ impl VimState {
         buffer.delete_range(cursor, start, start + 1);
         buffer.insert_str(cursor, &toggled.to_string());
         cursor.char_idx = (start + 1).min(buffer.len_chars());
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    /// `Ctrl-a`/`Ctrl-x`: finds the nearest run of ASCII digits (optionally
+    /// `-`-prefixed) at or after the cursor on its own line, adds `delta`
+    /// to it, and lands the cursor on the new value's last digit --
+    /// matches real Vim's own `Ctrl-a`/`Ctrl-x`. A no-op if the line has
+    /// no number from the cursor onward, or the found run doesn't parse
+    /// (longer than `i64` can hold -- not worth a bigint dependency for
+    /// this). Scoped to the current line -- a number spanning a newline
+    /// isn't a real case worth handling.
+    fn increment_number(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, delta: i64) {
+        let (line, _) = buffer.line_col(cursor);
+        let line_start = buffer.line_start_char(line);
+        let line_text = buffer.text_range(line_start, line_start + buffer.line_len(line));
+        let chars: Vec<char> = line_text.chars().collect();
+        let cursor_col = cursor.char_idx.saturating_sub(line_start);
+
+        let Some((rel_start, rel_end)) = find_number(&chars, cursor_col) else { return };
+        let old_text: String = chars[rel_start..rel_end].iter().collect();
+        let Ok(value) = old_text.parse::<i64>() else { return };
+        let new_text = value.saturating_add(delta).to_string();
+
+        let start = line_start + rel_start;
+        let end = line_start + rel_end;
+        buffer.replace_range(cursor, start, end, &new_text);
+        cursor.char_idx = start + new_text.chars().count() - 1;
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
     }
@@ -1361,6 +1501,21 @@ impl VimState {
             }
         }
 
+        // vim-surround/evil-surround: `y`/`d`/`c` followed by `s` doesn't
+        // mean "yank/delete/change the letter s" (there's no motion/
+        // text-object named `s`) -- it starts `ys`/`ds`/`cs` instead.
+        // Checked before the doubled-operator check below since `s` can
+        // never collide with `op.trigger_key()` (`y`/`d`/`c`).
+        if !self.pending_matcher.is_pending() && key == KeyPress::char('s') {
+            self.pending_op = None;
+            self.pending_surround = Some(match op {
+                Operator::Yank => SurroundPending::Target,
+                Operator::Delete => SurroundPending::Delete,
+                Operator::Change => SurroundPending::ChangeOld,
+            });
+            return;
+        }
+
         // Doubled operator (dd/cc/yy): linewise, current line(s). Only
         // applies as the very first key after the operator, matching Vim.
         // cc (unlike dd/yy) keeps the line itself -- it only clears the
@@ -1411,7 +1566,7 @@ impl VimState {
                     }
                     // Counts on text objects aren't supported ("2diw" behaves
                     // like "diw") -- a disclosed simplification.
-                    PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj), false),
+                    PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj), textobject::is_linewise(obj)),
                 };
                 self.finish_operator(buffer, cursor, op, range, linewise);
             }
@@ -1442,6 +1597,136 @@ impl VimState {
                     self.mode = Mode::Insert;
                 }
             }
+        }
+    }
+
+    /// Dispatches a key to whichever `SurroundPending` phase is active --
+    /// vim-surround/evil-surround's own `ys`/`ds`/`cs`. See `SurroundPending`'s
+    /// own doc comment for what each phase is waiting on.
+    fn handle_surround_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, pending: SurroundPending, key: KeyPress) {
+        match pending {
+            SurroundPending::Target => {
+                if key.code == KeyCode::Named(NamedKey::Escape) {
+                    self.pending_surround = None;
+                    self.pending_matcher.cancel();
+                    self.count = None;
+                    return;
+                }
+                // `yss`: doubled form, "surround the whole current line"
+                // -- same "doubled key means the current line" shape
+                // `dd`/`cc`/`yy` already have, just reached through this
+                // pending machine instead of `handle_operator_pending_key`.
+                if !self.pending_matcher.is_pending() && key == KeyPress::char('s') {
+                    let (line, _) = buffer.line_col(cursor);
+                    let start = motion::line_first_non_blank(buffer, line);
+                    let end = buffer.line_start_char(line) + buffer.line_len(line);
+                    self.pending_surround = Some(SurroundPending::AddChar { start, end });
+                    return;
+                }
+                match self.pending_matcher.feed(key) {
+                    Step::Pending(_) => self.pending_surround = Some(SurroundPending::Target),
+                    Step::NoMatch => self.pending_surround = None,
+                    Step::Matched(target) => {
+                        let range = self.surround_target_range(buffer, cursor, *target);
+                        self.pending_surround = Some(SurroundPending::AddChar { start: range.start, end: range.end });
+                    }
+                }
+            }
+            SurroundPending::AddChar { start, end } => {
+                self.pending_surround = None;
+                if let KeyCode::Char(c) = key.code {
+                    if key.mods == Mods::default() {
+                        self.add_surrounding(buffer, cursor, start..end, c);
+                    }
+                }
+            }
+            SurroundPending::Delete => {
+                self.pending_surround = None;
+                if let KeyCode::Char(c) = key.code {
+                    if key.mods == Mods::default() {
+                        if let Some((open_idx, close_idx)) = self.find_surrounding(buffer, cursor, c) {
+                            buffer.delete_range(cursor, close_idx, close_idx + 1);
+                            buffer.delete_range(cursor, open_idx, open_idx + 1);
+                            cursor.char_idx = open_idx;
+                            let (_, col) = buffer.line_col(cursor);
+                            cursor.sticky_col = col;
+                        }
+                    }
+                }
+            }
+            SurroundPending::ChangeOld => {
+                self.pending_surround = None;
+                if let KeyCode::Char(c) = key.code {
+                    if key.mods == Mods::default() {
+                        if let Some((open_idx, close_idx)) = self.find_surrounding(buffer, cursor, c) {
+                            self.pending_surround = Some(SurroundPending::ChangeNew { open_idx, close_idx });
+                        }
+                    }
+                }
+            }
+            SurroundPending::ChangeNew { open_idx, close_idx } => {
+                self.pending_surround = None;
+                if let KeyCode::Char(c) = key.code {
+                    if key.mods == Mods::default() {
+                        if let Some((open_str, close_str)) = surround_pair_for(c) {
+                            buffer.replace_range(cursor, close_idx, close_idx + 1, &close_str);
+                            buffer.replace_range(cursor, open_idx, open_idx + 1, &open_str);
+                            cursor.char_idx = open_idx;
+                            let (_, col) = buffer.line_col(cursor);
+                            cursor.sticky_col = col;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `ys{motion}`'s target range -- deliberately simpler than the real
+    /// operator-pending resolver (`handle_operator_pending_key`'s own
+    /// `PendingTarget` match): no `adjust_for_change_word` (a `Change`-
+    /// operator-specific nuance for `cw`) and no absolute-line-count
+    /// special case for `BufferTop`/`BufferBottom` (a rare target for
+    /// surround specifically) -- both skipped as disclosed
+    /// simplifications, same posture text objects already have for
+    /// counts. `count` is always `1`: `ys3w"` isn't supported, matching
+    /// that same simplification.
+    fn surround_target_range(&self, buffer: &Buffer, cursor: &Cursor, target: PendingTarget) -> Range<usize> {
+        match target {
+            PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, 1),
+            PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj),
+        }
+    }
+
+    /// Wraps `range` in whatever `surround_pair_for(c)` resolves to --
+    /// shared by `ys{motion}{char}`'s `AddChar` phase and Visual `S`.
+    /// Inserts the close delimiter first, then the open one: inserting
+    /// at `range.end` first doesn't shift `range.start`, so no offset
+    /// math is needed for the second insert. Leaves the cursor at the
+    /// (possibly now-shifted-left-by-nothing) start of the wrapped text.
+    fn add_surrounding(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, range: Range<usize>, c: char) {
+        let Some((open_str, close_str)) = surround_pair_for(c) else { return };
+        let mut end_cursor = Cursor { char_idx: range.end, sticky_col: 0 };
+        buffer.insert_str(&mut end_cursor, &close_str);
+        let mut start_cursor = Cursor { char_idx: range.start, sticky_col: 0 };
+        buffer.insert_str(&mut start_cursor, &open_str);
+        cursor.char_idx = range.start;
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    /// The (open, close) delimiter positions of the nearest surrounding
+    /// pair matching `c` -- `ds`/`cs`'s own lookup, dispatching to
+    /// `bracket::enclosing_pair` for a bracket char (or its `b`/`B`
+    /// vim-surround alias) or `textobject::quote_positions` for a quote
+    /// char. `None` for any other char, or if nothing of that kind
+    /// encloses the cursor.
+    fn find_surrounding(&self, buffer: &Buffer, cursor: &Cursor, c: char) -> Option<(usize, usize)> {
+        match c {
+            '(' | ')' | 'b' => bracket::enclosing_pair(buffer, cursor.char_idx, '(', ')'),
+            '{' | '}' | 'B' => bracket::enclosing_pair(buffer, cursor.char_idx, '{', '}'),
+            '[' | ']' => bracket::enclosing_pair(buffer, cursor.char_idx, '[', ']'),
+            '"' | '\'' | '`' => textobject::quote_positions(buffer, cursor, c),
+            _ => None,
         }
     }
 
@@ -1550,6 +1835,26 @@ impl VimState {
             return VimEvent::None;
         }
 
+        if self.pending_visual_surround {
+            self.pending_visual_surround = false;
+            if let KeyCode::Char(c) = key.code {
+                self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                // Block visual surround isn't supported (matches real
+                // vim-surround's own lack of block support) -- `visual_
+                // range` itself doesn't handle Block anyway (see its own
+                // doc comment), so this guard is required, not optional.
+                if self.visual_kind != VisualKind::Block {
+                    let (range, _) = self.visual_range(buffer, cursor);
+                    self.add_surrounding(buffer, cursor, range, c);
+                }
+                self.mode = Mode::Normal;
+            } else if key.code == KeyCode::Named(NamedKey::Escape) {
+                self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                self.mode = Mode::Normal;
+            }
+            return VimEvent::None;
+        }
+
         if key.code == KeyCode::Named(NamedKey::Escape) {
             self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
             self.mode = Mode::Normal;
@@ -1628,6 +1933,9 @@ impl VimState {
                 }
                 VisualAction::ReplaceChar => {
                     self.pending_visual_replace = true;
+                }
+                VisualAction::Surround => {
+                    self.pending_visual_surround = true;
                 }
             }
             // Same one-shot reset as `handle_normal_key`'s own
@@ -1776,6 +2084,60 @@ fn adjust_for_change_word(op: Operator, motion: Motion, buffer: &Buffer, cursor:
         Motion::WordEndForward
     } else {
         motion
+    }
+}
+
+/// The char range (relative to `chars`, a single line's own characters)
+/// of the nearest run of ASCII digits at or after `from_col` -- `Ctrl-a`/
+/// `Ctrl-x`'s own target-finding. If `from_col` already sits inside a
+/// digit run, that run is what's returned (backs up to its start first)
+/// rather than the *next* one, matching real Vim: incrementing with the
+/// cursor mid-number still targets that number. A `-` immediately before
+/// the run is included (a negative number, not a separate token). `None`
+/// if there's no digit from `from_col` onward.
+fn find_number(chars: &[char], from_col: usize) -> Option<(usize, usize)> {
+    let len = chars.len();
+    let mut i = from_col.min(len);
+    if i < len && chars[i].is_ascii_digit() {
+        while i > 0 && chars[i - 1].is_ascii_digit() {
+            i -= 1;
+        }
+    } else {
+        while i < len && !chars[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if i >= len || !chars[i].is_ascii_digit() {
+        return None;
+    }
+    let start = if i > 0 && chars[i - 1] == '-' { i - 1 } else { i };
+    let mut end = i;
+    while end < len && chars[end].is_ascii_digit() {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// The (open, close) insertion strings vim-surround/evil-surround uses
+/// for a given surround char -- `(`/`{`/`[` (the *opening*-bracket
+/// spelling) get inner padding, matching real vim-surround's own
+/// convention that spells "with a space inside" by typing the open
+/// delimiter and "tight, no space" by typing the close one; `b`/`B` are
+/// vim-surround's own aliases for `()`/`{}`. `None` for any other char --
+/// callers treat that as "not a recognized surround char," a silent
+/// no-op same posture as an unrecognized mark name.
+fn surround_pair_for(c: char) -> Option<(String, String)> {
+    match c {
+        '(' => Some(("( ".to_string(), " )".to_string())),
+        ')' | 'b' => Some(("(".to_string(), ")".to_string())),
+        '{' => Some(("{ ".to_string(), " }".to_string())),
+        '}' | 'B' => Some(("{".to_string(), "}".to_string())),
+        '[' => Some(("[ ".to_string(), " ]".to_string())),
+        ']' => Some(("[".to_string(), "]".to_string())),
+        '"' => Some(("\"".to_string(), "\"".to_string())),
+        '\'' => Some(("'".to_string(), "'".to_string())),
+        '`' => Some(("`".to_string(), "`".to_string())),
+        _ => None,
     }
 }
 
@@ -2421,6 +2783,223 @@ mod tests {
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "daw");
         assert_eq!(b.text(), "foo baz");
+    }
+
+    #[test]
+    fn di_paren_deletes_inside_brackets_from_anywhere_inside() {
+        let mut b = buf("foo(bar)baz");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 }; // on 'a' inside "bar"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "di(");
+        assert_eq!(b.text(), "foo()baz");
+    }
+
+    #[test]
+    fn ci_quote_changes_the_quoted_text() {
+        let mut b = buf(r#"say "hello" now"#);
+        let mut c = Cursor { char_idx: 6, sticky_col: 6 }; // inside "hello"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "ci\"");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), r#"say "" now"#);
+    }
+
+    #[test]
+    fn i_brace_alias_b_and_shift_b_reach_the_same_text_object() {
+        let mut b1 = buf("x{y}z");
+        let mut c1 = Cursor { char_idx: 2, sticky_col: 2 };
+        let mut vim1 = VimState::new();
+        keys(&mut vim1, &mut b1, &mut c1, "diB");
+        assert_eq!(b1.text(), "x{}z");
+    }
+
+    #[test]
+    fn dap_removes_a_paragraph_and_its_trailing_blank_line() {
+        let mut b = buf("a\nb\n\nc\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "dap");
+        assert_eq!(b.text(), "c\n");
+    }
+
+    // -- Surround (`ys`/`ds`/`cs`, Visual `S`) --------------------------
+
+    #[test]
+    fn ysiw_quote_wraps_the_inner_word_in_quotes() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start(); // on "hello"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "ysiw\"");
+        assert_eq!(b.text(), "\"hello\" world");
+        assert_eq!(vim.mode(), Mode::Normal); // ys never enters Insert
+    }
+
+    #[test]
+    fn ysiw_open_paren_adds_inner_padding_close_paren_does_not() {
+        let mut open = buf("hello world");
+        let mut oc = Cursor::at_start();
+        let mut ovim = VimState::new();
+        keys(&mut ovim, &mut open, &mut oc, "ysiw(");
+        assert_eq!(open.text(), "( hello ) world");
+
+        let mut close = buf("hello world");
+        let mut cc = Cursor::at_start();
+        let mut cvim = VimState::new();
+        keys(&mut cvim, &mut close, &mut cc, "ysiw)");
+        assert_eq!(close.text(), "(hello) world");
+    }
+
+    #[test]
+    fn yss_surrounds_the_whole_line() {
+        let mut b = buf("  hello world  ");
+        let mut c = Cursor { char_idx: 4, sticky_col: 4 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yss)");
+        assert_eq!(b.text(), "  (hello world  )");
+    }
+
+    #[test]
+    fn ds_quote_removes_the_nearest_quote_pair() {
+        let mut b = buf(r#"say "hello" now"#);
+        let mut c = Cursor { char_idx: 6, sticky_col: 6 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "ds\"");
+        assert_eq!(b.text(), "say hello now");
+    }
+
+    #[test]
+    fn ds_paren_removes_the_enclosing_parens() {
+        let mut b = buf("foo(bar)baz");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "ds(");
+        assert_eq!(b.text(), "foobarbaz");
+    }
+
+    #[test]
+    fn cs_quote_to_single_quote_swaps_the_delimiters() {
+        let mut b = buf(r#"say "hello" now"#);
+        let mut c = Cursor { char_idx: 6, sticky_col: 6 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "cs\"'");
+        assert_eq!(b.text(), "say 'hello' now");
+    }
+
+    #[test]
+    fn cs_paren_to_brace_swaps_bracket_kind() {
+        let mut b = buf("foo(bar)baz");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "cs({");
+        assert_eq!(b.text(), "foo{ bar }baz");
+    }
+
+    #[test]
+    fn ds_with_no_enclosing_pair_is_a_no_op() {
+        let mut b = buf("plain text");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "ds\"");
+        assert_eq!(b.text(), "plain text");
+    }
+
+    #[test]
+    fn visual_shift_s_surrounds_the_selection() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vll"); // selects "hel"
+        vim.handle_key(&mut b, &mut c, KeyPress::char('S'));
+        vim.handle_key(&mut b, &mut c, KeyPress::char('"'));
+        assert_eq!(b.text(), "\"hel\"lo world");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    // -- `zz`/`zt`/`zb`, `Ctrl-a`/`Ctrl-x` -------------------------------
+
+    #[test]
+    fn zz_zt_zb_raise_the_expected_scroll_events() {
+        let mut b = buf("a");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Center));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('t')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Top));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('b')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Bottom));
+    }
+
+    #[test]
+    fn ctrl_a_increments_the_number_under_the_cursor() {
+        let mut b = buf("count: 41");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('a').with_ctrl());
+        assert_eq!(b.text(), "count: 42");
+        assert_eq!(c.char_idx, b.len_chars() - 1); // on the last digit
+    }
+
+    #[test]
+    fn ctrl_x_decrements_the_number_under_the_cursor() {
+        let mut b = buf("count: 41");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('x').with_ctrl());
+        assert_eq!(b.text(), "count: 40");
+    }
+
+    #[test]
+    fn ctrl_a_finds_the_next_number_when_the_cursor_isnt_on_one() {
+        let mut b = buf("x = 9");
+        let mut c = Cursor::at_start(); // on 'x', not the digit
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('a').with_ctrl());
+        assert_eq!(b.text(), "x = 10");
+    }
+
+    #[test]
+    fn ctrl_a_with_a_count_adds_that_many() {
+        let mut b = buf("5");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('a').with_ctrl());
+        assert_eq!(b.text(), "8");
+    }
+
+    #[test]
+    fn ctrl_a_with_no_number_on_the_line_is_a_no_op() {
+        let mut b = buf("no digits here");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('a').with_ctrl());
+        assert_eq!(b.text(), "no digits here");
+    }
+
+    // -- `is_idle` --------------------------------------------------------
+
+    #[test]
+    fn is_idle_is_true_at_rest_and_false_mid_sequence() {
+        let mut b = buf("hello");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert!(vim.is_idle());
+        vim.handle_key(&mut b, &mut c, KeyPress::char('d')); // pending_op set
+        assert!(!vim.is_idle());
+        vim.handle_key(&mut b, &mut c, KeyPress::char('w'));
+        assert!(vim.is_idle()); // dw resolved, back to rest
+    }
+
+    #[test]
+    fn is_idle_is_false_while_in_insert_mode() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        assert!(!vim.is_idle());
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert!(vim.is_idle());
     }
 
     #[test]

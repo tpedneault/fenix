@@ -6,17 +6,28 @@ use crate::state::VimEvent;
 
 /// Parses and runs one confirmed `:` command line -- the bare `w`/`q`/
 /// `q!`/`wq`/`x` file/quit commands (unchanged from before this module
-/// existed), `set shiftwidth=N`/`set sw=N` (mutates `indent_width` in
-/// place, since this is a plain function without access to `VimState`'s
-/// own field), or a `[range]s/pattern/replacement/flags` substitute.
-/// Anything else is silently ignored, matching this project's existing
-/// "log and degrade, never crash on user input" posture elsewhere (e.g.
-/// `fenix-explorer`'s file-op failures).
-pub fn run_ex_command(cmd: &str, buffer: &mut Buffer, cursor: &mut Cursor, indent_width: &mut usize) -> VimEvent {
+/// existed, except `q!` now raises its own event -- see `VimEvent::
+/// RequestForceQuit`'s own doc comment), `set shiftwidth=N`/`set sw=N`
+/// (mutates `indent_width` in place, since this is a plain function
+/// without access to `VimState`'s own field), or a `[range]s/pattern/
+/// replacement/flags` substitute (`last_search`, the most recently
+/// confirmed `/`/`?` pattern if any, is what an empty `s///` pattern
+/// falls back to -- see `run_substitute`). Anything else is silently
+/// ignored, matching this project's existing "log and degrade, never
+/// crash on user input" posture elsewhere (e.g. `fenix-explorer`'s
+/// file-op failures).
+pub fn run_ex_command(
+    cmd: &str,
+    buffer: &mut Buffer,
+    cursor: &mut Cursor,
+    indent_width: &mut usize,
+    last_search: Option<&str>,
+) -> VimEvent {
     let cmd = cmd.trim();
     match cmd {
         "w" => return VimEvent::RequestSave,
-        "q" | "q!" => return VimEvent::RequestQuit,
+        "q" => return VimEvent::RequestQuit,
+        "q!" => return VimEvent::RequestForceQuit,
         "wq" | "x" => return VimEvent::RequestSaveAndQuit,
         _ => {}
     }
@@ -33,7 +44,7 @@ pub fn run_ex_command(cmd: &str, buffer: &mut Buffer, cursor: &mut Cursor, inden
     if let Some(spec) = rest.strip_prefix('s') {
         let (cur_line, _) = buffer.line_col(cursor);
         let (start_line, end_line) = range.unwrap_or((cur_line, cur_line));
-        run_substitute(buffer, cursor, start_line, end_line, spec);
+        return run_substitute(buffer, cursor, start_line, end_line, spec, last_search);
     }
     VimEvent::None
 }
@@ -91,15 +102,23 @@ fn parse_range(cmd: &str, last_line: usize) -> (Option<(usize, usize)>, &str) {
 /// `spec` is everything after the `s` in `s/pat/repl/flags` -- the first
 /// character is the delimiter (Vim convention: any punctuation works,
 /// not hardcoded to `/`, so a pattern that itself contains `/` can use
-/// e.g. `s#/path#/other#`).
-fn run_substitute(buffer: &mut Buffer, cursor: &mut Cursor, start_line: usize, end_line: usize, spec: &str) {
-    let Some(delim) = spec.chars().next() else { return };
+/// e.g. `s#/path#/other#`). An empty pattern (`s//repl/`) falls back to
+/// `last_search`, matching real Vim; still a no-op (not an error -- there
+/// was nothing to reuse) if that's also `None`.
+fn run_substitute(
+    buffer: &mut Buffer,
+    cursor: &mut Cursor,
+    start_line: usize,
+    end_line: usize,
+    spec: &str,
+    last_search: Option<&str>,
+) -> VimEvent {
+    let Some(delim) = spec.chars().next() else { return VimEvent::None };
     let parts: Vec<&str> = spec[delim.len_utf8()..].splitn(3, delim).collect();
     let pattern = parts.first().copied().unwrap_or("");
+    let pattern = if pattern.is_empty() { last_search.unwrap_or("") } else { pattern };
     if pattern.is_empty() {
-        // Real Vim reuses the last search pattern here; not supported --
-        // see the plan's Scope/Out. An empty pattern is just a no-op.
-        return;
+        return VimEvent::None;
     }
     let replacement = parts.get(1).copied().unwrap_or("");
     let flags = parts.get(2).copied().unwrap_or("");
@@ -112,8 +131,9 @@ fn run_substitute(buffer: &mut Buffer, cursor: &mut Cursor, start_line: usize, e
         global: flags.contains('g'),
         ignore_case: flags.contains('i'),
     };
-    if let Err(err) = substitute(buffer, cursor, &spec) {
-        eprintln!("fenix: :s failed: {err}");
+    match substitute(buffer, cursor, &spec) {
+        Ok(()) => VimEvent::None,
+        Err(err) => VimEvent::Error(format!(":s failed: {err}")),
     }
 }
 
@@ -253,60 +273,60 @@ mod tests {
     #[test]
     fn w_q_wq_x_are_unchanged() {
         let (mut b, mut c) = cmd("hi");
-        assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4), VimEvent::RequestSave);
-        assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4), VimEvent::RequestQuit);
-        assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4), VimEvent::RequestQuit);
-        assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4), VimEvent::RequestSaveAndQuit);
-        assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4), VimEvent::RequestSaveAndQuit);
+        assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4, None), VimEvent::RequestSave);
+        assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4, None), VimEvent::RequestQuit);
+        assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceQuit);
+        assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndQuit);
+        assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndQuit);
     }
 
     #[test]
     fn substitute_with_no_range_affects_only_the_current_line() {
         let (mut b, mut c) = cmd("foo\nfoo\nfoo");
         c.char_idx = b.line_start_char(1); // on the second line
-        run_ex_command("s/foo/bar/", &mut b, &mut c, &mut 4);
+        run_ex_command("s/foo/bar/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "foo\nbar\nfoo");
     }
 
     #[test]
     fn substitute_with_percent_range_affects_the_whole_buffer() {
         let (mut b, mut c) = cmd("foo\nfoo\nfoo");
-        run_ex_command("%s/foo/bar/", &mut b, &mut c, &mut 4);
+        run_ex_command("%s/foo/bar/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "bar\nbar\nbar");
     }
 
     #[test]
     fn substitute_with_a_numeric_range_affects_only_those_lines() {
         let (mut b, mut c) = cmd("foo\nfoo\nfoo\nfoo");
-        run_ex_command("2,3s/foo/bar/", &mut b, &mut c, &mut 4);
+        run_ex_command("2,3s/foo/bar/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "foo\nbar\nbar\nfoo");
     }
 
     #[test]
     fn substitute_without_g_replaces_only_the_first_match_per_line() {
         let (mut b, mut c) = cmd("foo foo foo");
-        run_ex_command("s/foo/bar/", &mut b, &mut c, &mut 4);
+        run_ex_command("s/foo/bar/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "bar foo foo");
     }
 
     #[test]
     fn substitute_with_g_replaces_every_match_per_line() {
         let (mut b, mut c) = cmd("foo foo foo");
-        run_ex_command("s/foo/bar/g", &mut b, &mut c, &mut 4);
+        run_ex_command("s/foo/bar/g", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "bar bar bar");
     }
 
     #[test]
     fn substitute_with_i_is_case_insensitive() {
         let (mut b, mut c) = cmd("FOO foo");
-        run_ex_command("s/foo/bar/gi", &mut b, &mut c, &mut 4);
+        run_ex_command("s/foo/bar/gi", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "bar bar");
     }
 
     #[test]
     fn substitute_supports_a_non_slash_delimiter() {
         let (mut b, mut c) = cmd("/usr/bin");
-        run_ex_command("s#/usr#/opt#", &mut b, &mut c, &mut 4);
+        run_ex_command("s#/usr#/opt#", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "/opt/bin");
     }
 
@@ -317,14 +337,14 @@ mod tests {
         // translated, only the *replacement* side is); `(...)` is
         // already a capture group here, no backslash needed.
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command(r"s/(\w+) (\w+)/\2 \1: [&]/", &mut b, &mut c, &mut 4);
+        run_ex_command(r"s/(\w+) (\w+)/\2 \1: [&]/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "world hello: [hello world]");
     }
 
     #[test]
     fn substitute_is_a_single_undo_step() {
         let (mut b, mut c) = cmd("foo foo foo");
-        run_ex_command("s/foo/bar/g", &mut b, &mut c, &mut 4);
+        run_ex_command("s/foo/bar/g", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "bar bar bar");
         assert!(b.undo(&mut c));
         assert_eq!(b.text(), "foo foo foo");
@@ -333,22 +353,36 @@ mod tests {
     #[test]
     fn substitute_with_no_matches_is_a_no_op() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command("s/xyz/abc/", &mut b, &mut c, &mut 4);
+        run_ex_command("s/xyz/abc/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "hello world");
     }
 
     #[test]
-    fn substitute_with_an_empty_pattern_is_a_no_op() {
+    fn substitute_with_an_empty_pattern_is_a_no_op_when_theres_no_last_search() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command("s///", &mut b, &mut c, &mut 4);
+        run_ex_command("s///", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "hello world");
+    }
+
+    #[test]
+    fn substitute_with_an_empty_pattern_reuses_the_last_search_pattern() {
+        let (mut b, mut c) = cmd("hello world");
+        run_ex_command("s//bye/", &mut b, &mut c, &mut 4, Some("hello"));
+        assert_eq!(b.text(), "bye world");
     }
 
     #[test]
     fn substitute_with_an_invalid_pattern_does_not_panic_or_change_the_buffer() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4);
+        run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4, None);
         assert_eq!(b.text(), "hello world");
+    }
+
+    #[test]
+    fn substitute_with_an_invalid_pattern_raises_an_error_event() {
+        let (mut b, mut c) = cmd("hello world");
+        let event = run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4, None);
+        assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 
     #[test]
@@ -405,7 +439,7 @@ mod tests {
     fn set_shiftwidth_changes_the_indent_width_and_reports_it() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set shiftwidth=3", &mut b, &mut c, &mut width), VimEvent::IndentWidthChanged(3));
+        assert_eq!(run_ex_command("set shiftwidth=3", &mut b, &mut c, &mut width, None), VimEvent::IndentWidthChanged(3));
         assert_eq!(width, 3);
     }
 
@@ -413,7 +447,7 @@ mod tests {
     fn set_sw_is_an_accepted_alias_for_shiftwidth() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set sw=8", &mut b, &mut c, &mut width), VimEvent::IndentWidthChanged(8));
+        assert_eq!(run_ex_command("set sw=8", &mut b, &mut c, &mut width, None), VimEvent::IndentWidthChanged(8));
         assert_eq!(width, 8);
     }
 
@@ -421,7 +455,7 @@ mod tests {
     fn set_to_the_same_width_reports_no_change() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set sw=4", &mut b, &mut c, &mut width), VimEvent::None);
+        assert_eq!(run_ex_command("set sw=4", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -429,9 +463,9 @@ mod tests {
     fn set_with_a_zero_or_unparsable_width_is_ignored() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set sw=0", &mut b, &mut c, &mut width), VimEvent::None);
+        assert_eq!(run_ex_command("set sw=0", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
-        assert_eq!(run_ex_command("set sw=nope", &mut b, &mut c, &mut width), VimEvent::None);
+        assert_eq!(run_ex_command("set sw=nope", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -439,7 +473,7 @@ mod tests {
     fn set_with_an_unrecognized_option_is_ignored() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set number", &mut b, &mut c, &mut width), VimEvent::None);
+        assert_eq!(run_ex_command("set number", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -447,7 +481,7 @@ mod tests {
     fn bare_set_with_no_arguments_is_a_no_op() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("set", &mut b, &mut c, &mut width), VimEvent::None);
+        assert_eq!(run_ex_command("set", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
     }
 }

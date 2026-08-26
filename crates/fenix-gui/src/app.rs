@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, Step};
-use fenix_vim::{Mode, VimEvent, VimState, VisualKind};
+// `ScrollTarget` collides with this file's own hit-test enum of the same
+// name (`Sidebar`/`Terminal`/`Pane` -- used by click/wheel routing), so
+// the Vim one (`Center`/`Top`/`Bottom`, for `zz`/`zt`/`zb`) is aliased.
+use fenix_vim::{Mode, ScrollTarget as VimScrollTarget, VimEvent, VimState, VisualKind};
 use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -51,6 +54,14 @@ const PULSE_DURATION: Duration = Duration::from_millis(300);
 const PULSE_PEAK_ALPHA: f32 = 0.45;
 /// How long the viewport takes to ease to a new scroll position.
 const SCROLL_DURATION: Duration = Duration::from_millis(150);
+/// How long a status/error message (`App::set_message`/`set_error`)
+/// stays visible in the modeline before the normal filename/Ln/Col
+/// display returns -- long enough to actually read a short sentence,
+/// short enough not to hide real state (the cursor position, whether
+/// the buffer's dirty) for long. No fade, unlike `Pulse` -- a message is
+/// text you read, not a highlight you glance at; an abrupt cutoff reads
+/// fine for text the way it wouldn't for a color wash.
+const MESSAGE_DURATION: Duration = Duration::from_secs(4);
 /// Real Vim's own `:set tabstop` default -- how many visual columns a
 /// literal `\t` advances by when `config.tab_width` isn't set.
 const DEFAULT_TAB_WIDTH: usize = 8;
@@ -133,6 +144,18 @@ const COMPLETION_MAX_ROWS: usize = 10;
 struct Pulse {
     range: std::ops::Range<usize>,
     started: Instant,
+}
+
+/// A status/error message set via `App::set_message`/`set_error`, shown
+/// in the modeline in place of the filename/Ln/Col display for
+/// `MESSAGE_DURATION` -- vim's own "a message overwrites the command
+/// line" convention. `is_error` picks the color (`modeline_error_color`
+/// below); expiry is checked by timestamp on every redraw rather than
+/// cleared by a timer, the same posture `Pulse`'s own fade already has.
+struct StatusMessage {
+    text: String,
+    is_error: bool,
+    set_at: Instant,
 }
 
 /// An in-flight scroll transition: eases `rendered_scroll` from `from`
@@ -2605,6 +2628,36 @@ pub struct App {
     /// across every nested `@`-call it makes) -- see `MACRO_REPLAY_
     /// BUDGET`'s own doc comment.
     replay_budget: u32,
+    /// Raw keys since the last point `VimState::is_idle()` was true --
+    /// `.`'s own capture, directly parallel to `macro_capture` (same
+    /// "tap every keypress in `dispatch_keypress`, including ones a
+    /// prompt swallows before Vim sees them" reasoning) except always-on
+    /// rather than opt-in. Reset (and `change_capture_dirty` with it)
+    /// every time a fresh span starts; snapshotted into `last_change_
+    /// keys` when a completed span turns out to have edited the buffer.
+    change_capture: Vec<KeyPress>,
+    /// Whether the in-progress `change_capture` span has edited the
+    /// buffer yet -- set at the one place `vim.handle_key` is actually
+    /// called (`route_keypress`), by comparing `Buffer::edit_count`
+    /// before/after. OR-accumulated across every key in the span (a
+    /// multi-key command like `dw` only edits on its last key).
+    change_capture_dirty: bool,
+    /// What `.` replays -- the most recently completed `change_capture`
+    /// span that edited the buffer. `None` until the first one happens.
+    last_change_keys: Option<Vec<KeyPress>>,
+    /// Set for the duration of `repeat_last_change`'s own replay loop --
+    /// suppresses `change_capture_dirty`'s bookkeeping (not the edits
+    /// themselves) so a bare `.` press's own outer span doesn't get
+    /// polluted by the edits its *replayed* keys make, which would
+    /// otherwise overwrite `last_change_keys` with just `['.']` on every
+    /// repeat instead of leaving it stable. Mirrors how `play_macro`
+    /// replays through `route_keypress` directly rather than `dispatch_
+    /// keypress`, just at the bookkeeping layer instead of the tap layer
+    /// (`.`'s own replay still needs to go through the same call path
+    /// the edits themselves happen on, unlike a macro's literal-keys
+    /// replay, which is why this is a guard flag and not a different
+    /// entry point).
+    replaying_change: bool,
     /// `Some` only for a real, `main.rs`-launched `App` (see `App::new`'s
     /// own doc comment) -- the handle background threads (the Docker
     /// stats poller/log follower, the Git status poller) get their own
@@ -2730,6 +2783,15 @@ pub struct App {
     blink_transition_start: Instant,
     next_blink: Instant,
     pulse: Option<Pulse>,
+    /// The most recent status/error message, if any and not yet expired
+    /// -- see `StatusMessage`'s own doc comment. Set via `set_message`/
+    /// `set_error`; read (and its expiry checked) by `modeline_pieces`.
+    status_message: Option<StatusMessage>,
+    /// Armed by `request_quit` when quitting would discard unsaved
+    /// changes -- the next keypress is captured by `quit_confirm_key`
+    /// (`y` quits, anything else cancels), same "captures the very next
+    /// key" shape as `docker_confirm_remove`/`git_confirm`.
+    quit_confirm: bool,
 }
 
 /// The sidebar/terminal/pane rects a mouse click or wheel notch hit-
@@ -2925,6 +2987,10 @@ impl App {
             last_played_macro: None,
             replay_depth: 0,
             replay_budget: 0,
+            change_capture: Vec::new(),
+            change_capture_dirty: false,
+            last_change_keys: None,
+            replaying_change: false,
             event_proxy: None,
             completion: None,
             tcl_candidates_cache: None,
@@ -2953,6 +3019,8 @@ impl App {
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
             pulse: None,
+            status_message: None,
+            quit_confirm: false,
         }
     }
 
@@ -3247,12 +3315,12 @@ impl App {
         match self.project_root.clone() {
             Some(root) => {
                 let count = self.tcl_tags(Some(&root)).len();
-                eprintln!("fenix: refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display());
+                self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
             }
             None => {
-                eprintln!(
-                    "fenix: refresh_completion_tags: no project root detected for the focused buffer -- open a file \
-                     inside a recognized project (a `.git`/`Cargo.toml`/etc. marker somewhere above it) first"
+                self.set_error(
+                    "no project root detected for the focused buffer -- open a file inside a recognized project \
+                     (a `.git`/`Cargo.toml`/etc. marker somewhere above it) first",
                 );
             }
         }
@@ -3271,12 +3339,12 @@ impl App {
     /// formatter binary, or output identical to what's already there.
     pub(crate) fn format_buffer(&mut self) {
         let Some(language) = self.focused_language() else {
-            eprintln!("fenix: no formatter configured for this buffer's language");
+            self.set_error("no formatter configured for this buffer's language");
             return;
         };
         let source = self.open().buffer.text();
         let Some(formatted) = format_with_external_tool(language, &source, false) else {
-            eprintln!("fenix: format failed -- is the formatter for this language installed and on PATH?");
+            self.set_error("format failed -- is the formatter for this language installed and on PATH?");
             return;
         };
         if formatted == source {
@@ -3295,7 +3363,7 @@ impl App {
     /// graceful-degrade posture as `format_buffer`.
     pub(crate) fn format_selection(&mut self) {
         let Some(language) = self.focused_language() else {
-            eprintln!("fenix: no formatter configured for this buffer's language");
+            self.set_error("no formatter configured for this buffer's language");
             return;
         };
         let id = self.focused_buffer_id();
@@ -3303,18 +3371,30 @@ impl App {
         let Some(ob) = self.buffers.get_mut(id) else { return };
         let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
         let Some((range, _linewise)) = self.vim.visual_selection_range(&ob.buffer, &pane_state.cursor) else {
-            eprintln!("fenix: SPC c f needs an active (non-block) Visual selection");
+            // Can't call `self.set_error` here -- `ob`/`pane_state` still
+            // hold disjoint mutable borrows of `self.buffers`/`self.
+            // workspaces` at this point. Set directly instead; equivalent
+            // to `set_error`, just without the (unavailable) method call.
+            self.status_message = Some(StatusMessage {
+                text: "SPC c f needs an active (non-block) Visual selection".to_string(),
+                is_error: true,
+                set_at: Instant::now(),
+            });
             return;
         };
         let selected = ob.buffer.text_range(range.start, range.end);
-        if let Some(formatted) = format_with_external_tool(language, &selected, true) {
+        let format_failed = if let Some(formatted) = format_with_external_tool(language, &selected, true) {
             if formatted != selected {
                 ob.buffer.replace_range(&mut pane_state.cursor, range.start, range.end, &formatted);
             }
+            false
         } else {
-            eprintln!("fenix: format failed -- is the formatter for this language installed and on PATH?");
-        }
+            true
+        };
         self.vim.exit_visual_mode(&pane_state.cursor);
+        if format_failed {
+            self.set_error("format failed -- is the formatter for this language installed and on PATH?");
+        }
     }
 
     /// Replaces the typed prefix with the selected candidate's full
@@ -3329,13 +3409,80 @@ impl App {
 
     pub(crate) fn save(&mut self) {
         if self.open().buffer.path().is_none() {
-            eprintln!("fenix: no file path to save to yet; pass a file path as the first argument");
+            self.set_error("no file path to save to yet; pass a file path as the first argument");
             return;
         }
         let ob = self.open_mut();
         match ob.buffer.save() {
-            Ok(()) => println!("fenix: saved {:?}", ob.buffer.path().unwrap()),
-            Err(err) => eprintln!("fenix: save failed: {err}"),
+            Ok(()) => {
+                let path = ob.buffer.path().unwrap().to_path_buf();
+                self.set_message(format!("saved {}", path.display()));
+            }
+            Err(err) => self.set_error(format!("save failed: {err}")),
+        }
+        self.wake_caret();
+    }
+
+    /// Whether any open buffer has unsaved changes -- extends the
+    /// modeline's existing single-buffer `[+]` marker (`ob.buffer.
+    /// is_dirty()`) across every open buffer, not just the focused one.
+    /// `request_quit`'s own check.
+    fn any_buffer_dirty(&self) -> bool {
+        self.buffers.ids_sorted_by_path().iter().any(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
+    }
+
+    /// The event-loop-independent half of `request_quit`: arms `quit_
+    /// confirm` and the modeline message when there's unsaved work
+    /// (returning `true`), or leaves everything untouched when there
+    /// isn't (returning `false`, meaning the caller should exit
+    /// immediately). Split out purely so it's directly testable --
+    /// `&ActiveEventLoop` can't be constructed in this test harness (see
+    /// `test_dispatch_key`'s own doc comment for the same limitation
+    /// elsewhere in this file).
+    fn arm_quit_confirm_if_dirty(&mut self) -> bool {
+        if !self.any_buffer_dirty() {
+            return false;
+        }
+        self.quit_confirm = true;
+        let count = self
+            .buffers
+            .ids_sorted_by_path()
+            .iter()
+            .filter(|&&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
+            .count();
+        let plural = if count == 1 { "" } else { "s" };
+        self.set_error(format!("{count} unsaved buffer{plural} -- quit anyway? (y/n)"));
+        true
+    }
+
+    /// `:q`/`SPC q q`/the window's close button (`app.quit`) -- exits
+    /// immediately if every buffer is saved, otherwise arms `quit_
+    /// confirm` and shows a message instead of exiting, so an accidental
+    /// (or just habitual, forgetting there's unsaved work) `:q` can't
+    /// silently discard it. `:q!`/`app.quit_force` bypasses this
+    /// entirely (`commands::cmd_quit_force`) -- real Vim's own `!`
+    /// convention for "yes, I know, do it anyway."
+    pub(crate) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.arm_quit_confirm_if_dirty() {
+            event_loop.exit();
+        }
+    }
+
+    /// The event-loop-independent half of `quit_confirm_key`: clears
+    /// `quit_confirm` and reports whether the pressed key confirmed
+    /// (`y`) or cancelled (anything else). Split out for the same
+    /// testability reason as `arm_quit_confirm_if_dirty`.
+    fn resolve_quit_confirm(&mut self, keypress: KeyPress) -> bool {
+        self.quit_confirm = false;
+        keypress.code == KeyCode::Char('y')
+    }
+
+    /// Resolves an armed `quit_confirm` -- `y` quits unconditionally
+    /// (same as `:q!`), anything else cancels. Same "captures the very
+    /// next key" shape as `docker_confirm_key`/`git_confirm_key`.
+    fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+        if self.resolve_quit_confirm(keypress) {
+            event_loop.exit();
         }
         self.wake_caret();
     }
@@ -3771,7 +3918,7 @@ impl App {
                     .collect();
                 self.enter_picker(ActivePicker::Grep(fenix_picker::PickerState::new(candidates)));
             }
-            Err(err) => eprintln!("fenix: search failed: {err}"),
+            Err(err) => self.set_error(format!("search failed: {err}")),
         }
     }
 
@@ -3828,7 +3975,7 @@ impl App {
     /// all -- there'd be nothing to index.
     fn mib_index(&mut self) -> Option<&mut fenix_mib::MibIndex> {
         if self.mib_roots.is_empty() {
-            eprintln!("fenix: no MIB roots configured (see [mib] in config.ini)");
+            self.set_error("no MIB roots configured (see [mib] in config.ini)");
             return None;
         }
         if self.mib_index.is_none() {
@@ -4691,7 +4838,7 @@ impl App {
     fn start_project_search_replace(&mut self, pattern: String, replacement: String) {
         let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let matches = fenix_project::grep_project(&root, &pattern).unwrap_or_else(|err| {
-            eprintln!("fenix: project search failed: {err}");
+            self.set_error(format!("project search failed: {err}"));
             Vec::new()
         });
         if matches.is_empty() {
@@ -4840,9 +4987,9 @@ impl App {
             files_changed += 1;
             total_replacements += count;
         }
-        eprintln!(
-            "fenix: search/replace applied {total_replacements} replacement(s) across {files_changed} file(s) ({left_dirty} already open, not yet saved)"
-        );
+        self.set_message(format!(
+            "applied {total_replacements} replacement(s) across {files_changed} file(s) ({left_dirty} already open, not yet saved)"
+        ));
         self.kill_buffer();
     }
 
@@ -5301,7 +5448,7 @@ impl App {
     fn docker_start_selected(&mut self) {
         if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
             if let Err(err) = fenix_docker::start_container(&id) {
-                eprintln!("fenix: docker start failed: {err}");
+                self.set_error(format!("docker start failed: {err}"));
             }
             self.docker_refresh_session();
         }
@@ -5311,7 +5458,7 @@ impl App {
     fn docker_stop_selected(&mut self) {
         if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
             if let Err(err) = fenix_docker::stop_container(&id) {
-                eprintln!("fenix: docker stop failed: {err}");
+                self.set_error(format!("docker stop failed: {err}"));
             }
             self.docker_refresh_session();
         }
@@ -5322,7 +5469,7 @@ impl App {
     fn docker_restart_selected(&mut self) {
         if let Some(docker_panel::DockerEntry::Container(id)) = self.docker_entry_at_cursor() {
             if let Err(err) = fenix_docker::restart_container(&id) {
-                eprintln!("fenix: docker restart failed: {err}");
+                self.set_error(format!("docker restart failed: {err}"));
             }
             self.docker_refresh_session();
         }
@@ -5333,7 +5480,7 @@ impl App {
     fn docker_run_selected(&mut self) {
         if let Some(docker_panel::DockerEntry::Image(id)) = self.docker_entry_at_cursor() {
             if let Err(err) = fenix_docker::run_image(&id) {
-                eprintln!("fenix: docker run failed: {err}");
+                self.set_error(format!("docker run failed: {err}"));
             }
             self.docker_refresh_session();
         }
@@ -5455,8 +5602,8 @@ impl App {
         let context_dir = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let tag = context_dir.file_name().map(|n| format!("{}:latest", n.to_string_lossy()));
         match fenix_docker::build_image(&context_dir, tag.as_deref()) {
-            Ok(_) => println!("fenix: docker build succeeded for {}", context_dir.display()),
-            Err(err) => eprintln!("fenix: docker build failed: {err}"),
+            Ok(_) => self.set_message(format!("docker build succeeded for {}", context_dir.display())),
+            Err(err) => self.set_error(format!("docker build failed: {err}")),
         }
         if self.docker_session.is_some() {
             self.docker_refresh_session();
@@ -5536,7 +5683,7 @@ impl App {
                     docker_panel::DockerEntry::Network(id) => fenix_docker::remove_network(&id),
                 };
                 if let Err(err) = result {
-                    eprintln!("fenix: docker remove failed: {err}");
+                    self.set_error(format!("docker remove failed: {err}"));
                 }
                 self.docker_refresh_session();
             }
@@ -6016,7 +6163,7 @@ impl App {
             _ => return,
         };
         if let Err(err) = fenix_git::stage_file(&repo_root, &path) {
-            eprintln!("fenix: git stage failed: {err}");
+            self.set_error(format!("git stage failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6031,7 +6178,7 @@ impl App {
             _ => return,
         };
         if let Err(err) = fenix_git::unstage_file(&repo_root, &path) {
-            eprintln!("fenix: git unstage failed: {err}");
+            self.set_error(format!("git unstage failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6041,7 +6188,7 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         if let Err(err) = fenix_git::stage_all(&repo_root) {
-            eprintln!("fenix: git stage all failed: {err}");
+            self.set_error(format!("git stage all failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6051,7 +6198,7 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         if let Err(err) = fenix_git::unstage_all(&repo_root) {
-            eprintln!("fenix: git unstage all failed: {err}");
+            self.set_error(format!("git unstage all failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6062,7 +6209,7 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         if let Err(err) = fenix_git::stash_push(&repo_root) {
-            eprintln!("fenix: git stash failed: {err}");
+            self.set_error(format!("git stash failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6072,7 +6219,7 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         if let Err(err) = fenix_git::push(&repo_root) {
-            eprintln!("fenix: git push failed: {err}");
+            self.set_error(format!("git push failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6082,7 +6229,7 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         if let Err(err) = fenix_git::pull(&repo_root) {
-            eprintln!("fenix: git pull failed: {err}");
+            self.set_error(format!("git pull failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6093,7 +6240,7 @@ impl App {
         let repo_root = session.repo_root.clone();
         if let Some(git_panel::GitEntry::Branch(name)) = self.git_entry_at_cursor() {
             if let Err(err) = fenix_git::checkout_branch(&repo_root, &name) {
-                eprintln!("fenix: git checkout failed: {err}");
+                self.set_error(format!("git checkout failed: {err}"));
             }
             self.git_refresh_session();
         }
@@ -6106,7 +6253,7 @@ impl App {
         let repo_root = session.repo_root.clone();
         if let Some(git_panel::GitEntry::Stash(index)) = self.git_entry_at_cursor() {
             if let Err(err) = fenix_git::stash_apply(&repo_root, index) {
-                eprintln!("fenix: git stash apply failed: {err}");
+                self.set_error(format!("git stash apply failed: {err}"));
             }
             self.git_refresh_session();
         }
@@ -6119,7 +6266,7 @@ impl App {
         let repo_root = session.repo_root.clone();
         if let Some(git_panel::GitEntry::Stash(index)) = self.git_entry_at_cursor() {
             if let Err(err) = fenix_git::stash_pop(&repo_root, index) {
-                eprintln!("fenix: git stash pop failed: {err}");
+                self.set_error(format!("git stash pop failed: {err}"));
             }
             self.git_refresh_session();
         }
@@ -6211,7 +6358,7 @@ impl App {
                     GitConfirmAction::DropStash { index } => fenix_git::stash_drop(&repo_root, index),
                 };
                 if let Err(err) = result {
-                    eprintln!("fenix: git action failed: {err}");
+                    self.set_error(format!("git action failed: {err}"));
                 }
                 self.git_refresh_session();
             }
@@ -6266,7 +6413,7 @@ impl App {
             GitPromptKind::NewBranch => fenix_git::create_branch(&repo_root, input),
         };
         if let Err(err) = result {
-            eprintln!("fenix: git operation failed: {err}");
+            self.set_error(format!("git operation failed: {err}"));
         }
         self.git_refresh_session();
     }
@@ -6563,12 +6710,12 @@ impl App {
         };
         let id = self.focused_buffer_id();
         if let Err(err) = self.open_mut().buffer.save_as(&new_path) {
-            eprintln!("fenix: rename failed: {err}");
+            self.set_error(format!("rename failed: {err}"));
             return;
         }
         self.buffers.path_changed(id, Some(&old_path));
         if let Err(err) = std::fs::remove_file(&old_path) {
-            eprintln!("fenix: rename couldn't remove the old file {}: {err}", old_path.display());
+            self.set_error(format!("rename couldn't remove the old file {}: {err}", old_path.display()));
         }
     }
 
@@ -6605,7 +6752,7 @@ impl App {
     fn apply_delete_file(&mut self) {
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         if let Err(err) = std::fs::remove_file(&path) {
-            eprintln!("fenix: couldn't delete {}: {err}", path.display());
+            self.set_error(format!("couldn't delete {}: {err}", path.display()));
             return;
         }
         self.kill_buffer();
@@ -7393,11 +7540,34 @@ impl App {
     /// this tap: a nested `@b` call's own literal two keystrokes get
     /// captured here (as ordinary top-level input), but `b`'s *expanded*
     /// replay must not also be appended on top of that.
+    ///
+    /// Also where `.`'s own capture lives (`change_capture`), same
+    /// always-tap reasoning: `VimState::is_idle()` marks the span
+    /// boundary -- a fresh span starts (clearing `change_capture`/
+    /// `change_capture_dirty`) whenever the state was idle *before* this
+    /// key, and a completed span (idle again *after*) gets promoted to
+    /// `last_change_keys` if it actually edited the buffer along the way
+    /// (`change_capture_dirty`, set inside `route_keypress` at the one
+    /// place `vim.handle_key` is called). `.` itself replays through
+    /// `repeat_last_change` -> `route_keypress` directly, same as a
+    /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
         if self.vim.is_recording() {
             self.macro_capture.push(keypress);
         }
+        if self.vim.is_idle() {
+            self.change_capture.clear();
+            self.change_capture_dirty = false;
+        }
+        self.change_capture.push(keypress);
         self.route_keypress(keypress, event_loop);
+        if self.vim.is_idle() {
+            if self.change_capture_dirty {
+                self.last_change_keys = Some(std::mem::take(&mut self.change_capture));
+            } else {
+                self.change_capture.clear();
+            }
+        }
     }
 
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
@@ -7425,6 +7595,17 @@ impl App {
                 self.write_terminal_input(keypress);
             }
             self.wake_caret();
+            return;
+        }
+
+        // An armed quit confirmation (`:q`/`SPC q q`/the window's close
+        // button with unsaved buffers) captures the very next key --
+        // same "y confirms, anything else cancels" shape as `docker_
+        // confirm_remove`/`git_confirm` below, checked first since it's
+        // the one prompt that can be reached from *outside* Normal mode
+        // too (the window close button).
+        if self.quit_confirm {
+            self.quit_confirm_key(keypress, event_loop);
             return;
         }
 
@@ -8018,7 +8199,16 @@ impl App {
         let vim_event = {
             let Some(ob) = self.buffers.get_mut(id) else { return };
             let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
-            self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress)
+            let edit_count_before = ob.buffer.edit_count();
+            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress);
+            // See `dispatch_keypress`'s own doc comment for `change_
+            // capture`/`replaying_change` -- suppressed only while `.`
+            // itself is replaying, so its own outer span doesn't get
+            // polluted by the edits its replayed keys make.
+            if !self.replaying_change && ob.buffer.edit_count() != edit_count_before {
+                self.change_capture_dirty = true;
+            }
+            event
         };
         self.push_clipboard_after_edit();
         self.sync_completion();
@@ -8049,10 +8239,16 @@ impl App {
             VimEvent::RequestQuit => {
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
             }
+            VimEvent::RequestForceQuit => {
+                CommandRegistry::with_builtins().run(self, event_loop, "app.quit_force");
+            }
             VimEvent::RequestSaveAndQuit => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
             }
+            VimEvent::Error(msg) => self.set_error(msg),
+            VimEvent::ScrollWindow(target) => self.scroll_window(target),
+            VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::Pulse(range) => {
                 self.pulse = Some(Pulse { range, started: Instant::now() });
             }
@@ -8120,7 +8316,7 @@ impl App {
         let register = if register == '@' { self.last_played_macro } else { Some(register) };
         let Some(register) = register else { return };
         if self.replay_depth >= MAX_MACRO_REPLAY_DEPTH {
-            eprintln!("fenix: macro replay stopped -- nested too deep (possible infinite recursion)");
+            self.set_error("macro replay stopped -- nested too deep (possible infinite recursion)");
             return;
         }
         let Some(keys) = self.vim.decode_register(register) else { return };
@@ -8137,7 +8333,7 @@ impl App {
         'replay: for _ in 0..count.max(1) {
             for key in &keys {
                 if self.replay_budget == 0 {
-                    eprintln!("fenix: macro replay stopped -- too many keys played (possible infinite recursion)");
+                    self.set_error("macro replay stopped -- too many keys played (possible infinite recursion)");
                     break 'replay;
                 }
                 self.replay_budget -= 1;
@@ -8145,6 +8341,26 @@ impl App {
             }
         }
         self.replay_depth -= 1;
+    }
+
+    /// `.` -- replays `last_change_keys` (the most recently completed
+    /// change-producing key span, captured by `dispatch_keypress`) the
+    /// same way `play_macro` replays a register's decoded content:
+    /// through `route_keypress` directly, not `dispatch_keypress`, so
+    /// the replay's own keys don't get re-tapped into `change_capture`.
+    /// `replaying_change` additionally suppresses `change_capture_
+    /// dirty`'s bookkeeping for the duration (see its own doc comment)
+    /// -- without it, the replayed edits would make the *outer* `.`
+    /// keypress's own span look dirty too, and `last_change_keys` would
+    /// get overwritten with just `['.']` on every repeat. A silent no-op
+    /// if nothing's been recorded yet.
+    fn repeat_last_change(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(keys) = self.last_change_keys.clone() else { return };
+        self.replaying_change = true;
+        for key in &keys {
+            self.route_keypress(*key, event_loop);
+        }
+        self.replaying_change = false;
     }
 
     /// Right before dispatching a bare `p`/`P` in Normal mode (the only
@@ -8331,6 +8547,23 @@ impl App {
         })
     }
 
+    /// Sets a plain (non-error) status message -- shown in the modeline
+    /// for `MESSAGE_DURATION` (`modeline_pieces`). For routine
+    /// confirmations ("saved", "tags refreshed"), not failures -- use
+    /// `set_error` for those, which also tints the text.
+    fn set_message(&mut self, text: impl Into<String>) {
+        self.status_message = Some(StatusMessage { text: text.into(), is_error: false, set_at: Instant::now() });
+    }
+
+    /// Sets an error status message -- same display as `set_message`,
+    /// tinted red (`git_conflicted`'s accent). This is the replacement
+    /// for what used to be a silent `eprintln!` at most of this file's
+    /// failure sites: invisible in a normally-launched GUI window, so
+    /// the user had no way to know a search/save/format/etc. failed.
+    fn set_error(&mut self, text: impl Into<String>) {
+        self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
+    }
+
     /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
     /// command or a `/`/`?` search query, since either replaces the
     /// whole modeline with raw prompt text instead of the usual badge +
@@ -8352,6 +8585,20 @@ impl App {
             || self.delete_file_confirm
         {
             return None;
+        }
+        // A live status/error message pre-empts even the Explorer/Picker
+        // badge -- it's telling the user something just happened,
+        // regardless of what view they're in. Uses the plain mode badge
+        // (Normal/Insert/...) rather than Explorer's/Picker's own,
+        // matching the "additive, doesn't replace the real mode
+        // indicator" posture `recording_indicator`/`workspace_indicator`
+        // already have below.
+        if let Some(msg) = &self.status_message {
+            if msg.set_at.elapsed() < MESSAGE_DURATION {
+                let mode_label =
+                    if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
+                return Some((mode_label, format!("│ {} ", msg.text)));
+            }
         }
         if self.main_view == MainView::Explorer {
             let suffix = match &self.explorer {
@@ -9542,6 +9789,54 @@ impl App {
         (sidebar_px, terminal_h, modeline_top)
     }
 
+    /// `zz`/`zt`/`zb` -- scrolls the focused pane so the cursor's line
+    /// lands centered/top/bottom. Thin `self.gpu`-reading wrapper around
+    /// `scroll_window_at`, mirroring `handle_click`/`handle_click_at`'s
+    /// own split -- a silent no-op before the window/GPU exists, same
+    /// posture `handle_click` already has.
+    fn scroll_window(&mut self, target: VimScrollTarget) {
+        let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+        else {
+            return;
+        };
+        self.scroll_window_at(target, window_width, window_height);
+    }
+
+    /// The GPU-independent core of `scroll_window` -- computes the
+    /// focused pane's visible-line count the same way `redraw`'s own
+    /// `pane_visible_lines` is derived (`frame_metrics`/`frame_geometry`/
+    /// `pane_content_rect`/`text::lines_that_fit`), then snaps `scroll_
+    /// line`/`rendered_scroll` directly (no ease -- these are deliberate
+    /// one-shot jumps, not a "keep the cursor in view" nudge, the same
+    /// reason `ensure_cursor_visible`'s own "huge jump" branch snaps
+    /// instead of animating) to land the cursor's line where requested.
+    /// Clears any in-flight scroll animation for this pane first so it
+    /// can't fight the snap on the next frame.
+    fn scroll_window_at(&mut self, target: VimScrollTarget, window_width: f32, window_height: f32) {
+        let pane = self.focused_pane_id();
+        let buffer_id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let cursor = self.pane_state(pane).cursor;
+        let (line, _) = ob.buffer.line_col(&cursor);
+
+        let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else { return };
+        let content_rect = pane_content_rect(*rect, line_height, true);
+        let visible_lines = text::lines_that_fit(content_rect.h, line_height);
+
+        let scroll_line = match target {
+            VimScrollTarget::Top => line,
+            VimScrollTarget::Bottom => line.saturating_sub(visible_lines.saturating_sub(1)),
+            VimScrollTarget::Center => line.saturating_sub(visible_lines / 2),
+        };
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let pane_state = self.pane_state_mut(pane);
+        pane_state.scroll_line = scroll_line;
+        pane_state.rendered_scroll = scroll_line as f32;
+    }
+
     /// Left-click: focuses whatever the click landed on -- a plain
     /// focus change, the same granularity `SPC w hjkl`/pane-cycling
     /// already work at (see this feature's own design notes on why
@@ -10164,7 +10459,17 @@ impl App {
             Some((mode_label, suffix)) => {
                 let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
                 let existing_chars = badge.chars().count() + suffix.chars().count();
-                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), theme.fg_modeline)]);
+                // An unexpired error message tints the suffix red (`git_
+                // conflicted`'s accent -- no dedicated error color exists
+                // yet, and this reads as a reasonable semantic reuse
+                // rather than a new theme field x6 themes) instead of the
+                // ordinary modeline foreground.
+                let is_error_message = self
+                    .status_message
+                    .as_ref()
+                    .is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
+                let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
+                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), suffix_fg)]);
                 existing_chars
             }
             None => {
@@ -10547,7 +10852,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            // Same unsaved-changes check as `:q`/`SPC q q` -- the window's
+            // own X button shouldn't be able to silently discard work
+            // either.
+            WindowEvent::CloseRequested => self.request_quit(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
@@ -10672,7 +10980,20 @@ impl App {
         if self.vim.is_recording() {
             self.macro_capture.push(kp);
         }
+        // Mirrors `dispatch_keypress`'s own `.`-capture span tracking.
+        if self.vim.is_idle() {
+            self.change_capture.clear();
+            self.change_capture_dirty = false;
+        }
+        self.change_capture.push(kp);
         self.test_route_key(kp);
+        if self.vim.is_idle() {
+            if self.change_capture_dirty {
+                self.last_change_keys = Some(std::mem::take(&mut self.change_capture));
+            } else {
+                self.change_capture.clear();
+            }
+        }
     }
 
     /// The non-tapping half of `test_dispatch_key`, mirroring `route_
@@ -10688,7 +11009,14 @@ impl App {
         let vim_event = {
             let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
             let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
-            self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, kp)
+            let edit_count_before = ob.buffer.edit_count();
+            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, kp);
+            // Mirrors `route_keypress`'s own instrumentation -- see
+            // `dispatch_keypress`'s doc comment.
+            if !self.replaying_change && ob.buffer.edit_count() != edit_count_before {
+                self.change_capture_dirty = true;
+            }
+            event
         };
         match vim_event {
             VimEvent::MacroRecordStart(register) => {
@@ -10701,8 +11029,22 @@ impl App {
                 self.vim.finish_recording(register, &keys, self.macro_recording_append);
             }
             VimEvent::MacroPlay { register, count } => self.test_play_macro(register, count),
+            VimEvent::RepeatLastChange => self.test_repeat_last_change(),
+            VimEvent::Error(msg) => self.set_error(msg),
             _ => {}
         }
+    }
+
+    /// Test-only mirror of `repeat_last_change` -- identical logic,
+    /// replaying through `test_route_key` instead of the real `route_
+    /// keypress`.
+    fn test_repeat_last_change(&mut self) {
+        let Some(keys) = self.last_change_keys.clone() else { return };
+        self.replaying_change = true;
+        for key in &keys {
+            self.test_route_key(*key);
+        }
+        self.replaying_change = false;
     }
 
     /// Test-only mirror of `play_macro` -- identical logic, replaying
@@ -16029,6 +16371,204 @@ mod tests {
 
         app.test_dispatch_key(KeyPress::char('q'));
         assert!(!app.modeline_pieces().unwrap().1.contains("recording"));
+    }
+
+    // -- Status/error messages ------------------------------------------
+
+    #[test]
+    fn set_message_and_set_error_show_in_the_modeline_suffix() {
+        let mut app = App::with_file(None);
+        app.set_message("hello there");
+        assert!(app.modeline_pieces().unwrap().1.contains("hello there"));
+
+        app.set_error("something broke");
+        assert!(app.modeline_pieces().unwrap().1.contains("something broke"));
+    }
+
+    #[test]
+    fn a_message_expires_after_message_duration() {
+        let mut app = App::with_file(None);
+        app.set_message("fresh");
+        app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
+        assert!(!app.modeline_pieces().unwrap().1.contains("fresh"));
+    }
+
+    #[test]
+    fn an_expired_message_falls_back_to_the_ordinary_modeline() {
+        let mut app = App::with_file(None);
+        app.set_message("stale");
+        app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
+        assert!(app.modeline_pieces().unwrap().1.contains("Ln 1, Col"));
+    }
+
+    // -- Dot-repeat (`.`) -------------------------------------------------
+
+    #[test]
+    fn dot_repeats_a_simple_single_key_change() {
+        let mut app = macro_app("aaa");
+        app.test_dispatch_key(KeyPress::char('x'));
+        assert_eq!(app.open().buffer.text(), "aa");
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "a");
+    }
+
+    #[test]
+    fn dot_repeats_a_multi_key_operator_motion() {
+        let mut app = macro_app("foo bar baz");
+        app.test_dispatch_key(KeyPress::char('d'));
+        app.test_dispatch_key(KeyPress::char('w'));
+        assert_eq!(app.open().buffer.text(), "bar baz");
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "baz");
+    }
+
+    #[test]
+    fn dot_repeats_an_insert_mode_session() {
+        let mut app = macro_app("\n\n");
+        app.test_dispatch_key(KeyPress::char('i'));
+        app.test_dispatch_key(KeyPress::char('h'));
+        app.test_dispatch_key(KeyPress::char('i'));
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        assert_eq!(app.open().buffer.text(), "hi\n\n");
+        app.test_dispatch_key(KeyPress::char('j'));
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "hi\nhi\n");
+    }
+
+    #[test]
+    fn a_plain_motion_does_not_become_the_repeatable_change() {
+        let mut app = macro_app("aaa");
+        app.test_dispatch_key(KeyPress::char('x'));
+        assert_eq!(app.open().buffer.text(), "aa");
+        app.test_dispatch_key(KeyPress::char('l')); // pure motion, no edit
+        app.test_dispatch_key(KeyPress::char('.')); // must still repeat 'x', not 'l'
+        assert_eq!(app.open().buffer.text(), "a");
+    }
+
+    #[test]
+    fn dot_is_a_noop_before_any_change_has_happened() {
+        let mut app = macro_app("aaa");
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "aaa");
+    }
+
+    #[test]
+    fn dot_repeats_a_text_object_change_with_no_extra_plumbing() {
+        // Confirms the design's central claim: `.` works for the new
+        // text objects/surround with zero per-command wiring, since it
+        // just replays raw keystrokes.
+        let mut app = macro_app("(a) (b)");
+        app.test_set_cursor(Cursor { char_idx: 1, sticky_col: 1 }); // inside "(a)"
+        app.test_dispatch_key(KeyPress::char('d'));
+        app.test_dispatch_key(KeyPress::char('i'));
+        app.test_dispatch_key(KeyPress::char('('));
+        assert_eq!(app.open().buffer.text(), "() (b)");
+        app.test_set_cursor(Cursor { char_idx: 4, sticky_col: 4 }); // inside "(b)"
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "() ()");
+    }
+
+    #[test]
+    fn pressing_dot_itself_does_not_redefine_the_repeated_change() {
+        let mut app = macro_app("aaaa");
+        app.test_dispatch_key(KeyPress::char('x'));
+        assert_eq!(app.open().buffer.text(), "aaa");
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "aa");
+        app.test_dispatch_key(KeyPress::char('.')); // still repeats 'x', not '.'
+        assert_eq!(app.open().buffer.text(), "a");
+    }
+
+    // -- Quit confirmation -------------------------------------------------
+
+    #[test]
+    fn any_buffer_dirty_is_false_for_a_freshly_opened_buffer() {
+        // `macro_app` itself types into the buffer via `test_insert_str`
+        // (that's how it seeds content), which already makes it dirty --
+        // use the plain dashboard buffer instead for the "nothing's
+        // dirty yet" case.
+        let app = App::with_file(None);
+        assert!(!app.any_buffer_dirty());
+    }
+
+    #[test]
+    fn any_buffer_dirty_is_true_after_an_edit() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.test_insert('!');
+        assert!(app.any_buffer_dirty());
+    }
+
+    #[test]
+    fn arm_quit_confirm_if_dirty_arms_and_shows_a_message_when_dirty() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.test_insert('!');
+        assert!(app.arm_quit_confirm_if_dirty());
+        assert!(app.quit_confirm);
+        assert!(app.modeline_pieces().unwrap().1.contains("unsaved buffer"));
+    }
+
+    #[test]
+    fn arm_quit_confirm_if_dirty_is_a_noop_when_everything_is_saved() {
+        let mut app = App::with_file(None);
+        assert!(!app.arm_quit_confirm_if_dirty());
+        assert!(!app.quit_confirm);
+    }
+
+    #[test]
+    fn resolve_quit_confirm_only_confirms_on_y() {
+        let mut app = App::with_file(None);
+        app.quit_confirm = true;
+        assert!(!app.resolve_quit_confirm(KeyPress::char('n')));
+        assert!(!app.quit_confirm);
+
+        app.quit_confirm = true;
+        assert!(app.resolve_quit_confirm(KeyPress::char('y')));
+        assert!(!app.quit_confirm);
+    }
+
+    // -- `zz`/`zt`/`zb` (`scroll_window_at`) ------------------------------
+
+    #[test]
+    fn scroll_window_at_top_puts_the_cursor_line_at_the_very_top() {
+        let dir = TempDir::new("scroll_window_zt");
+        let content: String = (0..100).map(|i| format!("line{i}\n")).collect();
+        let file = dir.write("f.txt", &content);
+        let mut app = App::with_file(None);
+        app.test_open_path(&file);
+        for _ in 0..50 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        app.scroll_window_at(VimScrollTarget::Top, 800.0, 600.0);
+        let pane = app.focused_pane_id();
+        assert_eq!(app.pane_state(pane).scroll_line, 50);
+    }
+
+    #[test]
+    fn scroll_window_at_center_and_bottom_use_the_panes_real_visible_line_count() {
+        let dir = TempDir::new("scroll_window_zzzb");
+        let content: String = (0..100).map(|i| format!("line{i}\n")).collect();
+        let file = dir.write("f.txt", &content);
+        let mut app = App::with_file(None);
+        app.test_open_path(&file);
+        for _ in 0..50 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
+        let content_rect = pane_content_rect(rect, text::LINE_HEIGHT, true);
+        let visible_lines = text::lines_that_fit(content_rect.h, text::LINE_HEIGHT);
+
+        app.scroll_window_at(VimScrollTarget::Center, 800.0, 600.0);
+        assert_eq!(app.pane_state(pane).scroll_line, 50usize.saturating_sub(visible_lines / 2));
+
+        app.scroll_window_at(VimScrollTarget::Bottom, 800.0, 600.0);
+        assert_eq!(app.pane_state(pane).scroll_line, 50usize.saturating_sub(visible_lines.saturating_sub(1)));
     }
 
     // -- Search and replace (`SPC s s`/`SPC s r`/`SPC s p`) ------------

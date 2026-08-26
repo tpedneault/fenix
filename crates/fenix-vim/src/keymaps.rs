@@ -75,6 +75,27 @@ pub enum VimAction {
     /// `linewise` picks which of the two forms: `` ` `` (exact position)
     /// or `'` (first non-blank of the mark's line).
     MarkJumpPrompt { linewise: bool },
+    /// `zz`/`zt`/`zb`: scroll the window so the cursor's line lands
+    /// centered, at the top, or at the bottom -- resolved by the host
+    /// (`VimEvent::ScrollWindow`), since only it knows pane geometry.
+    ScrollWindow(ScrollTarget),
+    /// `Ctrl-a`/`Ctrl-x`: increment/decrement the nearest number at or
+    /// after the cursor on the current line, by `count` (already signed
+    /// -- negative for `Ctrl-x`).
+    IncrementNumber { delta: i64 },
+    /// `.`: replay the last change-producing command. Resolved by the
+    /// host (`VimEvent::RepeatLastChange`), which owns the raw-keystroke
+    /// capture this replays -- see `state.rs`'s `is_idle` doc comment.
+    RepeatLastChange,
+}
+
+/// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
+/// window after scrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollTarget {
+    Center,
+    Top,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +121,11 @@ pub enum VisualAction {
     /// special" shape as Normal mode's own `r`, just resolved against
     /// the whole selection instead of `count` chars from the cursor.
     ReplaceChar,
+    /// `S`: waits for one more raw key (the surround char), then wraps
+    /// the selection in it -- vim-surround/evil-surround's own Visual
+    /// binding. Char/Line kinds only; a no-op in Block mode (matches
+    /// real vim-surround's own lack of block support).
+    Surround,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +220,16 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('`')], "jump to mark", VimAction::MarkJumpPrompt { linewise: false });
     t.insert(&[KeyPress::char('\'')], "jump to mark (line)", VimAction::MarkJumpPrompt { linewise: true });
 
+    t.label_group(&[KeyPress::char('z')], "scroll...");
+    t.insert(&[KeyPress::char('z'), KeyPress::char('z')], "scroll center", VimAction::ScrollWindow(ScrollTarget::Center));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('t')], "scroll top", VimAction::ScrollWindow(ScrollTarget::Top));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('b')], "scroll bottom", VimAction::ScrollWindow(ScrollTarget::Bottom));
+
+    t.insert(&[KeyPress::char('a').with_ctrl()], "increment number", VimAction::IncrementNumber { delta: 1 });
+    t.insert(&[KeyPress::char('x').with_ctrl()], "decrement number", VimAction::IncrementNumber { delta: -1 });
+
+    t.insert(&[KeyPress::char('.')], "repeat last change", VimAction::RepeatLastChange);
+
     t
 }
 
@@ -210,6 +246,7 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
     t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
+    t.insert(&[KeyPress::char('S')], "surround selection", VisualAction::Surround);
     t
 }
 
@@ -228,7 +265,37 @@ fn build_pending_trie() -> KeyTrie<PendingTarget> {
         "a word",
         PendingTarget::TextObject(TextObject::AWord),
     );
+    add_bracketed_and_quoted_objects(&mut t);
+    t.insert(
+        &[KeyPress::char('i'), KeyPress::char('p')],
+        "inner paragraph",
+        PendingTarget::TextObject(TextObject::InnerParagraph),
+    );
+    t.insert(
+        &[KeyPress::char('a'), KeyPress::char('p')],
+        "a paragraph",
+        PendingTarget::TextObject(TextObject::AParagraph),
+    );
     t
+}
+
+/// `i"`/`a"`, `i'`/`a'`, `` i` ``/`` a` ``, and the three bracket kinds
+/// (each with its `b`/`B` vim-surround-style alias, e.g. `ib` == `i(`) --
+/// split out from `build_pending_trie` since it's the same small
+/// (quote/bracket char, `TextObject` variant) pairing repeated many
+/// times, not because it's reused elsewhere.
+fn add_bracketed_and_quoted_objects(t: &mut KeyTrie<PendingTarget>) {
+    for &q in &['"', '\'', '`'] {
+        t.insert(&[KeyPress::char('i'), KeyPress::char(q)], "inner quote", PendingTarget::TextObject(TextObject::InnerQuote(q)));
+        t.insert(&[KeyPress::char('a'), KeyPress::char(q)], "a quote", PendingTarget::TextObject(TextObject::AQuote(q)));
+    }
+    let brackets: &[(char, &[char])] = &[('(', &['(', ')', 'b']), ('{', &['{', '}', 'B']), ('[', &['[', ']'])];
+    for &(open, aliases) in brackets {
+        for &key in aliases {
+            t.insert(&[KeyPress::char('i'), KeyPress::char(key)], "inner bracket", PendingTarget::TextObject(TextObject::InnerBracket(open)));
+            t.insert(&[KeyPress::char('a'), KeyPress::char(key)], "a bracket", PendingTarget::TextObject(TextObject::ABracket(open)));
+        }
+    }
 }
 
 pub(crate) fn normal_trie() -> &'static KeyTrie<VimAction> {

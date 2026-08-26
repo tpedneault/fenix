@@ -32,7 +32,8 @@ impl CommandRegistry {
         registry.register("file.save", "Save the current file", cmd_save);
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
-        registry.register("app.quit", "Quit Fenix", cmd_quit);
+        registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
+        registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
         registry.register(
             "view.cycle_line_numbers",
             "Cycle the line-number gutter: off, absolute, relative",
@@ -161,6 +162,10 @@ fn cmd_redo(ctx: &mut CommandCtx) {
 }
 
 fn cmd_quit(ctx: &mut CommandCtx) {
+    ctx.app.request_quit(ctx.event_loop);
+}
+
+fn cmd_quit_force(ctx: &mut CommandCtx) {
     ctx.event_loop.exit();
 }
 
