@@ -161,11 +161,18 @@ struct PaneState {
     cursor: Cursor,
     scroll_line: usize,
     rendered_scroll: f32,
+    /// Leftmost visual column currently shown -- the horizontal analog
+    /// of `scroll_line`, but with no `rendered_scroll`-style smooth-
+    /// scroll animation (an instant snap is enough to fix "there's no
+    /// horizontal scrolling at all"; a second full easing system for
+    /// this axis isn't worth it yet). See `ensure_cursor_visible_
+    /// horizontally`.
+    scroll_col: usize,
 }
 
 impl PaneState {
     fn seeded_at(cursor: Cursor) -> Self {
-        Self { cursor, scroll_line: 0, rendered_scroll: 0.0 }
+        Self { cursor, scroll_line: 0, rendered_scroll: 0.0, scroll_col: 0 }
     }
 }
 
@@ -1173,6 +1180,20 @@ fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: 
     let x = content_x + col as f32 * char_width;
     let y = rect.y + text::PAD_TOP + row as f32 * line_height - content_frac * line_height;
     (x, y)
+}
+
+/// Skips the first `n` characters of `s` for horizontal scroll --
+/// returns the remaining substring plus how many *bytes* that was, so
+/// a caller matching byte-offset syntax-highlight ranges against the
+/// substring can shift its own coordinate space by exactly that much.
+/// `n` at or past `s`'s own character count returns an empty
+/// remainder (nothing left to show once scrolled past a short line)
+/// and `s.len()` skipped bytes.
+fn skip_chars(s: &str, n: usize) -> (&str, usize) {
+    match s.char_indices().nth(n) {
+        Some((byte_idx, _)) => (&s[byte_idx..], byte_idx),
+        None => ("", s.len()),
+    }
 }
 
 /// Splits `line_text` into colored sub-spans according to `highlights`
@@ -8224,6 +8245,38 @@ impl App {
         self.update_rendered_scroll();
     }
 
+    /// Horizontal analog of `ensure_cursor_visible` -- keeps the cursor's
+    /// *visual* column within the focused pane's visible window, snapping
+    /// `scroll_col` instantly (no `rendered_scroll`-style easing on this
+    /// axis; see `PaneState.scroll_col`'s own doc comment for why).
+    /// `visual_cols` needs the cursor's own line's tab-expanded column,
+    /// not its raw character column -- `content_spans` slices the tab-
+    /// *expanded* display text, where "1 char = 1 visual column" holds
+    /// (the same invariant `remap_col`'s own doc comment relies on), so
+    /// comparing a raw column against `scroll_col` would drift on any
+    /// line with a tab before the cursor.
+    fn ensure_cursor_visible_horizontally(&mut self, visible_cols: usize) {
+        let pane = self.focused_pane_id();
+        let buffer_id = self.focused_buffer_id();
+        let cursor_col = {
+            let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
+            let cursor = self.pane_state(pane).cursor;
+            let (line, col) = ob.buffer.line_col(&cursor);
+            let start = ob.buffer.line_start_char(line);
+            let len = ob.buffer.line_len(line);
+            let line_text = ob.buffer.text_range(start, start + len);
+            if line_text.contains('\t') {
+                let tab_stops = self.tab_stops_for(buffer_id);
+                let (_, col_map) = tabstops::expand_line(&line_text, &tab_stops);
+                tabstops::visual_col(&col_map, col)
+            } else {
+                col
+            }
+        };
+        let pane_state = self.pane_state_mut(pane);
+        pane_state.scroll_col = scroll_to_include(pane_state.scroll_col, cursor_col, visible_cols);
+    }
+
     /// Advances the focused pane's `rendered_scroll` toward its
     /// `scroll_line` if a transition is in flight, clearing it once
     /// settled.
@@ -8666,6 +8719,14 @@ impl App {
     /// Bash/Python files (all have a tree-sitter grammar registered in
     /// this project) keep working, not just delimited data files with
     /// no grammar in the first place.
+    ///
+    /// `scroll_col` (visual columns, post-tab-expansion -- see `remap_
+    /// col`'s own doc comment for why) drops that many leading
+    /// characters from each row's *code* text only, via `skip_chars` --
+    /// the gutter prefix above is built and pushed before this runs, so
+    /// it's never touched. A line shorter than `scroll_col` renders
+    /// with no code text at all for that row, same as a real editor
+    /// showing nothing once you've scrolled past a short line's end.
     #[allow(clippy::too_many_arguments)] // a plain data parameter list, not a design smell worth a struct for one private call site
     fn content_spans(
         &self,
@@ -8677,6 +8738,7 @@ impl App {
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
         cursor_line: usize,
         tab_stops: &TabStops,
+        scroll_col: usize,
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
@@ -8710,8 +8772,9 @@ impl App {
                 let line_text = ob.buffer.text_range(start, start + len);
                 if line_text.contains('\t') {
                     let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
+                    let (sliced, skipped_bytes) = skip_chars(&display, scroll_col);
                     if syntax_highlights.is_empty() {
-                        spans.push((display, theme.fg));
+                        spans.push((sliced.to_string(), theme.fg));
                     } else {
                         let line_byte_start = ob.buffer.char_to_byte(start);
                         let line_byte_end = ob.buffer.char_to_byte(start + len);
@@ -8724,20 +8787,27 @@ impl App {
                             line_byte_end,
                             syntax_highlights,
                         );
-                        spans.extend(split_line_by_highlights(&display, 0, display.len(), &remapped, theme.fg));
+                        // `skipped_bytes`/`display.len()` here are local
+                        // to `display` (0-based), matching `remapped`'s
+                        // own coordinate space -- not the real buffer's
+                        // byte offsets, unlike the plain branch below.
+                        spans.extend(split_line_by_highlights(sliced, skipped_bytes, display.len(), &remapped, theme.fg));
                     }
-                } else if syntax_highlights.is_empty() {
-                    spans.push((line_text, theme.fg));
                 } else {
-                    let line_byte_start = ob.buffer.char_to_byte(start);
-                    let line_byte_end = ob.buffer.char_to_byte(start + len);
-                    spans.extend(split_line_by_highlights(
-                        &line_text,
-                        line_byte_start,
-                        line_byte_end,
-                        syntax_highlights,
-                        theme.fg,
-                    ));
+                    let (sliced, skipped_bytes) = skip_chars(&line_text, scroll_col);
+                    if syntax_highlights.is_empty() {
+                        spans.push((sliced.to_string(), theme.fg));
+                    } else {
+                        let line_byte_start = ob.buffer.char_to_byte(start) + skipped_bytes;
+                        let line_byte_end = ob.buffer.char_to_byte(start + len);
+                        spans.extend(split_line_by_highlights(
+                            sliced,
+                            line_byte_start,
+                            line_byte_end,
+                            syntax_highlights,
+                            theme.fg,
+                        ));
+                    }
                 }
             }
             if r + 1 < rows {
@@ -9828,6 +9898,15 @@ impl App {
             // above, alongside `pane_title`.
             if is_focused {
                 self.ensure_cursor_visible(pane_visible_lines);
+                // Recomputes `gutter_chars`/`gutter_px` redundantly rather
+                // than reordering the real computation below (`gutter_px`
+                // there also folds in dashboard centering, which doesn't
+                // apply here) -- cheap, and keeps this already-large
+                // function's existing flow untouched.
+                let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
+                let gutter_px = gutter_chars as f32 * char_width;
+                let visible_cols = text::cols_that_fit(rect.w - gutter_px, char_width);
+                self.ensure_cursor_visible_horizontally(visible_cols);
             }
             // Every pane -- not just the focused one -- has its own
             // `PaneState` (seeded when it was created), so each renders
@@ -9913,6 +9992,7 @@ impl App {
                     &syntax_highlights,
                     line,
                     &tab_stops,
+                    pane_state.scroll_col,
                 ),
                 None => Vec::new(),
             };
@@ -9933,9 +10013,18 @@ impl App {
             // further down, so that loop's `col_start as f32 *
             // char_width` math needs no changes at all: by the time
             // anything lands in `PaneRender`, its columns are already
-            // real visual columns.
+            // real visual columns. Also subtracts `scroll_col` here, for
+            // the same reason -- `content_spans` already sliced away the
+            // first `scroll_col` visual columns of each row's *rendered
+            // text*, so every column-bearing value referring to a
+            // position in that same text needs the same offset removed
+            // to stay aligned with what's actually on screen.
+            // `saturating_sub` rather than a bounds check: a
+            // selection/highlight starting before the current scroll
+            // position clamps to column 0 (still drawn, just from the
+            // pane's left edge) instead of underflowing.
             let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col)
+                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(pane_state.scroll_col)
             };
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
@@ -10785,6 +10874,58 @@ mod tests {
     }
 
     #[test]
+    fn ensure_cursor_visible_horizontally_is_a_noop_when_cursor_already_in_view() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("short line");
+        app.ensure_cursor_visible_horizontally(20);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_col, 0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontally_scrolls_right_past_the_edge() {
+        let mut app = App::with_file(None);
+        app.test_insert_str(&"x".repeat(50)); // cursor lands at char_idx/col 50
+        app.ensure_cursor_visible_horizontally(10);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_col, 41); // scroll_to_include(0, 50, 10)
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontally_scrolls_back_left_after_the_cursor_moves_left() {
+        let mut app = App::with_file(None);
+        app.test_insert_str(&"x".repeat(50));
+        app.ensure_cursor_visible_horizontally(10);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_col, 41);
+
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // e.g. after `0`/`^`
+        app.ensure_cursor_visible_horizontally(10);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_col, 0);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_horizontally_resolves_the_cursors_visual_column_past_a_tab() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("a\tx"); // tab (width 8, default) expands "a" + 7 spaces + "x"
+        // Cursor right after 'x': raw col 3, visual col 9.
+        app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 0 });
+        app.ensure_cursor_visible_horizontally(4);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_col, 6); // scroll_to_include(0, 9, 4)
+    }
+
+    #[test]
+    fn scroll_col_is_independent_per_pane() {
+        let mut app = App::with_file(None);
+        app.test_insert_str(&"x".repeat(50));
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let second = app.windows().focused_id();
+        assert_ne!(first, second);
+
+        app.ensure_cursor_visible_horizontally(10); // scrolls the now-focused second pane only
+        assert!(app.pane_state(second).scroll_col > 0);
+        assert_eq!(app.pane_state(first).scroll_col, 0, "the other pane's own scroll position must be untouched");
+    }
+
+    #[test]
     fn small_scroll_change_starts_an_animation_not_an_instant_jump() {
         let mut app = App::with_file(None);
         for _ in 0..5 {
@@ -11190,7 +11331,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.new_scratch_buffer(); // single empty line, cursor on it
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -11201,7 +11342,7 @@ mod tests {
         app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Off;
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -11214,7 +11355,7 @@ mod tests {
         app.test_insert_str("a\nb\nc\nd");
         app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1, 'b'
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -11226,7 +11367,7 @@ mod tests {
         app.test_insert_str("a\nb");
         app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
     }
@@ -11245,7 +11386,7 @@ mod tests {
         assert_eq!(ob.kind, BufferKind::Dashboard);
 
         let pad = [5usize];
-        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         assert_eq!(spans[0].0, "     "); // 5 literal spaces, not "1 " or similar
     }
 
@@ -11256,7 +11397,7 @@ mod tests {
         let visual_lines = ob.buffer.visual_line_count();
         let pad: Vec<usize> = vec![0; visual_lines + 11];
         // Ask for a row well past the dashboard's own content.
-        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         assert!(!spans.iter().any(|(s, _)| s == "~"));
     }
 
@@ -11385,7 +11526,7 @@ mod tests {
         let fg = app.theme.fg;
         let ob = app.open();
         let highlights = vec![(2..4, color)]; // "bb"'s real byte range
-        let spans = app.content_spans(ob, 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(4));
+        let spans = app.content_spans(ob, 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(4), 0);
 
         assert_eq!(spans, vec![("a   ".to_string(), fg), ("bb".to_string(), color)]);
     }
@@ -11403,7 +11544,7 @@ mod tests {
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
 
-        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let fn_span = spans.iter().find(|(s, _)| s == "fn");
         assert_eq!(
             fn_span.map(|(_, c)| *c),
@@ -11420,7 +11561,7 @@ mod tests {
         let id = app.focused_buffer_id();
 
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 2);
-        let spans = app.content_spans(app.open(), 0, 2, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
+        let spans = app.content_spans(app.open(), 0, 2, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
 
         // "puts" -- a real builtin (in `tcl::KEYWORDS` and the query's
         // own `#any-of?` list) -- keeps its function color.
@@ -15672,9 +15813,55 @@ mod tests {
         let mut app = App::with_file(None);
         app.test_insert_str("a\tb");
         let ob = app.open();
-        let spans = app.content_spans(ob, 0, 1, 0, None, &[], 0, &TabStops::Fixed(4));
+        let spans = app.content_spans(ob, 0, 1, 0, None, &[], 0, &TabStops::Fixed(4), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "a   b"); // tab expands from col 1 to col 4
+    }
+
+    #[test]
+    fn content_spans_with_a_nonzero_scroll_col_slices_the_code_but_not_the_gutter() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("abcdefghij");
+        let ob = app.open();
+        let spans = app.content_spans(ob, 0, 1, 2, None, &[], 0, &TabStops::Fixed(4), 3);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        // "1 " gutter (gutter_chars = 2) untouched, code starts at 'd'
+        // (3 chars skipped: "abc").
+        assert_eq!(joined, "1 defghij");
+    }
+
+    #[test]
+    fn content_spans_scroll_col_counts_visual_columns_past_a_tab() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("a\tbb"); // expands to "a   bb" at tab width 4
+        let ob = app.open();
+        let spans = app.content_spans(ob, 0, 1, 0, None, &[], 0, &TabStops::Fixed(4), 4);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "bb"); // first 4 visual columns ("a   ") skipped
+    }
+
+    #[test]
+    fn content_spans_scroll_col_past_a_short_line_renders_no_code_text() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("ab");
+        let ob = app.open();
+        let spans = app.content_spans(ob, 0, 1, 1, None, &[], 0, &TabStops::Fixed(4), 5);
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "1 "); // just the gutter, no code left to show
+    }
+
+    #[test]
+    fn content_spans_scroll_col_keeps_syntax_highlights_on_the_right_characters() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("aaaabb");
+        let color = app.theme.syntax_variable;
+        let fg = app.theme.fg;
+        let ob = app.open();
+        let highlights = vec![(4..6, color)]; // "bb"'s real byte range
+        let spans = app.content_spans(ob, 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(4), 2);
+        // First 2 chars ("aa") scrolled off; remaining "aabb" keeps "bb"
+        // colored, not shifted onto the wrong characters.
+        assert_eq!(spans, vec![("aa".to_string(), fg), ("bb".to_string(), color)]);
     }
 
     // -- Macros (`q{reg}`/`@{reg}`/`@@`) -------------------------------

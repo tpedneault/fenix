@@ -788,6 +788,15 @@ pub fn lines_that_fit(height: f32, line_height: f32) -> usize {
     ((height - PAD_TOP) / line_height).floor().max(1.0) as usize
 }
 
+/// Horizontal analog of `lines_that_fit` -- how many full character
+/// columns fit in `width`, reserving `PAD_LEFT` on *both* sides (a
+/// pane's own left inset, and matching breathing room on the right so
+/// the last visible column isn't drawn flush against the pane's own
+/// edge or a neighboring split's divider).
+pub fn cols_that_fit(width: f32, char_width: f32) -> usize {
+    ((width - PAD_LEFT * 2.0) / char_width).floor().max(1.0) as usize
+}
+
 /// How many full text lines fit in the content area above the modeline,
 /// for the single-pane/whole-window case.
 pub fn visible_line_count(window_height: f32, modeline_height: f32, line_height: f32) -> usize {
@@ -881,6 +890,23 @@ mod tests {
                 PAD_TOP + n as f32 * LINE_HEIGHT
             );
         }
+    }
+
+    #[test]
+    fn cols_that_fit_reserves_pad_left_on_both_sides() {
+        for width in [400.0, 400.0 + PAD_LEFT, 800.0] {
+            let n = cols_that_fit(width, CHAR_WIDTH);
+            assert!(
+                PAD_LEFT * 2.0 + n as f32 * CHAR_WIDTH <= width,
+                "width {width}: {n} cols claims to fit, but PAD_LEFT*2 + {n} * {CHAR_WIDTH} = {} > {width}",
+                PAD_LEFT * 2.0 + n as f32 * CHAR_WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn cols_that_fit_never_reports_zero_even_for_a_too_narrow_width() {
+        assert_eq!(cols_that_fit(1.0, CHAR_WIDTH), 1);
     }
 
     #[test]
