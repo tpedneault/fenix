@@ -25,24 +25,82 @@ pub struct TagEntry {
 }
 
 /// Shells `ctags --fields=+n --languages={language} -R -f - {root}` and
-/// parses the tab-separated vi-compatible output. Never fails -- a
-/// missing `ctags` binary, a non-zero exit, or a directory with no
+/// parses the tab-separated vi-compatible output. Never fails outright
+/// -- a missing `ctags` binary, a non-zero exit, or a directory with no
 /// matches all just produce an empty `Vec`, the same "disclosed
 /// degradation, not an error state" posture `fenix-project`'s own
-/// `rg`/`git` shelling already takes for a missing external tool.
+/// `rg`/`git` shelling already takes for a missing external tool -- but
+/// unlike those, every non-success path here is loud about *why*
+/// (`eprintln!`, this crate's own established convention elsewhere,
+/// e.g. `fenix_format`): a bare-not-found binary, a non-zero exit (with
+/// its captured stderr -- the single most useful signal for something
+/// like "this ctags build has no Tcl parser" or a rejected flag), and
+/// any other spawn failure are each reported distinctly, since silently
+/// returning an empty `Vec` gives a caller no way to tell "genuinely no
+/// definitions found" apart from "ctags never actually ran."
 pub fn run(root: &Path, language: &str) -> Vec<TagEntry> {
-    let output = Command::new("ctags")
-        .arg("--fields=+n")
-        .arg(format!("--languages={language}"))
-        .arg("-R")
-        .arg("-f")
-        .arg("-")
-        .arg(root)
-        .output();
+    let mut cmd = Command::new("ctags");
+    cmd.arg("--fields=+n").arg(format!("--languages={language}")).arg("-R").arg("-f").arg("-").arg(root);
+    // Windows-only: without this, every shell-out here (and there are a
+    // lot -- once per `SPC c r`, once per project root change) briefly
+    // flashes a console window, since `fenix-gui` itself has no console
+    // of its own to inherit. Purely cosmetic, no bearing on *why* a run
+    // fails, but a real, easy robustness win specifically on the
+    // platform this was reported on.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
-    match output {
-        Ok(out) if out.status.success() => parse(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let entries = parse(&stdout);
+            // A successful run that produced real tag lines but zero
+            // *parsed* entries is a different, more actionable signal
+            // than "this directory genuinely has no procs/namespaces" --
+            // most likely an unexpected ctags output shape (a different
+            // ctags implementation/version than this parser was written
+            // against). Gated on real content existing at all, so an
+            // honestly-empty project stays silent here.
+            if entries.is_empty() {
+                let other_lines = stdout.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("!_")).count();
+                if other_lines > 0 {
+                    eprintln!(
+                        "fenix: ctags scanned {} for {language} and produced {other_lines} tag line(s), but none parsed \
+                         as a proc/namespace Fenix recognizes -- possibly a ctags output-format this parser doesn't \
+                         expect (this is written against Universal Ctags' plain vi-compatible `-f -` output)",
+                        root.display()
+                    );
+                }
+            }
+            entries
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
+            eprintln!(
+                "fenix: ctags exited with {} while scanning {} for {language} definitions{}",
+                out.status,
+                root.display(),
+                if stderr.is_empty() { String::new() } else { format!(" -- {stderr}") },
+            );
+            Vec::new()
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "fenix: ctags not found on PATH -- Tcl completion and symbol lookup (`SPC c s`) need Universal Ctags \
+                 installed and reachable as `ctags` (`ctags.exe` on Windows resolves the same way). If you just \
+                 installed it, restart your terminal/shell so the updated PATH is picked up."
+            );
+            Vec::new()
+        }
+        Err(err) => {
+            eprintln!("fenix: couldn't run ctags while scanning {} for {language} definitions: {err}", root.display());
+            Vec::new()
+        }
     }
 }
 
