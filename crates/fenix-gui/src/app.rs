@@ -3508,6 +3508,14 @@ impl App {
     /// the same "next keystrokes are special" shape as `explorer_prompt_key`,
     /// scoped to this one always-plain-text case.
     fn grep_query_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(query), Some(text)) = (&mut self.pending_grep_query, pasted) {
+                query.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
         let Some(query) = &mut self.pending_grep_query else { return };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.pending_grep_query = None,
@@ -4016,9 +4024,15 @@ impl App {
             PushArgument(String),
             Backspace,
             PushChar(char),
+            PushString(String),
             Commit,
             Ignore,
         }
+        // Fetched before borrowing `self.mib_insert` below -- `clipboard_
+        // text` takes `&mut self`, so it can't run while that borrow is
+        // still live (same reasoning `find_file_prompt_key`'s own paste
+        // handling documents).
+        let pasted = if key == KeyPress::char('v').with_ctrl() { self.clipboard_text() } else { None };
         let Some(insert) = &self.mib_insert else { return };
         let action = match &insert.stage {
             MibInsertStage::ChooseArgumentMode => match key.code {
@@ -4026,13 +4040,19 @@ impl App {
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::PromptNext,
                 _ => Action::EnterConfirm,
             },
-            MibInsertStage::ArgumentText { input, .. } => match key.code {
-                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
-                KeyCode::Named(FenixNamedKey::Enter) => Action::PushArgument(input.clone()),
-                KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
-                KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
-                _ => Action::Ignore,
-            },
+            MibInsertStage::ArgumentText { input, .. } => {
+                if let Some(text) = pasted {
+                    Action::PushString(text)
+                } else {
+                    match key.code {
+                        KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
+                        KeyCode::Named(FenixNamedKey::Enter) => Action::PushArgument(input.clone()),
+                        KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
+                        KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
+                        _ => Action::Ignore,
+                    }
+                }
+            }
             MibInsertStage::Confirm { .. } => match key.code {
                 KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::Commit,
                 _ => Action::Cancel,
@@ -4060,6 +4080,11 @@ impl App {
             Action::PushChar(c) => {
                 if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
                     input.push(c);
+                }
+            }
+            Action::PushString(text) => {
+                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
+                    input.push_str(&text);
                 }
             }
             Action::Commit => self.mib_commit_insert(),
@@ -4133,13 +4158,20 @@ impl App {
         enum Action {
             Cancel,
             PushChar(char),
+            PushString(String),
             Backspace,
             ConfirmPattern,
             ConfirmReplacement,
             Apply,
         }
+        // Fetched before borrowing `self.replace_wizard` below -- same
+        // reasoning as `mib_insert_key`'s own paste handling.
+        let pasted = if key == KeyPress::char('v').with_ctrl() { self.clipboard_text() } else { None };
         let Some(wizard) = &self.replace_wizard else { return };
         let action = match &wizard.stage {
+            ReplaceWizardStage::Pattern { .. } | ReplaceWizardStage::Replacement { .. } if pasted.is_some() => {
+                Action::PushString(pasted.unwrap_or_default())
+            }
             ReplaceWizardStage::Pattern { .. } => match key.code {
                 KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
                 KeyCode::Named(FenixNamedKey::Enter) => Action::ConfirmPattern,
@@ -4164,6 +4196,11 @@ impl App {
             Action::PushChar(c) => match &mut self.replace_wizard {
                 Some(ReplaceWizard { stage: ReplaceWizardStage::Pattern { input }, .. })
                 | Some(ReplaceWizard { stage: ReplaceWizardStage::Replacement { input, .. }, .. }) => input.push(c),
+                _ => {}
+            },
+            Action::PushString(text) => match &mut self.replace_wizard {
+                Some(ReplaceWizard { stage: ReplaceWizardStage::Pattern { input }, .. })
+                | Some(ReplaceWizard { stage: ReplaceWizardStage::Replacement { input, .. }, .. }) => input.push_str(&text),
                 _ => {}
             },
             Action::Backspace => match &mut self.replace_wizard {
@@ -5821,6 +5858,14 @@ impl App {
 
     /// Mirrors `explorer_prompt_key`'s text-accumulation shape exactly.
     fn git_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(prompt), Some(text)) = (&mut self.git_prompt, pasted) {
+                prompt.input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
         let Some(prompt) = &mut self.git_prompt else { return };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.git_prompt = None,
@@ -6006,6 +6051,14 @@ impl App {
     /// Routes one keypress to the in-progress `find_file_prompt` -- same
     /// "next keystrokes are special" shape as `grep_query_key`.
     fn find_file_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(input), Some(text)) = (&mut self.find_file_prompt, pasted) {
+                input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
         let Some(input) = &mut self.find_file_prompt else { return };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.find_file_prompt = None,
@@ -6083,6 +6136,14 @@ impl App {
     /// Routes one keypress to the in-progress `rename_file_prompt` --
     /// same shape as `find_file_prompt_key`.
     fn rename_file_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(input), Some(text)) = (&mut self.rename_file_prompt, pasted) {
+                input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
         let Some(input) = &mut self.rename_file_prompt else { return };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.rename_file_prompt = None,
@@ -6367,6 +6428,20 @@ impl App {
     /// the explorer's, so unrecognized keys just don't do anything
     /// rather than falling through to something else).
     fn picker_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(picker), Some(text)) = (&mut self.active_picker, pasted) {
+                // One `push_char` per pasted char, same as fast typing --
+                // each fuzzy-picker's own `push_char` re-filters as it
+                // goes, so this keeps the candidate list correct at every
+                // step, not just at the end.
+                for c in text.chars() {
+                    picker_push_char(picker, c);
+                }
+            }
+            self.wake_caret();
+            return;
+        }
         let Some(picker) = &mut self.active_picker else { return };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
@@ -6573,6 +6648,15 @@ impl App {
                 }
             } else {
                 self.explorer_prompt = None;
+            }
+            self.wake_caret();
+            return;
+        }
+
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(prompt), Some(text)) = (&mut self.explorer_prompt, pasted) {
+                prompt.input.push_str(&text);
             }
             self.wake_caret();
             return;
@@ -7717,6 +7801,17 @@ impl App {
         if clipboard.set_text(text.clone()).is_ok() {
             self.clipboard_mirror = text;
         }
+    }
+
+    /// The OS clipboard's current text, if any -- `None` if there's no
+    /// clipboard (headless tests), it's empty, or it doesn't hold text.
+    /// `Ctrl-V` in every modeline-style prompt (`find_file_prompt_key`
+    /// and its siblings) pastes this in; Vim's own `p`/`P` paste has its
+    /// own separate path (`pull_clipboard_before_paste`) since it also
+    /// needs the linewise/charwise distinction these plain-text prompts
+    /// don't have.
+    fn clipboard_text(&mut self) -> Option<String> {
+        self.clipboard.as_mut()?.get_text().ok()
     }
 
     /// Keeps the cursor's line within the *focused pane's* visible
@@ -15062,6 +15157,111 @@ mod tests {
         assert!(app.find_file_prompt.is_none());
     }
 
+    /// Sets the OS clipboard's text for a paste test, returning whether
+    /// it worked -- some CI/sandboxed environments have no clipboard at
+    /// all (`app.clipboard` is `None`), the same gap `yank_file_path_
+    /// sets_the_clipboard`'s own test already works around by only
+    /// asserting inside a matching `if let Some(...)`.
+    ///
+    /// Returns the lock guard too (held by the caller for the rest of
+    /// its `if let` block): the real OS clipboard is one shared,
+    /// process-wide resource, and Windows' clipboard API isn't safe to
+    /// touch from two threads at once -- with the test harness running
+    /// tests in parallel by default, two clipboard-touching tests
+    /// racing each other reliably crashed the whole test binary
+    /// (`STATUS_HEAP_CORRUPTION`) before this lock serialized them.
+    static CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_set_clipboard(app: &mut App, text: &str) -> Option<std::sync::MutexGuard<'static, ()>> {
+        let guard = CLIPBOARD_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let clipboard = app.clipboard.as_mut()?;
+        clipboard.set_text(text.to_string()).ok()?;
+        Some(guard)
+    }
+
+    #[test]
+    fn find_file_prompt_ctrl_v_pastes_the_clipboard() {
+        let mut app = App::with_file(None);
+        app.start_find_file_prompt();
+        if let Some(_guard) = test_set_clipboard(&mut app, "pasted/path.txt") {
+            app.find_file_prompt_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(app.find_file_prompt.as_deref(), Some("pasted/path.txt"));
+        }
+    }
+
+    #[test]
+    fn rename_file_prompt_ctrl_v_pastes_the_clipboard() {
+        let dir = TempDir::new("rename_prompt_paste");
+        let path = dir.write("a.txt", "hi");
+        let mut app = App::with_file(None);
+        app.test_open_path(&path);
+        app.start_rename_file_prompt();
+        let before = app.rename_file_prompt.clone().unwrap_or_default();
+        if let Some(_guard) = test_set_clipboard(&mut app, "renamed.txt") {
+            app.rename_file_prompt_key(KeyPress::char('v').with_ctrl());
+            // Paste appends to whatever's already there -- same as every
+            // other prompt here -- and `start_rename_file_prompt` seeds
+            // the prompt with the current file name, not an empty string.
+            assert_eq!(app.rename_file_prompt.as_deref(), Some(format!("{before}renamed.txt")).as_deref());
+        }
+    }
+
+    #[test]
+    fn git_prompt_ctrl_v_pastes_the_clipboard() {
+        let mut app = App::with_file(None);
+        app.git_prompt = Some(GitPrompt { kind: GitPromptKind::CommitMessage, input: String::new() });
+        if let Some(_guard) = test_set_clipboard(&mut app, "fix: pasted commit message") {
+            app.git_prompt_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(app.git_prompt.as_ref().unwrap().input, "fix: pasted commit message");
+        }
+    }
+
+    #[test]
+    fn grep_query_ctrl_v_pastes_the_clipboard() {
+        let mut app = App::with_file(None);
+        app.pending_grep_query = Some(String::new());
+        if let Some(_guard) = test_set_clipboard(&mut app, "TODO") {
+            app.grep_query_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(app.pending_grep_query.as_deref(), Some("TODO"));
+        }
+    }
+
+    #[test]
+    fn explorer_prompt_ctrl_v_pastes_the_clipboard() {
+        let mut app = App::with_file(None);
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CreateFile, input: String::new() });
+        if let Some(_guard) = test_set_clipboard(&mut app, "new_file.txt") {
+            app.explorer_prompt_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(app.explorer_prompt.as_ref().unwrap().input, "new_file.txt");
+        }
+    }
+
+    #[test]
+    fn picker_ctrl_v_pastes_the_clipboard_one_char_at_a_time() {
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(Vec::new())));
+        if let Some(_guard) = test_set_clipboard(&mut app, "main.rs") {
+            app.picker_key(KeyPress::char('v').with_ctrl());
+            assert_eq!(picker_query(app.active_picker.as_ref().unwrap()), "main.rs");
+        }
+    }
+
+    #[test]
+    fn replace_wizard_ctrl_v_pastes_the_clipboard_into_the_pattern_stage() {
+        let mut app = App::with_file(None);
+        app.replace_wizard = Some(ReplaceWizard {
+            scope: ReplaceScope::Buffer { line_range: None },
+            stage: ReplaceWizardStage::Pattern { input: String::new() },
+        });
+        if let Some(_guard) = test_set_clipboard(&mut app, "old_name") {
+            app.replace_wizard_key(KeyPress::char('v').with_ctrl());
+            match &app.replace_wizard.as_ref().unwrap().stage {
+                ReplaceWizardStage::Pattern { input } => assert_eq!(input, "old_name"),
+                _ => panic!("expected the Pattern stage"),
+            }
+        }
+    }
+
     #[test]
     fn find_file_prompt_escape_cancels_without_opening_anything() {
         let mut app = App::with_file(None);
@@ -15171,6 +15371,9 @@ mod tests {
 
     #[test]
     fn yank_file_path_sets_the_clipboard() {
+        // Serialized against every other real-OS-clipboard test in this
+        // module -- see `CLIPBOARD_TEST_LOCK`'s own doc comment.
+        let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = TempDir::new("yank_file_path");
         let path = dir.write("a.txt", "hi\n");
         let mut app = App::with_file(None);
