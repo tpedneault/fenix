@@ -1,9 +1,13 @@
 //! Pure logic for the autocompletion popup: extracting the in-progress
-//! identifier prefix at the cursor. No knowledge of rendering, Vim modes,
-//! or completion *sources* -- `App` (in `app.rs`) owns the actual popup
+//! identifier prefix at the cursor, and the buffer-word candidate source
+//! (the one completion source that works for any language, not just
+//! Tcl). No knowledge of rendering, Vim modes, or the Tcl-specific
+//! completion *sources* -- `App` (in `app.rs`) owns the actual popup
 //! state and drives `fenix-completion`/`fenix-picker` with what this
 //! module computes, the same "small self-contained module" role
 //! `dashboard.rs`/`icon.rs` already play.
+
+use std::collections::HashSet;
 
 use fenix_core::{Buffer, Cursor};
 
@@ -37,6 +41,28 @@ pub fn prefix_at_cursor(buffer: &Buffer, cursor: &Cursor) -> Option<(usize, Stri
     }
     let prefix: String = (start..end).map(|i| buffer.char_at(i).unwrap()).collect();
     Some((start, prefix))
+}
+
+/// Every distinct identifier-like token already present in `buffer` --
+/// the "complete a word from what's already been typed in this file"
+/// source real Vim's own `<C-n>`/`<C-p>` draws on, and the only
+/// completion source that isn't Tcl-specific (see `App::completion_
+/// candidates`, which layers this on top of the Tcl keyword/ctags pool
+/// for a Tcl buffer, or uses it alone for anything else). Purely-numeric
+/// tokens (`123`) are skipped -- not something worth ever completing to.
+/// Scans the whole buffer on every call, same "just clone the text" cost
+/// as `Buffer::text()`'s other callers (`format_buffer`, syntax
+/// highlighting) -- fine at the size files are actually edited at,
+/// expensive on a huge one; not attempting anything cleverer here.
+/// Iteration order is whatever `HashSet` happens to produce -- callers
+/// already fuzzy-filter/sort the result, so token order was never
+/// meaningful.
+pub fn buffer_words(buffer: &Buffer) -> HashSet<String> {
+    let text = buffer.text();
+    text.split(|c: char| !is_ident_char(c))
+        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,5 +137,38 @@ mod tests {
         let (start, prefix) = prefix_at_cursor(&buffer, &cur(6)).unwrap();
         assert_eq!(start, 0);
         assert_eq!(prefix, "my_var");
+    }
+
+    #[test]
+    fn buffer_words_finds_every_distinct_identifier_token() {
+        let buffer = buf("let seek_value = 1;\nlet other = seek_value;\n");
+        let words = buffer_words(&buffer);
+        assert!(words.contains("let"));
+        assert!(words.contains("seek_value"));
+        assert!(words.contains("other"));
+        // "seek_value" appears twice but is only one distinct word.
+        assert_eq!(words.iter().filter(|w| *w == "seek_value").count(), 1);
+    }
+
+    #[test]
+    fn buffer_words_skips_purely_numeric_tokens() {
+        let buffer = buf("let x = 123;\nlet y2 = 4;\n");
+        let words = buffer_words(&buffer);
+        assert!(!words.contains("123"));
+        assert!(!words.contains("4"));
+        assert!(words.contains("y2")); // alphanumeric but not *purely* digits
+    }
+
+    #[test]
+    fn buffer_words_is_empty_for_an_empty_buffer() {
+        let buffer = buf("");
+        assert!(buffer_words(&buffer).is_empty());
+    }
+
+    #[test]
+    fn buffer_words_ignores_punctuation_and_whitespace_boundaries() {
+        let buffer = buf("foo::bar, baz.qux(quux)");
+        let words = buffer_words(&buffer);
+        assert_eq!(words, HashSet::from(["foo", "bar", "baz", "qux", "quux"].map(str::to_string)));
     }
 }

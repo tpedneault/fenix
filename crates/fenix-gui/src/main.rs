@@ -9,6 +9,7 @@ mod icon;
 mod keymap;
 mod popup;
 mod rect;
+mod tabstops;
 mod text;
 mod theme;
 

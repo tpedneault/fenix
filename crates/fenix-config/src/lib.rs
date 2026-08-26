@@ -28,7 +28,27 @@ pub struct Config {
     pub font_size: Option<f32>,
     pub font_family: Option<String>,
     pub indent_width: Option<usize>,
+    /// How many visual columns a literal `\t` character expands to when
+    /// rendered (real Vim's own `:set tabstop`) -- distinct from
+    /// `indent_width`, which governs what typing Tab in Insert mode or
+    /// `>>`/`<<` actually *inserts* (always spaces; Fenix never inserts
+    /// a real tab character itself). Consulted by `fenix-gui`'s
+    /// `tabstops` module.
+    pub tab_width: Option<usize>,
     pub completion_symbols_file: Option<PathBuf>,
+    /// Configured SCOS-2000 MIB directories, `(label, path)`, in the
+    /// order they appear in `config.ini`'s `[mib]` section -- an actual
+    /// list, not an `Option<T>` like every other field here, since
+    /// "nothing configured" is just an empty `Vec`, no need to
+    /// distinguish that from "key present but empty" the way a scalar
+    /// setting would. Hand-authored by the user (see `[mib]`'s own
+    /// numbered-key format in `load`), never written by the app itself
+    /// -- `save` still round-trips it losslessly since it regenerates
+    /// every section from struct state on every call.
+    pub mib_roots: Vec<(String, PathBuf)>,
+    pub mib_telecommand_template: Option<String>,
+    pub mib_telecommand_argument_template: Option<String>,
+    pub mib_telecommand_argument_separator: Option<String>,
 }
 
 impl Config {
@@ -51,6 +71,7 @@ impl Config {
 
         let editor = sections.get("editor");
         let completion = sections.get("completion");
+        let mib = sections.get("mib");
 
         Ok(Self {
             path,
@@ -58,7 +79,12 @@ impl Config {
             font_size: editor.and_then(|s| s.get("font_size")).and_then(|v| v.parse().ok()),
             font_family: editor.and_then(|s| s.get("font_family")).cloned(),
             indent_width: editor.and_then(|s| s.get("indent_width")).and_then(|v| v.parse().ok()),
+            tab_width: editor.and_then(|s| s.get("tab_width")).and_then(|v| v.parse().ok()),
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
+            mib_roots: mib.map(parse_mib_roots).unwrap_or_default(),
+            mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
+            mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
+            mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
         })
     }
 
@@ -73,7 +99,12 @@ impl Config {
             font_size: None,
             font_family: None,
             indent_width: None,
+            tab_width: None,
             completion_symbols_file: None,
+            mib_roots: Vec::new(),
+            mib_telecommand_template: None,
+            mib_telecommand_argument_template: None,
+            mib_telecommand_argument_separator: None,
         })
     }
 
@@ -101,10 +132,27 @@ impl Config {
         if let Some(indent_width) = self.indent_width {
             out.push_str(&format!("indent_width = {indent_width}\n"));
         }
+        if let Some(tab_width) = self.tab_width {
+            out.push_str(&format!("tab_width = {tab_width}\n"));
+        }
         out.push('\n');
         out.push_str("[completion]\n");
         if let Some(symbols_file) = &self.completion_symbols_file {
             out.push_str(&format!("symbols_file = {}\n", symbols_file.display()));
+        }
+        out.push('\n');
+        out.push_str("[mib]\n");
+        for (i, (label, root_path)) in self.mib_roots.iter().enumerate() {
+            out.push_str(&format!("root{} = {label}|{}\n", i + 1, root_path.display()));
+        }
+        if let Some(template) = &self.mib_telecommand_template {
+            out.push_str(&format!("telecommand_template = {template}\n"));
+        }
+        if let Some(template) = &self.mib_telecommand_argument_template {
+            out.push_str(&format!("telecommand_argument_template = {template}\n"));
+        }
+        if let Some(separator) = &self.mib_telecommand_argument_separator {
+            out.push_str(&format!("telecommand_argument_separator = {separator}\n"));
         }
         std::fs::write(&self.path, out)
     }
@@ -113,6 +161,29 @@ impl Config {
     fn path(&self) -> &std::path::Path {
         &self.path
     }
+}
+
+/// Parses the `[mib]` section's `root1 = LABEL|PATH`, `root2 = ...`
+/// numbered keys into an ordered `(label, path)` list. Numbered rather
+/// than one `roots = ...` key: the INI parser (`ini::parse`) is single-
+/// value-per-key, so a growable list needs its own key per entry, the
+/// same convention plenty of other hand-rolled INI readers use for
+/// lists. `|` splits label from path (not `:`, which Windows paths
+/// contain); any key that isn't `rootN`, or a value with no `|`, is
+/// silently skipped -- same "a bad entry loses only itself" posture
+/// every other field in this file already has. Sorted by the numeric
+/// ordinal, not by key string, so `root2` sorts before `root10`.
+fn parse_mib_roots(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
+    let mut roots: Vec<(usize, String, PathBuf)> = section
+        .iter()
+        .filter_map(|(key, value)| {
+            let n = key.strip_prefix("root")?.parse::<usize>().ok()?;
+            let (label, path) = value.split_once('|')?;
+            Some((n, label.trim().to_string(), PathBuf::from(path.trim())))
+        })
+        .collect();
+    roots.sort_by_key(|(n, _, _)| *n);
+    roots.into_iter().map(|(_, label, path)| (label, path)).collect()
 }
 
 #[cfg(test)]
@@ -133,7 +204,12 @@ mod tests {
         assert!(config.font_size.is_none());
         assert!(config.font_family.is_none());
         assert!(config.indent_width.is_none());
+        assert!(config.tab_width.is_none());
         assert!(config.completion_symbols_file.is_none());
+        assert!(config.mib_roots.is_empty());
+        assert!(config.mib_telecommand_template.is_none());
+        assert!(config.mib_telecommand_argument_template.is_none());
+        assert!(config.mib_telecommand_argument_separator.is_none());
     }
 
     #[test]
@@ -154,6 +230,7 @@ mod tests {
         config.font_size = Some(18.0);
         config.font_family = Some("Fira Code".to_string());
         config.indent_width = Some(2);
+        config.tab_width = Some(4);
         config.completion_symbols_file = Some(PathBuf::from("/home/thomas/tcl-symbols.txt"));
         config.save().unwrap();
 
@@ -162,7 +239,87 @@ mod tests {
         assert_eq!(reloaded.font_size, Some(18.0));
         assert_eq!(reloaded.font_family, Some("Fira Code".to_string()));
         assert_eq!(reloaded.indent_width, Some(2));
+        assert_eq!(reloaded.tab_width, Some(4));
         assert_eq!(reloaded.completion_symbols_file, Some(PathBuf::from("/home/thomas/tcl-symbols.txt")));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mib_roots_and_templates_round_trip_through_save_and_load() {
+        let path = temp_path("mib_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.mib_roots = vec![
+            ("MIB-A".to_string(), PathBuf::from("/data/mib-a")),
+            ("MIB-B".to_string(), PathBuf::from("/data/mib-b")),
+        ];
+        config.mib_telecommand_template = Some("TC {mnemo}".to_string());
+        config.mib_telecommand_argument_template = Some("{name}:{value}".to_string());
+        // No leading/trailing whitespace -- the INI parser trims every
+        // value (see `ini::parse`), so a separator that depends on
+        // surrounding spaces wouldn't round-trip; that's a property of
+        // the shared INI format, not something to work around here.
+        config.mib_telecommand_argument_separator = Some(";".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(
+            reloaded.mib_roots,
+            vec![("MIB-A".to_string(), PathBuf::from("/data/mib-a")), ("MIB-B".to_string(), PathBuf::from("/data/mib-b"))]
+        );
+        assert_eq!(reloaded.mib_telecommand_template, Some("TC {mnemo}".to_string()));
+        assert_eq!(reloaded.mib_telecommand_argument_template, Some("{name}:{value}".to_string()));
+        assert_eq!(reloaded.mib_telecommand_argument_separator, Some(";".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mib_roots_survive_a_save_triggered_by_an_unrelated_field_change() {
+        // Regression guard: `save` regenerates every section from struct
+        // state on every call, so a hand-authored `[mib]` section must
+        // still be in the in-memory `Config` (loaded once at startup) or
+        // an unrelated theme-cycle save would silently wipe it from disk.
+        let path = temp_path("mib_survives_unrelated_save");
+        std::fs::write(&path, "[mib]\nroot1 = MIB-A|/data/mib-a\n").unwrap();
+        let mut config = Config::load(path.clone()).unwrap();
+        config.theme = Some("Nord".to_string()); // unrelated change
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.mib_roots, vec![("MIB-A".to_string(), PathBuf::from("/data/mib-a"))]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mib_roots_are_ordered_by_numeric_ordinal_not_key_string() {
+        let path = temp_path("mib_root_order");
+        // Deliberately written out of string order (root10 sorts before
+        // root2 as a plain string) to prove numeric ordering is used.
+        std::fs::write(&path, "[mib]\nroot2 = SECOND|/b\nroot10 = TENTH|/j\nroot1 = FIRST|/a\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(
+            config.mib_roots,
+            vec![
+                ("FIRST".to_string(), PathBuf::from("/a")),
+                ("SECOND".to_string(), PathBuf::from("/b")),
+                ("TENTH".to_string(), PathBuf::from("/j")),
+            ]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_mib_root_entry_with_no_separator_is_skipped_not_an_error() {
+        let path = temp_path("mib_root_bad_entry");
+        std::fs::write(&path, "[mib]\nroot1 = MIB-A|/data/a\nroot2 = no-separator-here\nroot3 = MIB-C|/data/c\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(
+            config.mib_roots,
+            vec![("MIB-A".to_string(), PathBuf::from("/data/a")), ("MIB-C".to_string(), PathBuf::from("/data/c"))]
+        );
         std::fs::remove_file(&path).ok();
     }
 

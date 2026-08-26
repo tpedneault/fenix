@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+arboard = "3"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 chrono = "0.4"
 dirs = "6"
@@ -14,11 +15,14 @@ fenix-config = { path = "../fenix-config" }
 fenix-core = { path = "../fenix-core" }
 fenix-docker = { path = "../fenix-docker" }
 fenix-explorer = { path = "../fenix-explorer" }
+fenix-format = { path = "../fenix-format" }
 fenix-git = { path = "../fenix-git" }
 fenix-keymap = { path = "../fenix-keymap" }
+fenix-mib = { path = "../fenix-mib" }
 fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
+fenix-table = { path = "../fenix-table" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"

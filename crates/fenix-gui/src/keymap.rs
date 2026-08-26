@@ -88,6 +88,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('f')], "files");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('f')], "find file", "file.find");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('a')], "find file (all)", "file.find_all");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('r')], "recent files", "file.recent");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('R')], "rename file", "file.rename");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('D')], "delete file", "file.delete");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('y')], "yank file path", "file.yank_path");
 
         t.label_group(&[spc, KeyPress::char('q')], "quit");
         t.insert(&[spc, KeyPress::char('q'), KeyPress::char('q')], "quit", "app.quit");
@@ -116,12 +123,35 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('f')], "find file", "project.find_file");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('s')], "search", "project.grep");
         t.insert(
+            &[spc, KeyPress::char('p'), KeyPress::char('n')],
+            "next match",
+            "project.quickfix_next",
+        );
+        t.insert(
+            &[spc, KeyPress::char('p'), KeyPress::char('N')],
+            "prev match",
+            "project.quickfix_prev",
+        );
+        t.insert(
             &[spc, KeyPress::char('p'), KeyPress::char('p')],
             "switch project",
             "project.switch_project",
         );
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
+
+        t.label_group(&[spc, KeyPress::char('s')], "search");
+        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('s')], "search buffer", "search.buffer");
+        t.insert(
+            &[spc, KeyPress::char('s'), KeyPress::char('r')],
+            "replace in buffer",
+            "search.replace_buffer",
+        );
+        t.insert(
+            &[spc, KeyPress::char('s'), KeyPress::char('p')],
+            "replace in project",
+            "search.replace_project",
+        );
 
         t.label_group(&[spc, KeyPress::char('o')], "open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
@@ -139,12 +169,53 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
 
-        t.label_group(&[spc, KeyPress::char('c')], "completion");
+        t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('r')],
             "refresh tags",
             "completion.refresh_tags",
         );
+        t.insert(
+            &[spc, KeyPress::char('c'), KeyPress::char('f')],
+            "format selection",
+            "code.format_selection",
+        );
+        t.insert(
+            &[spc, KeyPress::char('c'), KeyPress::char('F')],
+            "format buffer",
+            "code.format_buffer",
+        );
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('s')], "symbols", "code.symbols");
+
+        // SCOS-2000 MIB lookup/insertion -- letters kept identical to
+        // the reference elisp implementation's own scheme for muscle-
+        // memory continuity (there it's `SPC M`, capitalized, since
+        // Doom Emacs splits a global leader from a mode-local one;
+        // Fenix has one flat leader tree, so this is lowercase `m`,
+        // matching the user's own `SPC m i` example).
+        t.label_group(&[spc, KeyPress::char('m')], "mib");
+        t.insert(
+            &[spc, KeyPress::char('m'), KeyPress::char('i')],
+            "insert telecommand",
+            "mib.insert_telecommand",
+        );
+        t.insert(
+            &[spc, KeyPress::char('m'), KeyPress::char('t')],
+            "lookup telecommand",
+            "mib.lookup_telecommand",
+        );
+        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('k')], "lookup TM packet", "mib.lookup_tm_packet");
+        t.insert(
+            &[spc, KeyPress::char('m'), KeyPress::char('p')],
+            "lookup TM parameter",
+            "mib.lookup_tm_parameter",
+        );
+        t.insert(
+            &[spc, KeyPress::char('m'), KeyPress::char('c')],
+            "lookup calibration",
+            "mib.lookup_calibration",
+        );
+        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('r')], "refresh MIB index", "mib.refresh_index");
 
         t.label_group(&[spc, KeyPress::char('w')], "window");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
@@ -282,6 +353,14 @@ mod tests {
 
         let mut m = trie.matcher();
         m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('f'));
+        match m.feed(KeyPress::char('t')) {
+            fenix_keymap::Step::Matched(&"table.toggle") => {}
+            _ => panic!("expected SPC f t to resolve to table.toggle"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('e'));
         match m.feed(KeyPress::char('t')) {
             fenix_keymap::Step::Matched(&"explorer.toggle_sidebar") => {}
@@ -318,6 +397,22 @@ mod tests {
         match m.feed(KeyPress::char('s')) {
             fenix_keymap::Step::Matched(&"project.grep") => {}
             _ => panic!("expected SPC p s to resolve to project.grep"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('n')) {
+            fenix_keymap::Step::Matched(&"project.quickfix_next") => {}
+            _ => panic!("expected SPC p n to resolve to project.quickfix_next"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('p'));
+        match m.feed(KeyPress::char('N')) {
+            fenix_keymap::Step::Matched(&"project.quickfix_prev") => {}
+            _ => panic!("expected SPC p N to resolve to project.quickfix_prev"),
         }
 
         let mut m = trie.matcher();
@@ -394,6 +489,61 @@ mod tests {
         match m.feed(KeyPress::char('r')) {
             fenix_keymap::Step::Matched(&"completion.refresh_tags") => {}
             _ => panic!("expected SPC c r to resolve to completion.refresh_tags"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_format_selection_and_format_buffer() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('f')) {
+            fenix_keymap::Step::Matched(&"code.format_selection") => {}
+            _ => panic!("expected SPC c f to resolve to code.format_selection"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('F')) {
+            fenix_keymap::Step::Matched(&"code.format_buffer") => {}
+            _ => panic!("expected SPC c F to resolve to code.format_buffer"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_symbols() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('s')) {
+            fenix_keymap::Step::Matched(&"code.symbols") => {}
+            _ => panic!("expected SPC c s to resolve to code.symbols"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_mib_commands() {
+        let trie = leader_trie();
+        let cases: &[(char, &str)] = &[
+            ('i', "mib.insert_telecommand"),
+            ('t', "mib.lookup_telecommand"),
+            ('k', "mib.lookup_tm_packet"),
+            ('p', "mib.lookup_tm_parameter"),
+            ('c', "mib.lookup_calibration"),
+            ('r', "mib.refresh_index"),
+        ];
+        for &(key, expected) in cases {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('m'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&id) if id == expected => {}
+                _ => panic!("expected SPC m {key} to resolve to {expected}"),
+            }
         }
     }
 

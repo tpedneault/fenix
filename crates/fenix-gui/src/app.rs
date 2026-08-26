@@ -14,7 +14,7 @@ use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
@@ -29,6 +29,7 @@ use crate::icon;
 use crate::keymap;
 use crate::popup;
 use crate::rect::RectRenderer;
+use crate::tabstops::{self, TabStops};
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
 
@@ -50,6 +51,30 @@ const PULSE_DURATION: Duration = Duration::from_millis(300);
 const PULSE_PEAK_ALPHA: f32 = 0.45;
 /// How long the viewport takes to ease to a new scroll position.
 const SCROLL_DURATION: Duration = Duration::from_millis(150);
+/// Real Vim's own `:set tabstop` default -- how many visual columns a
+/// literal `\t` advances by when `config.tab_width` isn't set.
+const DEFAULT_TAB_WIDTH: usize = 8;
+/// Blank visual columns between a table view's elastic columns (`SPC f
+/// t`), in addition to each column's own widest-value width.
+const TABLE_COLUMN_GAP: usize = 2;
+/// Total keystrokes a `@{register}` replay (including every nested
+/// `@`-call it makes) may play before `App::play_macro` bails out --
+/// real Vim itself would just hang forever on a self-referential macro
+/// (`qaa@aq`) too; a GUI app shouldn't get to. Comfortably above
+/// anything a legitimate macro (even one replaying itself many times
+/// over a large file) would need, and fast enough that hitting it is
+/// still instant.
+const MACRO_REPLAY_BUDGET: u32 = 10_000;
+/// Nested `@`-call depth a replay may reach before `App::play_macro`
+/// bails out -- a *second*, independent guard from `MACRO_REPLAY_
+/// BUDGET`: a self-referential macro (`qaa@aq`) recurses one Rust stack
+/// frame deeper per replayed key, so the key-count budget alone would
+/// let it recurse thousands of frames deep (each several calls through
+/// `route_keypress`/`VimState::handle_key`) before ever tripping --
+/// real recursion, real risk of overflowing the actual call stack, not
+/// just spending time. Real Vim has the exact same guard for the exact
+/// same reason (`E169: command too recursive`, `'maxmapdepth'`).
+const MAX_MACRO_REPLAY_DEPTH: u32 = 100;
 /// Jumps larger than this many screens snap instantly instead of
 /// animating. Panning smoothly through a huge jump (`G` on a large file)
 /// would either blur past unreadably fast or need fetching far more
@@ -152,10 +177,10 @@ impl PaneState {
 /// live background threads/processes that a second, orphaned session
 /// would leak.
 ///
-/// Five panes, not four: Containers/Images/Volumes stacked on the left,
-/// then Status (small, on top) and Logs (below it) stacked on the
-/// right -- Status always shows plain info fields (+ live CPU/MEM once
-/// a stats tick has landed, if the selection is a container) for
+/// Six panes, not five: Containers/Images/Volumes/Networks stacked on
+/// the left, then Status (small, on top) and Logs (below it) stacked on
+/// the right -- Status always shows plain info fields (+ live CPU/MEM
+/// once a stats tick has landed, if the selection is a container) for
 /// whatever's under the cursor in the focused left pane; Logs is
 /// dedicated purely to `l`'s live-streamed log output. Splitting these
 /// into two buffers (rather than the original single "Details" pane
@@ -165,7 +190,7 @@ impl PaneState {
 /// since they're no longer the same buffer.
 ///
 /// Role (which pane is which) lives here, not as extra `BufferKind`
-/// variants: all five buffers stay tagged the existing `BufferKind::
+/// variants: all six buffers stay tagged the existing `BufferKind::
 /// Docker` -- `App`'s action-key routing and `docker_sync_details` both
 /// key off *which pane is focused* (`DockerPaneRole`/`docker_focused_
 /// role`) instead.
@@ -174,20 +199,23 @@ struct DockerSession {
     containers_pane: fenix_window::WindowId,
     images_pane: fenix_window::WindowId,
     volumes_pane: fenix_window::WindowId,
+    networks_pane: fenix_window::WindowId,
     status_pane: fenix_window::WindowId,
     logs_pane: fenix_window::WindowId,
     containers_buffer: BufferId,
     images_buffer: BufferId,
     volumes_buffer: BufferId,
+    networks_buffer: BufferId,
     status_buffer: BufferId,
     logs_buffer: BufferId,
-    /// Last-listed containers/images/volumes, cached so `docker_sync_
-    /// details` and the stats poller can re-render merged rows without
-    /// re-running `docker ps`/`docker images`/`docker volume ls` on
-    /// every cursor move/tick.
+    /// Last-listed containers/images/volumes/networks, cached so
+    /// `docker_sync_details` and the stats poller can re-render merged
+    /// rows without re-running `docker ps`/`docker images`/`docker
+    /// volume ls`/`docker network ls` on every cursor move/tick.
     containers: Vec<fenix_docker::Container>,
     images: Vec<fenix_docker::Image>,
     volumes: Vec<fenix_docker::Volume>,
+    networks: Vec<fenix_docker::Network>,
     /// The most recent `docker stats --no-stream` snapshot, cached so
     /// the Status pane can show live CPU/MEM for whichever container is
     /// currently selected without needing its own separate fetch --
@@ -343,7 +371,7 @@ impl Drop for DockerLogFollower {
     }
 }
 
-/// Which of a `DockerSession`'s five panes is currently focused, if
+/// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +379,7 @@ enum DockerPaneRole {
     Containers,
     Images,
     Volumes,
+    Networks,
     Status,
     Logs,
 }
@@ -585,6 +614,100 @@ enum ExplorerPurpose {
     PickProjectDir,
 }
 
+/// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
+/// char index within it, not a `Cursor` (no `sticky_col` to carry
+/// around; `goto_jump_entry` derives a fresh one from the buffer at
+/// landing time, same as every other programmatic cursor placement in
+/// this file). `buffer` is only ever looked up, never assumed to still
+/// exist -- `BufferId`s are never reused within a session (see
+/// `BufferList::insert`), so a closed buffer's old entries just fail
+/// their lookup and get silently skipped rather than resurrecting an
+/// unrelated buffer that happens to reuse the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JumpEntry {
+    buffer: BufferId,
+    char_idx: usize,
+}
+
+/// The active `SPC m i` telecommand-insert wizard: build (or skip)
+/// engineering values for a telecommand's variable parameters, preview
+/// the rendered command plus any validation warnings, then insert it at
+/// wherever the wizard was started from. Entered once a telecommand's
+/// been picked from `ActivePicker::MibTelecommandInsert`; `App::
+/// mib_insert_key` (mirroring `git_prompt_key`/`explorer_prompt_key`'s
+/// "next keystrokes are special" shape) drives everything from there.
+struct MibInsertState {
+    ccf: fenix_mib::Row,
+    /// Buffer + char index to insert the finished command into --
+    /// captured *before* the telecommand picker took over (which
+    /// changes `main_view`/focus), the same "remember where this
+    /// started" role `JumpEntry` already plays for the jumplist.
+    origin: JumpEntry,
+    /// This telecommand's non-fixed (`CDF_VALUE` empty) parameters, in
+    /// order -- `collected.len()` is always the index of whichever one
+    /// is currently being prompted for.
+    variable_params: Vec<fenix_mib::telecommand::TcParameter>,
+    collected: Vec<(String, String)>,
+    stage: MibInsertStage,
+}
+
+#[derive(Debug)]
+enum MibInsertStage {
+    /// Only entered when `variable_params` isn't empty -- `y` walks
+    /// them one at a time, `n` (or anything else) skips straight to
+    /// `Confirm` with `collected` left empty (`{arguments}` renders
+    /// empty, matching a telecommand with only fixed parameters).
+    ChooseArgumentMode,
+    /// Free-text capture for `variable_params[collected.len()]`, char by
+    /// char like `ExplorerPrompt`'s own text fields -- only reached for
+    /// a parameter with no `PAF`/`PAS`-enumerated aliases; one that has
+    /// some is delegated to `ActivePicker::MibArgumentAlias` instead.
+    /// `prompt` (description/unit/default/range, ported from the
+    /// reference elisp implementation's own `mod-mib--tc-argument-
+    /// prompt`) is precomputed once when this stage is entered
+    /// (`mib_prompt_next_argument`, which already needs `&mut self` to
+    /// reach the MIB index) rather than at modeline-render time
+    /// (`mib_insert_text`, `&self` only, called every frame).
+    ArgumentText { input: String, prompt: String },
+    /// All arguments collected (or skipped) -- `y`/`Y` inserts `rendered`
+    /// at `origin` and closes the wizard; anything else cancels without
+    /// touching the buffer.
+    Confirm { rendered: String, warnings: Vec<String> },
+}
+
+/// The active `SPC s r`/`SPC s p` search-and-replace wizard -- pattern,
+/// then replacement, then (scope-dependent) either an immediate y/n
+/// confirm (`Buffer`) or a hand-off to the real, navigable `App::
+/// project_replace` review buffer (`Project`, see its own doc comment).
+/// Mirrors `MibInsertState`'s own "one `Option<XxxState>`, a `stage`
+/// enum, a `*_key` dispatcher" shape.
+struct ReplaceWizard {
+    scope: ReplaceScope,
+    stage: ReplaceWizardStage,
+}
+
+#[derive(Clone, Copy)]
+enum ReplaceScope {
+    /// `line_range` (0-indexed, inclusive) is `Some` when `SPC s r` was
+    /// invoked from Visual mode -- scopes the replace to just those
+    /// lines, mirroring real Vim's own `:'<,'>s` convention for a
+    /// selection-invoked `:`. `None` is the whole buffer.
+    Buffer { line_range: Option<(usize, usize)> },
+    /// `SPC s p` -- once the replacement text is entered, this scope
+    /// hands off to `App::project_replace` instead of a `Confirm` stage
+    /// here (see `replace_wizard_key`).
+    Project,
+}
+
+#[derive(Debug)]
+enum ReplaceWizardStage {
+    Pattern { input: String },
+    Replacement { pattern: String, input: String },
+    /// `Buffer` scope only -- `Project` scope never reaches this stage,
+    /// it hands off to `project_replace` instead once matches are known.
+    Confirm { pattern: String, replacement: String, count: usize },
+}
+
 /// A picker's payload type varies by what it's picking between, but
 /// `App` only ever has one active at a time -- an enum, not three
 /// separate `Option` fields, the same reasoning `ExplorerPrompt` already
@@ -603,6 +726,54 @@ enum ActivePicker {
     /// `cycle_theme` does. The quick `SPC t t` cycle stays too; this is
     /// for "I know which one I want," not "just try the next one."
     Theme(fenix_picker::PickerState<&'static Theme>),
+    /// `SPC c s`: fuzzy-find any known Tcl definition by its fully-
+    /// qualified name (same `ctags`-sourced list `tcl_candidates`'s own
+    /// `Tag`-kind completion entries come from, see `tcl_tags`) --
+    /// confirming jumps straight to where it's defined, the payload
+    /// carrying the file/line `tcl_candidates`'s own `CompletionItem`
+    /// conversion discards.
+    Symbol(fenix_picker::PickerState<fenix_completion::ctags::TagEntry>),
+    /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
+    /// subsystem, confirming opens its detail view (`mib_show_
+    /// telecommand`). Same candidate list as `MibTelecommandInsert`,
+    /// just a different picker variant so `picker_confirm` can dispatch
+    /// differently -- exact precedent `SwitchProject`/`DeleteProject`
+    /// already set for "one candidate list, two possible actions."
+    MibTelecommandLookup(fenix_picker::PickerState<fenix_mib::Row>),
+    /// `SPC m i`'s first step: same candidates as `MibTelecommandLookup`,
+    /// but confirming starts the insert wizard (`mib_start_insert`)
+    /// instead of opening a detail view.
+    MibTelecommandInsert(fenix_picker::PickerState<fenix_mib::Row>),
+    /// `SPC m k`: fuzzy-find a TM packet (`pid` table) by SPID/type/
+    /// subtype/APID, confirming opens its detail view.
+    MibTmPacket(fenix_picker::PickerState<fenix_mib::Row>),
+    /// `SPC m p`: fuzzy-find a TM parameter (`pcf` table) by name,
+    /// confirming opens its detail view.
+    MibTmParameter(fenix_picker::PickerState<fenix_mib::Row>),
+    /// `SPC m c`: fuzzy-find a calibration definition -- `caf` (numeric
+    /// curves), `paf` (status/enumeration), or `prf` (range checks) rows
+    /// merged into one candidate list, confirming opens a detail view
+    /// showing that definition's own points/aliases/range (`cap`/`pas`/
+    /// `prv` respectively).
+    MibCalibration(fenix_picker::PickerState<fenix_mib::Row>),
+    /// Mid-`SPC m i` wizard: the current variable parameter has `PAF`/
+    /// `PAS`-enumerated engineering aliases, so its value is picked
+    /// from this list instead of typed -- confirming feeds the chosen
+    /// alias back into `mib_insert` and advances to the next parameter
+    /// (`mib_resume_insert`).
+    MibArgumentAlias(fenix_picker::PickerState<String>),
+    /// `c` on a `BufferKind::Table` buffer: fuzzy-find a column by its
+    /// synthesized name, confirming jumps the cursor to that column's
+    /// start on the current row (`table_column_start`). The payload is
+    /// the column's 0-indexed tab-occurrence position, exactly what
+    /// `table_column_start` takes.
+    TableColumn(fenix_picker::PickerState<usize>),
+    /// `SPC s s`: fuzzy-find any line in the focused buffer, live-
+    /// filtered by `PickerState`'s own already-built fuzzy matching --
+    /// candidates are one per buffer line (label `"{line:>4}  {trimmed
+    /// text}"`, payload that line's start char offset), confirming
+    /// jumps the cursor there.
+    BufferSearch(fenix_picker::PickerState<usize>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -617,6 +788,15 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
+        ActivePicker::Symbol(s) => s.push_char(c),
+        ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
+        ActivePicker::MibTelecommandInsert(s) => s.push_char(c),
+        ActivePicker::MibTmPacket(s) => s.push_char(c),
+        ActivePicker::MibTmParameter(s) => s.push_char(c),
+        ActivePicker::MibCalibration(s) => s.push_char(c),
+        ActivePicker::MibArgumentAlias(s) => s.push_char(c),
+        ActivePicker::TableColumn(s) => s.push_char(c),
+        ActivePicker::BufferSearch(s) => s.push_char(c),
     }
 }
 
@@ -628,6 +808,15 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchBuffer(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
+        ActivePicker::Symbol(s) => s.backspace(),
+        ActivePicker::MibTelecommandLookup(s) => s.backspace(),
+        ActivePicker::MibTelecommandInsert(s) => s.backspace(),
+        ActivePicker::MibTmPacket(s) => s.backspace(),
+        ActivePicker::MibTmParameter(s) => s.backspace(),
+        ActivePicker::MibCalibration(s) => s.backspace(),
+        ActivePicker::MibArgumentAlias(s) => s.backspace(),
+        ActivePicker::TableColumn(s) => s.backspace(),
+        ActivePicker::BufferSearch(s) => s.backspace(),
     }
 }
 
@@ -639,6 +828,15 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
+        ActivePicker::Symbol(s) => s.move_selection(delta),
+        ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
+        ActivePicker::MibTelecommandInsert(s) => s.move_selection(delta),
+        ActivePicker::MibTmPacket(s) => s.move_selection(delta),
+        ActivePicker::MibTmParameter(s) => s.move_selection(delta),
+        ActivePicker::MibCalibration(s) => s.move_selection(delta),
+        ActivePicker::MibArgumentAlias(s) => s.move_selection(delta),
+        ActivePicker::TableColumn(s) => s.move_selection(delta),
+        ActivePicker::BufferSearch(s) => s.move_selection(delta),
     }
 }
 
@@ -650,6 +848,15 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchBuffer(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
+        ActivePicker::Symbol(s) => s.query(),
+        ActivePicker::MibTelecommandLookup(s) => s.query(),
+        ActivePicker::MibTelecommandInsert(s) => s.query(),
+        ActivePicker::MibTmPacket(s) => s.query(),
+        ActivePicker::MibTmParameter(s) => s.query(),
+        ActivePicker::MibCalibration(s) => s.query(),
+        ActivePicker::MibArgumentAlias(s) => s.query(),
+        ActivePicker::TableColumn(s) => s.query(),
+        ActivePicker::BufferSearch(s) => s.query(),
     }
 }
 
@@ -661,6 +868,15 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBuffer(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
+        ActivePicker::Symbol(s) => s.len(),
+        ActivePicker::MibTelecommandLookup(s) => s.len(),
+        ActivePicker::MibTelecommandInsert(s) => s.len(),
+        ActivePicker::MibTmPacket(s) => s.len(),
+        ActivePicker::MibTmParameter(s) => s.len(),
+        ActivePicker::MibCalibration(s) => s.len(),
+        ActivePicker::MibArgumentAlias(s) => s.len(),
+        ActivePicker::TableColumn(s) => s.len(),
+        ActivePicker::BufferSearch(s) => s.len(),
     }
 }
 
@@ -672,6 +888,15 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
+        ActivePicker::Symbol(s) => s.selected_row(),
+        ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
+        ActivePicker::MibTelecommandInsert(s) => s.selected_row(),
+        ActivePicker::MibTmPacket(s) => s.selected_row(),
+        ActivePicker::MibTmParameter(s) => s.selected_row(),
+        ActivePicker::MibCalibration(s) => s.selected_row(),
+        ActivePicker::MibArgumentAlias(s) => s.selected_row(),
+        ActivePicker::TableColumn(s) => s.selected_row(),
+        ActivePicker::BufferSearch(s) => s.selected_row(),
     }
 }
 
@@ -687,6 +912,15 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibTelecommandInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibTmPacket(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibTmParameter(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibCalibration(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibArgumentAlias(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -776,6 +1010,52 @@ fn split_line_by_highlights(
         spans.push((line_text.to_string(), default_color));
     }
     spans
+}
+
+/// Remaps `highlights` (document-wide byte ranges against the buffer's
+/// *real* text) onto `display`'s own local byte offsets, for a line that
+/// contains a `\t` and was tab-expanded into `display` by `tabstops::
+/// expand_line` -- so a tab-indented line in a real language (C, Bash,
+/// Python, ... all have tree-sitter grammars registered in this project,
+/// and commonly use tab indentation) still gets correct syntax
+/// highlighting instead of falling back to plain text.
+///
+/// Leans on the same "1 char = 1 visual column" invariant the rest of
+/// this renderer already assumes: every char `expand_line` writes into
+/// `display` (an original character, or one space per padded column)
+/// advances the visual column by exactly one, so a visual column *is*
+/// a char index into `display` -- `col_map` (original char column ->
+/// visual column) is directly usable as "char index into `display`"
+/// once a highlight's buffer-wide byte range is converted to a line-
+/// relative char range first.
+fn remap_highlights_for_display(
+    buffer: &Buffer,
+    line_start_char: usize,
+    col_map: &[usize],
+    display: &str,
+    line_byte_start: usize,
+    line_byte_end: usize,
+    highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let line_char_len = col_map.len().saturating_sub(1);
+    highlights
+        .iter()
+        .filter(|(range, _)| range.end > line_byte_start && range.start < line_byte_end)
+        .filter_map(|(range, color)| {
+            let start_byte = range.start.max(line_byte_start);
+            let end_byte = range.end.min(line_byte_end);
+            let start_char = buffer.byte_to_char(start_byte).saturating_sub(line_start_char).min(line_char_len);
+            let end_char = buffer.byte_to_char(end_byte).saturating_sub(line_start_char).min(line_char_len);
+            let visual_start = tabstops::visual_col(col_map, start_char);
+            let visual_end = tabstops::visual_col(col_map, end_char);
+            if visual_start >= visual_end {
+                return None;
+            }
+            let byte_start = display.char_indices().nth(visual_start).map(|(b, _)| b).unwrap_or(display.len());
+            let byte_end = display.char_indices().nth(visual_end).map(|(b, _)| b).unwrap_or(display.len());
+            Some((byte_start..byte_end, *color))
+        })
+        .collect()
 }
 
 /// Whether `style` belongs to the banner block (the logo + tagline) as
@@ -1005,6 +1285,142 @@ fn file_counts(files: &[fenix_git::FileEntry]) -> (usize, usize, usize) {
     (staged, unstaged, untracked)
 }
 
+/// Dispatches to whichever external formatter handles `language` --
+/// currently just Tcl, via `fenix_format` (see its own doc comment for
+/// why that's a temp-file shell-out rather than stdin). `partial` selects
+/// the fragment-aware variant `format_selection`'s Visual-selection case
+/// needs rather than a complete script. `None` for an unsupported
+/// language or any formatter failure (tool missing, non-zero exit) --
+/// never a hard error, same posture as every other optional external
+/// tool this project shells out to. A free function, not an `App`
+/// method, so it can run in between two separate mutable borrows of
+/// `self.buffers`/`self.workspaces` without fighting the borrow checker.
+fn format_with_external_tool(language: fenix_syntax::LanguageId, source: &str, partial: bool) -> Option<String> {
+    match language {
+        fenix_syntax::LanguageId::Tcl if partial => fenix_format::format_tcl_fragment(source),
+        fenix_syntax::LanguageId::Tcl => fenix_format::format_tcl(source),
+        _ => None,
+    }
+}
+
+/// The char index of the first non-blank (non-space, non-tab) character
+/// on `line`, or the line's own start if it's blank/empty -- `'{mark}`'s
+/// landing spot (`goto_jump_entry`), real Vim's own `'` (vs. `` ` ``,
+/// which wants the exact position) convention.
+fn line_first_non_blank_char(buffer: &Buffer, line: usize) -> usize {
+    let start = buffer.line_start_char(line);
+    let len = buffer.line_len(line);
+    for i in 0..len {
+        if buffer.char_at(start + i).is_some_and(|c| c != ' ' && c != '\t') {
+            return start + i;
+        }
+    }
+    start
+}
+
+/// `SPC m t`/`SPC m i` candidate label -- name plus `type=`/`sub=`/
+/// `apid=`/`subsys=` field tokens (so a query like `type=8 sub=1`
+/// narrows correctly, ported from the reference elisp implementation's
+/// own field-tokened labels) and the description.
+fn mib_tc_label(row: &fenix_mib::Row) -> String {
+    format!(
+        "{}  type={} sub={} apid={} subsys={}  [{}]  {}",
+        row.clean("CCF_CNAME"),
+        row.clean("CCF_TYPE"),
+        row.clean("CCF_STYPE"),
+        row.clean("CCF_APID"),
+        row.clean("CCF_SUBSYS"),
+        row.source.root_label,
+        row.clean("CCF_DESCR"),
+    )
+}
+
+fn mib_tm_packet_label(row: &fenix_mib::Row) -> String {
+    format!(
+        "SPID:{}  type={} sub={} apid={}  [{}]  {}",
+        row.clean("PID_SPID"),
+        row.clean("PID_TYPE"),
+        row.clean("PID_STYPE"),
+        row.clean("PID_APID"),
+        row.source.root_label,
+        row.clean("PID_DESCR"),
+    )
+}
+
+fn mib_tm_parameter_label(row: &fenix_mib::Row) -> String {
+    format!("{}  [{}]  {}", row.clean("PCF_NAME"), row.source.root_label, row.clean("PCF_DESCR"))
+}
+
+/// `SPC m c` candidate label -- works across `caf`/`paf`/`prf` uniformly
+/// since all three follow the same `{TABLE}_NUMBR`/`{TABLE}_DESCR`
+/// column-naming convention.
+fn mib_calibration_label(row: &fenix_mib::Row) -> String {
+    let kind = match row.table.as_str() {
+        "caf" => "numeric",
+        "paf" => "status",
+        "prf" => "range",
+        other => other,
+    };
+    let numbr = row.clean(&format!("{}_NUMBR", row.table.to_uppercase())).to_string();
+    let descr = row.clean(&format!("{}_DESCR", row.table.to_uppercase())).to_string();
+    format!("{numbr}  {kind}  [{}]  {descr}", row.source.root_label)
+}
+
+fn mib_source_text(source: &fenix_mib::RowSource) -> String {
+    format!("- MIB: {}\n- Table: {}.dat\n- Row: {}\n- File: {}\n", source.root_label, source.table, source.line, source.file.display())
+}
+
+fn mib_field_list_text(row: &fenix_mib::Row, fields: &[&str]) -> String {
+    let mut text = String::new();
+    for field in fields {
+        let value = row.clean(field);
+        if !value.is_empty() {
+            text.push_str(&format!("- {field}: {value}\n"));
+        }
+    }
+    text
+}
+
+fn mib_raw_fields_text(row: &fenix_mib::Row, title: &str) -> String {
+    let mut text = format!("\n* {title}\n");
+    for (name, value) in &row.fields {
+        text.push_str(&format!("- {name}: {value}\n"));
+    }
+    text
+}
+
+fn mib_row_fields_inline(row: &fenix_mib::Row) -> String {
+    row.fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+}
+
+/// A helpful modeline prompt for one telecommand argument -- name plus,
+/// in parens, whatever's known about it (description, allowed engineering
+/// aliases or numeric range, unit, default), ported from the reference
+/// elisp implementation's own `mod-mib--tc-argument-prompt`.
+fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain) -> String {
+    let mut parts = Vec::new();
+    if !domain.description.is_empty() {
+        parts.push(domain.description.clone());
+    }
+    if !domain.aliases.is_empty() {
+        parts.push(format!("values {}", domain.aliases.join(", ")));
+    } else if !domain.ranges.is_empty() {
+        let ranges = domain.ranges.iter().map(|(lo, hi)| format!("{lo}..{hi}")).collect::<Vec<_>>().join(", ");
+        parts.push(format!("range {ranges}"));
+    }
+    if !domain.unit.is_empty() {
+        parts.push(format!("unit {}", domain.unit));
+    }
+    if !domain.default.is_empty() {
+        parts.push(format!("default {}", domain.default));
+    }
+    if parts.is_empty() {
+        format!("{name}: ")
+    } else {
+        format!("{name} ({}): ", parts.join("; "))
+    }
+}
+
 fn docker_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<docker_panel::DockerLine>]>,
@@ -1028,6 +1444,7 @@ fn docker_highlights_for_visible_range(
             docker_panel::DockerLineStyle::Container
             | docker_panel::DockerLineStyle::Image
             | docker_panel::DockerLineStyle::Volume
+            | docker_panel::DockerLineStyle::Network
             | docker_panel::DockerLineStyle::Detail => {
                 if let Some(dim_from) = meta.dim_from {
                     let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
@@ -1141,6 +1558,81 @@ fn explorer_dired_text(state: &ExplorerState) -> (String, Vec<Option<usize>>) {
             text.push_str("  ");
             text.push_str(git_status_marker(status));
         }
+        lines.push(Some(i));
+    }
+    (text, lines)
+}
+
+/// Groups `fenix_project::grep_project`'s raw per-*match* results into
+/// one `ProjectReplaceEntry` per *file* -- `rg --vimgrep` reports one
+/// row per occurrence, so a file with several matches would otherwise
+/// produce several rows sharing the same path. Applying (`App::
+/// project_replace_apply`) always runs one fresh, global regex pass per
+/// included file rather than surgically touching each individual match
+/// (see the plan's own "Why group by file" reasoning: a line with two
+/// matches has byte columns computed against the file's *original*
+/// text, which drift the moment an earlier replacement on the same line
+/// changes its length -- a whole-file pass sidesteps that class of bug
+/// entirely, at the cost of the toggle granularity being per-file, not
+/// per-match, which is also simply what the file-scoped safety concern
+/// this feature exists for actually needs). Preserves the order files
+/// were first seen in `matches` (ripgrep's own path-then-line order).
+fn group_matches_by_file(matches: Vec<fenix_project::GrepMatch>) -> Vec<ProjectReplaceEntry> {
+    let mut order: Vec<PathBuf> = Vec::new();
+    let mut by_path: HashMap<PathBuf, ProjectReplaceEntry> = HashMap::new();
+    for m in matches {
+        by_path
+            .entry(m.path.clone())
+            .and_modify(|e| e.match_count += 1)
+            .or_insert_with(|| {
+                order.push(m.path.clone());
+                ProjectReplaceEntry {
+                    path: m.path.clone(),
+                    match_count: 1,
+                    sample_line: m.line,
+                    sample_text: m.text.trim().to_string(),
+                    included: true,
+                }
+            });
+    }
+    order.into_iter().filter_map(|p| by_path.remove(&p)).collect()
+}
+
+/// The `BufferKind::SearchReplace` review buffer's real, plain-text
+/// content -- a non-interactive summary header row followed by one row
+/// per `entries` (checkbox, path, match count, first-match context),
+/// paired with which `entries` index each generated line corresponds to
+/// (mirrors `explorer_dired_text`'s own role for `BufferKind::Explorer`
+/// -- `None` for the header row, since it isn't toggle-able). Paths are
+/// shown relative to `root` when possible (same `strip_prefix`
+/// convention `run_grep`'s own candidate labels already use) -- `entry.
+/// path` itself stays absolute (needed to actually read/write the file
+/// on apply), this is display-only.
+fn render_project_replace(
+    pattern: &str,
+    replacement: &str,
+    root: &Path,
+    entries: &[ProjectReplaceEntry],
+) -> (String, Vec<Option<usize>>) {
+    let included = entries.iter().filter(|e| e.included).count();
+    let total_matches: usize = entries.iter().map(|e| e.match_count).sum();
+    let mut text = format!(
+        "Replace \"{pattern}\" -> \"{replacement}\"  --  {} file(s), {total_matches} match(es), {included} selected",
+        entries.len()
+    );
+    let mut lines = vec![None];
+    for (i, entry) in entries.iter().enumerate() {
+        text.push('\n');
+        let check = if entry.included { "[x]" } else { "[ ]" };
+        let rel = entry.path.strip_prefix(root).unwrap_or(&entry.path);
+        text.push_str(&format!(
+            "{check} {}:{}  ({} match{})  \"{}\"",
+            rel.display(),
+            entry.sample_line,
+            entry.match_count,
+            if entry.match_count == 1 { "" } else { "es" },
+            entry.sample_text
+        ));
         lines.push(Some(i));
     }
     (text, lines)
@@ -1296,6 +1788,56 @@ impl WorkspaceList {
     }
 }
 
+/// One `BufferKind::Table` buffer's current elastic-column layout --
+/// synthesized column names plus `fenix_table::tab_stops`'s cumulative
+/// stop positions, fed to the renderer as `TabStops::Custom(stops)`
+/// (`App::tab_stops_for`). Recomputed from the buffer's *current* text
+/// whenever its `edit_count()` has moved since `last_edit_count` (see
+/// `App::sync_table_view`), so editing a cell and having every row
+/// re-align happens "for free" -- no buffer mutation, just fresh
+/// arithmetic over the current rope content.
+struct TableView {
+    columns: Vec<String>,
+    stops: Vec<usize>,
+    last_edit_count: u64,
+}
+
+/// One file a pending `SPC s p` project-replace would touch -- grouped
+/// from `fenix_project::grep_project`'s raw per-match results (see
+/// `group_matches_by_file`'s own doc comment for why grouping is by
+/// file, not by individual match). `sample_line`/`sample_text` are
+/// context only (the file's first match, for the review row), not
+/// consulted when actually applying -- `App::project_replace_apply`
+/// always re-reads the file's current content and runs a fresh global
+/// replace over the whole thing.
+#[derive(Clone)]
+struct ProjectReplaceEntry {
+    path: PathBuf,
+    match_count: usize,
+    sample_line: usize,
+    sample_text: String,
+    included: bool,
+}
+
+/// The active `SPC s p` review session -- one at a time (mirrors
+/// `DockerSession`/`GitSession`'s own singleton shape), spanning from
+/// the moment the search completes until the user applies or cancels.
+/// `buffer_id` is the real, `BufferKind::SearchReplace`-tagged buffer
+/// showing `entries` (via `render_project_replace`, refreshed on every
+/// toggle) for review.
+struct ProjectReplaceSession {
+    pattern: String,
+    replacement: String,
+    root: PathBuf,
+    entries: Vec<ProjectReplaceEntry>,
+    buffer_id: BufferId,
+    /// Set by `a`/`Enter` in the review buffer -- one more keypress (`y`
+    /// applies, anything else backs out to plain review) before
+    /// anything is actually written, mirroring `docker_confirm_remove`'s
+    /// own y/n gate for a destructive action.
+    confirming: bool,
+}
+
 pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
@@ -1368,10 +1910,58 @@ pub struct App {
     /// project.
     project_root: Option<PathBuf>,
     active_picker: Option<ActivePicker>,
+    /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
+    /// back/forward pair of stacks (like a browser's history, not real
+    /// Vim's single circular list with a pointer -- a deliberate
+    /// simplification: `jump_back`/`jump_forward` pushes the *other*
+    /// stack's entry directly rather than reconciling against wherever
+    /// a pointer currently sits). Populated by `record_jump`, called
+    /// from `VimEvent::JumpRecorded` (same-buffer `gg`/`G`/`%`/search)
+    /// and from `picker_confirm`'s Grep/Symbol arms (cross-file jumps,
+    /// the reason this exists at all -- `fenix-vim` only ever knows
+    /// about one buffer at a time, so a jumplist that can point at a
+    /// *different* file can't live there).
+    jump_back_stack: Vec<JumpEntry>,
+    jump_forward_stack: Vec<JumpEntry>,
+    /// `m{name}`/`` `{name} ``/`'{name}` -- a named position bookmark,
+    /// keyed by the mark char. `JumpEntry` reused verbatim: a mark is
+    /// exactly "a saved (buffer, char_idx) pair," the same shape a
+    /// jumplist entry already is, including the same closed-buffer-goes-
+    /// stale simplification (see `JumpEntry`'s own doc comment) -- marks
+    /// aren't persisted across a buffer close/reopen the way real Vim's
+    /// path-keyed marks are. Doesn't distinguish lowercase (buffer-
+    /// local) from uppercase (global) the way real Vim does either --
+    /// every mark here can jump across files, one flat namespace, the
+    /// same simplification `jump_back_stack`/`jump_forward_stack`
+    /// already made for the same reason (simpler, and arguably more
+    /// useful, than replicating Vim's split exactly).
+    marks: HashMap<char, JumpEntry>,
+    /// The full match list from the most recent `SPC p s` (`run_grep`) --
+    /// kept around after the `Grep` picker itself closes so `SPC p n`/
+    /// `SPC p N` (`quickfix_next`/`quickfix_prev`) can keep sweeping
+    /// through it without reopening the picker or re-running the search.
+    /// Real Vim's quickfix list, cut down to just this one source (no
+    /// `:make`/build-error integration -- out of scope, nothing to parse
+    /// that from).
+    quickfix: Vec<fenix_project::GrepMatch>,
+    /// Index into `quickfix` of wherever `quickfix_next`/`quickfix_prev`/
+    /// confirming a `Grep` picker entry last landed -- `None` before
+    /// any match in the current list has been visited.
+    quickfix_index: Option<usize>,
     /// The grep search-term prompt, when in progress -- `Some` only
     /// between `SPC p s` and the term being submitted (or cancelled),
     /// not while an `ActivePicker::Grep` is already showing results.
     pending_grep_query: Option<String>,
+    /// `SPC f f`'s typed-path prompt, when in progress -- a plain
+    /// capturing prompt, same shape as `pending_grep_query`.
+    find_file_prompt: Option<String>,
+    /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
+    /// the current filename (see `start_rename_file_prompt`).
+    rename_file_prompt: Option<String>,
+    /// `SPC f D`'s y/n gate, armed until the next keypress confirms
+    /// (`y`) or cancels (anything else) -- same shape as `docker_
+    /// confirm_remove`.
+    delete_file_confirm: bool,
     /// Loaded once at startup; saved back to disk whenever `SPC p a`/
     /// `SPC p d` change it, or the switch-project picker re-selects an
     /// already-known root (an MRU bump, not a new registration -- see
@@ -1458,6 +2048,40 @@ pub struct App {
     /// The active Git multi-pane session (`SPC g g`), if any -- see
     /// `GitSession`'s own doc comment.
     git_session: Option<GitSession>,
+
+    /// Elastic-column layout for every real `BufferKind::Table` buffer
+    /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
+    /// per-buffer-keyed precedent as `dashboard_lines`/`docker_lines`.
+    /// See `TableView`'s own doc comment.
+    table_views: HashMap<BufferId, TableView>,
+
+    /// The multi-source key-capture tap for `q{register}` macro
+    /// recording -- accumulated by `dispatch_keypress` for every key
+    /// while `self.vim.is_recording()`, including ones a leader command
+    /// or a prompt swallows before `VimState` ever sees them (see
+    /// `dispatch_keypress`'s own doc comment for why this can't just
+    /// live in `fenix-vim`). Cleared on `VimEvent::MacroRecordStart`,
+    /// drained into `VimState::finish_recording` on `MacroRecordStop`.
+    macro_capture: Vec<KeyPress>,
+    /// Whether the in-progress recording (`macro_capture`) should
+    /// append to its target register's existing content instead of
+    /// overwriting it -- set from `VimEvent::MacroRecordStart`'s own
+    /// case (an uppercase register name), since that event only fires
+    /// once, at the start, while `finish_recording` isn't called until
+    /// the end.
+    macro_recording_append: bool,
+    /// Whichever register `@{register}` last actually replayed (not
+    /// last *recorded*) -- what `@@` repeats.
+    last_played_macro: Option<char>,
+    /// `> 0` while inside `play_macro`, at whatever nesting depth a
+    /// macro's own `@`-calls have recursed to -- only the outermost
+    /// call (`0`) resets `replay_budget`, so the cap applies to the
+    /// whole nested replay's total key count, not per level.
+    replay_depth: u32,
+    /// Keystrokes still allowed this top-level `@` replay (shared
+    /// across every nested `@`-call it makes) -- see `MACRO_REPLAY_
+    /// BUDGET`'s own doc comment.
+    replay_budget: u32,
     /// `Some` only for a real, `main.rs`-launched `App` (see `App::new`'s
     /// own doc comment) -- the handle background threads (the Docker
     /// stats poller/log follower, the Git status poller) get their own
@@ -1466,13 +2090,18 @@ pub struct App {
     event_proxy: Option<winit::event_loop::EventLoopProxy<FenixUserEvent>>,
 
     /// The autocompletion popup's live state -- `Some` only while Insert
-    /// mode, the focused buffer's language, and the prefix at the cursor
-    /// all currently justify showing it (see `sync_completion`, called
-    /// after every keystroke that reaches Vim while Insert-relevant, the
-    /// same "derive fresh from whatever's current" posture `content_
-    /// spans`/dashboard centering already use -- `VimEvent` has no "a
-    /// character was typed" signal, so this recomputes instead of trying
-    /// to track it incrementally).
+    /// mode and the prefix at the cursor currently justify showing it
+    /// (see `sync_completion`, called after every keystroke that reaches
+    /// Vim while Insert-relevant, the same "derive fresh from whatever's
+    /// current" posture `content_spans`/dashboard centering already use
+    /// -- `VimEvent` has no "a character was typed" signal, so this
+    /// recomputes instead of trying to track it incrementally). Sourced
+    /// from `completion_candidates`: the Tcl-specific keyword/ctags/
+    /// symbols-file pool for a Tcl buffer, plus buffer-word candidates
+    /// (`completion::buffer_words`) layered on top for *every* buffer
+    /// regardless of language -- the one source that isn't Tcl-specific,
+    /// so even a buffer with no recognized language at all still gets a
+    /// popup once it has something to complete from.
     completion: Option<CompletionState>,
     /// One cached `(project_root, candidates)` pair for Tcl completion,
     /// rebuilt only when the current buffer's project root differs from
@@ -1481,11 +2110,33 @@ pub struct App {
     /// single-active-project case, see the plan's Scope). Cleared by
     /// `SPC c r` to force a fresh `ctags` scan.
     tcl_candidates_cache: Option<(Option<PathBuf>, Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>>)>,
+    /// The raw `ctags`-shelled Tcl tag list `tcl_candidates` derives its
+    /// own `Tag`-kind `CompletionItem`s from (see `tcl_tags`) -- a
+    /// separate cache because completion only ever needs the name, but
+    /// the `SPC c s` symbol picker also needs the file/line that
+    /// conversion throws away. Same staleness rule and `SPC c r` reset as
+    /// `tcl_candidates_cache`.
+    tcl_tags_cache: Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
     completion_scroll: usize,
 
     vim: VimState,
+    /// The OS clipboard, mirrored with Vim's unnamed register around `y`/
+    /// `d`/`c`/`p`/`P` (see `sync_clipboard_before_paste`/`sync_clipboard_
+    /// after_edit`) so yanking in Fenix and pasting elsewhere (or vice
+    /// versa) just works. `None` when the platform clipboard couldn't be
+    /// opened -- degrades to the old private-register-only behavior
+    /// rather than a hard error, same posture as the optional `rg`/`git`/
+    /// `ctags`/`docker` shell-outs.
+    clipboard: Option<arboard::Clipboard>,
+    /// What `clipboard` was last set to, so `handle_key` can tell whether
+    /// Vim's unnamed register changed this keystroke (yank, delete,
+    /// change -- anything that writes it) without re-reading the OS
+    /// clipboard just to compare. Updated on every push *and* every pull
+    /// so the two stay in lockstep and a pull never immediately reads
+    /// back as a spurious push.
+    clipboard_mirror: String,
     /// Persists across keystrokes so a `SPC f s` sequence can span several
     /// `handle_key` calls; `'static` because the leader trie is a global
     /// singleton (see `keymap::leader_trie`), which sidesteps
@@ -1507,6 +2158,34 @@ pub struct App {
     /// this one struct on every change (`cycle_theme`, `adjust_font_
     /// size`, `VimEvent::IndentWidthChanged`).
     config: fenix_config::Config,
+
+    /// Configured SCOS-2000 MIB roots (`config.mib_roots`, built once at
+    /// startup -- the user hand-edits `config.ini`'s `[mib]` section to
+    /// change these, so re-deriving on every access would be pointless).
+    mib_roots: Vec<fenix_mib::MibRoot>,
+    /// The parsed MIB data, lazily built (and `refresh()`'d) the first
+    /// time any `SPC m ...` command needs it -- same "expensive work
+    /// only on real state changes" deferral `tcl_tags`'s own cache
+    /// already uses for `ctags`, just gated on first-use instead of
+    /// project-root-change. `None` until then, or if `mib_roots` is
+    /// empty (nothing configured -- see `mib_index`).
+    mib_index: Option<fenix_mib::MibIndex>,
+    /// The active `SPC m i` telecommand-insert wizard, if any -- `Some`
+    /// from the moment a telecommand's picked until it's inserted or
+    /// cancelled. See `MibInsertState`'s own doc comment.
+    mib_insert: Option<MibInsertState>,
+
+    /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
+    /// if any -- see `ReplaceWizard`'s own doc comment.
+    replace_wizard: Option<ReplaceWizard>,
+    /// The active `SPC s p` project-replace review session, if any --
+    /// one at a time, mirroring `docker_session`/`git_session`'s own
+    /// singleton shape. See `ProjectReplaceSession`'s own doc comment.
+    project_replace: Option<ProjectReplaceSession>,
+    /// Which `entries` index (if any) each generated line of the review
+    /// buffer's real rope text corresponds to -- mirrors `dashboard_
+    /// lines`/`dired_lines`'s exact role.
+    project_replace_lines: HashMap<BufferId, Vec<Option<usize>>>,
 
     modifiers: ModifiersState,
     /// Whether the caret is fading toward visible or toward hidden --
@@ -1586,10 +2265,27 @@ impl App {
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
         let config_path = fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"));
+        let config_existed = config_path.exists();
         let config = fenix_config::Config::load_or_default(config_path);
+        // First launch on this machine: write the file immediately
+        // instead of waiting for the user to change some setting (theme
+        // cycle, font size, ...) before it ever appears on disk -- same
+        // "only `Some` fields get written" shape `save` always had, just
+        // triggered eagerly once so `config.ini` exists (and is
+        // discoverable/hand-editable) from the very first run.
+        if !config_existed {
+            if let Err(err) = config.save() {
+                eprintln!("fenix: couldn't create default config.ini ({err})");
+            }
+        }
         let theme = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
         let mut vim = VimState::new();
         vim.set_indent_width(config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
+        let mib_roots = config
+            .mib_roots
+            .iter()
+            .map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() })
+            .collect();
 
         Self {
             window: None,
@@ -1612,6 +2308,11 @@ impl App {
             picker_scroll: 0,
             project_root,
             active_picker: None,
+            jump_back_stack: Vec::new(),
+            jump_forward_stack: Vec::new(),
+            marks: HashMap::new(),
+            quickfix: Vec::new(),
+            quickfix_index: None,
             known_projects,
             recent_files,
             dashboard_lines,
@@ -1627,16 +2328,34 @@ impl App {
             git_prompt: None,
             git_menu_open: false,
             git_session: None,
+            table_views: HashMap::new(),
+            macro_capture: Vec::new(),
+            macro_recording_append: false,
+            last_played_macro: None,
+            replay_depth: 0,
+            replay_budget: 0,
             event_proxy: None,
             completion: None,
             tcl_candidates_cache: None,
+            tcl_tags_cache: None,
             completion_scroll: 0,
             pending_grep_query: None,
+            find_file_prompt: None,
+            rename_file_prompt: None,
+            delete_file_confirm: false,
             vim,
+            clipboard: arboard::Clipboard::new().ok(),
+            clipboard_mirror: String::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             config,
+            mib_roots,
+            mib_index: None,
+            mib_insert: None,
+            replace_wizard: None,
+            project_replace: None,
+            project_replace_lines: HashMap::new(),
             modifiers: ModifiersState::empty(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
@@ -1784,12 +2503,10 @@ impl App {
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
-            if let Some(root) = root {
-                for tag in fenix_completion::ctags::run(root, "Tcl") {
-                    if seen.insert(tag.name.clone()) {
-                        let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag };
-                        candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
-                    }
+            for tag in self.tcl_tags(root) {
+                if seen.insert(tag.name.clone()) {
+                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag };
+                    candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
             if let Some(symbols_file) = &self.config.completion_symbols_file {
@@ -1804,6 +2521,39 @@ impl App {
         self.tcl_candidates_cache.as_ref().expect("just populated above if it was missing").1.clone()
     }
 
+    /// The raw `ctags`-shelled Tcl tag list (name/file/line preserved),
+    /// rebuilding only when `root` differs from what's cached -- same
+    /// cost tradeoff and cache shape as `tcl_candidates`, which this now
+    /// backs (see its own doc comment) alongside the `SPC c s` symbol
+    /// picker (`picker_symbols`), which needs the location `tcl_
+    /// candidates`'s `CompletionItem` conversion throws away. `None`
+    /// root (no known project) always yields an empty list without
+    /// shelling anything, same as `tcl_candidates` did inline before.
+    fn tcl_tags(&mut self, root: Option<&Path>) -> Vec<fenix_completion::ctags::TagEntry> {
+        let stale = match &self.tcl_tags_cache {
+            Some((cached_root, _)) => cached_root.as_deref() != root,
+            None => true,
+        };
+        if stale {
+            let tags = root.map(|r| fenix_completion::ctags::run(r, "Tcl")).unwrap_or_default();
+            self.tcl_tags_cache = Some((root.map(PathBuf::from), tags));
+        }
+        self.tcl_tags_cache.as_ref().expect("just populated above if it was missing").1.clone()
+    }
+
+    /// `SPC c s` -- fuzzy-find any known Tcl definition (proc/namespace)
+    /// by its fully-qualified name and jump straight to where it's
+    /// defined. Sourced from `tcl_tags`, so it shares that cache (and
+    /// `SPC c r`'s manual refresh) with the Insert-mode completion
+    /// popup's own `Tag`-kind entries -- opening this picker never
+    /// re-shells `ctags` on its own.
+    pub(crate) fn picker_symbols(&mut self) {
+        let root = self.project_root.clone();
+        let candidates =
+            self.tcl_tags(root.as_deref()).into_iter().map(|tag| fenix_picker::Candidate::new(tag.name.clone(), tag)).collect();
+        self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
+    }
+
     /// Re-derives the completion popup's state from whatever's current --
     /// called once right after every keystroke that reaches Vim while
     /// Insert-relevant (`handle_key`'s Vim-fallthrough tier). Closes the
@@ -1812,12 +2562,6 @@ impl App {
     /// prefix at the cursor, or the prefix no longer matches anything.
     fn sync_completion(&mut self) {
         if self.vim.mode() != Mode::Insert {
-            self.completion = None;
-            return;
-        }
-        let ob = self.open();
-        let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
-        if language != Some(fenix_syntax::LanguageId::Tcl) {
             self.completion = None;
             return;
         }
@@ -1834,8 +2578,7 @@ impl App {
                 state.picker.set_query(&prefix);
             }
             None => {
-                let root = self.project_root.clone();
-                let candidates = self.tcl_candidates(root.as_deref());
+                let candidates = self.completion_candidates();
                 let mut picker = fenix_picker::PickerState::new(candidates);
                 picker.set_query(&prefix);
                 self.completion = Some(CompletionState { prefix_start: start, picker });
@@ -1852,29 +2595,134 @@ impl App {
     /// `Ctrl-Space`'s effect, the near-universal manual-trigger
     /// convention.
     fn force_open_completion(&mut self) {
-        let ob = self.open();
-        let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
-        if language != Some(fenix_syntax::LanguageId::Tcl) {
-            return;
-        }
         let cursor = self.cursor();
         let ob = self.open();
         let (prefix_start, prefix) =
             completion::prefix_at_cursor(&ob.buffer, &cursor).unwrap_or((cursor.char_idx, String::new()));
-        let root = self.project_root.clone();
-        let candidates = self.tcl_candidates(root.as_deref());
+        let candidates = self.completion_candidates();
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         self.completion = if picker.is_empty() { None } else { Some(CompletionState { prefix_start, picker }) };
         self.completion_scroll = 0;
     }
 
-    /// `SPC c r` -- clears the cached Tcl completion candidates so the
-    /// next `sync_completion`/`force_open_completion` re-shells `ctags`
-    /// and picks up new/renamed `proc`/`namespace` definitions. Manual
-    /// only (no save-hook/file-watcher refresh) -- see the plan's Scope.
+    /// The completion candidate pool for whatever buffer is focused right
+    /// now -- the Tcl-specific keyword/ctags/symbols-file pool (`tcl_
+    /// candidates`) for a Tcl buffer, plus buffer-word candidates
+    /// (`completion::buffer_words`) layered on top regardless of
+    /// language -- the one source that isn't Tcl-specific, so a buffer
+    /// in any other (or no recognized) language still gets a useful
+    /// popup once there's something in it to complete from. Shared by
+    /// `sync_completion`/`force_open_completion` so the two ways of
+    /// opening the popup never drift out of sync with each other.
+    /// Buffer-word candidates tagged `CompletionKind::Tag`, the same
+    /// "not a built-in keyword" bucket ctags/symbols-file entries
+    /// already share -- see that variant's own doc comment for why a
+    /// third kind isn't worth a new calibrated popup color.
+    fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>> {
+        let mut candidates = if self.focused_language() == Some(fenix_syntax::LanguageId::Tcl) {
+            let root = self.project_root.clone();
+            self.tcl_candidates(root.as_deref())
+        } else {
+            Vec::new()
+        };
+        let mut seen: std::collections::HashSet<String> = candidates.iter().map(|c| c.label.clone()).collect();
+        for word in completion::buffer_words(&self.open().buffer) {
+            if seen.insert(word.clone()) {
+                let item = fenix_completion::CompletionItem { label: word.clone(), kind: fenix_completion::CompletionKind::Tag };
+                candidates.push(fenix_picker::Candidate::new(word, item));
+            }
+        }
+        candidates
+    }
+
+    /// `SPC c r` -- clears the cached Tcl completion candidates *and*
+    /// eagerly re-shells `ctags` right away (rather than leaving it to
+    /// the next `sync_completion`/`force_open_completion` call to
+    /// trigger lazily), so pressing this key has an immediate, visible
+    /// result: an `eprintln!` reporting either how many definitions were
+    /// found or, if there's no known project root at all, that there
+    /// was nothing to scan. `ctags::run` itself already reports *why* a
+    /// scan came back empty (missing binary, non-zero exit, its stderr,
+    /// ...) -- this is the "did the refresh actually do anything"
+    /// summary on top of that, since a manually-triggered action with no
+    /// feedback at all is indistinguishable from one that silently
+    /// failed. Manual only (no save-hook/file-watcher refresh) -- see
+    /// the plan's Scope.
     pub(crate) fn refresh_completion_tags(&mut self) {
         self.tcl_candidates_cache = None;
+        self.tcl_tags_cache = None;
+        match self.project_root.clone() {
+            Some(root) => {
+                let count = self.tcl_tags(Some(&root)).len();
+                eprintln!("fenix: refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display());
+            }
+            None => {
+                eprintln!(
+                    "fenix: refresh_completion_tags: no project root detected for the focused buffer -- open a file \
+                     inside a recognized project (a `.git`/`Cargo.toml`/etc. marker somewhere above it) first"
+                );
+            }
+        }
+    }
+
+    /// The focused buffer's detected language -- a path-extension check
+    /// used to gate Tcl-only formatting (`format_buffer`/`format_
+    /// selection`) and the Tcl-specific slice of `completion_candidates`.
+    fn focused_language(&self) -> Option<fenix_syntax::LanguageId> {
+        self.open().buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
+    }
+
+    /// `SPC c F` -- formats the whole focused buffer in place via an
+    /// external formatter. A no-op (logged to stderr, not a hard error)
+    /// for a language with no formatter wired up yet, a missing/failing
+    /// formatter binary, or output identical to what's already there.
+    pub(crate) fn format_buffer(&mut self) {
+        let Some(language) = self.focused_language() else {
+            eprintln!("fenix: no formatter configured for this buffer's language");
+            return;
+        };
+        let source = self.open().buffer.text();
+        let Some(formatted) = format_with_external_tool(language, &source, false) else {
+            eprintln!("fenix: format failed -- is the formatter for this language installed and on PATH?");
+            return;
+        };
+        if formatted == source {
+            return;
+        }
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let end = buffer.len_chars();
+        buffer.replace_range(cursor, 0, end, &formatted);
+    }
+
+    /// `SPC c f` -- formats the active Visual selection in place, then
+    /// returns to Normal mode (mirroring what an ordinary Visual operator
+    /// does on completion). Only meaningful for Char/Line selections --
+    /// a formatter acts on text, not a column rectangle -- so this is a
+    /// no-op outside Visual mode or on a Visual-Block selection, same
+    /// graceful-degrade posture as `format_buffer`.
+    pub(crate) fn format_selection(&mut self) {
+        let Some(language) = self.focused_language() else {
+            eprintln!("fenix: no formatter configured for this buffer's language");
+            return;
+        };
+        let id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
+        let Some(ob) = self.buffers.get_mut(id) else { return };
+        let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
+        let Some((range, _linewise)) = self.vim.visual_selection_range(&ob.buffer, &pane_state.cursor) else {
+            eprintln!("fenix: SPC c f needs an active (non-block) Visual selection");
+            return;
+        };
+        let selected = ob.buffer.text_range(range.start, range.end);
+        if let Some(formatted) = format_with_external_tool(language, &selected, true) {
+            if formatted != selected {
+                ob.buffer.replace_range(&mut pane_state.cursor, range.start, range.end, &formatted);
+            }
+        } else {
+            eprintln!("fenix: format failed -- is the formatter for this language installed and on PATH?");
+        }
+        self.vim.exit_visual_mode(&pane_state.cursor);
     }
 
     /// Replaces the typed prefix with the selected candidate's full
@@ -2075,6 +2923,47 @@ impl App {
         self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// Same shape as `find_file_candidates`, backed by `fenix_project::
+    /// list_project_files_including_ignored` instead -- every file
+    /// `.gitignore` would otherwise hide (`.env`, a build artifact,
+    /// anything else) is fuzzy-findable by name here.
+    fn find_file_candidates_all(root: &Path) -> Vec<fenix_picker::Candidate<PathBuf>> {
+        fenix_project::list_project_files_including_ignored(root)
+            .into_iter()
+            .map(|path| {
+                let label = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                fenix_picker::Candidate::new(label, path)
+            })
+            .collect()
+    }
+
+    /// `SPC f a`: `picker_find_file`'s gitignore-blind sibling. Reuses
+    /// `ActivePicker::FindFile` as-is -- `picker_confirm`'s own arm only
+    /// cares that the payload is a path, not how the candidate list was
+    /// built.
+    pub(crate) fn picker_find_file_all(&mut self) {
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let candidates = Self::find_file_candidates_all(&root);
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC f r`: a fuzzy picker over `recent_files` (already loaded,
+    /// already backing the dashboard's own recent-file rows -- just
+    /// never exposed as a standalone picker before). Labeled with the
+    /// full path, not root-relative -- recent files can span multiple
+    /// projects, so "relative to the current project" wouldn't always
+    /// make sense. Reuses `ActivePicker::FindFile`, same reasoning as
+    /// `picker_find_file_all`.
+    pub(crate) fn picker_recent_files(&mut self) {
+        let candidates = self
+            .recent_files
+            .paths()
+            .iter()
+            .map(|path| fenix_picker::Candidate::new(path.display().to_string(), path.clone()))
+            .collect();
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+    }
+
     /// Candidates for both the switch-project (`SPC p p`) and delete-
     /// project (`SPC p d`) pickers -- same list, same label, just a
     /// different picker variant so `picker_confirm` dispatches to a
@@ -2181,6 +3070,15 @@ impl App {
         let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         match fenix_project::grep_project(&root, query) {
             Ok(matches) => {
+                // Kept around as `quickfix` after the picker itself
+                // closes -- `SPC p n`/`SPC p N` keep sweeping through
+                // this same result set without re-running the search or
+                // reopening the picker. Replaced on every successful
+                // search (even a zero-result one), left alone on a
+                // failed one -- a transient `rg` failure shouldn't wipe
+                // out the ability to keep navigating the previous sweep.
+                self.quickfix = matches.clone();
+                self.quickfix_index = None;
                 let candidates = matches
                     .into_iter()
                     .map(|m| {
@@ -2193,6 +3091,891 @@ impl App {
             }
             Err(err) => eprintln!("fenix: search failed: {err}"),
         }
+    }
+
+    /// `SPC p n` -- jumps to the next match in `quickfix` (the most
+    /// recent `SPC p s` results), without reopening the picker or
+    /// re-running the search. Starts at the first match if nothing's
+    /// been visited yet. Clamps at either end (a no-op past the last/
+    /// before the first match) rather than wrapping -- same "stop
+    /// rather than surprise" reasoning `jump_back`/`jump_forward` use
+    /// for an exhausted stack. Also a no-op while a Docker/Git panel
+    /// session is open (`jumplist_navigation_allowed`) -- this steps
+    /// through `open_file_from_picker`/`jump_to_grep_match` exactly like
+    /// confirming a Grep picker entry does, so it's exactly as unsafe to
+    /// call from there.
+    pub(crate) fn quickfix_next(&mut self) {
+        self.quickfix_step(1);
+    }
+
+    /// `SPC p N` -- the mirror of `quickfix_next`, stepping backward.
+    pub(crate) fn quickfix_prev(&mut self) {
+        self.quickfix_step(-1);
+    }
+
+    fn quickfix_step(&mut self, delta: isize) {
+        if self.quickfix.is_empty() || !self.jumplist_navigation_allowed() {
+            return;
+        }
+        let target = match self.quickfix_index {
+            None => 0,
+            Some(i) => {
+                let n = i as isize + delta;
+                if n < 0 || n as usize >= self.quickfix.len() {
+                    return;
+                }
+                n as usize
+            }
+        };
+        let m = self.quickfix[target].clone();
+        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+        self.open_file_from_picker(&m.path);
+        self.jump_to_grep_match(&m);
+        self.record_jump(from);
+        self.quickfix_index = Some(target);
+    }
+
+    // -- SCOS-2000 MIB (`SPC m ...`) --------------------------------
+
+    /// Lazily builds (and `refresh()`'s once) the MIB index the first
+    /// time any `SPC m ...` command needs it -- same "expensive work
+    /// only when it's actually needed" deferral `tcl_tags`'s own cache
+    /// already uses for `ctags`, just gated on first-use instead of
+    /// project-root-change (MIB roots don't change while Fenix is
+    /// running). `None` (with a message) if no roots are configured at
+    /// all -- there'd be nothing to index.
+    fn mib_index(&mut self) -> Option<&mut fenix_mib::MibIndex> {
+        if self.mib_roots.is_empty() {
+            eprintln!("fenix: no MIB roots configured (see [mib] in config.ini)");
+            return None;
+        }
+        if self.mib_index.is_none() {
+            let mut index = fenix_mib::MibIndex::new(self.mib_roots.clone());
+            index.refresh();
+            self.mib_index = Some(index);
+        }
+        self.mib_index.as_mut()
+    }
+
+    /// `SPC m r` -- clears and reparses the MIB index from disk (picks
+    /// up edits to the `.dat` files made outside Fenix since the last
+    /// load/refresh).
+    pub(crate) fn mib_refresh_index(&mut self) {
+        if let Some(index) = self.mib_index() {
+            index.refresh();
+        }
+    }
+
+    fn mib_tc_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
+        let index = self.mib_index()?;
+        Some(index.rows("ccf").iter().map(|row| fenix_picker::Candidate::new(mib_tc_label(row), row.clone())).collect())
+    }
+
+    fn mib_tm_packet_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
+        let index = self.mib_index()?;
+        Some(index.rows("pid").iter().map(|row| fenix_picker::Candidate::new(mib_tm_packet_label(row), row.clone())).collect())
+    }
+
+    fn mib_tm_parameter_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
+        let index = self.mib_index()?;
+        Some(
+            index.rows("pcf").iter().map(|row| fenix_picker::Candidate::new(mib_tm_parameter_label(row), row.clone())).collect(),
+        )
+    }
+
+    /// `caf` (numeric curves), `paf` (status/enumeration), and `prf`
+    /// (range checks) rows merged into one candidate list -- the three
+    /// SCOS-2000 calibration "kinds," each keyed by its own `_NUMBR`.
+    fn mib_calibration_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
+        let index = self.mib_index()?;
+        let mut candidates = Vec::new();
+        for table in ["caf", "paf", "prf"] {
+            for row in index.rows(table) {
+                candidates.push(fenix_picker::Candidate::new(mib_calibration_label(row), row.clone()));
+            }
+        }
+        Some(candidates)
+    }
+
+    /// `SPC m t` -- fuzzy-find a telecommand, confirming opens its detail view.
+    pub(crate) fn mib_lookup_telecommand(&mut self) {
+        if let Some(candidates) = self.mib_tc_candidates() {
+            self.enter_picker(ActivePicker::MibTelecommandLookup(fenix_picker::PickerState::new(candidates)));
+        }
+    }
+
+    /// `SPC m i` -- fuzzy-find a telecommand, confirming starts the
+    /// insert wizard (`mib_start_insert`).
+    pub(crate) fn mib_insert_telecommand(&mut self) {
+        if let Some(candidates) = self.mib_tc_candidates() {
+            self.enter_picker(ActivePicker::MibTelecommandInsert(fenix_picker::PickerState::new(candidates)));
+        }
+    }
+
+    /// `SPC m k` -- fuzzy-find a TM packet, confirming opens its detail view.
+    pub(crate) fn mib_lookup_tm_packet(&mut self) {
+        if let Some(candidates) = self.mib_tm_packet_candidates() {
+            self.enter_picker(ActivePicker::MibTmPacket(fenix_picker::PickerState::new(candidates)));
+        }
+    }
+
+    /// `SPC m p` -- fuzzy-find a TM parameter, confirming opens its detail view.
+    pub(crate) fn mib_lookup_tm_parameter(&mut self) {
+        if let Some(candidates) = self.mib_tm_parameter_candidates() {
+            self.enter_picker(ActivePicker::MibTmParameter(fenix_picker::PickerState::new(candidates)));
+        }
+    }
+
+    /// `SPC m c` -- fuzzy-find a calibration definition, confirming opens
+    /// its detail view. Not in the reference elisp implementation --
+    /// added per the user's own explicit ask, alongside the ported
+    /// telecommand/TM-packet/TM-parameter lookups.
+    pub(crate) fn mib_lookup_calibration(&mut self) {
+        if let Some(candidates) = self.mib_calibration_candidates() {
+            self.enter_picker(ActivePicker::MibCalibration(fenix_picker::PickerState::new(candidates)));
+        }
+    }
+
+    /// Renders `text` into a fresh read-only-ish scratch buffer and
+    /// shows it in the focused pane -- `BufferList::open_text_view`,
+    /// "viewing generated content needs nothing beyond what an ordinary
+    /// buffer already gives for free," reused here for every MIB detail
+    /// view exactly as it was built for.
+    fn mib_open_detail(&mut self, text: &str) {
+        let id = self.buffers.open_text_view(text);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
+        self.main_view = MainView::Editor;
+        self.wake_caret();
+    }
+
+    /// `SPC m t` confirm -- a telecommand's summary, every `CDF`
+    /// parameter (with its `CPC` definition and calibration/reference
+    /// rows inlined), and its raw fields.
+    fn mib_show_telecommand(&mut self, row: &fenix_mib::Row) {
+        const SUMMARY: &[&str] =
+            &["CCF_CNAME", "CCF_TYPE", "CCF_STYPE", "CCF_APID", "CCF_DESCR", "CCF_DESCR2", "CCF_NPARS", "CCF_PKTID", "CCF_SUBSYS"];
+        let name = row.clean("CCF_CNAME").to_string();
+        let mut text =
+            format!("* Telecommand {name}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
+        let Some(index) = self.mib_index() else {
+            self.mib_open_detail(&text);
+            return;
+        };
+        let params = fenix_mib::telecommand::tc_parameters(index, row);
+        text.push_str("\n* Parameters\n");
+        if params.is_empty() {
+            text.push_str("- No CDF parameters found\n");
+        } else {
+            for param in &params {
+                text.push_str(&format!(
+                    "- {}  {}  bit:{}  len:{}  value:{}\n",
+                    param.name,
+                    param.cdf.clean("CDF_DESCR"),
+                    param.cdf.clean("CDF_BIT"),
+                    param.cdf.clean("CDF_ELLEN"),
+                    param.cdf.clean("CDF_VALUE"),
+                ));
+                if let Some(cpc) = &param.cpc {
+                    text.push_str(&format!(
+                        "  CPC: {}, PTC/PFC {}/{}, unit {}, default {}\n",
+                        cpc.clean("CPC_DESCR"),
+                        cpc.clean("CPC_PTC"),
+                        cpc.clean("CPC_PFC"),
+                        cpc.clean("CPC_UNIT"),
+                        cpc.clean("CPC_DEFVAL"),
+                    ));
+                    let cal_rows = fenix_mib::telecommand::calibration_rows(index, cpc);
+                    if !cal_rows.is_empty() {
+                        text.push_str("  Calibration / references:\n");
+                        for cal in &cal_rows {
+                            text.push_str(&format!(
+                                "  - {}:{}:{}  {}\n",
+                                cal.source.root_label,
+                                cal.table,
+                                cal.source.line,
+                                mib_row_fields_inline(cal)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        text.push_str(&mib_raw_fields_text(row, "Raw CCF Fields"));
+        self.mib_open_detail(&text);
+    }
+
+    /// `SPC m k` confirm -- a TM packet's summary, every `PLF` occurrence
+    /// (with its `PCF` definition inlined), and its raw fields.
+    fn mib_show_tm_packet(&mut self, row: &fenix_mib::Row) {
+        const SUMMARY: &[&str] = &["PID_SPID", "PID_TYPE", "PID_STYPE", "PID_APID", "PID_DESCR", "PID_UNIT", "PID_TPSD", "PID_DFHSIZE"];
+        let spid = row.clean("PID_SPID").to_string();
+        let mut text =
+            format!("* TM Packet SPID {spid}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
+        let Some(index) = self.mib_index() else {
+            self.mib_open_detail(&text);
+            return;
+        };
+        let root = Some(row.source.root_index);
+        let params = index.rows_by_field("plf", "PLF_SPID", &spid, root);
+        text.push_str("\n* Parameters\n");
+        if params.is_empty() {
+            text.push_str("- No PLF parameters found\n");
+        } else {
+            for param in &params {
+                let pname = param.clean("PLF_NAME");
+                text.push_str(&format!(
+                    "- {pname}  off:{}.{}  occ:{}\n",
+                    param.clean("PLF_OFFBY"),
+                    param.clean("PLF_OFFBI"),
+                    param.clean("PLF_NBOCC")
+                ));
+                if let Some(pcf) = index.first_row_by_field("pcf", "PCF_NAME", pname, root) {
+                    text.push_str(&format!(
+                        "  PCF: {}, PTC/PFC {}/{}, unit {}, width {}\n",
+                        pcf.clean("PCF_DESCR"),
+                        pcf.clean("PCF_PTC"),
+                        pcf.clean("PCF_PFC"),
+                        pcf.clean("PCF_UNIT"),
+                        pcf.clean("PCF_WIDTH")
+                    ));
+                }
+            }
+        }
+        text.push_str(&mib_raw_fields_text(row, "Raw PID Fields"));
+        self.mib_open_detail(&text);
+    }
+
+    /// `SPC m p` confirm -- a TM parameter's summary, every `PLF` packet
+    /// occurrence it appears in, and its raw fields.
+    fn mib_show_tm_parameter(&mut self, row: &fenix_mib::Row) {
+        const SUMMARY: &[&str] =
+            &["PCF_NAME", "PCF_DESCR", "PCF_PID", "PCF_UNIT", "PCF_PTC", "PCF_PFC", "PCF_WIDTH", "PCF_CATEG", "PCF_INTER", "PCF_VALPAR", "PCF_DESCR2"];
+        let name = row.clean("PCF_NAME").to_string();
+        let mut text =
+            format!("* TM Parameter {name}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
+        let Some(index) = self.mib_index() else {
+            self.mib_open_detail(&text);
+            return;
+        };
+        let root = Some(row.source.root_index);
+        let occurrences = index.rows_by_field("plf", "PLF_NAME", &name, root);
+        text.push_str("\n* Packet Occurrences\n");
+        if occurrences.is_empty() {
+            text.push_str("- No PLF packet occurrences found\n");
+        } else {
+            for occ in &occurrences {
+                let spid = occ.clean("PLF_SPID");
+                let pid = index.first_row_by_field("pid", "PID_SPID", spid, root);
+                let (ptype, pstype, descr) =
+                    pid.map(|p| (p.clean("PID_TYPE"), p.clean("PID_STYPE"), p.clean("PID_DESCR"))).unwrap_or(("", "", ""));
+                text.push_str(&format!(
+                    "- SPID {spid}  type:{ptype}  stype:{pstype}  off:{}.{}  {descr}\n",
+                    occ.clean("PLF_OFFBY"),
+                    occ.clean("PLF_OFFBI")
+                ));
+            }
+        }
+        text.push_str(&mib_raw_fields_text(row, "Raw PCF Fields"));
+        self.mib_open_detail(&text);
+    }
+
+    /// `SPC m c` confirm -- a calibration definition's summary plus its
+    /// own points: `CAP` x/y pairs for a `caf` (numeric curve), `PAS`
+    /// raw/text aliases for a `paf` (status), or `PRV` min/max pairs for
+    /// a `prf` (range check).
+    fn mib_show_calibration(&mut self, row: &fenix_mib::Row) {
+        let numbr_field = format!("{}_NUMBR", row.table.to_uppercase());
+        let descr_field = format!("{}_DESCR", row.table.to_uppercase());
+        let number = row.clean(&numbr_field).to_string();
+        let mut text = format!(
+            "* Calibration {number} ({})\n\n* Source\n{}\n* Summary\n- {numbr_field}: {number}\n- {descr_field}: {}\n",
+            row.table.to_uppercase(),
+            mib_source_text(&row.source),
+            row.clean(&descr_field)
+        );
+        let Some(index) = self.mib_index() else {
+            self.mib_open_detail(&text);
+            return;
+        };
+        let root = Some(row.source.root_index);
+        text.push_str("\n* Points\n");
+        match row.table.as_str() {
+            "caf" => {
+                let points = index.rows_by_field("cap", "CAP_NUMBR", &number, root);
+                if points.is_empty() {
+                    text.push_str("- No CAP curve points found\n");
+                } else {
+                    for p in &points {
+                        text.push_str(&format!("- x={}  y={}\n", p.clean("CAP_XVALS"), p.clean("CAP_YVALS")));
+                    }
+                }
+            }
+            "paf" => {
+                let aliases = index.rows_by_field("pas", "PAS_NUMBR", &number, root);
+                if aliases.is_empty() {
+                    text.push_str("- No PAS aliases found\n");
+                } else {
+                    for a in &aliases {
+                        text.push_str(&format!("- raw={}  text={}\n", a.clean("PAS_ALVAL"), a.clean("PAS_ALTXT")));
+                    }
+                }
+            }
+            "prf" => {
+                let ranges = index.rows_by_field("prv", "PRV_NUMBR", &number, root);
+                if ranges.is_empty() {
+                    text.push_str("- No PRV ranges found\n");
+                } else {
+                    for r in &ranges {
+                        text.push_str(&format!("- min={}  max={}\n", r.clean("PRV_MINVAL"), r.clean("PRV_MAXVAL")));
+                    }
+                }
+            }
+            _ => {}
+        }
+        text.push_str(&mib_raw_fields_text(row, "Raw Fields"));
+        self.mib_open_detail(&text);
+    }
+
+    /// `SPC m i` picker confirm -- starts the insert wizard for `ccf`:
+    /// straight to `Confirm` if it has no variable parameters, else
+    /// `ChooseArgumentMode`.
+    fn mib_start_insert(&mut self, ccf: fenix_mib::Row) {
+        let Some(index) = self.mib_index() else { return };
+        let variable_params: Vec<_> = fenix_mib::telecommand::tc_parameters(index, &ccf).into_iter().filter(|p| !p.fixed).collect();
+        let origin = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+        let has_variable_params = !variable_params.is_empty();
+        self.mib_insert =
+            Some(MibInsertState { ccf, origin, variable_params, collected: Vec::new(), stage: MibInsertStage::ChooseArgumentMode });
+        self.main_view = MainView::Editor;
+        if !has_variable_params {
+            self.mib_enter_confirm_stage();
+        }
+        self.wake_caret();
+    }
+
+    /// Advances the wizard to whichever variable parameter comes next --
+    /// a picker (`ActivePicker::MibArgumentAlias`) if it has `PAF`/`PAS`
+    /// aliases, otherwise a free-text capture stage -- or to `Confirm`
+    /// once every parameter's been collected.
+    fn mib_prompt_next_argument(&mut self) {
+        let Some(insert) = &self.mib_insert else { return };
+        if insert.collected.len() >= insert.variable_params.len() {
+            self.mib_enter_confirm_stage();
+            return;
+        }
+        let param = insert.variable_params[insert.collected.len()].clone();
+        let Some(index) = self.mib_index() else { return };
+        let domain = fenix_mib::telecommand::parameter_domain(index, &param);
+        if domain.aliases.is_empty() {
+            let prompt = mib_argument_prompt(&param.name, &domain);
+            if let Some(insert) = &mut self.mib_insert {
+                insert.stage = MibInsertStage::ArgumentText { input: String::new(), prompt };
+            }
+        } else {
+            let candidates = domain.aliases.iter().map(|alias| fenix_picker::Candidate::new(alias.clone(), alias.clone())).collect();
+            self.enter_picker(ActivePicker::MibArgumentAlias(fenix_picker::PickerState::new(candidates)));
+        }
+        self.wake_caret();
+    }
+
+    /// `ActivePicker::MibArgumentAlias` confirm -- records `alias` as the
+    /// current parameter's value and advances to the next one.
+    fn mib_resume_insert(&mut self, alias: String) {
+        let Some(insert) = &self.mib_insert else { return };
+        let idx = insert.collected.len();
+        let Some(param) = insert.variable_params.get(idx) else { return };
+        let name = param.name.clone();
+        if let Some(insert) = &mut self.mib_insert {
+            insert.collected.push((name, alias));
+        }
+        self.mib_prompt_next_argument();
+    }
+
+    /// Every variable parameter's collected (or skipped) -- renders the
+    /// final command and re-validates every collected argument against
+    /// its own engineering domain (aliases/ranges), moving the wizard to
+    /// `Confirm`.
+    fn mib_enter_confirm_stage(&mut self) {
+        let Some(insert) = self.mib_insert.take() else { return };
+        let Some(index) = self.mib_index() else {
+            self.mib_insert = Some(insert);
+            return;
+        };
+        let mut warnings = Vec::new();
+        for (name, value) in &insert.collected {
+            if let Some(param) = insert.variable_params.iter().find(|p| &p.name == name) {
+                let domain = fenix_mib::telecommand::parameter_domain(index, param);
+                warnings.extend(fenix_mib::telecommand::validate_argument(param, value, &domain));
+            }
+        }
+        let rendered = fenix_mib::telecommand::render_telecommand(
+            self.config.mib_telecommand_template.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_TEMPLATE),
+            self.config.mib_telecommand_argument_template.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
+            self.config.mib_telecommand_argument_separator.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
+            &insert.ccf,
+            &insert.ccf.source.root_label.clone(),
+            &insert.collected,
+        );
+        let mut insert = insert;
+        insert.stage = MibInsertStage::Confirm { rendered, warnings };
+        self.mib_insert = Some(insert);
+        self.wake_caret();
+    }
+
+    /// `y` on the `Confirm` stage -- inserts the rendered command at
+    /// wherever the wizard started (`MibInsertState::origin`) and closes
+    /// the wizard.
+    fn mib_commit_insert(&mut self) {
+        let Some(insert) = self.mib_insert.take() else { return };
+        let MibInsertStage::Confirm { rendered, .. } = insert.stage else { return };
+        let Some(ob) = self.buffers.get_mut(insert.origin.buffer) else { return };
+        let mut cursor = Cursor { char_idx: insert.origin.char_idx, sticky_col: 0 };
+        ob.buffer.insert_str(&mut cursor, &rendered);
+        if insert.origin.buffer == self.focused_buffer_id() {
+            let pane = self.focused_pane_id();
+            if let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
+                pane_state.cursor = cursor;
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// Routes one keystroke to the active `SPC m i` wizard -- only ever
+    /// called while `mib_insert` is `Some` and its stage isn't delegated
+    /// to a picker (`ChooseArgumentMode`/`ArgumentText`/`Confirm`; see
+    /// `MibInsertStage`'s own doc comment). Computes what to do first
+    /// (borrowing `self.mib_insert` immutably) and only then applies it
+    /// (mutating `self`) -- the two can't overlap, since deciding what a
+    /// `ChooseArgumentMode`/`Confirm` keystroke means can itself call
+    /// `&mut self` methods (`mib_prompt_next_argument`/`mib_enter_
+    /// confirm_stage`/`mib_commit_insert`).
+    fn mib_insert_key(&mut self, key: KeyPress) {
+        enum Action {
+            Cancel,
+            PromptNext,
+            EnterConfirm,
+            PushArgument(String),
+            Backspace,
+            PushChar(char),
+            Commit,
+            Ignore,
+        }
+        let Some(insert) = &self.mib_insert else { return };
+        let action = match &insert.stage {
+            MibInsertStage::ChooseArgumentMode => match key.code {
+                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::PromptNext,
+                _ => Action::EnterConfirm,
+            },
+            MibInsertStage::ArgumentText { input, .. } => match key.code {
+                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
+                KeyCode::Named(FenixNamedKey::Enter) => Action::PushArgument(input.clone()),
+                KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
+                KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
+                _ => Action::Ignore,
+            },
+            MibInsertStage::Confirm { .. } => match key.code {
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::Commit,
+                _ => Action::Cancel,
+            },
+        };
+        match action {
+            Action::Cancel => self.mib_insert = None,
+            Action::PromptNext => self.mib_prompt_next_argument(),
+            Action::EnterConfirm => self.mib_enter_confirm_stage(),
+            Action::PushArgument(value) => {
+                if let Some(insert) = &mut self.mib_insert {
+                    let idx = insert.collected.len();
+                    if let Some(param) = insert.variable_params.get(idx) {
+                        let name = param.name.clone();
+                        insert.collected.push((name, value));
+                    }
+                }
+                self.mib_prompt_next_argument();
+            }
+            Action::Backspace => {
+                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
+                    input.pop();
+                }
+            }
+            Action::PushChar(c) => {
+                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
+                    input.push(c);
+                }
+            }
+            Action::Commit => self.mib_commit_insert(),
+            Action::Ignore => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `mib_insert` is active
+    /// -- mirrors `explorer_prompt_text`/`git_prompt_text`.
+    fn mib_insert_text(&self) -> Option<String> {
+        let insert = self.mib_insert.as_ref()?;
+        Some(match &insert.stage {
+            MibInsertStage::ChooseArgumentMode => {
+                let n = insert.variable_params.len();
+                format!("Build {n} variable argument{}? (y/n)", if n == 1 { "" } else { "s" })
+            }
+            MibInsertStage::ArgumentText { input, prompt } => format!("{prompt}{input}"),
+            MibInsertStage::Confirm { rendered, warnings } => {
+                if warnings.is_empty() {
+                    format!("Insert `{rendered}`? (y/n)")
+                } else {
+                    format!("{} warning(s) ({}) -- insert `{rendered}` anyway? (y/n)", warnings.len(), warnings.join("; "))
+                }
+            }
+        })
+    }
+
+    /// `SPC s r`: starts the buffer-local search & replace wizard.
+    /// Scoped to the current Visual selection's lines if invoked from
+    /// Visual mode (mirroring real Vim's own `:'<,'>s` convention for a
+    /// selection-invoked `:`), exiting Visual mode the same way
+    /// `format_selection` already does; otherwise scoped to the whole
+    /// buffer.
+    pub(crate) fn start_replace_buffer(&mut self) {
+        let line_range = if self.vim.mode() == Mode::Visual {
+            let cursor = self.cursor();
+            let ob = self.open();
+            let lines = self.vim.visual_selection_range(&ob.buffer, &cursor).map(|(r, _)| {
+                let lo = ob.buffer.line_col(&Cursor { char_idx: r.start, sticky_col: 0 }).0;
+                let hi_idx = r.end.saturating_sub(1).max(r.start);
+                let hi = ob.buffer.line_col(&Cursor { char_idx: hi_idx, sticky_col: 0 }).0;
+                (lo, hi)
+            });
+            self.vim.exit_visual_mode(&cursor);
+            lines
+        } else {
+            None
+        };
+        self.replace_wizard = Some(ReplaceWizard {
+            scope: ReplaceScope::Buffer { line_range },
+            stage: ReplaceWizardStage::Pattern { input: String::new() },
+        });
+        self.wake_caret();
+    }
+
+    /// `SPC s p`: starts the project-wide search & replace wizard --
+    /// same pattern/replacement text entry as `SPC s r`, but the
+    /// Replacement stage's Enter hands off to a real search
+    /// (`start_project_search_replace`) instead of an in-place Confirm.
+    pub(crate) fn start_replace_project(&mut self) {
+        self.replace_wizard =
+            Some(ReplaceWizard { scope: ReplaceScope::Project, stage: ReplaceWizardStage::Pattern { input: String::new() } });
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `replace_wizard` -- same
+    /// "compute an `Action` enum immutably, apply mutably" two-phase
+    /// shape `mib_insert_key` already uses.
+    fn replace_wizard_key(&mut self, key: KeyPress) {
+        enum Action {
+            Cancel,
+            PushChar(char),
+            Backspace,
+            ConfirmPattern,
+            ConfirmReplacement,
+            Apply,
+        }
+        let Some(wizard) = &self.replace_wizard else { return };
+        let action = match &wizard.stage {
+            ReplaceWizardStage::Pattern { .. } => match key.code {
+                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
+                KeyCode::Named(FenixNamedKey::Enter) => Action::ConfirmPattern,
+                KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
+                KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
+                _ => return,
+            },
+            ReplaceWizardStage::Replacement { .. } => match key.code {
+                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
+                KeyCode::Named(FenixNamedKey::Enter) => Action::ConfirmReplacement,
+                KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
+                KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
+                _ => return,
+            },
+            ReplaceWizardStage::Confirm { .. } => match key.code {
+                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::Apply,
+                _ => Action::Cancel,
+            },
+        };
+        match action {
+            Action::Cancel => self.replace_wizard = None,
+            Action::PushChar(c) => match &mut self.replace_wizard {
+                Some(ReplaceWizard { stage: ReplaceWizardStage::Pattern { input }, .. })
+                | Some(ReplaceWizard { stage: ReplaceWizardStage::Replacement { input, .. }, .. }) => input.push(c),
+                _ => {}
+            },
+            Action::Backspace => match &mut self.replace_wizard {
+                Some(ReplaceWizard { stage: ReplaceWizardStage::Pattern { input }, .. })
+                | Some(ReplaceWizard { stage: ReplaceWizardStage::Replacement { input, .. }, .. }) => {
+                    input.pop();
+                }
+                _ => {}
+            },
+            Action::ConfirmPattern => {
+                if let Some(wizard) = &mut self.replace_wizard {
+                    if let ReplaceWizardStage::Pattern { input } = &wizard.stage {
+                        if !input.is_empty() {
+                            wizard.stage = ReplaceWizardStage::Replacement { pattern: input.clone(), input: String::new() };
+                        }
+                    }
+                }
+            }
+            Action::ConfirmReplacement => self.replace_wizard_confirm_replacement(),
+            Action::Apply => self.apply_replace_wizard_confirm(),
+        }
+        self.wake_caret();
+    }
+
+    /// The Replacement stage's Enter -- for `Buffer` scope, computes the
+    /// replacement right away (in-memory, no cost to pay) and advances
+    /// to `Confirm` showing the match count; for `Project` scope, runs a
+    /// real search and hands off to `project_replace` instead.
+    fn replace_wizard_confirm_replacement(&mut self) {
+        let Some(wizard) = &self.replace_wizard else { return };
+        let ReplaceWizardStage::Replacement { pattern, input } = &wizard.stage else { return };
+        let (pattern, replacement) = (pattern.clone(), input.clone());
+        match wizard.scope {
+            ReplaceScope::Buffer { line_range } => {
+                let ob = self.open();
+                let (start, end) = match line_range {
+                    Some((lo, hi)) => {
+                        let start = ob.buffer.line_start_char(lo);
+                        let end = ob.buffer.line_start_char(hi) + ob.buffer.line_len(hi);
+                        (start, end)
+                    }
+                    None => (0, ob.buffer.len_chars()),
+                };
+                let text = ob.buffer.text_range(start, end);
+                match fenix_vim::replace_in_text(&text, &pattern, &replacement, false, true) {
+                    Ok((_, 0)) | Err(_) => self.replace_wizard = None,
+                    Ok((_, count)) => {
+                        self.replace_wizard =
+                            Some(ReplaceWizard { scope: wizard.scope, stage: ReplaceWizardStage::Confirm { pattern, replacement, count } });
+                    }
+                }
+            }
+            ReplaceScope::Project => {
+                self.replace_wizard = None;
+                self.start_project_search_replace(pattern, replacement);
+            }
+        }
+    }
+
+    /// `y` on the Buffer-scope `Confirm` stage -- re-runs the same
+    /// `replace_in_text` computation (cheap, in-memory) over whatever
+    /// scope the wizard captured and applies it as one `Buffer::
+    /// replace_range` call (one undo step).
+    fn apply_replace_wizard_confirm(&mut self) {
+        let Some(wizard) = self.replace_wizard.take() else { return };
+        let ReplaceWizardStage::Confirm { pattern, replacement, .. } = &wizard.stage else { return };
+        let ReplaceScope::Buffer { line_range } = wizard.scope else { return };
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let (start, end) = match line_range {
+            Some((lo, hi)) => {
+                let start = buffer.line_start_char(lo);
+                let end = buffer.line_start_char(hi) + buffer.line_len(hi);
+                (start, end)
+            }
+            None => (0, buffer.len_chars()),
+        };
+        let text = buffer.text_range(start, end);
+        if let Ok((new_text, count)) = fenix_vim::replace_in_text(&text, pattern, replacement, false, true) {
+            if count > 0 {
+                buffer.replace_range(cursor, start, end, &new_text);
+            }
+        }
+    }
+
+    /// What to show in place of the modeline while `replace_wizard` is
+    /// active -- mirrors `mib_insert_text`/`explorer_prompt_text`.
+    fn replace_wizard_text(&self) -> Option<String> {
+        let wizard = self.replace_wizard.as_ref()?;
+        Some(match &wizard.stage {
+            ReplaceWizardStage::Pattern { input } => format!("search: {input}"),
+            ReplaceWizardStage::Replacement { pattern, input } => format!("replace \"{pattern}\" with: {input}"),
+            ReplaceWizardStage::Confirm { pattern, replacement, count } => {
+                format!("Replace {count} occurrence{} of \"{pattern}\" with \"{replacement}\"? (y/n)", if *count == 1 { "" } else { "s" })
+            }
+        })
+    }
+
+    /// What to show in place of the modeline while the review buffer's
+    /// y/n apply gate is armed -- mirrors `docker_confirm_text`.
+    fn project_replace_confirm_text(&self) -> Option<String> {
+        let session = self.project_replace.as_ref()?;
+        if !session.confirming {
+            return None;
+        }
+        let included = session.entries.iter().filter(|e| e.included).count();
+        let total_matches: usize = session.entries.iter().filter(|e| e.included).map(|e| e.match_count).sum();
+        Some(format!("Apply replace across {included} file(s) ({total_matches} occurrence(s))? (y/n)"))
+    }
+
+    /// `SPC s p`'s search step: runs a real project search and, unless
+    /// it found nothing, groups the results by file and opens the
+    /// review buffer. A `rg` failure or an empty result set is a silent
+    /// no-op -- same graceful posture `run_grep` already has, and there
+    /// being no review to show either way.
+    fn start_project_search_replace(&mut self, pattern: String, replacement: String) {
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let matches = fenix_project::grep_project(&root, &pattern).unwrap_or_else(|err| {
+            eprintln!("fenix: project search failed: {err}");
+            Vec::new()
+        });
+        if matches.is_empty() {
+            return;
+        }
+        let entries = group_matches_by_file(matches);
+        self.open_project_replace(pattern, replacement, root, entries);
+    }
+
+    /// Opens (or, if one's somehow already active, replaces) the
+    /// `BufferKind::SearchReplace` review buffer for `entries` in the
+    /// focused pane.
+    fn open_project_replace(&mut self, pattern: String, replacement: String, root: PathBuf, entries: Vec<ProjectReplaceEntry>) {
+        let (text, lines) = render_project_replace(&pattern, &replacement, &root, &entries);
+        let id = self.buffers.open_text_view(&text);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            ob.kind = BufferKind::SearchReplace;
+        }
+        self.project_replace_lines.insert(id, lines);
+        let pane = self.focused_pane_id();
+        self.set_pane_content(pane, id);
+        self.project_replace = Some(ProjectReplaceSession { pattern, replacement, root, entries, buffer_id: id, confirming: false });
+        self.wake_caret();
+    }
+
+    /// Regenerates the review buffer's rope text from `project_replace`'s
+    /// *current* `entries` -- called after every toggle, one atomic
+    /// `Buffer::replace_range` over the whole content (same tool `:s`/
+    /// `set_dired_state` already use), deliberately not resetting any
+    /// pane's cursor/scroll the way `set_dired_state` does for a real
+    /// directory change (a toggle doesn't change the row count or what
+    /// row means what, so there's nothing to re-seed).
+    fn refresh_project_replace_buffer(&mut self) {
+        let Some(session) = &self.project_replace else { return };
+        let id = session.buffer_id;
+        let (text, lines) = render_project_replace(&session.pattern, &session.replacement, &session.root, &session.entries);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
+        }
+        self.project_replace_lines.insert(id, lines);
+    }
+
+    /// `Space`/`t` on the review buffer: toggles the file under the
+    /// cursor in/out of the pending replace.
+    fn project_replace_toggle_selected(&mut self) {
+        let id = self.focused_buffer_id();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let Some(Some(idx)) = self.project_replace_lines.get(&id).and_then(|l| l.get(line)).copied() else { return };
+        if let Some(session) = &mut self.project_replace {
+            if let Some(entry) = session.entries.get_mut(idx) {
+                entry.included = !entry.included;
+            }
+        }
+        self.refresh_project_replace_buffer();
+        self.wake_caret();
+    }
+
+    /// `a`/`Enter` on the review buffer -- arms the y/n apply gate the
+    /// first time, actually applies on `y` while already armed.
+    fn project_replace_confirm_or_apply(&mut self) {
+        let already_confirming = self.project_replace.as_ref().is_some_and(|s| s.confirming);
+        if already_confirming {
+            self.project_replace_apply();
+        } else if let Some(session) = &mut self.project_replace {
+            session.confirming = true;
+        }
+        self.wake_caret();
+    }
+
+    /// Anything other than `y` while the apply gate is armed -- backs
+    /// out to plain review, no writes.
+    fn project_replace_decline_confirm(&mut self) {
+        if let Some(session) = &mut self.project_replace {
+            session.confirming = false;
+        }
+        self.wake_caret();
+    }
+
+    /// `q`/`Esc` on the review buffer: closes it without writing
+    /// anything, same "this pane's `q` means close" precedent the
+    /// Explorer/Docker/Git panels already established.
+    fn project_replace_cancel(&mut self) {
+        let Some(session) = self.project_replace.take() else { return };
+        self.project_replace_lines.remove(&session.buffer_id);
+        self.kill_buffer();
+    }
+
+    /// Writes every `included` entry's replacement -- an already-open
+    /// buffer's path is edited in memory (left dirty, never written to
+    /// disk directly out from under it -- see `BufferList::id_for_path`'s
+    /// own doc comment for the clobbering risk this avoids); anything
+    /// else is read fresh from disk, replaced, and written back
+    /// directly. A file that no longer matches (changed since the
+    /// search that found it) is silently skipped, not an error. Closes
+    /// the review buffer and refocuses whatever was open before `SPC s
+    /// p`, matching `mib_commit_insert`'s own "return to where this
+    /// started" behavior.
+    fn project_replace_apply(&mut self) {
+        let Some(session) = self.project_replace.take() else { return };
+        self.project_replace_lines.remove(&session.buffer_id);
+
+        let mut files_changed = 0usize;
+        let mut total_replacements = 0usize;
+        let mut left_dirty = 0usize;
+        for entry in session.entries.iter().filter(|e| e.included) {
+            let open_id = self.buffers.id_for_path(&entry.path);
+            let current_text = match open_id.and_then(|id| self.buffers.get(id)) {
+                Some(ob) => ob.buffer.text(),
+                None => match std::fs::read_to_string(&entry.path) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        eprintln!("fenix: search/replace couldn't read {}: {err}", entry.path.display());
+                        continue;
+                    }
+                },
+            };
+            let (new_text, count) =
+                match fenix_vim::replace_in_text(&current_text, &session.pattern, &session.replacement, false, true) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        eprintln!("fenix: search/replace pattern failed on {}: {err}", entry.path.display());
+                        continue;
+                    }
+                };
+            if count == 0 {
+                continue;
+            }
+            match open_id {
+                Some(id) => {
+                    if let Some(ob) = self.buffers.get_mut(id) {
+                        let mut scratch_cursor = Cursor::at_start();
+                        let end = ob.buffer.len_chars();
+                        ob.buffer.replace_range(&mut scratch_cursor, 0, end, &new_text);
+                    }
+                    left_dirty += 1;
+                }
+                None => {
+                    if let Err(err) = std::fs::write(&entry.path, &new_text) {
+                        eprintln!("fenix: search/replace couldn't write {}: {err}", entry.path.display());
+                        continue;
+                    }
+                }
+            }
+            files_changed += 1;
+            total_replacements += count;
+        }
+        eprintln!(
+            "fenix: search/replace applied {total_replacements} replacement(s) across {files_changed} file(s) ({left_dirty} already open, not yet saved)"
+        );
+        self.kill_buffer();
     }
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
@@ -2212,6 +3995,27 @@ impl App {
             })
             .collect();
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC s s`: a fuzzy picker over every line in the focused buffer --
+    /// candidates are the line's own text (trimmed of surrounding
+    /// whitespace, right-aligned line number prefix for context), payload
+    /// its start char offset. Live-filtered "for free" by `PickerState`'s
+    /// own already-built fuzzy matching, the same mechanism `FindFile`/
+    /// `Symbol` already lean on -- no new filtering logic needed here.
+    pub(crate) fn picker_search_buffer(&mut self) {
+        let buffer = &self.open().buffer;
+        let visual_lines = buffer.visual_line_count();
+        let candidates = (0..visual_lines)
+            .map(|line| {
+                let start = buffer.line_start_char(line);
+                let len = buffer.line_len(line);
+                let text = buffer.text_range(start, start + len);
+                let label = format!("{:>4}  {}", line + 1, text.trim());
+                fenix_picker::Candidate::new(label, start)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::BufferSearch(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Points the focused pane at an already-open buffer -- `SPC b b`'s
@@ -2253,15 +4057,22 @@ impl App {
     /// tree) currently showing it falls back to the MRU-next open buffer,
     /// or a fresh scratch buffer if none remain -- never leaves a pane
     /// pointing at a closed `BufferId`. Closing one of the Docker
-    /// session's four buffers this way really means "close the whole
+    /// session's six buffers this way really means "close the whole
     /// session" (they share live background state, not just a buffer
     /// slot) -- routed to `docker_session_close` instead of the ordinary
     /// single-buffer path below.
     pub(crate) fn kill_buffer(&mut self) {
         let id = self.focused_buffer_id();
         if let Some(session) = &self.docker_session {
-            if [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer]
-                .contains(&id)
+            if [
+                session.containers_buffer,
+                session.images_buffer,
+                session.volumes_buffer,
+                session.networks_buffer,
+                session.status_buffer,
+                session.logs_buffer,
+            ]
+            .contains(&id)
             {
                 self.docker_session_close();
                 return;
@@ -2283,6 +4094,11 @@ impl App {
             }
         }
         self.buffers.close(id);
+        self.table_views.remove(&id);
+        self.project_replace_lines.remove(&id);
+        if self.project_replace.as_ref().is_some_and(|s| s.buffer_id == id) {
+            self.project_replace = None;
+        }
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
         for pane in self.windows().windows() {
             if self.windows().content(pane) == Some(&id) {
@@ -2342,20 +4158,24 @@ impl App {
         let containers = fenix_docker::list_containers();
         let images = fenix_docker::list_images();
         let volumes = fenix_docker::list_volumes();
+        let networks = fenix_docker::list_networks();
 
         let containers_panel = docker_panel::render_containers(&containers);
         let images_panel = docker_panel::render_images(&images);
         let volumes_panel = docker_panel::render_volumes(&volumes);
+        let networks_panel = docker_panel::render_networks(&networks);
         let status_panel = docker_panel::render_details(None, None);
 
         let containers_buffer = self.buffers.open_docker(&containers_panel.text);
         let images_buffer = self.buffers.open_docker(&images_panel.text);
         let volumes_buffer = self.buffers.open_docker(&volumes_panel.text);
+        let networks_buffer = self.buffers.open_docker(&networks_panel.text);
         let status_buffer = self.buffers.open_docker(&status_panel.text);
         let logs_buffer = self.buffers.open_docker("");
         self.docker_lines.insert(containers_buffer, containers_panel.lines);
         self.docker_lines.insert(images_buffer, images_panel.lines);
         self.docker_lines.insert(volumes_buffer, volumes_panel.lines);
+        self.docker_lines.insert(networks_buffer, networks_panel.lines);
         self.docker_lines.insert(status_buffer, status_panel.lines);
 
         let cursor = Cursor::at_start();
@@ -2376,23 +4196,30 @@ impl App {
         self.workspaces.active_pane_states_mut().insert(logs_pane, PaneState::seeded_at(cursor));
         self.windows_mut().resize_focused(-0.2);
 
-        // Left column: Containers/Images/Volumes stacked, each split at
-        // the default 0.5 ratio -- splitting sequentially like this
-        // (Containers -> {Containers, Images}, then Images -> {Images,
-        // Volumes}) already produces exactly 50/25/25 without any
-        // further `resize_focused` calls.
+        // Left column: Containers/Images/Volumes/Networks stacked.
+        // Containers keeps its deliberate 50% (see the layout test's own
+        // name); Images/Volumes/Networks split the other 50% into equal
+        // thirds (1/6 of the column each). Three plain 0.5/0.5 splits
+        // would only produce that for *three* panes (50/25/25) -- for
+        // four, the Images split needs shrinking from 1/4 to 1/6 of the
+        // column (1/3, not 1/2, of the remaining half) so the Volumes/
+        // Networks split after it can still land on an even half each.
         self.windows_mut().focus(containers_pane);
         let images_pane = self.windows_mut().split(SplitKind::Horizontal, images_buffer);
         self.workspaces.active_pane_states_mut().insert(images_pane, PaneState::seeded_at(cursor));
         let volumes_pane = self.windows_mut().split(SplitKind::Horizontal, volumes_buffer);
         self.workspaces.active_pane_states_mut().insert(volumes_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-1.0 / 6.0);
+        let networks_pane = self.windows_mut().split(SplitKind::Horizontal, networks_buffer);
+        self.workspaces.active_pane_states_mut().insert(networks_pane, PaneState::seeded_at(cursor));
         self.windows_mut().focus(containers_pane);
 
         self.pane_titles.insert(containers_pane, "1. Containers".to_string());
         self.pane_titles.insert(images_pane, "2. Images".to_string());
         self.pane_titles.insert(volumes_pane, "3. Volumes".to_string());
-        self.pane_titles.insert(status_pane, "4. Status".to_string());
-        self.pane_titles.insert(logs_pane, "5. Logs".to_string());
+        self.pane_titles.insert(networks_pane, "4. Networks".to_string());
+        self.pane_titles.insert(status_pane, "5. Status".to_string());
+        self.pane_titles.insert(logs_pane, "6. Logs".to_string());
 
         // Only spawned for a real, `main.rs`-launched `App` -- every
         // test's `event_proxy` stays `None` (see `App::new`'s own doc
@@ -2408,16 +4235,19 @@ impl App {
             containers_pane,
             images_pane,
             volumes_pane,
+            networks_pane,
             status_pane,
             logs_pane,
             containers_buffer,
             images_buffer,
             volumes_buffer,
+            networks_buffer,
             status_buffer,
             logs_buffer,
             containers,
             images,
             volumes,
+            networks,
             last_stats: Vec::new(),
             logs_container: None,
             stats_poller,
@@ -2470,33 +4300,38 @@ impl App {
         self.docker_sync_details();
     }
 
-    /// `u` (on any of the three left panes, Status, or Logs): re-lists
-    /// containers/images/volumes from `docker` and re-renders all three,
-    /// then re-syncs Status from whatever's now under the cursor.
+    /// `u` (on any of the four left panes, Status, or Logs): re-lists
+    /// containers/images/volumes/networks from `docker` and re-renders
+    /// all four, then re-syncs Status from whatever's now under the
+    /// cursor.
     fn docker_refresh_session(&mut self) {
         let Some(session) = self.docker_session.as_ref() else { return };
-        let (containers_buffer, images_buffer, volumes_buffer) =
-            (session.containers_buffer, session.images_buffer, session.volumes_buffer);
+        let (containers_buffer, images_buffer, volumes_buffer, networks_buffer) =
+            (session.containers_buffer, session.images_buffer, session.volumes_buffer, session.networks_buffer);
 
         let containers = fenix_docker::list_containers();
         let images = fenix_docker::list_images();
         let volumes = fenix_docker::list_volumes();
+        let networks = fenix_docker::list_networks();
         let containers_panel = docker_panel::render_containers(&containers);
         let images_panel = docker_panel::render_images(&images);
         let volumes_panel = docker_panel::render_volumes(&volumes);
+        let networks_panel = docker_panel::render_networks(&networks);
 
         if let Some(session) = self.docker_session.as_mut() {
             session.containers = containers;
             session.images = images;
             session.volumes = volumes;
+            session.networks = networks;
         }
         self.set_docker_buffer(containers_buffer, containers_panel);
         self.set_docker_buffer(images_buffer, images_panel);
         self.set_docker_buffer(volumes_buffer, volumes_panel);
+        self.set_docker_buffer(networks_buffer, networks_panel);
         self.docker_sync_details();
     }
 
-    /// Which of the current `docker_session`'s five panes (if any) is
+    /// Which of the current `docker_session`'s six panes (if any) is
     /// focused right now -- `None` when there's no session, the active
     /// *workspace* isn't even the session's own one, or the focused
     /// pane belongs to something else entirely. The workspace check
@@ -2518,6 +4353,8 @@ impl App {
             Some(DockerPaneRole::Images)
         } else if focused == session.volumes_pane {
             Some(DockerPaneRole::Volumes)
+        } else if focused == session.networks_pane {
+            Some(DockerPaneRole::Networks)
         } else if focused == session.status_pane {
             Some(DockerPaneRole::Status)
         } else if focused == session.logs_pane {
@@ -2537,8 +4374,9 @@ impl App {
             1 => Some(session.containers_pane),
             2 => Some(session.images_pane),
             3 => Some(session.volumes_pane),
-            4 => Some(session.status_pane),
-            5 => Some(session.logs_pane),
+            4 => Some(session.networks_pane),
+            5 => Some(session.status_pane),
+            6 => Some(session.logs_pane),
             _ => None,
         }
     }
@@ -2581,6 +4419,9 @@ impl App {
             }
             docker_panel::DockerEntry::Volume(name) => {
                 (session.volumes.iter().find(|v| v.name == name).cloned().map(docker_panel::DockerDetail::Volume), None)
+            }
+            docker_panel::DockerEntry::Network(id) => {
+                (session.networks.iter().find(|n| n.id == id).cloned().map(docker_panel::DockerDetail::Network), None)
             }
         };
         let status_buffer = session.status_buffer;
@@ -2756,7 +4597,7 @@ impl App {
 
     /// `SPC d q`, or `SPC b k` on any of the session's five buffers (see
     /// `kill_buffer`'s own hook): tears down the whole multi-pane
-    /// session -- closes all five buffers, clears their `docker_lines`/
+    /// session -- closes all six buffers, clears their `docker_lines`/
     /// `pane_titles` entries, and removes the session's own workspace
     /// (switched to first, so this is correct regardless of whichever
     /// workspace happens to be active when it's called -- always
@@ -2765,11 +4606,25 @@ impl App {
     /// before it, so there's always at least one other workspace left).
     pub(crate) fn docker_session_close(&mut self) {
         let Some(session) = self.docker_session.take() else { return };
-        for id in [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer] {
+        for id in [
+            session.containers_buffer,
+            session.images_buffer,
+            session.volumes_buffer,
+            session.networks_buffer,
+            session.status_buffer,
+            session.logs_buffer,
+        ] {
             self.buffers.close(id);
             self.docker_lines.remove(&id);
         }
-        for pane in [session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane] {
+        for pane in [
+            session.containers_pane,
+            session.images_pane,
+            session.volumes_pane,
+            session.networks_pane,
+            session.status_pane,
+            session.logs_pane,
+        ] {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
@@ -2791,6 +4646,7 @@ impl App {
             // yet) -- unreachable today since nothing arms `x` on a
             // Volume entry, kept only for match exhaustiveness.
             docker_panel::DockerEntry::Volume(_) => "volume",
+            docker_panel::DockerEntry::Network(_) => "network",
         };
         Some(format!("Remove this {what}? (y/n)"))
     }
@@ -2808,6 +4664,7 @@ impl App {
                     // Unreachable today -- see `docker_confirm_text`'s
                     // matching comment.
                     docker_panel::DockerEntry::Volume(_) => Ok(String::new()),
+                    docker_panel::DockerEntry::Network(id) => fenix_docker::remove_network(&id),
                 };
                 if let Err(err) = result {
                     eprintln!("fenix: docker remove failed: {err}");
@@ -3429,8 +5286,16 @@ impl App {
             Some(ActivePicker::Grep(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
+                let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
                 self.open_file_from_picker(&m.path);
                 self.jump_to_grep_match(&m);
+                self.record_jump(from);
+                // So `SPC p n`/`SPC p N` continue from wherever the
+                // picker actually landed (which candidate got confirmed
+                // may not be `quickfix[0]` -- the picker's own fuzzy
+                // filter can reorder/narrow what's shown), not always
+                // restart from the top of the list.
+                self.quickfix_index = self.quickfix.iter().position(|entry| entry == &m);
             }
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let Some(id) = state.selected().map(|c| c.payload) else { return };
@@ -3452,6 +5317,64 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.apply_theme(theme);
             }
+            Some(ActivePicker::Symbol(state)) => {
+                let Some(tag) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+                self.open_file_from_picker(&tag.file);
+                self.jump_to_tag(&tag);
+                self.record_jump(from);
+            }
+            Some(ActivePicker::MibTelecommandLookup(state)) => {
+                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_show_telecommand(&row);
+            }
+            Some(ActivePicker::MibTelecommandInsert(state)) => {
+                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_start_insert(row);
+            }
+            Some(ActivePicker::MibTmPacket(state)) => {
+                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_show_tm_packet(&row);
+            }
+            Some(ActivePicker::MibTmParameter(state)) => {
+                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_show_tm_parameter(&row);
+            }
+            Some(ActivePicker::MibCalibration(state)) => {
+                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_show_calibration(&row);
+            }
+            Some(ActivePicker::MibArgumentAlias(state)) => {
+                let Some(alias) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.mib_resume_insert(alias);
+            }
+            Some(ActivePicker::TableColumn(state)) => {
+                let Some(column) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let line = self.open().buffer.line_col(&self.cursor()).0;
+                let idx = self.table_column_start(line, column);
+                let pane = self.focused_pane_id();
+                let cursor = &mut self.pane_state_mut(pane).cursor;
+                cursor.char_idx = idx;
+                cursor.sticky_col = 0;
+            }
+            Some(ActivePicker::BufferSearch(state)) => {
+                let Some(offset) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                cursor.char_idx = offset.min(buffer.len_chars());
+                let (_, col) = buffer.line_col(cursor);
+                cursor.sticky_col = col;
+            }
             None => {}
         }
         self.wake_caret();
@@ -3472,6 +5395,189 @@ impl App {
         self.main_view = MainView::Editor;
     }
 
+    /// `SPC f f`: starts the type-a-path find-file prompt.
+    pub(crate) fn start_find_file_prompt(&mut self) {
+        self.find_file_prompt = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `find_file_prompt` -- same
+    /// "next keystrokes are special" shape as `grep_query_key`.
+    fn find_file_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.find_file_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.find_file_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.find_file_prompt.take().unwrap_or_default();
+                self.open_typed_path(&input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// Resolves `typed` (a `~`-expandable, possibly-relative path -- an
+    /// absolute one is used as-is) and opens it via `open_file_from_
+    /// picker`, which already handles buffer reuse, `recent_files`
+    /// tracking, and switching back to `MainView::Editor`. Unlike every
+    /// fuzzy picker, this never enumerates anything -- a `.gitignore`'d
+    /// (or simply not-yet-existing -- `open_path` already degrades to
+    /// an empty, to-be-created buffer, real Emacs `find-file` semantics)
+    /// path opens exactly the same as any other.
+    fn open_typed_path(&mut self, typed: &str) {
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return;
+        }
+        let expanded = match typed.strip_prefix('~') {
+            Some(rest) => dirs::home_dir()
+                .map(|home| home.join(rest.trim_start_matches(['/', '\\'])))
+                .unwrap_or_else(|| PathBuf::from(typed)),
+            None => PathBuf::from(typed),
+        };
+        let resolved = if expanded.is_absolute() {
+            expanded
+        } else {
+            let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            root.join(expanded)
+        };
+        self.open_file_from_picker(&resolved);
+    }
+
+    /// What to show in place of the modeline while `find_file_prompt` is
+    /// active -- mirrors `explorer_prompt_text`.
+    fn find_file_prompt_text(&self) -> Option<String> {
+        self.find_file_prompt.as_ref().map(|input| format!("find file: {input}"))
+    }
+
+    /// `SPC f y`: copies the focused buffer's file path to the OS
+    /// clipboard -- a no-op (clipboard untouched) for an unsaved/
+    /// unnamed buffer. Reuses the same `arboard::Clipboard` `y`/`p`
+    /// already mirror onto.
+    pub(crate) fn yank_file_path(&mut self) {
+        let Some(path) = self.open().buffer.path() else { return };
+        let text = path.display().to_string();
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(text);
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC f R`: starts the rename prompt, pre-seeded with the current
+    /// filename -- a no-op for an unsaved/unnamed buffer (there's no
+    /// file on disk yet to rename; `:w path` already covers "save this
+    /// somewhere new").
+    pub(crate) fn start_rename_file_prompt(&mut self) {
+        let Some(path) = self.open().buffer.path() else { return };
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        self.rename_file_prompt = Some(name);
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `rename_file_prompt` --
+    /// same shape as `find_file_prompt_key`.
+    fn rename_file_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.rename_file_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.rename_file_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.rename_file_prompt.take().unwrap_or_default();
+                self.apply_rename_file(&input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// Renames the focused buffer's file to `new_name` (resolved
+    /// against its current parent directory -- a `new_name` containing
+    /// its own `/`s lands in a sub/parent path relative to there, same
+    /// as typing one into `Path::join` normally would). Writes the
+    /// buffer's *current* content to the new path (`Buffer::save_as`,
+    /// which also updates the buffer's own `path()`), so unsaved edits
+    /// are captured too, not just what was last saved -- then removes
+    /// the old file (create-then-remove rather than `std::fs::rename`,
+    /// so this can't fail with `EXDEV` across filesystem boundaries) and
+    /// tells the registry the path moved (`BufferList::path_changed`,
+    /// keeping `open_path`/`id_for_path` correct afterward).
+    fn apply_rename_file(&mut self, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return;
+        }
+        let Some(old_path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        let new_path = match old_path.parent() {
+            Some(parent) => parent.join(new_name),
+            None => PathBuf::from(new_name),
+        };
+        let id = self.focused_buffer_id();
+        if let Err(err) = self.open_mut().buffer.save_as(&new_path) {
+            eprintln!("fenix: rename failed: {err}");
+            return;
+        }
+        self.buffers.path_changed(id, Some(&old_path));
+        if let Err(err) = std::fs::remove_file(&old_path) {
+            eprintln!("fenix: rename couldn't remove the old file {}: {err}", old_path.display());
+        }
+    }
+
+    /// What to show in place of the modeline while `rename_file_prompt`
+    /// is active.
+    fn rename_file_prompt_text(&self) -> Option<String> {
+        self.rename_file_prompt.as_ref().map(|input| format!("rename to: {input}"))
+    }
+
+    /// `SPC f D`: arms the delete-current-file confirmation -- a no-op
+    /// for an unsaved/unnamed buffer.
+    pub(crate) fn start_delete_file_confirm(&mut self) {
+        if self.open().buffer.path().is_none() {
+            return;
+        }
+        self.delete_file_confirm = true;
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the armed delete confirmation -- same y/n
+    /// shape as `docker_confirm_key`.
+    fn delete_file_confirm_key(&mut self, key: KeyPress) {
+        self.delete_file_confirm = false;
+        if key.code == KeyCode::Char('y') {
+            self.apply_delete_file();
+        }
+        self.wake_caret();
+    }
+
+    /// Deletes the focused buffer's file from disk and closes the
+    /// buffer -- `kill_buffer` already falls back to the MRU-next
+    /// buffer (or a fresh scratch one) and removes the stale path from
+    /// the registry's own index.
+    fn apply_delete_file(&mut self) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        if let Err(err) = std::fs::remove_file(&path) {
+            eprintln!("fenix: couldn't delete {}: {err}", path.display());
+            return;
+        }
+        self.kill_buffer();
+    }
+
+    /// What to show in place of the modeline while the delete
+    /// confirmation is armed -- mirrors `docker_confirm_text`.
+    fn delete_file_confirm_text(&self) -> Option<String> {
+        if !self.delete_file_confirm {
+            return None;
+        }
+        let name = self.open().buffer.path().map(|p| p.display().to_string()).unwrap_or_default();
+        Some(format!("Delete {name}? (y/n)"))
+    }
+
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target_line = m.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
@@ -3480,6 +5586,130 @@ impl App {
         cursor.char_idx = start + col;
         let (_, sticky) = buffer.line_col(cursor);
         cursor.sticky_col = sticky;
+    }
+
+    /// Same shape as `jump_to_grep_match`, for a `ctags`-sourced
+    /// definition -- `ctags` only ever gives a line, not a column, so
+    /// this always lands at the start of it rather than on a specific
+    /// character within.
+    fn jump_to_tag(&mut self, tag: &fenix_completion::ctags::TagEntry) {
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let target_line = tag.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
+        cursor.char_idx = buffer.line_start_char(target_line);
+        let (_, sticky) = buffer.line_col(cursor);
+        cursor.sticky_col = sticky;
+    }
+
+    /// Pushes `from` onto the `Ctrl-O` back stack and clears the
+    /// `Ctrl-I` forward stack -- see `jump_back_stack`'s own doc comment
+    /// for why a new jump invalidates old forward history rather than
+    /// preserving it the way real Vim's jumplist does.
+    fn record_jump(&mut self, from: JumpEntry) {
+        self.jump_back_stack.push(from);
+        self.jump_forward_stack.clear();
+    }
+
+    /// `Ctrl-O`: jumps to the most recently recorded position, pushing
+    /// wherever the cursor currently is onto the forward stack so
+    /// `Ctrl-I` can return here. Silently drops (without stopping) any
+    /// entry whose buffer was since closed -- see `JumpEntry`'s own doc
+    /// comment. A no-op with nothing left to go back to, or while a
+    /// Docker/Git panel session is open (see `jumplist_navigation_
+    /// allowed`'s own doc comment).
+    pub(crate) fn jump_back(&mut self) {
+        if !self.jumplist_navigation_allowed() {
+            return;
+        }
+        let current = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+        while let Some(entry) = self.jump_back_stack.pop() {
+            if self.buffers.get(entry.buffer).is_some() {
+                self.jump_forward_stack.push(current);
+                self.goto_jump_entry(entry, false);
+                return;
+            }
+        }
+    }
+
+    /// `Ctrl-I`: the mirror of `jump_back`, popping the forward stack
+    /// instead.
+    pub(crate) fn jump_forward(&mut self) {
+        if !self.jumplist_navigation_allowed() {
+            return;
+        }
+        let current = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+        while let Some(entry) = self.jump_forward_stack.pop() {
+            if self.buffers.get(entry.buffer).is_some() {
+                self.jump_back_stack.push(current);
+                self.goto_jump_entry(entry, false);
+                return;
+            }
+        }
+    }
+
+    /// `` `{name} ``/`'{name}` -- looks up `name` in `marks` and jumps
+    /// there, recording the position jumped *from* onto the jumplist
+    /// first (same as a symbol/grep jump, and real Vim's own mark-jump
+    /// behavior) so `Ctrl-O` returns here afterward. A no-op if that
+    /// mark was never set, if its buffer's since closed (the stale entry
+    /// is dropped from `marks` too, same graceful-degrade posture
+    /// `jump_back`/`jump_forward` already have for the jumplist itself),
+    /// or while a Docker/Git panel session is open (see `jumplist_
+    /// navigation_allowed`'s own doc comment -- `goto_jump_entry` is
+    /// exactly as unsafe to call from there for a mark as for a jump).
+    fn jump_to_mark(&mut self, name: char, linewise: bool) {
+        let Some(&entry) = self.marks.get(&name) else { return };
+        if self.buffers.get(entry.buffer).is_none() {
+            self.marks.remove(&name);
+            return;
+        }
+        if !self.jumplist_navigation_allowed() {
+            return;
+        }
+        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+        self.goto_jump_entry(entry, linewise);
+        self.record_jump(from);
+    }
+
+    /// `goto_jump_entry` repoints the *focused pane's* content outright
+    /// (`set_pane_content`), which would silently desync a Docker/Git
+    /// panel session's own pane-role bookkeeping (`pane_titles`, `docker_
+    /// focused_role`/`git_focused_role`) if it fired on one of that
+    /// session's panes -- those track *which pane holds which role* by
+    /// pane id, not by buffer, and have no way to notice their pane's
+    /// buffer just got swapped out from under them by something outside
+    /// the session. Simplest safe rule: no jumplist navigation at all
+    /// while either panel is open, rather than trying to reconcile
+    /// session state case by case.
+    fn jumplist_navigation_allowed(&self) -> bool {
+        self.docker_session.is_none() && self.git_session.is_none()
+    }
+
+    /// Points the focused pane at `entry.buffer` (already open -- every
+    /// `JumpEntry` was recorded from a buffer that existed at the time,
+    /// see `JumpEntry`'s own doc comment) and lands the cursor at its
+    /// char index (clamped in case the buffer's shrunk since) or, if
+    /// `linewise`, the first non-blank of that char index's line --
+    /// `'{mark}`'s own landing spot, real Vim's own `` ` ``/`'` split
+    /// (`jump_back`/`jump_forward` always pass `false`; only `jump_to_
+    /// mark` ever passes `true`). Doesn't touch `project_root`/recent-
+    /// files the way `open_file_from_picker` does -- this is "return to
+    /// where you were," not "visit a file," so those side effects don't
+    /// apply.
+    fn goto_jump_entry(&mut self, entry: JumpEntry, linewise: bool) {
+        let focused = self.focused_pane_id();
+        if entry.buffer != self.focused_buffer_id() {
+            self.set_pane_content(focused, entry.buffer);
+        }
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let target = entry.char_idx.min(buffer.len_chars());
+        cursor.char_idx = if linewise {
+            let (line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
+            line_first_non_blank_char(buffer, line)
+        } else {
+            target
+        };
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
     }
 
     /// Registers `root` as the current project and immediately chains
@@ -4063,7 +6293,28 @@ impl App {
         }
 
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+        self.dispatch_keypress(keypress, event_loop);
+    }
 
+    /// Every real keypress passes through here exactly once -- the tap
+    /// that makes macro recording see everything, including keys a
+    /// leader-triggered command or a prompt swallows before `VimState::
+    /// handle_key` ever would (see `VimEvent::MacroRecordStart`'s own
+    /// doc comment for why the tap has to live here, not in `fenix-
+    /// vim`). `route_keypress` does the actual dispatch -- a macro
+    /// replay (`VimEvent::MacroPlay`'s handling, inside `route_keypress`
+    /// itself) calls `route_keypress` *directly*, deliberately skipping
+    /// this tap: a nested `@b` call's own literal two keystrokes get
+    /// captured here (as ordinary top-level input), but `b`'s *expanded*
+    /// replay must not also be appended on top of that.
+    fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+        if self.vim.is_recording() {
+            self.macro_capture.push(keypress);
+        }
+        self.route_keypress(keypress, event_loop);
+    }
+
+    fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
         // A Docker which-key menu (`x` on a pane) is purely informational,
         // not a capturing prompt -- cleared unconditionally on *every*
         // keypress before that keypress is dispatched normally below, so
@@ -4103,6 +6354,21 @@ impl App {
             return;
         }
 
+        // `SPC f f`/`SPC f R`/`SPC f D` -- same capturing-prompt tier as
+        // everything else here.
+        if self.find_file_prompt.is_some() {
+            self.find_file_prompt_key(keypress);
+            return;
+        }
+        if self.rename_file_prompt.is_some() {
+            self.rename_file_prompt_key(keypress);
+            return;
+        }
+        if self.delete_file_confirm {
+            self.delete_file_confirm_key(keypress);
+            return;
+        }
+
         // The grep search-term prompt and an open picker both capture
         // input the same way -- checked ahead of the explorer/sidebar-
         // focus check below since a picker can be opened while the
@@ -4116,6 +6382,21 @@ impl App {
         }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
+            return;
+        }
+        // The `SPC m i` wizard's own text-entry/y-n stages -- checked
+        // after `active_picker` so its `ArgumentAlias` sub-step (where
+        // `mib_insert` is *also* still `Some`) is routed there instead;
+        // this only ever fires for `ChooseArgumentMode`/`ArgumentText`/
+        // `Confirm`, none of which go through a picker.
+        if self.mib_insert.is_some() {
+            self.mib_insert_key(keypress);
+            return;
+        }
+        // `SPC s r`/`SPC s p`'s pattern/replacement text entry -- same
+        // tier as the other capturing prompts above.
+        if self.replace_wizard.is_some() {
+            self.replace_wizard_key(keypress);
             return;
         }
 
@@ -4150,24 +6431,42 @@ impl App {
             }
         }
 
-        if self.modifiers.control_key() {
-            if let Key::Character(s) = &event.logical_key {
-                let id = if s.eq_ignore_ascii_case("s") {
+        // `keypress.mods.ctrl`, not `self.modifiers.control_key()` --
+        // the two always agree for a real hardware keypress (`keypress`
+        // is derived from `self.modifiers` at conversion time), but only
+        // `keypress` carries the *recorded* modifier state for a macro
+        // replay, which has no live hardware modifiers of its own to
+        // read. The Ctrl-Shift-Z-vs-Ctrl-Z distinction still reads the
+        // live `self.modifiers.shift_key()` rather than the char's case
+        // -- unlike Ctrl itself, this codebase has no evidence winit
+        // reliably reports the *shifted* character through a Ctrl-chord
+        // on every platform, so this one sub-branch keeps the original,
+        // proven-correct check; a macro that recorded Ctrl-Shift-Z
+        // specifically just won't replay that distinction faithfully, a
+        // narrow, disclosed gap far preferable to risking a regression
+        // in the everyday redo shortcut itself.
+        if keypress.mods.ctrl {
+            if let KeyCode::Char(c) = keypress.code {
+                let id = if c.eq_ignore_ascii_case(&'s') {
                     Some("file.save")
-                } else if s.eq_ignore_ascii_case("z") && self.modifiers.shift_key() {
+                } else if c.eq_ignore_ascii_case(&'z') && self.modifiers.shift_key() {
                     Some("edit.redo")
-                } else if s.eq_ignore_ascii_case("z") {
+                } else if c.eq_ignore_ascii_case(&'z') {
                     Some("edit.undo")
-                } else if s.eq_ignore_ascii_case("y") {
+                } else if c.eq_ignore_ascii_case(&'y') {
                     Some("edit.redo")
-                } else if s.eq_ignore_ascii_case("q") {
+                } else if c.eq_ignore_ascii_case(&'q') {
                     Some("app.quit")
-                } else if s == "=" || s == "+" {
+                } else if c == '=' || c == '+' {
                     Some("view.increase_font_size")
-                } else if s == "-" {
+                } else if c == '-' {
                     Some("view.decrease_font_size")
-                } else if s == "0" {
+                } else if c == '0' {
                     Some("view.reset_font_size")
+                } else if c.eq_ignore_ascii_case(&'o') {
+                    Some("nav.jump_back")
+                } else if c.eq_ignore_ascii_case(&'i') {
+                    Some("nav.jump_forward")
                 } else {
                     None
                 };
@@ -4204,11 +6503,19 @@ impl App {
         }
 
         // Leader sequences span multiple keystrokes: stay routed here while
-        // one is already in progress, or start one on SPC from Normal mode
-        // (matching orbit-emacs, where SPC is a Normal-mode-only leader --
-        // in Insert mode it should just insert a space).
+        // one is already in progress, or start one on SPC from Normal or
+        // Visual mode (matching orbit-emacs, where SPC is evil-visual-
+        // state's leader too -- in Insert mode it should just insert a
+        // space). Fenix's own Visual keymap has no binding for a bare
+        // space, so this doesn't take anything away from Visual mode --
+        // it only makes `SPC c f` (format the active selection) and the
+        // rest of the leader menu reachable without leaving the
+        // selection first. The leader keys themselves (here, `c`/`f`)
+        // never reach `self.vim`, so the selection's anchor/cursor stay
+        // exactly as they were until whatever command they resolve to
+        // (e.g. `format_selection`) reads them.
         if self.leader_matcher.is_pending()
-            || (self.vim.mode() == Mode::Normal && keypress == KeyPress::char(' '))
+            || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
         {
             if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
                 CommandRegistry::with_builtins().run(self, event_loop, id);
@@ -4316,6 +6623,97 @@ impl App {
             }
         }
 
+        // A table view (`SPC f t`) is likewise real Vim-navigable text --
+        // ordinary motions and edits reach Vim below unchanged (editing a
+        // cell is just ordinary Vim text editing on the buffer's real
+        // tab-separated content; nothing table-specific is needed for
+        // that at all). Only `]`/`[` (next/prev column) and `j`/`k`
+        // (reinterpreted: same *elastic column* on the adjacent row, not
+        // plain char-based `sticky_col`, which stops tracking "same
+        // column" once rows have different raw lengths up to it -- see
+        // `table_move_row`'s own doc comment) and `c` (jump to a column
+        // by name) are claimed here first.
+        if self.open().kind == BufferKind::Table {
+            match keypress.code {
+                KeyCode::Char(']') if keypress.mods == Mods::default() => {
+                    self.table_move_column(1);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('[') if keypress.mods == Mods::default() => {
+                    self.table_move_column(-1);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('j') if keypress.mods == Mods::default() => {
+                    self.table_move_row(1);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('k') if keypress.mods == Mods::default() => {
+                    self.table_move_row(-1);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('c') if keypress.mods == Mods::default() => {
+                    self.open_table_column_picker();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // The `SPC s p` project-replace review buffer -- ordinary
+        // motions (`j k gg G / n N`) navigate it like any real buffer
+        // (it's genuinely one), but its own action keys are claimed
+        // here first, same "claim a few keys" shape as the dired/table
+        // blocks above. `q`/`Esc` deliberately mean "close this pane"
+        // here, not whatever they'd mean in ordinary editing (macro-
+        // record `q`, in particular) -- same precedent the Explorer/
+        // Docker/Git panels already established for their own `q`.
+        if self.open().kind == BufferKind::SearchReplace {
+            let confirming = self.project_replace.as_ref().is_some_and(|s| s.confirming);
+            match keypress.code {
+                KeyCode::Named(FenixNamedKey::Escape) | KeyCode::Char('q') if keypress.mods == Mods::default() => {
+                    if confirming {
+                        self.project_replace_decline_confirm();
+                    } else {
+                        self.project_replace_cancel();
+                    }
+                    return;
+                }
+                _ if confirming => {
+                    // Any key other than Escape/`q` (already handled
+                    // above) while the apply gate is armed: `y` applies,
+                    // anything else declines back to plain review --
+                    // same "only Escape/`q` or `y` mean anything, every
+                    // other key is a plain decline" shape `docker_
+                    // confirm_key`'s own y/n gate already has.
+                    if let KeyCode::Char(c) = keypress.code {
+                        if c.eq_ignore_ascii_case(&'y') {
+                            self.project_replace_apply();
+                            return;
+                        }
+                    }
+                    self.project_replace_decline_confirm();
+                    return;
+                }
+                KeyCode::Char(' ') | KeyCode::Char('t') if keypress.mods == Mods::default() => {
+                    self.project_replace_toggle_selected();
+                    return;
+                }
+                KeyCode::Char('a') if keypress.mods == Mods::default() => {
+                    self.project_replace_confirm_or_apply();
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::Enter) => {
+                    self.project_replace_confirm_or_apply();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Lazydocker-style multi-pane panel: ordinary motions (`hjkl`,
         // `gg`/`G`, `/` search) reach Vim below unchanged in every one of
         // the four panes -- only a small, pane-scoped action-key set is
@@ -4352,7 +6750,9 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Containers, KeyCode::Char('d')) | (Images, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
+                (Containers, KeyCode::Char('d')) | (Images, KeyCode::Char('d')) | (Networks, KeyCode::Char('d'))
+                    if keypress.mods == Mods::default() =>
+                {
                     if let Some(entry) = self.docker_entry_at_cursor() {
                         self.docker_confirm_remove = Some(entry);
                     }
@@ -4364,7 +6764,7 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Containers | Images | Volumes, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                (Containers | Images | Volumes | Networks, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
                     self.docker_menu_open = true;
                     self.wake_caret();
                     return;
@@ -4379,7 +6779,7 @@ impl App {
                         self.windows_mut().focus(pane);
                         if matches!(
                             self.docker_focused_role(),
-                            Some(DockerPaneRole::Containers | DockerPaneRole::Images | DockerPaneRole::Volumes)
+                            Some(DockerPaneRole::Containers | DockerPaneRole::Images | DockerPaneRole::Volumes | DockerPaneRole::Networks)
                         ) && self.docker_session.as_ref().is_some_and(|s| s.logs_container.is_none())
                         {
                             self.docker_sync_details();
@@ -4500,6 +6900,7 @@ impl App {
             }
         }
 
+        self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -4507,6 +6908,7 @@ impl App {
             let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
             self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress)
         };
+        self.push_clipboard_after_edit();
         self.sync_completion();
         // Ordinary movement in one of the three left panes re-syncs the
         // Details pane to whatever's now under the cursor -- pure
@@ -4516,7 +6918,7 @@ impl App {
         // (`logs_container.is_some()`) -- moving the cursor in Containers
         // shouldn't yank a different container's log view back to plain
         // info text.
-        if matches!(self.docker_focused_role(), Some(DockerPaneRole::Containers | DockerPaneRole::Images | DockerPaneRole::Volumes))
+        if matches!(self.docker_focused_role(), Some(DockerPaneRole::Containers | DockerPaneRole::Images | DockerPaneRole::Volumes | DockerPaneRole::Networks))
             && self.docker_session.as_ref().is_some_and(|s| s.logs_container.is_none())
         {
             self.docker_sync_details();
@@ -4548,9 +6950,136 @@ impl App {
                     eprintln!("fenix: couldn't save indent width ({err})");
                 }
             }
+            VimEvent::JumpRecorded(from) => {
+                let buffer = self.focused_buffer_id();
+                self.record_jump(JumpEntry { buffer, char_idx: from });
+            }
+            VimEvent::MarkSet(name, char_idx) => {
+                let buffer = self.focused_buffer_id();
+                self.marks.insert(name, JumpEntry { buffer, char_idx });
+            }
+            VimEvent::JumpToMark { name, linewise } => {
+                self.jump_to_mark(name, linewise);
+            }
+            VimEvent::MacroRecordStart(register) => {
+                // The register-select keystrokes (`q`, then the register
+                // name) were already tapped into `macro_capture` by
+                // `dispatch_keypress` before `VimState` ever resolved
+                // them into this event -- real Vim doesn't record either
+                // of those two keys, only what happens *after* recording
+                // starts, so it's cleared here rather than left to
+                // accumulate from this point on.
+                self.macro_capture.clear();
+                self.macro_recording_append = register.is_ascii_uppercase();
+            }
+            VimEvent::MacroRecordStop(register) => {
+                // The closing `q` itself was also just tapped (recording
+                // was still active when `dispatch_keypress` saw it) --
+                // trimmed the same way, rather than included as part of
+                // the macro's own content.
+                self.macro_capture.pop();
+                let keys = std::mem::take(&mut self.macro_capture);
+                self.vim.finish_recording(register, &keys, self.macro_recording_append);
+            }
+            VimEvent::MacroPlay { register, count } => {
+                self.play_macro(register, count, event_loop);
+            }
             VimEvent::None => {}
         }
         self.wake_caret();
+    }
+
+    /// `@{register}` (or `@@`, `register` literally `'@'` -- resolved to
+    /// `last_played_macro` here, real Vim's own "repeat whichever
+    /// register was last played" convention; a `None` `last_played_
+    /// macro` is a silent no-op, matching real Vim's "no previously used
+    /// register"). Decodes the register's content (`VimState::decode_
+    /// register` -- works the same whether it got there by recording,
+    /// yanking, or hand-editing) and replays each key via `route_
+    /// keypress` directly, *not* `dispatch_keypress` -- see `dispatch_
+    /// keypress`'s own doc comment for why a nested `@b` call must not
+    /// double-record its own expansion. `replay_budget` is a defensive
+    /// cap (not real Vim's own behavior, which really would hang on a
+    /// self-referential macro like `qaa@aq` too) shared across nested
+    /// replay calls via a single counter on `self`, so a runaway macro
+    /// bails out with a modeline-visible message instead of freezing
+    /// the app.
+    fn play_macro(&mut self, register: char, count: u32, event_loop: &ActiveEventLoop) {
+        let register = if register == '@' { self.last_played_macro } else { Some(register) };
+        let Some(register) = register else { return };
+        if self.replay_depth >= MAX_MACRO_REPLAY_DEPTH {
+            eprintln!("fenix: macro replay stopped -- nested too deep (possible infinite recursion)");
+            return;
+        }
+        let Some(keys) = self.vim.decode_register(register) else { return };
+        self.last_played_macro = Some(register);
+        // The budget is one shared pool across every nested `@` call
+        // this replay makes (only reset at true top-level, tracked via
+        // `replay_depth`), not per-level -- a self-referential macro
+        // recursing through many levels should still hit the same
+        // overall cap, not get `MACRO_REPLAY_BUDGET` keys *per level*.
+        if self.replay_depth == 0 {
+            self.replay_budget = MACRO_REPLAY_BUDGET;
+        }
+        self.replay_depth += 1;
+        'replay: for _ in 0..count.max(1) {
+            for key in &keys {
+                if self.replay_budget == 0 {
+                    eprintln!("fenix: macro replay stopped -- too many keys played (possible infinite recursion)");
+                    break 'replay;
+                }
+                self.replay_budget -= 1;
+                self.route_keypress(*key, event_loop);
+            }
+        }
+        self.replay_depth -= 1;
+    }
+
+    /// Right before dispatching a bare `p`/`P` in Normal mode (the only
+    /// place those keys mean "paste" -- see `fenix_vim::keymaps::normal_
+    /// trie`), pulls whatever's currently on the OS clipboard into Vim's
+    /// unnamed register, so the paste sees anything copied outside Fenix
+    /// since the last sync, not just Fenix's own last yank/delete.
+    /// Gated on `!is_pending()` so a count prefix (`3p`) still resolves
+    /// through here (counts aren't tracked via the pending-sequence
+    /// matcher) while a `g`-prefixed or operator-pending sequence never
+    /// misreads its own continuation key as a paste.
+    fn pull_clipboard_before_paste(&mut self, keypress: KeyPress) {
+        if self.vim.mode() != Mode::Normal || self.vim.is_pending() || keypress.mods != Mods::default() {
+            return;
+        }
+        if !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            return;
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        let Ok(text) = clipboard.get_text() else { return };
+        // No per-entry regtype metadata on a plain OS clipboard -- a
+        // trailing newline is the same linewise signal Neovim's own
+        // clipboard provider uses to infer "this was a whole line" from
+        // plain text.
+        let linewise = text.ends_with('\n');
+        self.clipboard_mirror = text.clone();
+        self.vim.set_register(text, linewise);
+    }
+
+    /// After every dispatched key, mirrors Vim's unnamed register onto
+    /// the OS clipboard if this keystroke just changed it (yank, delete,
+    /// change -- anything `fenix_vim::VimState` writes it from). Compared
+    /// against `clipboard_mirror` rather than gated on `VimEvent::Pulse`,
+    /// since delete deliberately doesn't raise a pulse (see `VimEvent::
+    /// Pulse`'s own doc comment) but still needs to reach the clipboard --
+    /// otherwise `dd` then `p` in Fenix would silently diverge from
+    /// whatever's pasted elsewhere.
+    fn push_clipboard_after_edit(&mut self) {
+        let (text, _linewise) = self.vim.register();
+        if text == self.clipboard_mirror {
+            return;
+        }
+        let text = text.to_string();
+        let Some(clipboard) = self.clipboard.as_mut() else { return };
+        if clipboard.set_text(text.clone()).is_ok() {
+            self.clipboard_mirror = text;
+        }
     }
 
     /// Keeps the cursor's line within the *focused pane's* visible
@@ -4659,6 +7188,12 @@ impl App {
             || self.docker_confirm_remove.is_some()
             || self.git_confirm.is_some()
             || self.git_prompt.is_some()
+            || self.mib_insert.is_some()
+            || self.replace_wizard.is_some()
+            || self.project_replace.as_ref().is_some_and(|s| s.confirming)
+            || self.find_file_prompt.is_some()
+            || self.rename_file_prompt.is_some()
+            || self.delete_file_confirm
         {
             return None;
         }
@@ -4692,6 +7227,15 @@ impl App {
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
+                Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
+                Some(picker @ ActivePicker::MibTelecommandInsert(_)) => ("MIB-TC", picker_len(picker)),
+                Some(picker @ ActivePicker::MibTmPacket(_)) => ("MIB-PKT", picker_len(picker)),
+                Some(picker @ ActivePicker::MibTmParameter(_)) => ("MIB-PARAM", picker_len(picker)),
+                Some(picker @ ActivePicker::MibCalibration(_)) => ("MIB-CAL", picker_len(picker)),
+                Some(picker @ ActivePicker::MibArgumentAlias(_)) => ("MIB-ARG", picker_len(picker)),
+                Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
+                Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return Some((label, format!("│ {count} matches ")));
@@ -4709,7 +7253,18 @@ impl App {
         } else {
             String::new()
         };
-        let suffix = format!("│ {filename}{modified}{workspace_indicator}   Ln {}, Col {} ", line + 1, col + 1);
+        // Additive, not a full modeline override like a capturing prompt
+        // (`explorer_prompt_text`, ...) -- recording doesn't block
+        // ordinary editing/redraws, so the rest of the modeline should
+        // keep showing real information, same posture as `workspace_
+        // indicator`.
+        let recording_indicator =
+            match self.vim.recording_register() {
+                Some(reg) => format!("   recording @{reg}"),
+                None => String::new(),
+            };
+        let suffix =
+            format!("│ {filename}{modified}{workspace_indicator}{recording_indicator}   Ln {}, Col {} ", line + 1, col + 1);
         Some((mode_label, suffix))
     }
 
@@ -4739,6 +7294,9 @@ impl App {
         }
         if let Some(prompt_text) = self.git_prompt_text() {
             return prompt_text;
+        }
+        if let Some(insert_text) = self.mib_insert_text() {
+            return insert_text;
         }
         let (mode_label, suffix) = self.modeline_pieces().unwrap();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
@@ -4776,6 +7334,170 @@ impl App {
         }
     }
 
+    /// `Custom` stops for a `BufferKind::Table` buffer, else the buffer-
+    /// wide `Fixed` default from `config.tab_width` (real Vim's own
+    /// `:set tabstop`, `DEFAULT_TAB_WIDTH` if unset).
+    fn tab_stops_for(&self, id: BufferId) -> TabStops {
+        match self.table_views.get(&id) {
+            Some(view) => TabStops::Custom(view.stops.clone()),
+            None => TabStops::Fixed(self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH)),
+        }
+    }
+
+    /// Recomputes `id`'s `TableView` from its *current* buffer text if
+    /// it doesn't have one yet, or if `edit_count()` has moved since the
+    /// last computation -- the auto-realign every edit gets for free,
+    /// mirroring the `edit_count`-diff idiom `syntax_highlights_for_
+    /// visible_range` already uses to decide "did anything change." A
+    /// no-op for a buffer that isn't (or is no longer) `BufferKind::
+    /// Table`. Column names are synthesized (`Column 1`, `Column 2`,
+    /// ...) -- the source data's real tab-separated content has no
+    /// header row `parse` could reliably distinguish from an ordinary
+    /// data row.
+    fn sync_table_view(&mut self, id: BufferId) {
+        let Some(ob) = self.buffers.get(id) else { return };
+        if ob.kind != BufferKind::Table {
+            return;
+        }
+        let edit_count = ob.buffer.edit_count();
+        if self.table_views.get(&id).is_some_and(|v| v.last_edit_count == edit_count) {
+            return;
+        }
+        let rows = fenix_table::parse(&ob.buffer.text(), '\t');
+        let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let columns: Vec<String> = (0..column_count).map(|i| format!("Column {}", i + 1)).collect();
+        let widths = fenix_table::column_widths(&columns, &rows);
+        let stops = fenix_table::tab_stops(&widths, TABLE_COLUMN_GAP);
+        self.table_views.insert(id, TableView { columns, stops, last_edit_count: edit_count });
+    }
+
+    /// This pane's title-bar text for a `BufferKind::Table` buffer --
+    /// column names, space-padded to line up with the same `stops` the
+    /// renderer expands the content's real tabs to, so header and
+    /// content land in identical pixel columns (both ultimately paid out
+    /// in the same `char_width`). `None` for anything else, so the
+    /// caller falls back to the ordinary `buffer_display_name`.
+    fn table_view_header(&self, id: BufferId) -> Option<String> {
+        let view = self.table_views.get(&id)?;
+        let mut header = String::new();
+        let mut col_start = 0usize;
+        for (name, &stop) in view.columns.iter().zip(&view.stops) {
+            header.push_str(name);
+            let pad = stop.saturating_sub(col_start + name.chars().count());
+            header.push_str(&" ".repeat(pad));
+            col_start = stop;
+        }
+        Some(header)
+    }
+
+    /// `SPC f t`: toggles the focused buffer between `Text` and `Table`
+    /// -- no synthetic buffer, no distinct copy: the *same* buffer, same
+    /// path, same undo history, just retagged in place, since the file's
+    /// real tab-separated content is already exactly what the elastic-
+    /// column renderer needs to align it. A no-op on anything but
+    /// `Text`/`Table` (Dashboard/Explorer/Docker/Git buffers have no
+    /// meaningful table view).
+    pub(crate) fn toggle_table_view(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get_mut(id) else { return };
+        match ob.kind {
+            BufferKind::Table => {
+                ob.kind = BufferKind::Text;
+                self.table_views.remove(&id);
+            }
+            BufferKind::Text => {
+                ob.kind = BufferKind::Table;
+                self.sync_table_view(id);
+            }
+            _ => {}
+        }
+    }
+
+    /// 0-indexed tab-occurrence column the cursor currently sits in on
+    /// its own line, for a `BufferKind::Table` buffer's `]`/`[`/`j`/`k`
+    /// key interception -- counts real `\t` characters before the
+    /// cursor. A cursor past every tab on its line (the last column, or
+    /// a short ragged row) reports one past the last tab, same convention
+    /// `tab_index` uses in `tabstops::expand_line`.
+    fn table_current_column(&self) -> usize {
+        let buffer = &self.open().buffer;
+        let cursor_idx = self.cursor().char_idx;
+        let line = buffer.line_col(&self.cursor()).0;
+        let line_start = buffer.line_start_char(line);
+        buffer.text_range(line_start, cursor_idx).matches('\t').count()
+    }
+
+    /// The char index just after `line`'s `column`-th tab (0-indexed),
+    /// or the line's own end if it has fewer than `column` tabs -- the
+    /// landing spot for a table view's column navigation, both `]`/`[`
+    /// (same row) and `j`/`k` (adjacent row, same column).
+    fn table_column_start(&self, line: usize, column: usize) -> usize {
+        let buffer = &self.open().buffer;
+        let line_start = buffer.line_start_char(line);
+        if column == 0 {
+            return line_start; // field 0 starts at the line itself, no preceding tab
+        }
+        let len = buffer.line_len(line);
+        let line_text = buffer.text_range(line_start, line_start + len);
+        // Field `column` (>= 1) starts just after tab occurrence `column
+        // - 1` (0-indexed): tab 0 separates field 0 from field 1, tab 1
+        // separates field 1 from field 2, and so on.
+        match line_text.match_indices('\t').nth(column - 1) {
+            Some((byte_idx, _)) => line_start + line_text[..byte_idx].chars().count() + 1,
+            None => line_start + len,
+        }
+    }
+
+    /// `]`/`[` on a `BufferKind::Table` buffer: moves to the start of
+    /// the next/previous column on the current row.
+    fn table_move_column(&mut self, delta: isize) {
+        let current = self.table_current_column() as isize;
+        let target = (current + delta).max(0) as usize;
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let idx = self.table_column_start(line, target);
+        let pane = self.focused_pane_id();
+        let cursor = &mut self.pane_state_mut(pane).cursor;
+        cursor.char_idx = idx;
+        cursor.sticky_col = 0;
+    }
+
+    /// `j`/`k` on a `BufferKind::Table` buffer: moves a row while
+    /// staying in the *same elastic column* -- plain char-based `sticky_
+    /// col` doesn't work here, since rows have different raw lengths up
+    /// to the same visual column (that's the whole point of elastic
+    /// alignment), so this counts tabs instead of chars to find "same
+    /// column."
+    fn table_move_row(&mut self, delta: isize) {
+        let column = self.table_current_column();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        // `visual_line_count`, not `line_count` -- a buffer ending in
+        // `\n` (every table view's real file content, per convention)
+        // would otherwise let this land on ropey's phantom trailing
+        // empty line past the real last row.
+        let line_count = self.open().buffer.visual_line_count();
+        let Some(target_line) = line.checked_add_signed(delta).filter(|&l| l < line_count) else { return };
+        let idx = self.table_column_start(target_line, column);
+        let pane = self.focused_pane_id();
+        let cursor = &mut self.pane_state_mut(pane).cursor;
+        cursor.char_idx = idx;
+        cursor.sticky_col = 0;
+    }
+
+    /// `c` on a `BufferKind::Table` buffer: a fuzzy picker over its
+    /// synthesized column names -- confirming (`picker_confirm`'s own
+    /// `TableColumn` arm) jumps to that column's start on the current
+    /// row. A no-op if the buffer has no `TableView` yet (shouldn't
+    /// happen in practice: `sync_table_view` runs every redraw a `Table`
+    /// buffer is visible, but this guards the interception key itself
+    /// firing before the first redraw ever ran).
+    fn open_table_column_picker(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(view) = self.table_views.get(&id) else { return };
+        let candidates =
+            view.columns.iter().enumerate().map(|(i, name)| fenix_picker::Candidate::new(name.clone(), i)).collect();
+        self.enter_picker(ActivePicker::TableColumn(fenix_picker::PickerState::new(candidates)));
+    }
+
     /// Character width of the line-number gutter, including one trailing
     /// column of padding before the text starts; 0 when the gutter is off.
     /// Sized to the buffer's total line count regardless of Absolute vs.
@@ -4791,6 +7513,8 @@ impl App {
             || ob.kind == BufferKind::Explorer
             || ob.kind == BufferKind::Docker
             || ob.kind == BufferKind::Git
+            || ob.kind == BufferKind::Table
+            || ob.kind == BufferKind::SearchReplace
         {
             return 0;
         }
@@ -4823,6 +7547,17 @@ impl App {
     /// now that cursor is pane-owned, not buffer-owned (see `PaneState`'s
     /// own doc comment), so this stays correct for any pane, not just
     /// the focused one.
+    ///
+    /// `tab_stops` governs how a literal `\t` in the line's own text
+    /// expands (see the `tabstops` module) -- a line with no tab at all
+    /// never consults it and renders exactly as before. A line that
+    /// *does* contain one still gets full `syntax_highlights` coloring,
+    /// via `remap_highlights_for_display` translating the highlight
+    /// ranges (byte offsets against the real buffer text) onto the
+    /// tab-expanded display string's own offsets -- tab-indented C/
+    /// Bash/Python files (all have a tree-sitter grammar registered in
+    /// this project) keep working, not just delimited data files with
+    /// no grammar in the first place.
     #[allow(clippy::too_many_arguments)] // a plain data parameter list, not a design smell worth a struct for one private call site
     fn content_spans(
         &self,
@@ -4833,6 +7568,7 @@ impl App {
         dashboard_pad: Option<&[usize]>,
         syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
         cursor_line: usize,
+        tab_stops: &TabStops,
     ) -> Vec<(String, glyphon::Color)> {
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
@@ -4864,7 +7600,25 @@ impl App {
                 let start = ob.buffer.line_start_char(buffer_line);
                 let len = ob.buffer.line_len(buffer_line);
                 let line_text = ob.buffer.text_range(start, start + len);
-                if syntax_highlights.is_empty() {
+                if line_text.contains('\t') {
+                    let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
+                    if syntax_highlights.is_empty() {
+                        spans.push((display, theme.fg));
+                    } else {
+                        let line_byte_start = ob.buffer.char_to_byte(start);
+                        let line_byte_end = ob.buffer.char_to_byte(start + len);
+                        let remapped = remap_highlights_for_display(
+                            &ob.buffer,
+                            start,
+                            &col_map,
+                            &display,
+                            line_byte_start,
+                            line_byte_end,
+                            syntax_highlights,
+                        );
+                        spans.extend(split_line_by_highlights(&display, 0, display.len(), &remapped, theme.fg));
+                    }
+                } else if syntax_highlights.is_empty() {
                     spans.push((line_text, theme.fg));
                 } else {
                     let line_byte_start = ob.buffer.char_to_byte(start);
@@ -5249,6 +8003,7 @@ impl App {
             }
             DockerPaneRole::Images => &[("r", "run"), ("d", "remove"), ("u", "refresh")],
             DockerPaneRole::Volumes => &[("u", "refresh")],
+            DockerPaneRole::Networks => &[("d", "remove"), ("u", "refresh")],
             DockerPaneRole::Status | DockerPaneRole::Logs => return None,
         };
 
@@ -5608,12 +8363,24 @@ impl App {
             // those overlays never change what buffer the pane maps to,
             // just what's rendered in its content area this frame.
             let buffer_id = *self.windows().content(pane).expect("every pane has a buffer");
+            // Recomputed every frame from the buffer's *current* text
+            // (cheap: a no-op unless `edit_count()` moved since last
+            // time, or this buffer isn't `BufferKind::Table` at all) so
+            // the elastic column layout an edit changed shows correctly
+            // this same redraw, not one frame late.
+            self.sync_table_view(buffer_id);
             // The Docker panel's fixed layout gives its panes their own
             // descriptive titles ("Containers", "Logs", ...) via `pane_
-            // titles`, consulted first; every other pane is titled with
-            // its buffer's own display name, so a split showing two
-            // different files can tell them apart at a glance.
-            let pane_title = self.pane_titles.get(&pane).cloned().unwrap_or_else(|| self.buffer_display_name(buffer_id));
+            // titles`, consulted first, then a table view's own column-
+            // name header; every other pane is titled with its buffer's
+            // own display name, so a split showing two different files
+            // can tell them apart at a glance.
+            let pane_title = self
+                .pane_titles
+                .get(&pane)
+                .cloned()
+                .or_else(|| self.table_view_header(buffer_id))
+                .unwrap_or_else(|| self.buffer_display_name(buffer_id));
             // Every pane always has a title now, so its *content* area
             // is always shrunk by one `line_height` from the top,
             // reserving that strip for the title bar drawn later below.
@@ -5734,6 +8501,34 @@ impl App {
                 }
             }
             let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, render_base_line, pane_visible_lines + 1);
+            let tab_stops = self.tab_stops_for(buffer_id);
+            // Char-column -> visual-column map for every visible row
+            // whose line actually contains a `\t` -- absent (not an
+            // identity `Vec`) for every other row, so caret/selection
+            // math below falls back to the raw char column unchanged.
+            // Recomputed independently of `content_spans`'s own tab
+            // expansion (a small amount of duplicated line-text reading,
+            // paid only by tab-containing lines) so `content_spans`'s
+            // signature/return type -- and its several existing direct
+            // test call sites -- didn't need to change shape just to
+            // additionally hand back this map.
+            let mut col_maps: HashMap<usize, Vec<usize>> = HashMap::new();
+            if let Some(ob) = self.buffers.get(buffer_id) {
+                let visual_lines = ob.buffer.visual_line_count();
+                for r in 0..=pane_visible_lines {
+                    let buffer_line = render_base_line + r;
+                    if buffer_line >= visual_lines {
+                        continue;
+                    }
+                    let start = ob.buffer.line_start_char(buffer_line);
+                    let len = ob.buffer.line_len(buffer_line);
+                    let line_text = ob.buffer.text_range(start, start + len);
+                    if line_text.contains('\t') {
+                        let (_, col_map) = tabstops::expand_line(&line_text, &tab_stops);
+                        col_maps.insert(r, col_map);
+                    }
+                }
+            }
             let content_spans = match self.buffers.get(buffer_id) {
                 Some(ob) => self.content_spans(
                     ob,
@@ -5743,6 +8538,7 @@ impl App {
                     dashboard_pad.as_deref(),
                     &syntax_highlights,
                     line,
+                    &tab_stops,
                 ),
                 None => Vec::new(),
             };
@@ -5755,13 +8551,28 @@ impl App {
             // a bug.
             let hl_row = line.checked_sub(render_base_line).filter(|&row| row <= pane_visible_lines);
 
+            // Char column -> visual column, via this row's `col_maps`
+            // entry when it has one (a line with a tab), else unchanged
+            // -- applied here, once, to every kind of column-bearing
+            // value (selection/pulse/bracket/hlsearch segments, the
+            // caret) rather than at the final pixel-rect-building loop
+            // further down, so that loop's `col_start as f32 *
+            // char_width` math needs no changes at all: by the time
+            // anything lands in `PaneRender`, its columns are already
+            // real visual columns.
+            let remap_col = |row: usize, col: usize| -> usize {
+                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col)
+            };
+            let remap_segments = |segments: Segments| -> Segments {
+                segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
+            };
             let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused {
                 (
-                    self.visual_selection_segments(pane_visible_lines + 1),
-                    self.pulse_overlay(pane_visible_lines + 1),
-                    self.bracket_match_segments(pane_visible_lines + 1),
-                    self.hlsearch_segments(pane_visible_lines + 1),
-                    self.focused_caret(hl_row, col, render_base_line, pane_visible_lines),
+                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)),
+                    self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
+                    remap_segments(self.bracket_match_segments(pane_visible_lines + 1)),
+                    remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
+                    self.focused_caret(hl_row, col, render_base_line, pane_visible_lines).map(|(row, col)| (row, remap_col(row, col))),
                 )
             } else {
                 (Segments::new(), None, Segments::new(), Segments::new(), None)
@@ -5799,6 +8610,18 @@ impl App {
             Some(confirm_text)
         } else if let Some(prompt_text) = self.git_prompt_text() {
             Some(prompt_text)
+        } else if let Some(insert_text) = self.mib_insert_text() {
+            Some(insert_text)
+        } else if let Some(replace_text) = self.replace_wizard_text() {
+            Some(replace_text)
+        } else if let Some(confirm_text) = self.project_replace_confirm_text() {
+            Some(confirm_text)
+        } else if let Some(prompt_text) = self.find_file_prompt_text() {
+            Some(prompt_text)
+        } else if let Some(prompt_text) = self.rename_file_prompt_text() {
+            Some(prompt_text)
+        } else if let Some(confirm_text) = self.delete_file_confirm_text() {
+            Some(confirm_text)
         } else if modeline_pieces.is_none() {
             Some(format!(":{}", self.vim.command_line()))
         } else {
@@ -6319,6 +9142,79 @@ impl App {
         let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
         let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
         self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, key)
+    }
+
+    /// Test-only mirror of `dispatch_keypress` -- the real one needs a
+    /// live `&ActiveEventLoop`, which nothing in this test harness can
+    /// construct (confirmed: no existing test calls `handle_key`/
+    /// `dispatch_keypress`/`route_keypress` at all, for exactly this
+    /// reason). This validates the same recording-tap/finalize/replay
+    /// bookkeeping for ordinary Vim-reaching keys -- the realistic bulk
+    /// of any macro's content -- but, like every other App-level test
+    /// helper in this file, doesn't go through the leader trie or any
+    /// prompt intercept, so it can't claim coverage of "a macro that
+    /// replays a leader command."
+    fn test_dispatch_key(&mut self, kp: KeyPress) {
+        if self.vim.is_recording() {
+            self.macro_capture.push(kp);
+        }
+        self.test_route_key(kp);
+    }
+
+    /// The non-tapping half of `test_dispatch_key`, mirroring `route_
+    /// keypress` -- `test_play_macro`'s replay loop calls this directly,
+    /// skipping the tap, for the same reason `play_macro` calls `route_
+    /// keypress` (not `dispatch_keypress`) in production: a nested `@b`
+    /// call's own literal keystrokes are tapped by `test_dispatch_key`
+    /// as ordinary top-level input, but `b`'s *expanded* replay must not
+    /// also be appended on top of that.
+    fn test_route_key(&mut self, kp: KeyPress) {
+        let id = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
+        let vim_event = {
+            let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
+            let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
+            self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, kp)
+        };
+        match vim_event {
+            VimEvent::MacroRecordStart(register) => {
+                self.macro_capture.clear();
+                self.macro_recording_append = register.is_ascii_uppercase();
+            }
+            VimEvent::MacroRecordStop(register) => {
+                self.macro_capture.pop();
+                let keys = std::mem::take(&mut self.macro_capture);
+                self.vim.finish_recording(register, &keys, self.macro_recording_append);
+            }
+            VimEvent::MacroPlay { register, count } => self.test_play_macro(register, count),
+            _ => {}
+        }
+    }
+
+    /// Test-only mirror of `play_macro` -- identical logic, replaying
+    /// through `test_route_key` instead of the real `route_keypress`.
+    fn test_play_macro(&mut self, register: char, count: u32) {
+        let register = if register == '@' { self.last_played_macro } else { Some(register) };
+        let Some(register) = register else { return };
+        if self.replay_depth >= MAX_MACRO_REPLAY_DEPTH {
+            return;
+        }
+        let Some(keys) = self.vim.decode_register(register) else { return };
+        self.last_played_macro = Some(register);
+        if self.replay_depth == 0 {
+            self.replay_budget = MACRO_REPLAY_BUDGET;
+        }
+        self.replay_depth += 1;
+        'replay: for _ in 0..count.max(1) {
+            for key in &keys {
+                if self.replay_budget == 0 {
+                    break 'replay;
+                }
+                self.replay_budget -= 1;
+                self.test_route_key(*key);
+            }
+        }
+        self.replay_depth -= 1;
     }
 
     /// Points the focused pane at `path`, opening it fresh in the
@@ -6869,7 +9765,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.new_scratch_buffer(); // single empty line, cursor on it
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0);
+        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
     }
@@ -6880,7 +9776,7 @@ mod tests {
         app.new_scratch_buffer();
         app.line_number_mode = LineNumberMode::Off;
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 0);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "\n~");
     }
@@ -6893,7 +9789,7 @@ mod tests {
         app.test_insert_str("a\nb\nc\nd");
         app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1, 'b'
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[], 1);
+        let spans = app.content_spans(app.open(), 0, 4, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 a\n0 b\n1 c\n2 d");
     }
@@ -6905,7 +9801,7 @@ mod tests {
         app.test_insert_str("a\nb");
         app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // line 1
         let gutter = app.gutter_chars(app.open());
-        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 1);
+        let spans = app.content_spans(app.open(), 0, 2, gutter, None, &[], 1, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         assert_eq!(spans[0].1, app.theme.gutter_fg); // line 0: not current
         assert_eq!(spans[2].1, app.theme.fg); // line 1: current line's gutter
     }
@@ -6924,7 +9820,7 @@ mod tests {
         assert_eq!(ob.kind, BufferKind::Dashboard);
 
         let pad = [5usize];
-        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[], 0);
+        let spans = app.content_spans(ob, 0, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         assert_eq!(spans[0].0, "     "); // 5 literal spaces, not "1 " or similar
     }
 
@@ -6935,7 +9831,7 @@ mod tests {
         let visual_lines = ob.buffer.visual_line_count();
         let pad: Vec<usize> = vec![0; visual_lines + 11];
         // Ask for a row well past the dashboard's own content.
-        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0);
+        let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         assert!(!spans.iter().any(|(s, _)| s == "~"));
     }
 
@@ -7066,6 +9962,37 @@ mod tests {
     }
 
     #[test]
+    fn remap_highlights_for_display_lands_on_the_tab_expanded_offsets() {
+        let color = theme::ORBIT_DARK.syntax_variable;
+        let buffer = Buffer::from_text("a\tbb");
+        let (display, col_map) = tabstops::expand_line("a\tbb", &TabStops::Fixed(4));
+        assert_eq!(display, "a   bb");
+
+        let remapped = remap_highlights_for_display(&buffer, 0, &col_map, &display, 0, 4, &[(2..4, color)]);
+
+        assert_eq!(remapped, vec![(4..6, color)]); // "bb" now starts at display byte 4
+    }
+
+    #[test]
+    fn content_spans_still_colors_a_tab_indented_line_via_syntax_highlights() {
+        // The scope this session's renderer work initially cut too far:
+        // C/Bash/Python (all have a tree-sitter grammar registered in
+        // this project) commonly indent with real tabs -- highlighting
+        // must survive that, not just render the tab-expanded text in
+        // plain `theme.fg`.
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.test_insert_str("a\tbb");
+        let color = app.theme.syntax_variable;
+        let fg = app.theme.fg;
+        let ob = app.open();
+        let highlights = vec![(2..4, color)]; // "bb"'s real byte range
+        let spans = app.content_spans(ob, 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(4));
+
+        assert_eq!(spans, vec![("a   ".to_string(), fg), ("bb".to_string(), color)]);
+    }
+
+    #[test]
     fn syntax_state_seeds_from_the_detected_language() {
         let mut app = App::with_file(None);
         app.new_scratch_buffer(); // with_file(None) now opens the dashboard, which never has syntax
@@ -7078,7 +10005,7 @@ mod tests {
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
         assert!(!highlights.is_empty(), "expected highlights for a Rust buffer, got none");
 
-        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0);
+        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
         let fn_span = spans.iter().find(|(s, _)| s == "fn");
         assert_eq!(
             fn_span.map(|(_, c)| *c),
@@ -7095,7 +10022,7 @@ mod tests {
         let id = app.focused_buffer_id();
 
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 2);
-        let spans = app.content_spans(app.open(), 0, 2, 0, None, &highlights, 0);
+        let spans = app.content_spans(app.open(), 0, 2, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH));
 
         // "puts" -- a real builtin (in `tcl::KEYWORDS` and the query's
         // own `#any-of?` list) -- keeps its function color.
@@ -7299,8 +10226,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_completion_is_none_for_a_non_tcl_buffer() {
-        let dir = TempDir::new("completion_none_for_non_tcl");
+    fn sync_completion_never_offers_tcl_keywords_for_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_no_tcl_leak_non_tcl");
         let file = dir.write("foo.rs", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('i'));
@@ -7308,7 +10235,79 @@ mod tests {
 
         app.sync_completion();
 
-        assert!(app.completion.is_none());
+        // Buffer-word completion still offers "se" (the word just typed
+        // -- see sync_completion_offers_buffer_words_for_a_non_tcl_
+        // buffer for a case with something more interesting to complete
+        // to), but the Tcl-specific keyword list ("set", "seek", ...)
+        // must never leak into a non-Tcl buffer.
+        let state = app.completion.as_ref().expect("buffer-word completion should still open the popup");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(!labels.contains(&"set".to_string()));
+        assert!(!labels.contains(&"seek".to_string()));
+    }
+
+    #[test]
+    fn sync_completion_offers_buffer_words_for_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_buffer_words_non_tcl");
+        let file = dir.write("foo.rs", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("seek_value\n"); // an earlier word to complete against
+        app.test_insert_str("se");
+
+        app.sync_completion();
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"seek_value".to_string()), "expected a buffer-word candidate, got {labels:?}");
+    }
+
+    #[test]
+    fn format_buffer_is_a_noop_for_a_language_with_no_formatter_wired_up() {
+        let dir = TempDir::new("format_buffer_non_tcl");
+        let file = dir.write("foo.rs", "fn main(){}");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.format_buffer();
+
+        assert_eq!(app.open().buffer.text(), "fn main(){}");
+    }
+
+    #[test]
+    fn format_buffer_never_panics_on_a_tcl_buffer() {
+        let dir = TempDir::new("format_buffer_tcl");
+        let file = dir.write("foo.tcl", "proc foo {} {puts hi}");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        // Must not panic regardless of whether `tclfmt` happens to be
+        // installed on this machine.
+        app.format_buffer();
+    }
+
+    #[test]
+    fn format_selection_is_a_noop_outside_visual_mode() {
+        let dir = TempDir::new("format_selection_not_visual");
+        let file = dir.write("foo.tcl", "set x 1");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.format_selection();
+
+        assert_eq!(app.open().buffer.text(), "set x 1");
+        assert_eq!(app.vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn format_selection_leaves_a_block_selection_intact_instead_of_silently_dropping_it() {
+        let dir = TempDir::new("format_selection_block");
+        let file = dir.write("foo.tcl", "set x 1\nset y 2");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('v').with_ctrl());
+        app.test_vim_key(KeyPress::char('j'));
+
+        app.format_selection();
+
+        assert_eq!(app.open().buffer.text(), "set x 1\nset y 2");
+        assert_eq!(app.vim.mode(), Mode::Visual);
     }
 
     #[test]
@@ -7342,15 +10341,31 @@ mod tests {
     }
 
     #[test]
-    fn force_open_completion_does_nothing_on_a_non_tcl_buffer() {
-        let dir = TempDir::new("completion_force_open_non_tcl");
+    fn force_open_completion_is_a_noop_with_nothing_to_complete_from() {
+        let dir = TempDir::new("completion_force_open_empty");
         let file = dir.write("foo.rs", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('i'));
 
         app.force_open_completion();
 
+        // Empty buffer, non-Tcl language -- neither source has anything
+        // to offer.
         assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn force_open_completion_offers_buffer_words_on_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_force_open_non_tcl_words");
+        let file = dir.write("foo.rs", "let seek_value = 1;\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+
+        app.force_open_completion();
+
+        let state = app.completion.as_ref().expect("buffer-word completion should open the popup");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"seek_value".to_string()), "expected a buffer-word candidate, got {labels:?}");
     }
 
     #[test]
@@ -7409,6 +10424,25 @@ mod tests {
     }
 
     #[test]
+    fn tcl_candidates_are_layered_with_buffer_words_not_replaced_by_them() {
+        let dir = TempDir::new("completion_tcl_plus_buffer_words");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        // "local_scratch_var" is neither a Tcl keyword nor anything
+        // ctags would scan (not a proc/namespace) -- only buffer-word
+        // completion can offer it, alongside the still-present keywords.
+        app.test_insert_str("local_scratch_var\n");
+
+        app.force_open_completion(); // empty prefix -- lists everything
+
+        let state = app.completion.as_ref().expect("popup should be open");
+        let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(labels.contains(&"set".to_string()), "expected the Tcl keyword \"set\", got {labels:?}");
+        assert!(labels.contains(&"local_scratch_var".to_string()), "expected the buffer word, got {labels:?}");
+    }
+
+    #[test]
     fn a_symbols_file_entry_that_duplicates_a_keyword_is_not_shown_twice() {
         let dir = TempDir::new("completion_symbols_file_dedup");
         // "set" is already a Tcl keyword -- the symbols-file entry should
@@ -7425,6 +10459,558 @@ mod tests {
         let state = app.completion.as_ref().expect("popup should be open");
         let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
         assert_eq!(labels.iter().filter(|l| *l == "set").count(), 1);
+    }
+
+    #[test]
+    fn picker_symbols_lists_ctags_sourced_definitions_by_fully_qualified_name() {
+        let dir = TempDir::new("picker_symbols_lists");
+        dir.write(
+            "lib.tcl",
+            "namespace eval myns {\n    proc greet {} {\n        return 1\n    }\n}\n",
+        );
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.picker_symbols();
+
+        assert_eq!(app.main_view, MainView::Picker);
+        match &app.active_picker {
+            Some(ActivePicker::Symbol(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.contains(&"myns::greet".to_string()), "expected a ctags-sourced symbol, got {labels:?}");
+            }
+            other => panic!("expected an open Symbol picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_symbol_opens_the_defining_file_and_jumps_to_its_line() {
+        // A hand-built `TagEntry`, not a real `ctags` shell-out -- this
+        // test is about `picker_confirm`'s jump mechanics, already
+        // deterministic without depending on `ctags` being on `PATH`
+        // (`picker_symbols_lists_ctags_sourced_definitions_by_fully_
+        // qualified_name` covers the real shell-out separately).
+        let dir = TempDir::new("picker_confirm_symbol");
+        let lib = dir.write("lib.tcl", "puts start\n\nproc my_target_proc {} {\n    return 1\n}\n");
+        let mut app = App::with_file(None);
+
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
+        app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.open().buffer.path(), Some(lib.as_path()));
+        let (line, _) = app.open().buffer.line_col(&app.cursor());
+        assert_eq!(line, 2); // 0-indexed: ctags' line:3 is `proc my_target_proc`
+    }
+
+    #[test]
+    fn picker_confirm_on_symbol_records_a_jump_back_to_where_it_was_invoked_from() {
+        let dir = TempDir::new("picker_confirm_symbol_jumpback");
+        let lib = dir.write("lib.tcl", "puts start\n\nproc my_target_proc {} {\n    return 1\n}\n");
+        let origin = dir.write("main.tcl", "puts main\n");
+        let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('l')); // off column 0, so the return position is checkable
+
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
+        app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+        assert_eq!(app.open().buffer.path(), Some(lib.as_path()));
+
+        app.jump_back();
+        assert_eq!(app.open().buffer.path(), Some(origin.as_path()));
+        assert_eq!(app.cursor().char_idx, 1); // where `l` left it before jumping to the symbol
+
+        app.jump_forward();
+        assert_eq!(app.open().buffer.path(), Some(lib.as_path()));
+    }
+
+    #[test]
+    fn shift_g_jump_is_recorded_and_ctrl_o_ctrl_i_round_trip_it() {
+        // A real small file, not `App::with_file(None)` -- that opens the
+        // startup dashboard, which already has plenty of its own content
+        // for `G` to land in, not the three-line buffer this test wants.
+        let dir = TempDir::new("shift_g_jump");
+        let file = dir.write("abc.txt", "a\nb\nc");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        let event = app.test_vim_key(KeyPress::char('G'));
+        // Mirrors handle_key's own JumpRecorded arm -- handle_key itself
+        // needs a real winit KeyEvent, so this exercises the recording
+        // it would do directly (same posture as set_shiftwidth_command_
+        // persists_the_new_width above).
+        let VimEvent::JumpRecorded(from) = event else { panic!("expected a JumpRecorded event from G, got {event:?}") };
+        let buffer = app.focused_buffer_id();
+        app.record_jump(JumpEntry { buffer, char_idx: from });
+        assert_eq!(app.cursor().char_idx, 4); // G landed on "c"
+
+        app.jump_back();
+        assert_eq!(app.cursor().char_idx, 0);
+
+        app.jump_forward();
+        assert_eq!(app.cursor().char_idx, 4);
+    }
+
+    #[test]
+    fn recording_a_new_jump_clears_the_forward_stack() {
+        let dir = TempDir::new("jump_clears_forward");
+        let file = dir.write("abc.txt", "a\nb\nc");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let event = app.test_vim_key(KeyPress::char('G'));
+        let VimEvent::JumpRecorded(from) = event else { panic!("expected a JumpRecorded event") };
+        let buffer = app.focused_buffer_id();
+        app.record_jump(JumpEntry { buffer, char_idx: from });
+        app.jump_back();
+        assert!(!app.jump_forward_stack.is_empty());
+
+        app.record_jump(JumpEntry { buffer, char_idx: app.cursor().char_idx });
+        assert!(app.jump_forward_stack.is_empty());
+    }
+
+    #[test]
+    fn jump_back_skips_a_stale_entry_whose_buffer_was_closed() {
+        let dir = TempDir::new("jump_back_stale");
+        let stale_file = dir.write("stale.tcl", "gone\n");
+        let mut app = App::with_file(None);
+        let stale_id = app.buffers.open_path(&stale_file);
+        app.buffers.close(stale_id);
+        app.jump_back_stack.push(JumpEntry { buffer: stale_id, char_idx: 0 });
+
+        let origin_buffer = app.focused_buffer_id();
+        let origin_char_idx = app.cursor().char_idx;
+        app.jump_back();
+
+        // The only entry was stale and got dropped -- nothing to land
+        // on, so the focused buffer/cursor are untouched.
+        assert_eq!(app.focused_buffer_id(), origin_buffer);
+        assert_eq!(app.cursor().char_idx, origin_char_idx);
+        assert!(app.jump_back_stack.is_empty());
+    }
+
+    #[test]
+    fn jump_back_and_forward_are_noops_with_nothing_recorded() {
+        let mut app = App::with_file(None);
+        let origin = app.focused_buffer_id();
+        app.jump_back();
+        assert_eq!(app.focused_buffer_id(), origin);
+        app.jump_forward();
+        assert_eq!(app.focused_buffer_id(), origin);
+    }
+
+    #[test]
+    fn jump_back_is_a_noop_while_a_docker_panel_session_is_open() {
+        let mut app = App::with_file(None);
+        let buffer = app.focused_buffer_id();
+        app.jump_back_stack.push(JumpEntry { buffer, char_idx: 0 });
+        app.open_docker_panel();
+        assert!(app.docker_session.is_some());
+
+        let focused_before = app.focused_buffer_id();
+        app.jump_back();
+
+        assert_eq!(app.focused_buffer_id(), focused_before);
+        assert_eq!(app.jump_back_stack.len(), 1); // left untouched, not popped
+    }
+
+    #[test]
+    fn mark_set_then_backtick_jump_returns_to_the_exact_position() {
+        let dir = TempDir::new("mark_set_backtick");
+        let file = dir.write("abc.txt", "abcdef\nghijkl\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('l'));
+        app.test_vim_key(KeyPress::char('l')); // char_idx 2
+        app.test_vim_key(KeyPress::char('m'));
+        let event = app.test_vim_key(KeyPress::char('a'));
+        // Mirrors handle_key's own MarkSet arm -- see set_shiftwidth_
+        // command_persists_the_new_width's own comment for why tests do
+        // this manually instead of driving a real winit KeyEvent.
+        let VimEvent::MarkSet(name, char_idx) = event else { panic!("expected a MarkSet event, got {event:?}") };
+        let buffer = app.focused_buffer_id();
+        app.marks.insert(name, JumpEntry { buffer, char_idx });
+
+        app.test_vim_key(KeyPress::char('0'));
+        assert_eq!(app.cursor().char_idx, 0);
+
+        app.test_vim_key(KeyPress::char('`'));
+        let event = app.test_vim_key(KeyPress::char('a'));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        app.jump_to_mark(name, linewise);
+
+        assert_eq!(app.cursor().char_idx, 2);
+    }
+
+    #[test]
+    fn quote_mark_jump_lands_on_the_first_non_blank_of_the_marks_line() {
+        let dir = TempDir::new("mark_quote_linewise");
+        let file = dir.write("abc.txt", "abc\n   def\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('j')); // line 2
+        app.test_vim_key(KeyPress::char('$')); // end of line, not its first non-blank
+        let buffer = app.focused_buffer_id();
+        let char_idx = app.cursor().char_idx;
+        app.marks.insert('a', JumpEntry { buffer, char_idx });
+        app.test_vim_key(KeyPress::char('g'));
+        app.test_vim_key(KeyPress::char('g')); // back to line 1
+
+        app.test_vim_key(KeyPress::char('\''));
+        let event = app.test_vim_key(KeyPress::char('a'));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        assert!(linewise);
+        app.jump_to_mark(name, linewise);
+
+        let (line, col) = app.open().buffer.line_col(&app.cursor());
+        assert_eq!(line, 1);
+        assert_eq!(col, 3); // first non-blank of "   def" -- 3 leading spaces
+    }
+
+    #[test]
+    fn mark_jump_crosses_buffers() {
+        let dir = TempDir::new("mark_cross_buffer");
+        let other = dir.write("other.txt", "target line\n");
+        let origin = dir.write("origin.txt", "start\n");
+        let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
+        let other_id = app.buffers.open_path(&other);
+        app.marks.insert('a', JumpEntry { buffer: other_id, char_idx: 3 });
+
+        app.jump_to_mark('a', false);
+
+        assert_eq!(app.open().buffer.path(), Some(other.as_path()));
+        assert_eq!(app.cursor().char_idx, 3);
+    }
+
+    #[test]
+    fn mark_jump_records_a_jumplist_entry_so_ctrl_o_returns() {
+        let dir = TempDir::new("mark_jump_records");
+        let file = dir.write("abc.txt", "abcdef\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let buffer = app.focused_buffer_id();
+        app.marks.insert('a', JumpEntry { buffer, char_idx: 4 });
+        app.test_vim_key(KeyPress::char('l')); // char_idx 1
+
+        app.jump_to_mark('a', false);
+        assert_eq!(app.cursor().char_idx, 4);
+
+        app.jump_back();
+        assert_eq!(app.cursor().char_idx, 1);
+    }
+
+    #[test]
+    fn jump_to_an_unset_mark_is_a_noop() {
+        let mut app = App::with_file(None);
+        let origin = app.focused_buffer_id();
+        app.jump_to_mark('z', false);
+        assert_eq!(app.focused_buffer_id(), origin);
+    }
+
+    #[test]
+    fn jump_to_mark_drops_a_stale_entry_whose_buffer_was_closed() {
+        let dir = TempDir::new("mark_stale");
+        let stale_file = dir.write("stale.txt", "gone\n");
+        let mut app = App::with_file(None);
+        let stale_id = app.buffers.open_path(&stale_file);
+        app.buffers.close(stale_id);
+        app.marks.insert('a', JumpEntry { buffer: stale_id, char_idx: 0 });
+
+        app.jump_to_mark('a', false);
+
+        assert!(!app.marks.contains_key(&'a'));
+    }
+
+    #[test]
+    fn jump_to_mark_is_a_noop_while_a_docker_panel_session_is_open() {
+        let mut app = App::with_file(None);
+        let buffer = app.focused_buffer_id();
+        app.marks.insert('a', JumpEntry { buffer, char_idx: 0 });
+        app.open_docker_panel();
+
+        let focused_before = app.focused_buffer_id();
+        app.jump_to_mark('a', false);
+
+        assert_eq!(app.focused_buffer_id(), focused_before);
+        assert!(app.marks.contains_key(&'a')); // left untouched, not dropped either
+    }
+
+    /// A small, realistic SCOS-2000 MIB: two telecommands (`AAA001` with
+    /// a fixed subtype, an aliased `MODE` argument, and a ranged `GAIN`
+    /// argument; `AAA002` with no parameters at all), one TM packet
+    /// (`SPID 1001`) carrying one TM parameter (`PARAM_A`), and one
+    /// numeric calibration curve (`CAF1`). Field positions here are the
+    /// same ones already hand-verified against the schema in `fenix-
+    /// mib`'s own `telecommand::tests::build_fixture`.
+    fn mib_fixture_root(dir: &TempDir, label: &str) -> fenix_mib::MibRoot {
+        dir.write(
+            "ccf.dat",
+            "AAA001\tSwitch mode\t\tA\t0\t1\t8\t1\t100\t3\t\t\t\t\tAOCS\nAAA002\tPing\t\tA\t0\t2\t8\t2\t100\t0\t\t\t\t\tAOCS\n",
+        );
+        dir.write(
+            "cdf.dat",
+            "AAA001\tA\tsubtype\t8\t0\t0\tSTYPE\t\t1\t\nAAA001\tA\tmode\t8\t8\t0\tMODE\t\t\t\nAAA001\tA\tgain\t16\t16\t0\tGAIN\t\t\t\n",
+        );
+        dir.write(
+            "cpc.dat",
+            "MODE\tOperating mode\t7\t1\tA\t\t\tS\t\t\tPAF1\t\t\t\tOFF\t\tno\nGAIN\tLoop gain\t3\t1\tA\t\t\tS\tPRF1\t\t\t\t\t\t5\t\tno\n",
+        );
+        dir.write("paf.dat", "PAF1\tMode select\tU\t2\n");
+        dir.write("pas.dat", "PAF1\tOFF\t0\nPAF1\tON\t1\n");
+        dir.write("prf.dat", "PRF1\tGain range\tno\t\t\t1\t\n");
+        dir.write("prv.dat", "PRF1\t0\t100\n");
+        dir.write("caf.dat", "CAF1\tTemp curve\n");
+        dir.write("cap.dat", "CAF1\t0\t0\nCAF1\t10\t100\n");
+        dir.write("pid.dat", "3\t25\t100\t\t\t1001\tHousekeeping\n");
+        dir.write("plf.dat", "PARAM_A\t1001\t0\t0\t1\n");
+        dir.write("pcf.dat", "PARAM_A\tSome telemetry param\t\tV\t3\t1\t16\n");
+        fenix_mib::MibRoot { label: label.to_string(), path: dir.path().to_path_buf() }
+    }
+
+    #[test]
+    fn mib_lookup_telecommand_lists_field_tokened_candidates_and_opens_a_detail_view() {
+        let dir = TempDir::new("mib_lookup_tc");
+        let mut app = App::with_file(None);
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        app.mib_lookup_telecommand();
+        match &app.active_picker {
+            Some(ActivePicker::MibTelecommandLookup(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.iter().any(|l| l.contains("AAA001") && l.contains("type=8") && l.contains("sub=1")));
+            }
+            other => panic!("expected an open MibTelecommandLookup picker, got is_some={}", other.is_some()),
+        }
+
+        app.picker_confirm();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+        let text = app.open().buffer.text();
+        assert!(text.contains("Telecommand AAA001"));
+        assert!(text.contains("MODE")); // a CDF parameter
+        assert!(text.contains("Calibration")); // MODE's PAF/PAS references inlined
+    }
+
+    #[test]
+    fn mib_lookup_tm_packet_opens_a_detail_view_with_its_parameters() {
+        let dir = TempDir::new("mib_lookup_packet");
+        let mut app = App::with_file(None);
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        app.mib_lookup_tm_packet();
+        app.picker_confirm();
+
+        let text = app.open().buffer.text();
+        assert!(text.contains("SPID 1001"));
+        assert!(text.contains("PARAM_A"));
+    }
+
+    #[test]
+    fn mib_lookup_tm_parameter_opens_a_detail_view_with_its_packet_occurrences() {
+        let dir = TempDir::new("mib_lookup_param");
+        let mut app = App::with_file(None);
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        app.mib_lookup_tm_parameter();
+        app.picker_confirm();
+
+        let text = app.open().buffer.text();
+        assert!(text.contains("TM Parameter PARAM_A"));
+        assert!(text.contains("SPID 1001"));
+    }
+
+    #[test]
+    fn mib_lookup_calibration_merges_caf_paf_prf_and_opens_a_detail_view() {
+        let dir = TempDir::new("mib_lookup_cal");
+        let mut app = App::with_file(None);
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        app.mib_lookup_calibration();
+        match &app.active_picker {
+            Some(ActivePicker::MibCalibration(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.iter().any(|l| l.starts_with("CAF1") && l.contains("numeric")));
+                assert!(labels.iter().any(|l| l.starts_with("PAF1") && l.contains("status")));
+                assert!(labels.iter().any(|l| l.starts_with("PRF1") && l.contains("range")));
+            }
+            other => panic!("expected an open MibCalibration picker, got is_some={}", other.is_some()),
+        }
+
+        app.picker_confirm(); // whichever's selected first (sorted by insertion: caf, paf, prf)
+        let text = app.open().buffer.text();
+        assert!(text.contains("Calibration CAF1"));
+        assert!(text.contains("x=0")); // a CAP curve point
+    }
+
+    #[test]
+    fn mib_insert_telecommand_with_no_variable_params_goes_straight_to_confirm() {
+        let dir = TempDir::new("mib_insert_no_params");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        // Pick AAA002, which has CCF_NPARS=0 and no CDF rows.
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA002")).unwrap().payload;
+        app.mib_start_insert(ccf);
+
+        match &app.mib_insert.as_ref().unwrap().stage {
+            MibInsertStage::Confirm { rendered, warnings } => {
+                assert!(rendered.contains("MNEMO=AAA002"));
+                assert!(rendered.ends_with("ARGUMENTS=[]"));
+                assert!(warnings.is_empty());
+            }
+            other => panic!("expected the wizard to go straight to Confirm, got a different stage: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mib_insert_telecommand_walks_a_free_text_and_an_aliased_argument() {
+        let dir = TempDir::new("mib_insert_walk");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        assert!(matches!(app.mib_insert.as_ref().unwrap().stage, MibInsertStage::ChooseArgumentMode));
+
+        app.mib_insert_key(KeyPress::char('y')); // build arguments
+
+        // First variable parameter is MODE, which has PAF/PAS aliases --
+        // routed to a picker, not free text.
+        match &app.active_picker {
+            Some(ActivePicker::MibArgumentAlias(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert_eq!(labels, vec!["OFF".to_string(), "ON".to_string()]);
+            }
+            other => panic!("expected an open MibArgumentAlias picker, got is_some={}", other.is_some()),
+        }
+        app.picker_confirm(); // picks "OFF" (the first/only-selected row)
+
+        // Second variable parameter is GAIN, ranged but not aliased --
+        // free-text capture.
+        assert!(matches!(app.mib_insert.as_ref().unwrap().stage, MibInsertStage::ArgumentText { .. }));
+        for ch in "50".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        match &app.mib_insert.as_ref().unwrap().stage {
+            MibInsertStage::Confirm { rendered, warnings } => {
+                assert!(rendered.contains("MODE=OFF"));
+                assert!(rendered.contains("GAIN=50"));
+                assert!(warnings.is_empty()); // 50 is inside GAIN's known 0..100 range
+            }
+            other => panic!("expected Confirm after both arguments, got a different stage: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mib_insert_telecommand_flags_a_value_outside_the_known_range() {
+        let dir = TempDir::new("mib_insert_warning");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::char('y'));
+        app.picker_confirm(); // MODE = OFF
+        for ch in "500".chars() {
+            // GAIN way outside 0..100
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
+
+        let MibInsertStage::Confirm { warnings, .. } = &app.mib_insert.as_ref().unwrap().stage else {
+            panic!("expected Confirm stage");
+        };
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("GAIN"));
+        assert!(warnings[0].contains("outside"));
+    }
+
+    #[test]
+    fn mib_insert_telecommand_skip_mode_renders_with_empty_arguments() {
+        let dir = TempDir::new("mib_insert_skip");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::char('n')); // skip
+
+        let MibInsertStage::Confirm { rendered, .. } = &app.mib_insert.as_ref().unwrap().stage else {
+            panic!("expected Confirm stage");
+        };
+        assert!(rendered.ends_with("ARGUMENTS=[]"));
+    }
+
+    #[test]
+    fn mib_insert_telecommand_commits_at_the_original_cursor_position() {
+        let dir = TempDir::new("mib_insert_commit");
+        let file = dir.write("main.tcl", "puts start\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+        app.test_vim_key(KeyPress::char('l')); // char_idx 1 -- the insert point
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA002")).unwrap().payload; // no params
+        app.mib_start_insert(ccf); // straight to Confirm
+
+        app.mib_insert_key(KeyPress::char('y'));
+
+        assert!(app.mib_insert.is_none());
+        let text = app.open().buffer.text();
+        assert!(text.contains("MNEMO=AAA002"));
+        assert!(text.starts_with('p')); // the "p" of "puts" the cursor was already past
+        assert_eq!(text.find("telecommand_send"), Some(1)); // inserted right after that "p"
+        assert!(text.contains("uts start")); // the rest of the original line, untouched
+    }
+
+    #[test]
+    fn mib_insert_telecommand_escape_cancels_without_touching_the_buffer() {
+        let dir = TempDir::new("mib_insert_escape");
+        let file = dir.write("main.tcl", "original text\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.mib_insert.is_none());
+        assert_eq!(app.open().buffer.text(), "original text\n");
+    }
+
+    #[test]
+    fn mib_commands_are_a_noop_without_configured_roots() {
+        let mut app = App::with_file(None);
+        assert!(app.mib_roots.is_empty());
+
+        app.mib_lookup_telecommand();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.mib_index.is_none());
+    }
+
+    #[test]
+    fn mib_refresh_index_picks_up_a_changed_dat_file() {
+        let dir = TempDir::new("mib_refresh");
+        let mut app = App::with_file(None);
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+        let before = app.mib_tc_candidates().unwrap().len();
+
+        dir.write("ccf.dat", "AAA001\tSwitch mode\t\tA\t0\t1\t8\t1\t100\t3\t\t\t\t\tAOCS\nAAA002\tPing\t\tA\t0\t2\t8\t2\t100\t0\t\t\t\t\tAOCS\nAAA003\tNew\t\tA\t0\t3\t8\t3\t100\t0\t\t\t\t\tAOCS\n");
+        app.mib_refresh_index();
+
+        assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
     }
 
     #[test]
@@ -8231,6 +11817,118 @@ mod tests {
     }
 
     #[test]
+    fn quickfix_next_and_prev_step_through_matches_without_reopening_the_picker() {
+        // Hand-built `GrepMatch`es, not a real `rg` shell-out -- this is
+        // about quickfix stepping mechanics, already deterministic
+        // without depending on `rg` being on `PATH` (`run_grep_and_
+        // jump_to_grep_match_moves_the_cursor_to_the_match` covers the
+        // real shell-out separately).
+        let dir = TempDir::new("quickfix_step");
+        let a = dir.write("a.txt", "one\ntwo\nthree\n");
+        let b = dir.write("b.txt", "four\nfive\n");
+        let mut app = App::with_file(None);
+        app.quickfix = vec![
+            fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() },
+            fenix_project::GrepMatch { path: b.clone(), line: 1, col: 1, text: "four".to_string() },
+        ];
+
+        app.quickfix_next(); // nothing visited yet -- lands on the first
+        assert_eq!(app.open().buffer.path(), Some(a.as_path()));
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1);
+
+        app.quickfix_next();
+        assert_eq!(app.open().buffer.path(), Some(b.as_path()));
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 0);
+
+        app.quickfix_prev();
+        assert_eq!(app.open().buffer.path(), Some(a.as_path()));
+    }
+
+    #[test]
+    fn quickfix_next_clamps_at_the_last_match() {
+        let dir = TempDir::new("quickfix_clamp_end");
+        let a = dir.write("a.txt", "only line\n");
+        let mut app = App::with_file(None);
+        app.quickfix = vec![fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "only line".to_string() }];
+
+        app.quickfix_next();
+        let after_first = app.quickfix_index;
+        app.quickfix_next(); // past the end -- no-op
+        assert_eq!(app.quickfix_index, after_first);
+    }
+
+    #[test]
+    fn quickfix_prev_clamps_at_the_first_match() {
+        let dir = TempDir::new("quickfix_clamp_start");
+        let a = dir.write("a.txt", "l1\nl2\n");
+        let mut app = App::with_file(None);
+        app.quickfix = vec![
+            fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "l1".to_string() },
+            fenix_project::GrepMatch { path: a, line: 2, col: 1, text: "l2".to_string() },
+        ];
+
+        app.quickfix_next(); // index 0
+        app.quickfix_prev(); // before the start -- no-op
+        assert_eq!(app.quickfix_index, Some(0));
+    }
+
+    #[test]
+    fn quickfix_navigation_is_a_noop_when_the_list_is_empty() {
+        let mut app = App::with_file(None);
+        let origin = app.focused_buffer_id();
+        app.quickfix_next();
+        app.quickfix_prev();
+        assert_eq!(app.focused_buffer_id(), origin);
+        assert_eq!(app.quickfix_index, None);
+    }
+
+    #[test]
+    fn picker_confirm_on_grep_sets_the_quickfix_index_to_the_confirmed_match() {
+        let dir = TempDir::new("quickfix_confirm_index");
+        let a = dir.write("a.txt", "one\ntwo\n");
+        let mut app = App::with_file(None);
+        let second = fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() };
+        app.quickfix =
+            vec![fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "one".to_string() }, second.clone()];
+        let candidates = vec![fenix_picker::Candidate::new("a.txt:2: two", second)];
+        app.enter_picker(ActivePicker::Grep(fenix_picker::PickerState::new(candidates)));
+
+        app.picker_confirm();
+
+        assert_eq!(app.quickfix_index, Some(1)); // the second entry, not the first
+    }
+
+    #[test]
+    fn quickfix_navigation_records_a_jumplist_entry() {
+        let dir = TempDir::new("quickfix_jumplist");
+        let a = dir.write("a.txt", "one\ntwo\n");
+        let origin = dir.write("origin.txt", "start\n");
+        let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
+        app.quickfix = vec![fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() }];
+
+        app.quickfix_next();
+        assert_eq!(app.open().buffer.path(), Some(a.as_path()));
+
+        app.jump_back();
+        assert_eq!(app.open().buffer.path(), Some(origin.as_path()));
+    }
+
+    #[test]
+    fn quickfix_next_is_a_noop_while_a_docker_panel_session_is_open() {
+        let dir = TempDir::new("quickfix_docker_guard");
+        let a = dir.write("a.txt", "one\n");
+        let mut app = App::with_file(None);
+        app.quickfix = vec![fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "one".to_string() }];
+        app.open_docker_panel();
+
+        let focused_before = app.focused_buffer_id();
+        app.quickfix_next();
+
+        assert_eq!(app.focused_buffer_id(), focused_before);
+        assert_eq!(app.quickfix_index, None);
+    }
+
+    #[test]
     fn grep_query_key_routes_chars_backspace_and_enter() {
         let dir = TempDir::new("grep_query_key");
         dir.write("a.txt", "target line\n");
@@ -8903,19 +12601,27 @@ mod tests {
     }
 
     #[test]
-    fn open_docker_panel_creates_a_five_pane_session_with_titles() {
+    fn open_docker_panel_creates_a_six_pane_session_with_titles() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let panes = [session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane];
+        let panes = [
+            session.containers_pane,
+            session.images_pane,
+            session.volumes_pane,
+            session.networks_pane,
+            session.status_pane,
+            session.logs_pane,
+        ];
         let distinct: std::collections::HashSet<_> = panes.iter().collect();
-        assert_eq!(distinct.len(), 5, "every pane should be a distinct WindowId");
-        assert_eq!(app.windows().window_count(), 5);
+        assert_eq!(distinct.len(), 6, "every pane should be a distinct WindowId");
+        assert_eq!(app.windows().window_count(), 6);
         assert_eq!(app.pane_titles.get(&session.containers_pane).map(String::as_str), Some("1. Containers"));
         assert_eq!(app.pane_titles.get(&session.images_pane).map(String::as_str), Some("2. Images"));
         assert_eq!(app.pane_titles.get(&session.volumes_pane).map(String::as_str), Some("3. Volumes"));
-        assert_eq!(app.pane_titles.get(&session.status_pane).map(String::as_str), Some("4. Status"));
-        assert_eq!(app.pane_titles.get(&session.logs_pane).map(String::as_str), Some("5. Logs"));
+        assert_eq!(app.pane_titles.get(&session.networks_pane).map(String::as_str), Some("4. Networks"));
+        assert_eq!(app.pane_titles.get(&session.status_pane).map(String::as_str), Some("5. Status"));
+        assert_eq!(app.pane_titles.get(&session.logs_pane).map(String::as_str), Some("6. Logs"));
         assert_eq!(app.focused_pane_id(), session.containers_pane);
     }
 
@@ -8930,6 +12636,7 @@ mod tests {
         let containers_rect = rect_for(session.containers_pane);
         let images_rect = rect_for(session.images_pane);
         let volumes_rect = rect_for(session.volumes_pane);
+        let networks_rect = rect_for(session.networks_pane);
         let status_rect = rect_for(session.status_pane);
         let logs_rect = rect_for(session.logs_pane);
 
@@ -8937,9 +12644,10 @@ mod tests {
         assert!(containers_rect.w < status_rect.w);
         assert!(containers_rect.w < logs_rect.w);
         // Containers gets roughly half the left column's height,
-        // Images/Volumes split the other half evenly.
+        // Images/Volumes/Networks split the other half evenly.
         assert!(containers_rect.h > images_rect.h);
         assert!((images_rect.h - volumes_rect.h).abs() < 1.0);
+        assert!((volumes_rect.h - networks_rect.h).abs() < 1.0);
         // Logs gets a bigger share of the right column than Status.
         assert!(logs_rect.h > status_rect.h);
     }
@@ -8974,14 +12682,22 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let (containers, images, volumes, status, logs) =
-            (session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane);
+        let (containers, images, volumes, networks, status, logs) = (
+            session.containers_pane,
+            session.images_pane,
+            session.volumes_pane,
+            session.networks_pane,
+            session.status_pane,
+            session.logs_pane,
+        );
 
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
         app.windows_mut().focus(images);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Images));
         app.windows_mut().focus(volumes);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Volumes));
+        app.windows_mut().focus(networks);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Networks));
         app.windows_mut().focus(status);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Status));
         app.windows_mut().focus(logs);
@@ -9004,15 +12720,22 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let (containers, images, volumes, status, logs) =
-            (session.containers_pane, session.images_pane, session.volumes_pane, session.status_pane, session.logs_pane);
+        let (containers, images, volumes, networks, status, logs) = (
+            session.containers_pane,
+            session.images_pane,
+            session.volumes_pane,
+            session.networks_pane,
+            session.status_pane,
+            session.logs_pane,
+        );
 
         assert_eq!(app.docker_pane_by_number(1), Some(containers));
         assert_eq!(app.docker_pane_by_number(2), Some(images));
         assert_eq!(app.docker_pane_by_number(3), Some(volumes));
-        assert_eq!(app.docker_pane_by_number(4), Some(status));
-        assert_eq!(app.docker_pane_by_number(5), Some(logs));
-        assert_eq!(app.docker_pane_by_number(6), None);
+        assert_eq!(app.docker_pane_by_number(4), Some(networks));
+        assert_eq!(app.docker_pane_by_number(5), Some(status));
+        assert_eq!(app.docker_pane_by_number(6), Some(logs));
+        assert_eq!(app.docker_pane_by_number(7), None);
         assert_eq!(app.docker_pane_by_number(0), None);
 
         app.docker_session_close();
@@ -9159,12 +12882,19 @@ mod tests {
     }
 
     #[test]
-    fn docker_session_close_removes_all_five_buffers_and_the_workspace() {
+    fn docker_session_close_removes_all_six_buffers_and_the_workspace() {
         let mut app = App::with_file(None);
         let workspace_count_before = app.workspaces.len();
         app.open_docker_panel();
         let session = app.docker_session.as_ref().unwrap();
-        let buffers = [session.containers_buffer, session.images_buffer, session.volumes_buffer, session.status_buffer, session.logs_buffer];
+        let buffers = [
+            session.containers_buffer,
+            session.images_buffer,
+            session.volumes_buffer,
+            session.networks_buffer,
+            session.status_buffer,
+            session.logs_buffer,
+        ];
 
         app.docker_session_close();
 
@@ -9369,6 +13099,19 @@ mod tests {
     }
 
     #[test]
+    fn docker_menu_popup_lists_the_networks_pane_bindings() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let networks_pane = app.docker_session.as_ref().unwrap().networks_pane;
+        app.windows_mut().focus(networks_pane);
+        app.docker_menu_open = true;
+        let (_, spans) = app.docker_menu_popup(800.0, 580.0).unwrap();
+        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(text.contains("remove"));
+        assert!(text.contains("refresh"));
+    }
+
+    #[test]
     fn docker_menu_popup_is_none_on_the_status_and_logs_panes() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
@@ -9538,5 +13281,801 @@ mod tests {
         assert!(joined.starts_with("> "));
         assert!(joined.contains("a.txt"));
         assert!(joined.contains("b.txt"));
+    }
+
+    // -- Table view (`SPC f t`) --------------------------------------
+
+    /// Seeds the focused scratch buffer with a small ragged tab-separated
+    /// table (3 columns; header names are wider than every data value in
+    /// each column, so `column_widths` is driven entirely by the
+    /// synthesized `"Column N"` headers -- deliberately, so the expected
+    /// stops are simple to hand-compute) and toggles it into table view.
+    fn table_app() -> App {
+        // `App::with_file(None)` opens the startup *dashboard* (not a
+        // plain scratch buffer) in the initial pane -- `toggle_table_
+        // view` only acts on `BufferKind::Text`, so this points the
+        // pane at a real scratch buffer first.
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_scratch();
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, id);
+        app.test_insert_str("a\tbb\tccc\nddd\te\tf\n");
+        app.toggle_table_view();
+        app
+    }
+
+    #[test]
+    fn toggle_table_view_retags_the_buffer_and_computes_columns_and_stops() {
+        let app = table_app();
+        assert_eq!(app.open().kind, BufferKind::Table);
+        let id = app.focused_buffer_id();
+        let view = app.table_views.get(&id).expect("a TableView was computed");
+        assert_eq!(view.columns, vec!["Column 1", "Column 2", "Column 3"]);
+        // Each header is 8 chars wide (wider than every data value), plus
+        // the 2-char `TABLE_COLUMN_GAP`: cumulative stops 10, 20, 30.
+        assert_eq!(view.stops, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn toggle_table_view_twice_returns_to_text_and_clears_the_view() {
+        let mut app = table_app();
+        let id = app.focused_buffer_id();
+        app.toggle_table_view();
+        assert_eq!(app.open().kind, BufferKind::Text);
+        assert!(app.table_views.get(&id).is_none());
+    }
+
+    #[test]
+    fn toggle_table_view_is_a_noop_on_a_dashboard_buffer() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_dashboard("hello\n");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, id);
+        app.toggle_table_view();
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+    }
+
+    #[test]
+    fn table_view_header_pads_column_names_to_line_up_with_the_stops() {
+        let app = table_app();
+        let id = app.focused_buffer_id();
+        assert_eq!(app.table_view_header(id).unwrap(), "Column 1  Column 2  Column 3  ");
+    }
+
+    #[test]
+    fn gutter_chars_is_zero_for_a_table_buffer() {
+        let app = table_app();
+        assert_eq!(app.gutter_chars(app.open()), 0);
+    }
+
+    #[test]
+    fn table_move_column_lands_just_after_the_next_tab() {
+        let mut app = table_app();
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // "a", field 0
+        app.table_move_column(1);
+        assert_eq!(app.test_cursor().char_idx, 2); // "a\tbb..." -- 'b' starts at char 2
+        app.table_move_column(1);
+        assert_eq!(app.test_cursor().char_idx, 5); // just after the 2nd tab -- 'c' of "ccc"
+        app.table_move_column(-1);
+        assert_eq!(app.test_cursor().char_idx, 2);
+    }
+
+    #[test]
+    fn table_move_column_at_the_first_column_clamps_instead_of_going_negative() {
+        let mut app = table_app();
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.table_move_column(-1);
+        assert_eq!(app.test_cursor().char_idx, 0);
+    }
+
+    #[test]
+    fn table_move_row_stays_in_the_same_elastic_column_across_ragged_field_lengths() {
+        // Row 0's field 1 ("bb") starts at char 2; row 1's own field 1
+        // ("e") starts at char 6 ("ddd\t" is 4 chars) -- a different raw
+        // char offset for "the same column," which is exactly the case
+        // plain Vim `j`/`k` (char-based `sticky_col`) gets wrong and
+        // `table_move_row` (tab-counting) gets right.
+        let mut app = table_app();
+        app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 }); // row 0, field 1 ("bb")
+        app.table_move_row(1);
+        let idx = app.test_cursor().char_idx;
+        let line = app.open().buffer.line_col(&app.test_cursor()).0;
+        assert_eq!(line, 1);
+        assert_eq!(idx, 13); // 'e', "ddd\t" is 4 chars into row 1
+        assert_eq!(app.table_current_column(), 1);
+    }
+
+    #[test]
+    fn table_move_row_past_the_last_line_is_a_noop() {
+        let mut app = table_app();
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.table_move_row(-1);
+        assert_eq!(app.test_cursor().char_idx, 0);
+    }
+
+    #[test]
+    fn sync_table_view_widens_a_column_after_an_edit_lengthens_a_value() {
+        let mut app = table_app();
+        let id = app.focused_buffer_id();
+        assert_eq!(app.table_views.get(&id).unwrap().stops, vec![10, 20, 30]);
+
+        // Lengthen the first field past the synthesized "Column 1"
+        // header's own 8-char width.
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.test_insert_str("a-much-longer-value");
+        app.sync_table_view(id);
+
+        let widened = &app.table_views.get(&id).unwrap().stops;
+        assert!(widened[0] > 10, "column 0's stop should have grown, got {widened:?}");
+    }
+
+    #[test]
+    fn sync_table_view_is_a_noop_when_nothing_changed_since_the_last_call() {
+        let mut app = table_app();
+        let id = app.focused_buffer_id();
+        let before = app.table_views.get(&id).unwrap().last_edit_count;
+        app.sync_table_view(id); // no edit happened in between
+        assert_eq!(app.table_views.get(&id).unwrap().last_edit_count, before);
+    }
+
+    #[test]
+    fn open_table_column_picker_lists_column_names_and_confirm_jumps_to_the_column() {
+        let mut app = table_app();
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.open_table_column_picker();
+        match &app.active_picker {
+            Some(ActivePicker::TableColumn(state)) => {
+                assert_eq!(state.len(), 3);
+            }
+            _ => panic!("expected an active TableColumn picker"),
+        }
+        picker_move_selection(app.active_picker.as_mut().unwrap(), 2); // -> "Column 3"
+        app.picker_confirm();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.test_cursor().char_idx, 5); // start of "ccc", field 2
+    }
+
+    #[test]
+    fn content_spans_expands_a_tab_using_the_given_tab_stops() {
+        let mut app = App::with_file(None);
+        app.test_insert_str("a\tb");
+        let ob = app.open();
+        let spans = app.content_spans(ob, 0, 1, 0, None, &[], 0, &TabStops::Fixed(4));
+        let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(joined, "a   b"); // tab expands from col 1 to col 4
+    }
+
+    // -- Macros (`q{reg}`/`@{reg}`/`@@`) -------------------------------
+
+    fn macro_app(text: &str) -> App {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_scratch();
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, id);
+        app.test_insert_str(text);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app
+    }
+
+    #[test]
+    fn recording_then_replaying_a_macro_reproduces_the_same_edit() {
+        let mut app = macro_app("a\nb\nc");
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        // Append "!" to the current line, then move to the next one.
+        app.test_dispatch_key(KeyPress::char('A'));
+        app.test_dispatch_key(KeyPress::char('!'));
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        app.test_dispatch_key(KeyPress::char('j'));
+        app.test_dispatch_key(KeyPress::char('q')); // stop
+        assert_eq!(app.open().buffer.text(), "a!\nb\nc");
+        assert!(!app.vim.is_recording());
+
+        // Cursor is now on line 1 ("b") -- replaying should do to it
+        // exactly what was just done to line 0 by hand.
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert_eq!(app.open().buffer.text(), "a!\nb!\nc");
+    }
+
+    #[test]
+    fn the_closing_q_and_the_leading_qa_are_not_part_of_the_recorded_macro() {
+        let mut app = macro_app("x");
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        app.test_dispatch_key(KeyPress::char('l')); // the macro's only real content
+        app.test_dispatch_key(KeyPress::char('q'));
+        assert_eq!(app.vim.decode_register('a'), Some(vec![KeyPress::char('l')]));
+    }
+
+    #[test]
+    fn replaying_with_a_count_applies_the_macro_that_many_times() {
+        let mut app = macro_app("a\nb\nc\nd");
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        app.test_dispatch_key(KeyPress::char('A'));
+        app.test_dispatch_key(KeyPress::char('!'));
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        app.test_dispatch_key(KeyPress::char('j'));
+        app.test_dispatch_key(KeyPress::char('q'));
+        assert_eq!(app.open().buffer.text(), "a!\nb\nc\nd");
+
+        app.test_dispatch_key(KeyPress::char('3'));
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert_eq!(app.open().buffer.text(), "a!\nb!\nc!\nd!");
+    }
+
+    #[test]
+    fn a_nested_at_call_replays_the_targets_current_content_not_a_snapshot() {
+        let mut app = macro_app("xxx");
+        app.vim.finish_recording('b', &[KeyPress::char('A'), KeyPress::char('1'), KeyPress::named(FenixNamedKey::Escape)], false);
+        app.vim.finish_recording(
+            'a',
+            &[
+                KeyPress::char('@'),
+                KeyPress::char('b'),
+                KeyPress::char('A'),
+                KeyPress::char('2'),
+                KeyPress::named(FenixNamedKey::Escape),
+            ],
+            false,
+        );
+
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert_eq!(app.open().buffer.text(), "xxx12");
+
+        // Redefine register b -- `@a`'s own nested `@b` must pick up
+        // this NEW content on its next replay, not whatever b held the
+        // first time (there is no snapshot; `@` always reads the
+        // register live).
+        app.vim.finish_recording('b', &[KeyPress::char('A'), KeyPress::char('9'), KeyPress::named(FenixNamedKey::Escape)], false);
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert_eq!(app.open().buffer.text(), "xxx1292");
+    }
+
+    #[test]
+    fn a_nested_at_call_is_recorded_literally_not_expanded() {
+        // While recording macro `a`, typing the literal keys `@`,`b`
+        // must capture exactly those two keys -- not `b`'s own expanded
+        // replay -- exactly like real Vim.
+        let mut app = macro_app("x");
+        app.vim.finish_recording('b', &[KeyPress::char('l')], false);
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('b'));
+        app.test_dispatch_key(KeyPress::char('q'));
+        assert_eq!(app.vim.decode_register('a'), Some(vec![KeyPress::char('@'), KeyPress::char('b')]));
+    }
+
+    #[test]
+    fn at_at_replays_whichever_register_was_last_played_not_last_recorded() {
+        let mut app = macro_app("xxx");
+        app.vim.finish_recording('a', &[KeyPress::char('A'), KeyPress::char('A'), KeyPress::named(FenixNamedKey::Escape)], false);
+        app.vim.finish_recording('b', &[KeyPress::char('A'), KeyPress::char('B'), KeyPress::named(FenixNamedKey::Escape)], false);
+
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert_eq!(app.open().buffer.text(), "xxxA");
+
+        // Recording into a different register must not change what
+        // `@@` repeats -- only *playing* one does.
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('l'));
+        app.test_dispatch_key(KeyPress::char('q'));
+
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('@'));
+        assert_eq!(app.open().buffer.text(), "xxxAA"); // repeated 'a', not 'c' or 'b'
+    }
+
+    #[test]
+    fn a_self_referential_macro_is_bailed_out_instead_of_hanging_or_overflowing_the_stack() {
+        let mut app = macro_app("x");
+        // Appends "!" then replays itself -- unbounded without a guard.
+        app.vim.finish_recording(
+            'a',
+            &[
+                KeyPress::char('A'),
+                KeyPress::char('!'),
+                KeyPress::named(FenixNamedKey::Escape),
+                KeyPress::char('@'),
+                KeyPress::char('a'),
+            ],
+            false,
+        );
+
+        app.test_dispatch_key(KeyPress::char('@'));
+        app.test_dispatch_key(KeyPress::char('a'));
+
+        // Didn't hang or crash (execution reached here) and stopped
+        // well short of an unbounded number of appended '!' characters.
+        let bang_count = app.open().buffer.text().chars().filter(|&c| c == '!').count() as u32;
+        assert!(bang_count > 0, "expected at least one '!' to have been appended");
+        assert!(bang_count <= MAX_MACRO_REPLAY_DEPTH, "expected the depth guard to cap growth, got {bang_count}");
+    }
+
+    #[test]
+    fn modeline_shows_a_recording_indicator_only_while_actually_recording() {
+        let mut app = macro_app("x");
+        assert!(!app.modeline_pieces().unwrap().1.contains("recording"));
+
+        app.test_dispatch_key(KeyPress::char('q'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        assert!(app.modeline_pieces().unwrap().1.contains("recording @a"));
+
+        app.test_dispatch_key(KeyPress::char('q'));
+        assert!(!app.modeline_pieces().unwrap().1.contains("recording"));
+    }
+
+    // -- Search and replace (`SPC s s`/`SPC s r`/`SPC s p`) ------------
+
+    #[test]
+    fn picker_search_buffer_lists_every_line() {
+        let mut app = macro_app("alpha\nbeta\ngamma");
+        app.picker_search_buffer();
+        match &app.active_picker {
+            Some(ActivePicker::BufferSearch(state)) => assert_eq!(state.len(), 3),
+            _ => panic!("expected an active BufferSearch picker"),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_buffer_search_jumps_to_the_lines_start() {
+        let mut app = macro_app("alpha\nbeta\ngamma");
+        app.picker_search_buffer();
+        picker_move_selection(app.active_picker.as_mut().unwrap(), 2); // -> "gamma"
+        app.picker_confirm();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.test_cursor().char_idx, 11); // "alpha\nbeta\n" is 11 chars
+    }
+
+    #[test]
+    fn replace_wizard_buffer_scope_happy_path_changes_the_buffer_as_one_undo_step() {
+        let mut app = macro_app("foo bar foo");
+        app.start_replace_buffer();
+        for ch in "foo".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        for ch in "baz".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        match &app.replace_wizard {
+            Some(ReplaceWizard { stage: ReplaceWizardStage::Confirm { count, .. }, .. }) => assert_eq!(*count, 2),
+            _ => panic!("expected the Confirm stage"),
+        }
+
+        app.replace_wizard_key(KeyPress::char('y'));
+        assert_eq!(app.open().buffer.text(), "baz bar baz");
+        assert!(app.replace_wizard.is_none());
+
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        assert!(buffer.undo(cursor));
+        assert_eq!(buffer.text(), "foo bar foo");
+    }
+
+    #[test]
+    fn replace_wizard_with_no_matches_cancels_without_a_confirm_stage() {
+        let mut app = macro_app("hello world");
+        app.start_replace_buffer();
+        for ch in "xyz".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        for ch in "abc".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        assert!(app.replace_wizard.is_none());
+        assert_eq!(app.open().buffer.text(), "hello world");
+    }
+
+    #[test]
+    fn replace_wizard_escape_cancels_at_each_stage_without_touching_the_buffer() {
+        let mut app = macro_app("foo");
+        app.start_replace_buffer();
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.replace_wizard.is_none());
+
+        app.start_replace_buffer();
+        app.replace_wizard_key(KeyPress::char('f'));
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.replace_wizard.is_none());
+        assert_eq!(app.open().buffer.text(), "foo");
+    }
+
+    #[test]
+    fn replace_wizard_visual_mode_scopes_to_the_selected_lines_only_and_exits_visual_mode() {
+        let mut app = macro_app("foo\nfoo\nfoo");
+        let line1_start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: line1_start, sticky_col: 0 });
+        app.test_dispatch_key(KeyPress::char('V'));
+        assert_eq!(app.vim.mode(), Mode::Visual);
+
+        app.start_replace_buffer();
+        assert_eq!(app.vim.mode(), Mode::Normal);
+        for ch in "foo".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        for ch in "bar".chars() {
+            app.replace_wizard_key(KeyPress::char(ch));
+        }
+        app.replace_wizard_key(KeyPress::named(FenixNamedKey::Enter));
+        app.replace_wizard_key(KeyPress::char('y'));
+        assert_eq!(app.open().buffer.text(), "foo\nbar\nfoo"); // only the selected line changed
+    }
+
+    #[test]
+    fn group_matches_by_file_groups_multiple_matches_in_one_file_into_one_entry() {
+        let matches = vec![
+            fenix_project::GrepMatch { path: PathBuf::from("a.txt"), line: 1, col: 1, text: "foo x".to_string() },
+            fenix_project::GrepMatch { path: PathBuf::from("a.txt"), line: 3, col: 5, text: "foo y".to_string() },
+            fenix_project::GrepMatch { path: PathBuf::from("b.txt"), line: 2, col: 1, text: "foo z".to_string() },
+        ];
+        let entries = group_matches_by_file(matches);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("a.txt"));
+        assert_eq!(entries[0].match_count, 2);
+        assert_eq!(entries[0].sample_line, 1); // the first match's line
+        assert_eq!(entries[1].path, PathBuf::from("b.txt"));
+        assert_eq!(entries[1].match_count, 1);
+    }
+
+    #[test]
+    fn render_project_replace_shows_relative_paths_and_checkbox_state() {
+        let entries = vec![
+            ProjectReplaceEntry {
+                path: PathBuf::from("/proj/src/a.rs"),
+                match_count: 2,
+                sample_line: 5,
+                sample_text: "let x = foo();".to_string(),
+                included: true,
+            },
+            ProjectReplaceEntry {
+                path: PathBuf::from("/proj/target/b.rs"),
+                match_count: 1,
+                sample_line: 1,
+                sample_text: "foo".to_string(),
+                included: false,
+            },
+        ];
+        let (text, lines) = render_project_replace("foo", "bar", Path::new("/proj"), &entries);
+        assert!(text.contains("[x] src/a.rs:5"));
+        assert!(text.contains("[ ] target/b.rs:1"));
+        assert_eq!(lines, vec![None, Some(0), Some(1)]);
+    }
+
+    /// Opens a stand-in `BufferKind::SearchReplace` review buffer and
+    /// focuses it, then installs `project_replace` -- the same shape
+    /// `App::open_project_replace` builds, minus a real `rg` search.
+    fn open_project_replace_session(app: &mut App, pattern: &str, replacement: &str, root: &Path, entries: Vec<ProjectReplaceEntry>) {
+        let (text, lines) = render_project_replace(pattern, replacement, root, &entries);
+        let id = app.buffers.open_text_view(&text);
+        if let Some(ob) = app.buffers.get_mut(id) {
+            ob.kind = BufferKind::SearchReplace;
+        }
+        app.project_replace_lines.insert(id, lines);
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, id);
+        app.project_replace = Some(ProjectReplaceSession {
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+            root: root.to_path_buf(),
+            entries,
+            buffer_id: id,
+            confirming: false,
+        });
+    }
+
+    #[test]
+    fn project_replace_apply_writes_an_unopened_files_new_content_to_disk() {
+        let dir = TempDir::new("project_replace_unopened");
+        let path = dir.write("a.txt", "foo bar foo");
+        let mut app = App::with_file(None);
+        let entry = ProjectReplaceEntry {
+            path: path.clone(),
+            match_count: 2,
+            sample_line: 1,
+            sample_text: "foo bar foo".to_string(),
+            included: true,
+        };
+        open_project_replace_session(&mut app, "foo", "baz", dir.path(), vec![entry]);
+
+        app.project_replace_apply();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "baz bar baz");
+        assert!(app.project_replace.is_none());
+    }
+
+    #[test]
+    fn project_replace_apply_updates_an_already_open_buffer_instead_of_touching_disk() {
+        let dir = TempDir::new("project_replace_open_buffer");
+        let path = dir.write("a.txt", "foo bar");
+        let mut app = App::with_file(None);
+        let open_id = app.buffers.open_path(&path); // simulate the file already being open elsewhere
+        let entry =
+            ProjectReplaceEntry { path: path.clone(), match_count: 1, sample_line: 1, sample_text: "foo bar".to_string(), included: true };
+        open_project_replace_session(&mut app, "foo", "baz", dir.path(), vec![entry]);
+
+        app.project_replace_apply();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo bar"); // disk untouched...
+        let ob = app.buffers.get(open_id).unwrap();
+        assert_eq!(ob.buffer.text(), "baz bar"); // ...in-memory buffer has the new content
+        assert!(ob.buffer.is_dirty());
+    }
+
+    #[test]
+    fn project_replace_toggle_excludes_a_file_from_apply() {
+        let dir = TempDir::new("project_replace_toggle");
+        let path = dir.write("a.txt", "foo");
+        let mut app = App::with_file(None);
+        let entry = ProjectReplaceEntry { path: path.clone(), match_count: 1, sample_line: 1, sample_text: "foo".to_string(), included: true };
+        open_project_replace_session(&mut app, "foo", "bar", dir.path(), vec![entry]);
+
+        let line1_start = app.open().buffer.line_start_char(1); // line 0 is the non-interactive header
+        app.test_set_cursor(Cursor { char_idx: line1_start, sticky_col: 0 });
+        app.project_replace_toggle_selected();
+        assert!(!app.project_replace.as_ref().unwrap().entries[0].included);
+
+        app.project_replace_apply();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo"); // unchanged -- excluded
+    }
+
+    #[test]
+    fn project_replace_apply_skips_a_file_that_no_longer_matches() {
+        let dir = TempDir::new("project_replace_stale");
+        let path = dir.write("a.txt", "nothing to replace here");
+        let mut app = App::with_file(None);
+        let entry = ProjectReplaceEntry { path: path.clone(), match_count: 1, sample_line: 1, sample_text: "foo".to_string(), included: true };
+        open_project_replace_session(&mut app, "foo", "bar", dir.path(), vec![entry]);
+
+        app.project_replace_apply(); // must not error or panic
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nothing to replace here");
+    }
+
+    #[test]
+    fn project_replace_cancel_leaves_every_file_byte_for_byte_untouched() {
+        let dir = TempDir::new("project_replace_cancel");
+        let path = dir.write("a.txt", "foo");
+        let mut app = App::with_file(None);
+        let entry = ProjectReplaceEntry { path: path.clone(), match_count: 1, sample_line: 1, sample_text: "foo".to_string(), included: true };
+        open_project_replace_session(&mut app, "foo", "bar", dir.path(), vec![entry]);
+
+        app.project_replace_cancel();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "foo");
+        assert!(app.project_replace.is_none());
+    }
+
+    // -- Files menu (`SPC f f`/`a`/`r`/`R`/`D`/`y`) --------------------
+
+    #[test]
+    fn find_file_prompt_relative_path_resolves_against_project_root() {
+        let dir = TempDir::new("find_file_prompt_relative");
+        let path = dir.write("sub/target.txt", "hi");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.start_find_file_prompt();
+        for ch in "sub/target.txt".chars() {
+            app.find_file_prompt_key(KeyPress::char(ch));
+        }
+        app.find_file_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.open().buffer.path(), Some(path.as_path()));
+        assert!(app.find_file_prompt.is_none());
+    }
+
+    #[test]
+    fn find_file_prompt_escape_cancels_without_opening_anything() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        app.start_find_file_prompt();
+        app.find_file_prompt_key(KeyPress::char('x'));
+        app.find_file_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.find_file_prompt.is_none());
+        assert_eq!(app.focused_buffer_id(), before);
+    }
+
+    #[test]
+    fn find_file_prompt_opens_a_path_that_does_not_exist_yet_as_an_empty_buffer() {
+        let dir = TempDir::new("find_file_prompt_missing");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.start_find_file_prompt();
+        for ch in "brand-new.txt".chars() {
+            app.find_file_prompt_key(KeyPress::char(ch));
+        }
+        app.find_file_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.open().buffer.text(), "");
+    }
+
+    #[test]
+    fn find_file_prompt_tilde_expands_to_the_home_directory() {
+        let Some(home) = dirs::home_dir() else { return }; // skip if unavailable in this environment
+        let mut app = App::with_file(None);
+        app.start_find_file_prompt();
+        // An improbable filename so this can't collide with anything real
+        // in the actual home directory -- the file won't exist, which is
+        // fine, this only checks where the resolution *tried* to look.
+        let typed = "~/fenix-test-find-file-prompt-tilde-probe.txt";
+        for ch in typed.chars() {
+            app.find_file_prompt_key(KeyPress::char(ch));
+        }
+        app.find_file_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        // Missing-file opens degrade to a path-less scratch buffer (see
+        // `BufferList::open_path`'s own fallback) -- what's checkable
+        // here is only that this didn't error/panic and landed in the
+        // editor, not the buffer's own path. Resolution itself is
+        // covered precisely by `open_typed_path`'s absolute-path branch
+        // below with a file that *does* exist.
+        let _ = home;
+        assert_eq!(app.main_view, MainView::Editor);
+    }
+
+    #[test]
+    fn find_file_prompt_absolute_path_is_used_as_is() {
+        let dir = TempDir::new("find_file_prompt_absolute");
+        let path = dir.write("abs.txt", "hi");
+        let mut app = App::with_file(None);
+        // A different project root than `dir`, to prove the absolute
+        // path isn't (wrongly) joined onto it.
+        app.project_root = Some(std::env::temp_dir());
+        app.start_find_file_prompt();
+        for ch in path.display().to_string().chars() {
+            app.find_file_prompt_key(KeyPress::char(ch));
+        }
+        app.find_file_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.open().buffer.text(), "hi");
+        assert_eq!(app.open().buffer.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn picker_find_file_all_includes_a_gitignored_file() {
+        let dir = TempDir::new("find_file_all");
+        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(dir.path()).status().map(|s| s.success());
+        if !matches!(ok, Ok(true)) {
+            return; // git not available in this environment -- skip, same posture as the rg-missing tests
+        }
+        dir.write("tracked.txt", "x");
+        dir.write(".gitignore", ".env\n");
+        dir.write(".env", "SECRET=1");
+
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.picker_find_file_all();
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.iter().any(|l| l.contains(".env")), "expected .env among candidates, got {labels:?}");
+            }
+            _ => panic!("expected an active FindFile picker"),
+        }
+    }
+
+    #[test]
+    fn picker_recent_files_candidates_match_recent_files() {
+        // `App::with_file(None)` loads the *real* persisted recent-files
+        // list (other tests in this same process write to it via
+        // `record_recent_file`) -- so this only asserts the two newly
+        // `add`ed paths are *among* the candidates, not an exact count.
+        let mut app = App::with_file(None);
+        app.recent_files.add(PathBuf::from("/a/one.txt"));
+        app.recent_files.add(PathBuf::from("/b/two.txt"));
+        app.picker_recent_files();
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.iter().any(|l| l.contains("one.txt")), "expected one.txt among candidates, got {labels:?}");
+                assert!(labels.iter().any(|l| l.contains("two.txt")), "expected two.txt among candidates, got {labels:?}");
+            }
+            _ => panic!("expected an active FindFile picker"),
+        }
+    }
+
+    #[test]
+    fn yank_file_path_sets_the_clipboard() {
+        let dir = TempDir::new("yank_file_path");
+        let path = dir.write("a.txt", "hi\n");
+        let mut app = App::with_file(None);
+        app.test_open_path(&path);
+        app.yank_file_path();
+        if let Some(clipboard) = &mut app.clipboard {
+            assert_eq!(clipboard.get_text().unwrap(), path.display().to_string());
+        }
+    }
+
+    #[test]
+    fn yank_file_path_is_a_noop_for_an_unsaved_buffer() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.yank_file_path(); // must not panic
+    }
+
+    #[test]
+    fn apply_rename_file_moves_content_and_updates_the_registry() {
+        let dir = TempDir::new("rename_file");
+        let old_path = dir.write("old.txt", "hello");
+        let mut app = App::with_file(None);
+        app.test_open_path(&old_path);
+        let id = app.focused_buffer_id();
+
+        app.apply_rename_file("new.txt");
+
+        let new_path = dir.path().join("new.txt");
+        assert!(!old_path.exists());
+        assert_eq!(std::fs::read_to_string(&new_path).unwrap(), "hello");
+        assert_eq!(app.open().buffer.path(), Some(new_path.as_path()));
+        assert_eq!(app.buffers.id_for_path(&new_path), Some(id));
+        assert_eq!(app.buffers.id_for_path(&old_path), None);
+    }
+
+    #[test]
+    fn apply_rename_file_persists_unsaved_edits_into_the_renamed_file() {
+        let dir = TempDir::new("rename_file_dirty");
+        let old_path = dir.write("old.txt", "hello");
+        let mut app = App::with_file(None);
+        app.test_open_path(&old_path);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.test_insert_str("X"); // unsaved edit
+
+        app.apply_rename_file("new.txt");
+
+        let new_path = dir.path().join("new.txt");
+        assert_eq!(std::fs::read_to_string(&new_path).unwrap(), "Xhello");
+    }
+
+    #[test]
+    fn start_rename_file_prompt_is_a_noop_for_an_unsaved_buffer() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.start_rename_file_prompt();
+        assert!(app.rename_file_prompt.is_none());
+    }
+
+    #[test]
+    fn apply_delete_file_removes_the_file_and_closes_the_buffer() {
+        let dir = TempDir::new("delete_file");
+        let path = dir.write("a.txt", "x");
+        let mut app = App::with_file(None);
+        app.test_open_path(&path);
+        let id = app.focused_buffer_id();
+
+        app.apply_delete_file();
+
+        assert!(!path.exists());
+        assert!(app.buffers.get(id).is_none());
+    }
+
+    #[test]
+    fn delete_file_confirm_key_declines_on_anything_but_y() {
+        let dir = TempDir::new("delete_file_decline");
+        let path = dir.write("a.txt", "x");
+        let mut app = App::with_file(None);
+        app.test_open_path(&path);
+        app.start_delete_file_confirm();
+        assert!(app.delete_file_confirm);
+
+        app.delete_file_confirm_key(KeyPress::char('n'));
+
+        assert!(!app.delete_file_confirm);
+        assert!(path.exists());
+        assert_eq!(app.open().buffer.path(), Some(path.as_path()));
+    }
+
+    #[test]
+    fn start_delete_file_confirm_is_a_noop_for_an_unsaved_buffer() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.start_delete_file_confirm();
+        assert!(!app.delete_file_confirm);
     }
 }

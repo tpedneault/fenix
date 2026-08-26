@@ -1,11 +1,10 @@
-syslog "testing" 
+puts "testing" 
 
 if {$testing eq "testing"} {
-   test hello    
+   puts hello    
 }
 
-if {$testing == 12} {
-    test 
-    test
-    test
+if {$testing == 12} {    puts  
+puts 
+puts 
 }

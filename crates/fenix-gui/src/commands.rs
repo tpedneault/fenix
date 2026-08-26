@@ -47,8 +47,32 @@ impl CommandRegistry {
             cmd_explorer_jump,
         );
         registry.register("explorer.toggle_sidebar", "Toggle the file explorer sidebar", cmd_toggle_sidebar);
+        registry.register(
+            "table.toggle",
+            "Toggle the focused buffer between plain text and elastic-column table view",
+            cmd_table_toggle,
+        );
+        registry.register("search.buffer", "Fuzzy-find a line in the current buffer", cmd_search_buffer);
+        registry.register("search.replace_buffer", "Search and replace in the current buffer", cmd_search_replace_buffer);
+        registry.register(
+            "search.replace_project",
+            "Search and replace across the project",
+            cmd_search_replace_project,
+        );
+        registry.register("file.find", "Open a file by typing its path (bypasses .gitignore)", cmd_file_find);
+        registry.register("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", cmd_file_find_all);
+        registry.register("file.recent", "Fuzzy-find a recently-opened file", cmd_file_recent);
+        registry.register("file.rename", "Rename the current file on disk", cmd_file_rename);
+        registry.register("file.delete", "Delete the current file (with confirmation)", cmd_file_delete);
+        registry.register("file.yank_path", "Copy the current file's path to the clipboard", cmd_file_yank_path);
         registry.register("project.find_file", "Fuzzy-find a file in the current project", cmd_project_find_file);
         registry.register("project.grep", "Search the current project (ripgrep)", cmd_project_grep);
+        registry.register("project.quickfix_next", "Jump to the next match in the last project search", cmd_quickfix_next);
+        registry.register(
+            "project.quickfix_prev",
+            "Jump to the previous match in the last project search",
+            cmd_quickfix_prev,
+        );
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
@@ -82,6 +106,21 @@ impl CommandRegistry {
             "Refresh Tcl completion tags (re-scans the project with ctags)",
             cmd_completion_refresh_tags,
         );
+        registry.register("code.format_selection", "Format the active Visual selection", cmd_format_selection);
+        registry.register("code.format_buffer", "Format the whole focused buffer", cmd_format_buffer);
+        registry.register(
+            "code.symbols",
+            "Fuzzy-find a Tcl definition by its fully-qualified name and jump to it",
+            cmd_symbols,
+        );
+        registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
+        registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
+        registry.register("mib.lookup_telecommand", "Fuzzy-find a MIB telecommand and view its details", cmd_mib_lookup_telecommand);
+        registry.register("mib.insert_telecommand", "Build and insert a telecommand from the MIB", cmd_mib_insert_telecommand);
+        registry.register("mib.lookup_tm_packet", "Fuzzy-find a MIB TM packet and view its details", cmd_mib_lookup_tm_packet);
+        registry.register("mib.lookup_tm_parameter", "Fuzzy-find a MIB TM parameter and view its details", cmd_mib_lookup_tm_parameter);
+        registry.register("mib.lookup_calibration", "Fuzzy-find a MIB calibration definition and view its details", cmd_mib_lookup_calibration);
+        registry.register("mib.refresh_index", "Reparse the configured MIB roots from disk", cmd_mib_refresh_index);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -147,12 +186,60 @@ fn cmd_toggle_sidebar(ctx: &mut CommandCtx) {
     ctx.app.toggle_sidebar();
 }
 
+fn cmd_table_toggle(ctx: &mut CommandCtx) {
+    ctx.app.toggle_table_view();
+}
+
+fn cmd_search_buffer(ctx: &mut CommandCtx) {
+    ctx.app.picker_search_buffer();
+}
+
+fn cmd_search_replace_buffer(ctx: &mut CommandCtx) {
+    ctx.app.start_replace_buffer();
+}
+
+fn cmd_search_replace_project(ctx: &mut CommandCtx) {
+    ctx.app.start_replace_project();
+}
+
+fn cmd_file_find(ctx: &mut CommandCtx) {
+    ctx.app.start_find_file_prompt();
+}
+
+fn cmd_file_find_all(ctx: &mut CommandCtx) {
+    ctx.app.picker_find_file_all();
+}
+
+fn cmd_file_recent(ctx: &mut CommandCtx) {
+    ctx.app.picker_recent_files();
+}
+
+fn cmd_file_rename(ctx: &mut CommandCtx) {
+    ctx.app.start_rename_file_prompt();
+}
+
+fn cmd_file_delete(ctx: &mut CommandCtx) {
+    ctx.app.start_delete_file_confirm();
+}
+
+fn cmd_file_yank_path(ctx: &mut CommandCtx) {
+    ctx.app.yank_file_path();
+}
+
 fn cmd_project_find_file(ctx: &mut CommandCtx) {
     ctx.app.picker_find_file();
 }
 
 fn cmd_project_grep(ctx: &mut CommandCtx) {
     ctx.app.picker_grep_prompt();
+}
+
+fn cmd_quickfix_next(ctx: &mut CommandCtx) {
+    ctx.app.quickfix_next();
+}
+
+fn cmd_quickfix_prev(ctx: &mut CommandCtx) {
+    ctx.app.quickfix_prev();
 }
 
 fn cmd_project_switch(ctx: &mut CommandCtx) {
@@ -269,6 +356,50 @@ fn cmd_remove_workspace(ctx: &mut CommandCtx) {
 
 fn cmd_completion_refresh_tags(ctx: &mut CommandCtx) {
     ctx.app.refresh_completion_tags();
+}
+
+fn cmd_format_selection(ctx: &mut CommandCtx) {
+    ctx.app.format_selection();
+}
+
+fn cmd_format_buffer(ctx: &mut CommandCtx) {
+    ctx.app.format_buffer();
+}
+
+fn cmd_symbols(ctx: &mut CommandCtx) {
+    ctx.app.picker_symbols();
+}
+
+fn cmd_jump_back(ctx: &mut CommandCtx) {
+    ctx.app.jump_back();
+}
+
+fn cmd_jump_forward(ctx: &mut CommandCtx) {
+    ctx.app.jump_forward();
+}
+
+fn cmd_mib_lookup_telecommand(ctx: &mut CommandCtx) {
+    ctx.app.mib_lookup_telecommand();
+}
+
+fn cmd_mib_insert_telecommand(ctx: &mut CommandCtx) {
+    ctx.app.mib_insert_telecommand();
+}
+
+fn cmd_mib_lookup_tm_packet(ctx: &mut CommandCtx) {
+    ctx.app.mib_lookup_tm_packet();
+}
+
+fn cmd_mib_lookup_tm_parameter(ctx: &mut CommandCtx) {
+    ctx.app.mib_lookup_tm_parameter();
+}
+
+fn cmd_mib_lookup_calibration(ctx: &mut CommandCtx) {
+    ctx.app.mib_lookup_calibration();
+}
+
+fn cmd_mib_refresh_index(ctx: &mut CommandCtx) {
+    ctx.app.mib_refresh_index();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {
