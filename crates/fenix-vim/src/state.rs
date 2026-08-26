@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
 use fenix_core::{Buffer, Cursor};
@@ -5,6 +6,7 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
 use crate::indent;
 use crate::keymaps::{self, InsertEntry, PendingTarget, VimAction, VisualAction};
+use crate::keynotation;
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
 use crate::operator::Operator;
@@ -30,6 +32,53 @@ pub enum VimEvent {
     /// this value -- a hint for the host app to persist it, the same
     /// "escape hatch" role `RequestSave` plays for `:w`.
     IndentWidthChanged(usize),
+    /// A "big jump" motion (`gg`/`G`, `%`, an initial `/`/`?` search, or
+    /// `*`/`#`) just moved the cursor -- carries the char index it moved
+    /// *from*, for a host-owned jumplist (`Ctrl-O`/`Ctrl-I`) to record.
+    /// `fenix-vim` only ever tracks one buffer/cursor at a time, so the
+    /// jumplist itself can't live here -- a jump to a symbol definition
+    /// or a grep match crosses buffers entirely, which only the host
+    /// knows about. Raised only when the motion actually moved the
+    /// cursor (a no-op `%` off a bracket, or a search with no match,
+    /// raises `None` instead) -- and, deliberately unlike real Vim,
+    /// never for `n`/`N` (`VimAction::RepeatSearch`), which just repeats
+    /// whatever the last recorded jump already was rather than starting
+    /// a new one.
+    JumpRecorded(usize),
+    /// `m{name}` just recorded a mark named `name` at this char index.
+    /// The host owns the actual mark table, the same reason it owns the
+    /// jumplist (see `JumpRecorded`'s own doc comment) -- a mark set in
+    /// one buffer needs to still mean that buffer if the user switches
+    /// away and back, which `fenix-vim`'s single buffer-agnostic
+    /// `VimState` has no way to track.
+    MarkSet(char, usize),
+    /// `` `{name} ``/`'{name}` -- asks the host to look up mark `name`
+    /// and jump there; a no-op (silently) if that mark was never set,
+    /// same "graceful, not a hard error" posture as a `%` with nothing
+    /// to match. `linewise` mirrors real Vim's own split between the two
+    /// forms: `` ` `` wants the mark's exact char index, `'` wants the
+    /// first non-blank of its line.
+    JumpToMark { name: char, linewise: bool },
+    /// `q{name}` just started recording into register `name` (case
+    /// preserved: uppercase means "append to whatever's already in
+    /// there," matching real Vim's own convention) -- the host owns the
+    /// actual multi-source key capture (see `App::dispatch_keypress`'s
+    /// own doc comment for why: a leader-triggered command never reaches
+    /// `VimState::handle_key` at all, so only the host sees every key),
+    /// this is purely the "recording just started, into this register"
+    /// notification.
+    MacroRecordStart(char),
+    /// A second bare `q` just stopped recording into `name` -- no second
+    /// key needed, unlike the start. The host should finalize whatever
+    /// it captured since the matching `MacroRecordStart` and hand it to
+    /// `finish_recording`.
+    MacroRecordStop(char),
+    /// `@{name}` (or `@@`, `name` literally `'@'`, meaning "whichever
+    /// register was last played") -- asks the host to decode register
+    /// `name`'s text (`keynotation::decode`) and replay it `count` times.
+    /// A no-op if the register (or, for `@@`, "last played") is empty/
+    /// unknown, same graceful posture as `JumpToMark`.
+    MacroPlay { register: char, count: u32 },
 }
 
 struct Register {
@@ -38,6 +87,32 @@ struct Register {
     /// like `dd`/`yy`/`dG`) vs. a char span -- determines whether `p`/`P`
     /// paste as new lines or inline at the cursor.
     linewise: bool,
+}
+
+/// What `m`/`` ` ``/`'` are waiting on their next raw key (the mark's
+/// name) to do -- mirrors `pending_find`'s "one more raw key, not a
+/// trie key" shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingMark {
+    Set,
+    Jump { linewise: bool },
+}
+
+/// What `"`/`q`/`@` are waiting on their next raw key to do -- same
+/// "one more raw key, not a trie key" shape as `PendingMark`, unified
+/// into one enum since only one of the three can ever be pending at
+/// once. `"` selects which register the *next* command (`y`/`d`/`c`/`x`/
+/// `s`/`p`/`P`) reads or writes; `q` (only reachable when not already
+/// recording -- see `handle_normal_key`'s own `q` dispatch, which
+/// short-circuits to `VimEvent::MacroRecordStop` without ever setting
+/// this) starts recording into the named register; `@` replays it,
+/// `count` carrying whatever was typed before it (`3@a`), exactly like
+/// every other countable action already does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPrefixKey {
+    Register,
+    MacroRecord,
+    MacroPlay { count: u32 },
 }
 
 /// Tracks a Visual-Block `I` session: what's typed on the top line gets
@@ -53,7 +128,45 @@ struct BlockInsert {
 
 pub struct VimState {
     mode: Mode,
+    /// The unnamed register (`""`) -- always mirrors the *newly written*
+    /// text of the most recent yank/delete/change, regardless of
+    /// whether a named register (`registers`) was also explicitly
+    /// targeted via `"{name}`, matching real Vim's own behavior.
     register: Register,
+    /// Named registers `a`-`z`, keyed by lowercase -- case (uppercase =
+    /// append, matching real Vim's `"Ayy`-style convention) is only ever
+    /// a *write-mode* flag, never a distinct key. A macro recorded via
+    /// `q{name}` is stored here too (as `keynotation`-encoded text, see
+    /// `finish_recording`) -- real Vim itself has no separate "macro
+    /// storage": `@a` just interprets whatever text register `a` holds,
+    /// whether it got there by recording, yanking, or hand-editing.
+    registers: HashMap<char, Register>,
+    /// Set by `"`/`q`/`@`; consumed by the very next raw key -- see
+    /// `PendingPrefixKey`'s own doc comment.
+    pending_prefix: Option<PendingPrefixKey>,
+    /// Set once `"`'s register name arrives: `(lowercase name, append)`
+    /// -- consulted (and cleared) by the very next register-touching
+    /// command (`write_register`/`paste`), or cleared without effect by
+    /// any other command, exactly like a count-prefix already resets
+    /// after being consumed (see `handle_normal_key`'s `Step::Matched`/
+    /// `Step::NoMatch` arms).
+    active_register: Option<(char, bool)>,
+    /// `Some(name)` while `q{name}` is actively recording -- the single
+    /// source of truth `q`'s own dispatch checks to tell "start" from
+    /// "stop" apart (see `MacroRecordStart`/`MacroRecordStop`'s own doc
+    /// comments). The actual key-by-key *capture* lives on the host
+    /// (`App`), not here -- see `VimEvent::MacroRecordStart`'s doc
+    /// comment for why.
+    recording_register: Option<char>,
+    /// Set once `q{name}` resolves (case preserved); consumed by
+    /// `handle_key` and turned into `VimEvent::MacroRecordStart`.
+    pending_macro_start: Option<char>,
+    /// Set by a second bare `q` while recording; consumed by
+    /// `handle_key` and turned into `VimEvent::MacroRecordStop`.
+    pending_macro_stop: Option<char>,
+    /// Set once `@{name}`'s register name arrives; consumed by
+    /// `handle_key` and turned into `VimEvent::MacroPlay`.
+    pending_macro_play: Option<(char, u32)>,
     pending_op: Option<Operator>,
     /// The count that was accumulated before the operator was entered
     /// (`3dd`); combined multiplicatively with whatever count is typed
@@ -64,6 +177,11 @@ pub struct VimState {
     /// itself repeated `count` times, instead of going through the normal
     /// trie at all -- no motion/text object composition, just one raw key.
     pending_replace: Option<u32>,
+    /// Set by Visual mode's `r`: the *next* key overwrites every selected
+    /// character. Kept separate from `pending_replace` since Visual's `r`
+    /// doesn't take a `count` (the selection already says how much) and
+    /// is resolved by `handle_visual_key`, not `handle_normal_key`.
+    pending_visual_replace: bool,
     /// Digits accumulated so far for a numeric count prefix (`3w`, `2dd`).
     /// Consumed whenever a key sequence actually resolves to an action;
     /// preserved across `Step::Pending` (mid multi-key sequences like
@@ -78,6 +196,19 @@ pub struct VimState {
     /// Set by a yank or (non-block) paste; consumed by `handle_key` right
     /// after dispatch and turned into `VimEvent::Pulse`.
     pending_pulse: Option<Range<usize>>,
+    /// Set by a "big jump" motion that actually moved the cursor;
+    /// consumed by `handle_key` right after dispatch and turned into
+    /// `VimEvent::JumpRecorded` -- see that variant's own doc comment.
+    pending_jump: Option<usize>,
+    /// Set by `m`/`` ` ``/`'`: the *next* key names the mark, not a trie
+    /// key -- same "one more raw key" shape as `pending_find`.
+    pending_mark: Option<PendingMark>,
+    /// Set once the mark name arrives after `m`; consumed by `handle_key`
+    /// and turned into `VimEvent::MarkSet`.
+    pending_mark_set: Option<(char, usize)>,
+    /// Set once the mark name arrives after `` ` ``/`'`; consumed by
+    /// `handle_key` and turned into `VimEvent::JumpToMark`.
+    pending_mark_jump: Option<(char, bool)>,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -120,15 +251,27 @@ impl VimState {
         Self {
             mode: Mode::Normal,
             register: Register { text: String::new(), linewise: false },
+            registers: HashMap::new(),
+            pending_prefix: None,
+            active_register: None,
+            recording_register: None,
+            pending_macro_start: None,
+            pending_macro_stop: None,
+            pending_macro_play: None,
             pending_op: None,
             pending_op_count: 1,
             pending_replace: None,
+            pending_visual_replace: false,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
             last_visual: None,
             block_insert: None,
             pending_pulse: None,
+            pending_jump: None,
+            pending_mark: None,
+            pending_mark_set: None,
+            pending_mark_jump: None,
             command_line: String::new(),
             pending_find: None,
             last_find: None,
@@ -240,6 +383,93 @@ impl VimState {
         self.visual_anchor
     }
 
+    /// The unnamed register's current contents (text, linewise) -- for a
+    /// host UI that wants to mirror it onto the OS clipboard: push this
+    /// after any key that may have written the register (yank, delete,
+    /// change), and pull the OS clipboard's contents in via
+    /// `set_register` before dispatching a paste key, so `y`/`p` round-
+    /// trip through the system clipboard instead of Fenix's own private
+    /// scratch register.
+    pub fn register(&self) -> (&str, bool) {
+        (&self.register.text, self.register.linewise)
+    }
+
+    /// Overwrites the unnamed register -- see `register`'s own doc
+    /// comment for why a host UI would call this (syncing in whatever's
+    /// currently on the OS clipboard right before a paste).
+    pub fn set_register(&mut self, text: String, linewise: bool) {
+        self.register = Register { text, linewise };
+    }
+
+    /// Whether `q{name}` recording is currently active -- for a host UI
+    /// to show a "recording" indicator, and for `App::dispatch_keypress`
+    /// to decide whether to tap the incoming key into its own capture
+    /// buffer (see `VimEvent::MacroRecordStart`'s doc comment).
+    pub fn is_recording(&self) -> bool {
+        self.recording_register.is_some()
+    }
+
+    /// The register currently being recorded into, if any.
+    pub fn recording_register(&self) -> Option<char> {
+        self.recording_register
+    }
+
+    /// Register `name`'s content, decoded (`keynotation::decode`) back
+    /// into keystrokes to replay -- for a host handling `VimEvent::
+    /// MacroPlay`. Works uniformly regardless of how the register got
+    /// its content (typed, yanked, or recorded via `q{name}`), matching
+    /// real Vim: there's no distinct "macro storage," `@{name}` just
+    /// interprets whatever text is there. `None` for a register that's
+    /// never been written (or is empty) -- a host should treat this the
+    /// same as real Vim's "nothing to repeat."
+    pub fn decode_register(&self, name: char) -> Option<Vec<KeyPress>> {
+        let text = &self.registers.get(&name.to_ascii_lowercase())?.text;
+        if text.is_empty() {
+            return None;
+        }
+        Some(keynotation::decode(text))
+    }
+
+    /// Finalizes a `q{register}...q` recording: encodes `keys` (the
+    /// host's own captured buffer -- see `VimEvent::MacroRecordStart`'s
+    /// doc comment for why the host, not `VimState`, does the capturing)
+    /// via `keynotation::encode` and writes the result into `register`,
+    /// appending to whatever was already there if `append` (the
+    /// recording was started with an uppercase register name).
+    pub fn finish_recording(&mut self, register: char, keys: &[KeyPress], append: bool) {
+        let text = keynotation::encode(keys);
+        self.store_in_register(register.to_ascii_lowercase(), &text, false, append);
+    }
+
+    /// The absolute char range the active Visual selection covers, and
+    /// whether it's linewise -- `None` outside Visual mode, or for a
+    /// Visual-Block selection (a rectangular column selection has no
+    /// single contiguous range; `apply_block_operator`'s own per-row
+    /// handling is what deals with those). For a host action that wants
+    /// to treat "whatever's selected" as plain text -- e.g. running an
+    /// external formatter over it -- rather than going through a Vim
+    /// operator.
+    pub fn visual_selection_range(&self, buffer: &Buffer, cursor: &Cursor) -> Option<(Range<usize>, bool)> {
+        if self.mode != Mode::Visual || self.visual_kind == VisualKind::Block {
+            return None;
+        }
+        Some(self.visual_range(buffer, cursor))
+    }
+
+    /// Programmatically exits Visual mode back to Normal -- the same
+    /// state transition `Escape` performs (see `handle_visual_key`) --
+    /// for a host action that replaces the Visual selection's text
+    /// itself (bypassing Vim's own operator dispatch) and needs Vim's
+    /// mode/`last_visual` to catch up afterward. `cursor` should already
+    /// reflect wherever the host left it before calling this. A no-op
+    /// outside Visual mode.
+    pub fn exit_visual_mode(&mut self, cursor: &Cursor) {
+        if self.mode == Mode::Visual {
+            self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+            self.mode = Mode::Normal;
+        }
+    }
+
     /// Whether a multi-key sequence (operator-pending, `gg`, ...) is
     /// waiting on more input, for a which-key-style hint in the host UI.
     pub fn is_pending(&self) -> bool {
@@ -279,13 +509,44 @@ impl VimState {
         if buffer.edit_count() != edit_count_before {
             self.hlsearch_active = false;
         }
+        // All drained unconditionally (not just whichever's read below)
+        // so none of them ever linger stale into the next keystroke,
+        // even though nothing today sets more than one in the same call.
+        let pulse = self.pending_pulse.take();
+        let jump = self.pending_jump.take();
+        let mark_set = self.pending_mark_set.take();
+        let mark_jump = self.pending_mark_jump.take();
+        let macro_start = self.pending_macro_start.take();
+        let macro_stop = self.pending_macro_stop.take();
+        let macro_play = self.pending_macro_play.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
-        // RequestSave/Quit.
-        match self.pending_pulse.take() {
+        // RequestSave/Quit. The rest take the next priority for the same
+        // reason -- every key that sets one of these only ever returns
+        // `VimEvent::None` itself, so there's nothing real underneath to
+        // shadow.
+        match pulse {
             Some(range) => VimEvent::Pulse(range),
-            None => event,
+            None => match jump {
+                Some(from) => VimEvent::JumpRecorded(from),
+                None => match mark_set {
+                    Some((name, char_idx)) => VimEvent::MarkSet(name, char_idx),
+                    None => match mark_jump {
+                        Some((name, linewise)) => VimEvent::JumpToMark { name, linewise },
+                        None => match macro_start {
+                            Some(name) => VimEvent::MacroRecordStart(name),
+                            None => match macro_stop {
+                                Some(name) => VimEvent::MacroRecordStop(name),
+                                None => match macro_play {
+                                    Some((register, count)) => VimEvent::MacroPlay { register, count },
+                                    None => event,
+                                },
+                            },
+                        },
+                    },
+                },
+            },
         }
     }
 
@@ -358,8 +619,12 @@ impl VimState {
                 // to anything. A char-at-a-time loop, not `insert_str`,
                 // so it coalesces with the surrounding Insert-mode run.
                 let (_, col) = buffer.line_col(cursor);
-                for _ in 0..indent::spaces_to_next_stop(col, self.indent_width) {
+                let n = indent::spaces_to_next_stop(col, self.indent_width);
+                for _ in 0..n {
                     buffer.insert_char(cursor, ' ');
+                }
+                if let Some(bi) = &mut self.block_insert {
+                    bi.typed.push_str(&" ".repeat(n));
                 }
             }
             KeyCode::Named(NamedKey::Left) => buffer.move_left(cursor),
@@ -495,7 +760,11 @@ impl VimState {
                 self.mode = Mode::Normal;
                 if !query.is_empty() {
                     self.last_search = Some((query.clone(), self.search_forward));
+                    let before = cursor.char_idx;
                     self.jump_to_search(buffer, cursor, &query, self.search_forward);
+                    if cursor.char_idx != before {
+                        self.pending_jump = Some(before);
+                    }
                 }
             }
             KeyCode::Named(NamedKey::Backspace) => {
@@ -560,6 +829,30 @@ impl VimState {
             return VimEvent::None;
         }
 
+        // `m`/`` ` ``/`'`'s mark name -- same "one more raw key" shape as
+        // `pending_find` above. Not composable with an operator (no
+        // `` d`a ``/`d'a`` support -- see `PendingMark`'s own doc comment
+        // for why), so unlike `pending_find` this is never set while
+        // `pending_op` is also active, and doesn't need to coordinate
+        // with `handle_operator_pending_key` the way `pending_find` does.
+        if let Some(pending) = self.pending_mark.take() {
+            if let KeyCode::Char(name) = key.code {
+                if key.mods == Mods::default() {
+                    self.resolve_mark(cursor, pending, name);
+                }
+            }
+            // Anything else (Escape, ...) just silently aborts.
+            return VimEvent::None;
+        }
+
+        // `"`/`q`/`@`'s register name -- same "one more raw key" shape as
+        // `pending_mark` above, shared with `handle_visual_key` (only
+        // `Register` can ever be pending there) via `resolve_pending_prefix`.
+        if let Some(pending) = self.pending_prefix.take() {
+            self.resolve_pending_prefix(pending, key);
+            return VimEvent::None;
+        }
+
         if let Some(op) = self.pending_op {
             self.handle_operator_pending_key(buffer, cursor, op, key);
             return VimEvent::None;
@@ -582,15 +875,93 @@ impl VimState {
             }
         }
 
+        // `"`/`q`/`@`: bare, unmodified, top-level triggers -- never trie
+        // leaves (mirrors the count-digit interception just above), since
+        // none of them compose with anything else. `q` is the one
+        // conditional case: it means "start recording" only when nothing
+        // is already being recorded, "stop" (immediately, no second key)
+        // otherwise -- `VimState` is the sole owner of `recording_
+        // register`, so it alone can tell these apart.
+        if !self.normal_matcher.is_pending() {
+            if let KeyCode::Char(c @ ('"' | 'q' | '@')) = key.code {
+                if key.mods == Mods::default() {
+                    match c {
+                        '"' => {
+                            self.count = None;
+                            self.pending_prefix = Some(PendingPrefixKey::Register);
+                        }
+                        'q' => {
+                            self.count = None;
+                            match self.recording_register.take() {
+                                Some(reg) => self.pending_macro_stop = Some(reg),
+                                None => self.pending_prefix = Some(PendingPrefixKey::MacroRecord),
+                            }
+                        }
+                        '@' => {
+                            let count = self.count.take().unwrap_or(1).max(1);
+                            self.pending_prefix = Some(PendingPrefixKey::MacroPlay { count });
+                        }
+                        _ => unreachable!(),
+                    }
+                    return VimEvent::None;
+                }
+            }
+        }
+
         match self.normal_matcher.feed(key) {
             Step::Matched(action) => {
                 let raw_count = self.count.take();
                 self.apply_normal_action(buffer, cursor, *action, raw_count);
+                // A register selected via `"{name}` is one-shot: consumed
+                // by `write_register`/`paste` if this action touched a
+                // register, discarded here otherwise -- exactly like
+                // `count` already resets whether or not it was used.
+                // Skipped while an operator is left pending (`"ad2w`):
+                // the register is still needed once the motion arrives,
+                // resolved through `handle_operator_pending_key` instead
+                // of this match arm.
+                if self.pending_op.is_none() {
+                    self.active_register = None;
+                }
             }
-            Step::NoMatch => self.count = None,
+            Step::NoMatch => {
+                self.count = None;
+                self.active_register = None;
+            }
             Step::Pending(_) => {}
         }
         VimEvent::None
+    }
+
+    /// Resolves a pending `"`/`q`/`@` once its register-name key arrives
+    /// -- shared by `handle_normal_key` and `handle_visual_key` (only
+    /// `Register` is ever reachable from the latter). Anything other
+    /// than a plain, unmodified letter (or, for `MacroPlay`, the literal
+    /// `@` sentinel) silently cancels, same posture as an invalid mark
+    /// name.
+    fn resolve_pending_prefix(&mut self, pending: PendingPrefixKey, key: KeyPress) {
+        let KeyCode::Char(name) = key.code else { return };
+        if key.mods != Mods::default() {
+            return;
+        }
+        match pending {
+            PendingPrefixKey::Register => {
+                if name.is_ascii_alphabetic() {
+                    self.active_register = Some((name.to_ascii_lowercase(), name.is_ascii_uppercase()));
+                }
+            }
+            PendingPrefixKey::MacroRecord => {
+                if name.is_ascii_alphabetic() {
+                    self.recording_register = Some(name.to_ascii_lowercase());
+                    self.pending_macro_start = Some(name);
+                }
+            }
+            PendingPrefixKey::MacroPlay { count } => {
+                if name.is_ascii_alphabetic() || name == '@' {
+                    self.pending_macro_play = Some((name, count));
+                }
+            }
+        }
     }
 
     /// `raw_count` is the count exactly as typed (`None` if no digits
@@ -604,9 +975,20 @@ impl VimState {
         let count = raw_count.unwrap_or(1).max(1);
         match action {
             VimAction::Motion(m @ (Motion::BufferTop | Motion::BufferBottom)) => {
+                let before = cursor.char_idx;
                 cursor.char_idx = motion::buffer_line_target(buffer, m, raw_count);
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
+                if cursor.char_idx != before {
+                    self.pending_jump = Some(before);
+                }
+            }
+            VimAction::Motion(m @ Motion::MatchingBracket) => {
+                let before = cursor.char_idx;
+                apply_motion(buffer, cursor, m, count);
+                if cursor.char_idx != before {
+                    self.pending_jump = Some(before);
+                }
             }
             VimAction::Motion(m) => apply_motion(buffer, cursor, m, count),
             VimAction::Operator(op) => {
@@ -647,14 +1029,14 @@ impl VimState {
                 let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
-                    self.register = Register { text, linewise: false };
+                    self.write_register(text, false);
                 }
             }
             VimAction::DeleteCharBefore => {
                 let start = cursor.char_idx.saturating_sub(count as usize);
                 if start < cursor.char_idx {
                     let text = buffer.delete_range(cursor, start, cursor.char_idx);
-                    self.register = Register { text, linewise: false };
+                    self.write_register(text, false);
                 }
             }
             VimAction::PasteAfter => self.paste(buffer, cursor, true, count),
@@ -690,7 +1072,7 @@ impl VimState {
                 let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
-                    self.register = Register { text, linewise: false };
+                    self.write_register(text, false);
                 }
                 self.mode = Mode::Insert;
             }
@@ -728,9 +1110,15 @@ impl VimState {
             VimAction::SearchWord { forward } => {
                 if let Some(pattern) = crate::search::word_under_cursor_pattern(buffer, cursor) {
                     self.last_search = Some((pattern.clone(), forward));
+                    let before = cursor.char_idx;
                     self.jump_to_search(buffer, cursor, &pattern, forward);
+                    if cursor.char_idx != before {
+                        self.pending_jump = Some(before);
+                    }
                 }
             }
+            VimAction::MarkSetPrompt => self.pending_mark = Some(PendingMark::Set),
+            VimAction::MarkJumpPrompt { linewise } => self.pending_mark = Some(PendingMark::Jump { linewise }),
         }
     }
 
@@ -758,6 +1146,18 @@ impl VimState {
             self.finish_operator(buffer, cursor, op, range, m.is_linewise());
         } else {
             apply_motion(buffer, cursor, m, count);
+        }
+    }
+
+    /// Resolves a pending `m`/`` ` ``/`'` once its mark name arrives --
+    /// just stashes the right pending-event field for `handle_key` to
+    /// drain into a `VimEvent` (`MarkSet`/`JumpToMark`); the actual
+    /// bookkeeping/cursor movement is entirely the host's, see those
+    /// variants' own doc comments.
+    fn resolve_mark(&mut self, cursor: &Cursor, pending: PendingMark, name: char) {
+        match pending {
+            PendingMark::Set => self.pending_mark_set = Some((name, cursor.char_idx)),
+            PendingMark::Jump { linewise } => self.pending_mark_jump = Some((name, linewise)),
         }
     }
 
@@ -821,6 +1221,48 @@ impl VimState {
         cursor.char_idx = start;
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
+    }
+
+    /// Visual mode's `r<char>`: overwrites every selected character with
+    /// `c`, keeping the buffer's line structure -- any newline inside the
+    /// selection (a multi-line charwise span, a linewise span, or just the
+    /// ragged tail past a shorter line in Block mode) is left alone rather
+    /// than being clobbered, matching real Vim. Exits to Normal mode and
+    /// leaves the cursor at the selection's top-left, same as real Vim's
+    /// own `r` in Visual mode.
+    fn visual_replace_char(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, c: char) {
+        self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+        match self.visual_kind {
+            VisualKind::Block => {
+                let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
+                for line in line_lo..=line_hi {
+                    let start = buffer.line_start_char(line);
+                    let len = buffer.line_len(line);
+                    let lo = col_lo.min(len);
+                    let hi = col_hi.min(len);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let replacement: String = std::iter::repeat_n(c, hi - lo).collect();
+                    buffer.replace_range(cursor, start + lo, start + hi, &replacement);
+                }
+                cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
+            }
+            VisualKind::Char | VisualKind::Line => {
+                let (range, _) = self.visual_range(buffer, cursor);
+                let start = range.start;
+                for idx in range {
+                    if buffer.char_at(idx) == Some('\n') {
+                        continue;
+                    }
+                    buffer.replace_range(cursor, idx, idx + 1, &c.to_string());
+                }
+                cursor.char_idx = start;
+            }
+        }
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        self.mode = Mode::Normal;
     }
 
     fn enter_insert(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, entry: InsertEntry) {
@@ -988,14 +1430,14 @@ impl VimState {
             Operator::Yank => {
                 let text = buffer.text_range(range.start, range.end);
                 self.pending_pulse = Some(range.clone());
-                self.register = Register { text, linewise };
+                self.write_register(text, linewise);
                 cursor.char_idx = range.start.min(buffer.len_chars());
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
             Operator::Delete | Operator::Change => {
                 let text = buffer.delete_range(cursor, range.start, range.end);
-                self.register = Register { text, linewise };
+                self.write_register(text, linewise);
                 if op == Operator::Change {
                     self.mode = Mode::Insert;
                 }
@@ -1003,13 +1445,59 @@ impl VimState {
         }
     }
 
+    /// Writes `text` into whatever register `"{name}` most recently
+    /// selected (consuming that one-shot selection), or the unnamed
+    /// register if none was selected -- shared by every yank/delete/
+    /// change site above. The unnamed register always ends up holding
+    /// this same `text` regardless, matching real Vim: `""` mirrors the
+    /// most recent yank/delete even when a named register was also
+    /// explicitly targeted.
+    fn write_register(&mut self, text: String, linewise: bool) {
+        if let Some((name, append)) = self.active_register.take() {
+            self.store_in_register(name, &text, linewise, append);
+        }
+        self.register = Register { text, linewise };
+    }
+
+    /// Writes (or, if `append`, appends -- joined by a newline for a
+    /// linewise append, matching real Vim's `"Ayy` convention) `text`
+    /// into named register `name`. Shared by `write_register` (driven by
+    /// a `"{name}` selection) and `finish_recording` (a macro's own
+    /// register, already known directly, never going through the `"`-
+    /// prefix mechanism at all).
+    fn store_in_register(&mut self, name: char, text: &str, linewise: bool, append: bool) {
+        let final_text = if append {
+            match self.registers.get(&name) {
+                Some(existing) if !existing.text.is_empty() => {
+                    let mut combined = existing.text.clone();
+                    if existing.linewise && !combined.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                    combined.push_str(text);
+                    combined
+                }
+                _ => text.to_string(),
+            }
+        } else {
+            text.to_string()
+        };
+        self.registers.insert(name, Register { text: final_text, linewise });
+    }
+
     fn paste(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, after: bool, count: u32) {
-        if self.register.text.is_empty() {
+        let (text, linewise) = match self.active_register.take() {
+            Some((name, _append)) => match self.registers.get(&name) {
+                Some(r) => (r.text.clone(), r.linewise),
+                None => (String::new(), false),
+            },
+            None => (self.register.text.clone(), self.register.linewise),
+        };
+        if text.is_empty() {
             return;
         }
         let count = count.max(1) as usize;
-        if self.register.linewise {
-            let mut block = self.register.text.clone();
+        if linewise {
+            let mut block = text.clone();
             if !block.ends_with('\n') {
                 block.push('\n');
             }
@@ -1028,7 +1516,7 @@ impl VimState {
             // block's first line, not at column 0 -- matches `^`.
             cursor.char_idx = motion::target(buffer, &Cursor { char_idx: at, sticky_col: 0 }, Motion::LineFirstNonBlank);
         } else {
-            let text = self.register.text.repeat(count);
+            let text = text.repeat(count);
             let at = if after { (cursor.char_idx + 1).min(buffer.len_chars()) } else { cursor.char_idx };
             cursor.char_idx = at;
             buffer.insert_str(cursor, &text);
@@ -1044,9 +1532,40 @@ impl VimState {
     }
 
     fn handle_visual_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
+        if self.pending_visual_replace {
+            self.pending_visual_replace = false;
+            if let KeyCode::Char(c) = key.code {
+                self.visual_replace_char(buffer, cursor, c);
+            } else if key.code == KeyCode::Named(NamedKey::Escape) {
+                // Unlike Normal mode's own pending-replace (already in
+                // Normal mode, so Escape just cancels in place), Escape
+                // here also exits Visual mode -- matches real Vim, where
+                // Escape always returns to Normal mode regardless of what
+                // sub-state it interrupts.
+                self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                self.mode = Mode::Normal;
+            }
+            // Any other key (an arrow, a digit, ...) is a silent no-op,
+            // same as Normal mode's own pending_replace.
+            return VimEvent::None;
+        }
+
         if key.code == KeyCode::Named(NamedKey::Escape) {
             self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
             self.mode = Mode::Normal;
+            return VimEvent::None;
+        }
+
+        if let Some(pending) = self.pending_prefix.take() {
+            self.resolve_pending_prefix(pending, key);
+            return VimEvent::None;
+        }
+        // `"{name}` selects which register `d`/`y`/`c` below reads or
+        // writes -- a bare, unmodified `"`, never a trie leaf (mirrors
+        // `handle_normal_key`'s own treatment of it), since the Visual
+        // trie has no notion of "wait for one more key."
+        if key.code == KeyCode::Char('"') && key.mods == Mods::default() {
+            self.pending_prefix = Some(PendingPrefixKey::Register);
             return VimEvent::None;
         }
 
@@ -1107,7 +1626,17 @@ impl VimState {
                         cursor.sticky_col = col;
                     }
                 }
+                VisualAction::ReplaceChar => {
+                    self.pending_visual_replace = true;
+                }
             }
+            // Same one-shot reset as `handle_normal_key`'s own
+            // `Step::Matched` arm -- a register selected via `"{name}`
+            // that this action didn't consume (anything but `Apply`)
+            // doesn't linger into the next command. Harmless no-op for
+            // `Apply` itself, which already consumed it via
+            // `write_register`/`apply_block_operator`.
+            self.active_register = None;
         }
         VimEvent::None
     }
@@ -1183,7 +1712,7 @@ impl VimState {
             }
         }
 
-        self.register = Register { text: pieces.join("\n"), linewise: false };
+        self.write_register(pieces.join("\n"), false);
         cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
@@ -1684,12 +2213,47 @@ mod tests {
     }
 
     #[test]
+    fn a_confirmed_search_that_moves_the_cursor_records_a_jump() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/foo");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::JumpRecorded(0));
+    }
+
+    #[test]
+    fn n_and_shift_n_repeat_a_search_without_recording_a_new_jump() {
+        // Real Vim doesn't add `n`/`N` to the jumplist either -- they
+        // repeat whatever the last recorded jump already was.
+        let mut b = buf("foo bar foo baz foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "/foo");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('n'));
+        assert_eq!(ev, VimEvent::None);
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('N'));
+        assert_eq!(ev, VimEvent::None);
+    }
+
+    #[test]
     fn star_searches_the_word_under_the_cursor_forward() {
         let mut b = buf("foo bar foo");
         let mut c = Cursor::at_start();
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "*");
         assert_eq!(c.char_idx, 8);
+    }
+
+    #[test]
+    fn star_that_moves_the_cursor_records_a_jump() {
+        let mut b = buf("foo bar foo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('*'));
+        assert_eq!(ev, VimEvent::JumpRecorded(0));
     }
 
     #[test]
@@ -1708,6 +2272,15 @@ mod tests {
         let mut vim = VimState::new();
         keys(&mut vim, &mut b, &mut c, "*");
         assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn star_on_whitespace_records_no_jump() {
+        let mut b = buf("   ");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('*'));
+        assert_eq!(ev, VimEvent::None);
     }
 
     #[test]
@@ -1922,6 +2495,199 @@ mod tests {
         assert_eq!(b.text(), "bc");
         keys(&mut vim, &mut b, &mut c, "p");
         assert_eq!(b.text(), "bac");
+    }
+
+    #[test]
+    fn register_reflects_the_most_recent_yank() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yl");
+        assert_eq!(vim.register(), ("a", false));
+    }
+
+    #[test]
+    fn set_register_is_what_the_next_paste_uses() {
+        let mut b = buf("x");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_register("hi".to_string(), false);
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "xhi");
+    }
+
+    // -- Named registers (`"a`-`"z`/`"A`-`"Z`) ------------------------
+
+    #[test]
+    fn named_register_yank_and_paste_round_trip_and_mirror_the_unnamed_register() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "\"ayl"); // yank 'a' into register a
+        assert_eq!(vim.registers.get(&'a').map(|r| r.text.as_str()), Some("a"));
+        assert_eq!(vim.register(), ("a", false)); // "" mirrors it too
+
+        // An intervening plain (unnamed-only) yank must not disturb
+        // register a.
+        keys(&mut vim, &mut b, &mut c, "l\"byl");
+        assert_eq!(vim.registers.get(&'a').map(|r| r.text.as_str()), Some("a"));
+        assert_eq!(vim.registers.get(&'b').map(|r| r.text.as_str()), Some("b"));
+
+        keys(&mut vim, &mut b, &mut c, "\"ap");
+        assert_eq!(b.text(), "abac\ndef");
+    }
+
+    #[test]
+    fn uppercase_register_name_appends_to_existing_content() {
+        // "abc", not "ab" -- `l` at the buffer's very last character
+        // yanks an empty range even inside `yl` (the same clamp a bare
+        // `l` motion already has), which isn't what this test wants to
+        // exercise; the middle char keeps `l` meaningful both times.
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "\"ayl"); // register a = "a"
+        keys(&mut vim, &mut b, &mut c, "l\"Ayl"); // append -> register a = "ab"
+        assert_eq!(vim.registers.get(&'a').map(|r| r.text.as_str()), Some("ab"));
+    }
+
+    #[test]
+    fn an_invalid_register_name_cancels_the_pending_prefix_without_effect() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('"')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('5')), VimEvent::None); // not a-z/A-Z
+        // Confirms nothing was left pending -- an ordinary motion right
+        // after still behaves like an ordinary motion.
+        keys(&mut vim, &mut b, &mut c, "l");
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn active_register_does_not_linger_past_a_command_that_did_not_use_it() {
+        let mut b = buf("abcabc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "\"a"); // select register a...
+        keys(&mut vim, &mut b, &mut c, "l"); // ...then an ordinary motion, not a register command
+        keys(&mut vim, &mut b, &mut c, "yl"); // plain yank, no "-prefix this time
+        assert_eq!(vim.register(), ("b", false)); // the unnamed register got the plain yank...
+        assert!(vim.registers.get(&'a').is_none()); // ...register a was never actually written
+    }
+
+    #[test]
+    fn visual_mode_register_prefix_targets_a_named_register_too() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v"); // enter Visual, char at 0 anchored
+        keys(&mut vim, &mut b, &mut c, "l"); // extend to cover "ab"
+        keys(&mut vim, &mut b, &mut c, "\"ay");
+        assert_eq!(vim.registers.get(&'a').map(|r| r.text.as_str()), Some("ab"));
+    }
+
+    // -- Macros (`q{reg}`/`@{reg}`/`@@`) -------------------------------
+
+    #[test]
+    fn q_then_a_letter_starts_recording_and_returns_macro_record_start() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('q')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::MacroRecordStart('a'));
+        assert!(vim.is_recording());
+        assert_eq!(vim.recording_register(), Some('a'));
+    }
+
+    #[test]
+    fn an_uppercase_start_register_preserves_case_for_append_detection() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('q'));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('A')), VimEvent::MacroRecordStart('A'));
+        assert_eq!(vim.recording_register(), Some('a')); // storage itself is always lowercase
+    }
+
+    #[test]
+    fn a_second_bare_q_stops_recording_immediately_no_second_key_needed() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "qa");
+        assert!(vim.is_recording());
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('q')), VimEvent::MacroRecordStop('a'));
+        assert!(!vim.is_recording());
+    }
+
+    #[test]
+    fn finish_recording_encodes_and_stores_the_keys_in_the_target_register() {
+        let mut vim = VimState::new();
+        let typed = vec![KeyPress::char('d'), KeyPress::char('w')];
+        vim.finish_recording('a', &typed, false);
+        assert_eq!(vim.decode_register('a'), Some(typed));
+    }
+
+    #[test]
+    fn finish_recording_with_append_true_appends_to_existing_register_content() {
+        let mut vim = VimState::new();
+        vim.finish_recording('a', &[KeyPress::char('d')], false);
+        vim.finish_recording('a', &[KeyPress::char('w')], true);
+        assert_eq!(vim.decode_register('a'), Some(vec![KeyPress::char('d'), KeyPress::char('w')]));
+    }
+
+    #[test]
+    fn decode_register_is_none_for_a_register_that_was_never_written() {
+        let vim = VimState::new();
+        assert_eq!(vim.decode_register('z'), None);
+    }
+
+    #[test]
+    fn at_sign_with_a_leading_count_resolves_to_macro_play_with_that_count() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3"); // accumulate a count first, like every other countable action
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('@')), VimEvent::None); // waiting on the register name
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::MacroPlay { register: 'a', count: 3 });
+    }
+
+    #[test]
+    fn bare_at_sign_defaults_to_a_count_of_one() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('@'));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::MacroPlay { register: 'a', count: 1 });
+    }
+
+    #[test]
+    fn at_at_resolves_with_the_literal_at_sign_as_the_repeat_last_sentinel() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('@'));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('@')), VimEvent::MacroPlay { register: '@', count: 1 });
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_register_macro_record_or_macro_play_prefix() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        vim.handle_key(&mut b, &mut c, KeyPress::char('"'));
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        keys(&mut vim, &mut b, &mut c, "yl");
+        assert!(vim.registers.is_empty(), "register prefix should have been cancelled");
+
+        vim.handle_key(&mut b, &mut c, KeyPress::char('q'));
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert!(!vim.is_recording(), "macro-record prefix should have been cancelled");
+
+        vim.handle_key(&mut b, &mut c, KeyPress::char('@'));
+        assert_eq!(named(&mut vim, &mut b, &mut c, NamedKey::Escape), VimEvent::None);
     }
 
     #[test]
@@ -2460,6 +3226,91 @@ mod tests {
     }
 
     #[test]
+    fn shift_g_that_actually_moves_the_cursor_records_a_jump() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('G'));
+        assert_eq!(ev, VimEvent::JumpRecorded(0));
+    }
+
+    #[test]
+    fn gg_that_does_not_move_the_cursor_records_no_jump() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor::at_start(); // already on line 1
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "g");
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('g'));
+        assert_eq!(ev, VimEvent::None);
+    }
+
+    #[test]
+    fn matching_bracket_that_moves_the_cursor_records_a_jump() {
+        let mut b = buf("(abc)");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('%'));
+        assert_eq!(ev, VimEvent::JumpRecorded(0));
+        assert_eq!(c.char_idx, 4);
+    }
+
+    #[test]
+    fn matching_bracket_with_nothing_to_match_records_no_jump() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('%'));
+        assert_eq!(ev, VimEvent::None);
+    }
+
+    #[test]
+    fn m_then_a_char_emits_mark_set_at_the_cursors_position_without_moving_it() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor { char_idx: 3, sticky_col: 3 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "m");
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('a'));
+        assert_eq!(ev, VimEvent::MarkSet('a', 3));
+        assert_eq!(c.char_idx, 3); // setting a mark never moves the cursor
+    }
+
+    #[test]
+    fn backtick_then_a_char_emits_a_charwise_jump_to_mark() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('`'));
+        assert_eq!(ev, VimEvent::None); // waiting on the mark name
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('a'));
+        assert_eq!(ev, VimEvent::JumpToMark { name: 'a', linewise: false });
+    }
+
+    #[test]
+    fn quote_then_a_char_emits_a_linewise_jump_to_mark() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('\''));
+        let ev = vim.handle_key(&mut b, &mut c, KeyPress::char('z'));
+        assert_eq!(ev, VimEvent::JumpToMark { name: 'z', linewise: true });
+    }
+
+    #[test]
+    fn escape_after_m_aborts_without_setting_a_mark() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "m");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(ev, VimEvent::None);
+        // Confirms nothing was left pending: an ordinary motion right
+        // after still behaves like an ordinary motion, not a stale
+        // mark-name resolution.
+        keys(&mut vim, &mut b, &mut c, "l");
+        assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
     fn dg_with_no_count_deletes_linewise_to_the_last_line() {
         let mut b = buf("a\nb\nc");
         let mut c = Cursor::at_start();
@@ -2623,6 +3474,20 @@ mod tests {
     }
 
     #[test]
+    fn block_insert_left_propagates_a_tab_to_other_lines_on_escape() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jj"); // column 0 across all 3 lines
+        keys(&mut vim, &mut b, &mut c, "I");
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        let indent = " ".repeat(indent::DEFAULT_INDENT_WIDTH);
+        assert_eq!(b.text(), format!("{indent}abc\n{indent}def\n{indent}ghi"));
+    }
+
+    #[test]
     fn block_insert_left_skips_lines_too_short_to_reach_the_column() {
         let mut b = buf("abcdef\nxy\nghijkl");
         let mut c = Cursor { char_idx: 3, sticky_col: 3 }; // col 3 of line 0
@@ -2634,6 +3499,118 @@ mod tests {
         named(&mut vim, &mut b, &mut c, NamedKey::Escape);
         // line 1 ("xy") is only 2 chars -- too short for column 3, skipped
         assert_eq!(b.text(), "abcZdef\nxy\nghiZjkl");
+    }
+
+    #[test]
+    fn block_r_replaces_the_selected_rectangle_and_exits_to_normal() {
+        let mut b = buf("abc\ndef\nghi");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjl"); // column 0..=1 across all 3 lines
+        keys(&mut vim, &mut b, &mut c, "rx");
+        assert_eq!(b.text(), "xxc\nxxf\nxxi");
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert_eq!(c.char_idx, 0); // cursor lands at the block's top-left
+    }
+
+    #[test]
+    fn block_r_clamps_per_line_on_ragged_lines() {
+        let mut b = buf("abcdef\nx\nghijkl");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jj"); // down to line 2, still col 0
+        keys(&mut vim, &mut b, &mut c, "lll"); // extend to col 3
+        keys(&mut vim, &mut b, &mut c, "rz");
+        // middle line "x" is shorter than the rectangle -- its one char (at
+        // column 0, inside the selected 0..4) is replaced, but the
+        // rectangle isn't padded out to the other lines' width
+        assert_eq!(b.text(), "zzzzef\nz\nzzzzkl");
+    }
+
+    #[test]
+    fn charwise_r_replaces_only_the_selected_span() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vll"); // select "abc"
+        keys(&mut vim, &mut b, &mut c, "rz");
+        assert_eq!(b.text(), "zzzdef");
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert_eq!(c.char_idx, 0);
+    }
+
+    #[test]
+    fn charwise_r_spanning_lines_leaves_the_newline_alone() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "v");
+        keys(&mut vim, &mut b, &mut c, "jl"); // select through (and including) "e" on line 2
+        keys(&mut vim, &mut b, &mut c, "rz");
+        assert_eq!(b.text(), "zzz\nzzf");
+    }
+
+    #[test]
+    fn linewise_r_replaces_every_non_newline_char_on_each_selected_line() {
+        let mut b = buf("abc\nde\nfgh");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "Vj"); // lines 0..=1
+        keys(&mut vim, &mut b, &mut c, "rz");
+        assert_eq!(b.text(), "zzz\nzz\nfgh");
+    }
+
+    #[test]
+    fn escape_while_visual_r_is_pending_cancels_without_replacing_and_exits_visual() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vl");
+        keys(&mut vim, &mut b, &mut c, "r");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(b.text(), "abc");
+        assert_eq!(vim.mode(), Mode::Normal); // Escape cancels the replace AND exits Visual mode
+    }
+
+    #[test]
+    fn visual_selection_range_is_none_outside_visual_mode() {
+        let b = buf("abc");
+        let c = Cursor::at_start();
+        let vim = VimState::new();
+        assert_eq!(vim.visual_selection_range(&b, &c), None);
+    }
+
+    #[test]
+    fn visual_selection_range_is_none_for_a_block_selection() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        assert_eq!(vim.visual_selection_range(&b, &c), None);
+    }
+
+    #[test]
+    fn visual_selection_range_covers_a_char_selection() {
+        let mut b = buf("abcdef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vll"); // selects "abc"
+        assert_eq!(vim.visual_selection_range(&b, &c), Some((0..3, false)));
+    }
+
+    #[test]
+    fn exit_visual_mode_returns_to_normal_and_is_a_noop_otherwise() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.exit_visual_mode(&c); // outside Visual: no-op, doesn't panic
+        assert_eq!(vim.mode(), Mode::Normal);
+        keys(&mut vim, &mut b, &mut c, "v");
+        assert_eq!(vim.mode(), Mode::Visual);
+        vim.exit_visual_mode(&c);
+        assert_eq!(vim.mode(), Mode::Normal);
     }
 
     #[test]

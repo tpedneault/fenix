@@ -131,8 +131,7 @@ struct SubstituteSpec<'a> {
 }
 
 /// The actual substitution: extracts the target line range as one
-/// `String`, runs the regex replace per line (first match only, or
-/// every match with the `g` flag) entirely in memory, and -- only if
+/// `String`, runs `replace_in_text` entirely in memory, and -- only if
 /// anything actually changed -- swaps the whole span back into the rope
 /// with one `Buffer::replace_range` call (one atomic undo step,
 /// regardless of how many lines/matches were touched). Doing the regex
@@ -144,30 +143,13 @@ fn substitute(buffer: &mut Buffer, cursor: &mut Cursor, spec: &SubstituteSpec) -
     let (start_line, end_line) =
         if spec.start_line <= end_line { (spec.start_line, end_line) } else { (end_line, spec.start_line) };
 
-    let pattern_src = if spec.ignore_case { format!("(?i){}", spec.pattern) } else { spec.pattern.to_string() };
-    let re = Regex::new(&pattern_src)?;
-    let replacement = translate_replacement(spec.replacement);
-    let global = spec.global;
-
     let start_char = buffer.line_start_char(start_line);
     let end_char = buffer.line_start_char(end_line) + buffer.line_len(end_line);
     let original = buffer.text_range(start_char, end_char);
 
-    let mut changed = false;
-    let new_text: String = original
-        .split('\n')
-        .map(|line| {
-            let result =
-                if global { re.replace_all(line, replacement.as_str()) } else { re.replace(line, replacement.as_str()) };
-            if let std::borrow::Cow::Owned(_) = &result {
-                changed = true;
-            }
-            result.into_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (new_text, count) = replace_in_text(&original, spec.pattern, spec.replacement, spec.ignore_case, spec.global)?;
 
-    if changed {
+    if count > 0 {
         buffer.replace_range(cursor, start_char, end_char, &new_text);
         // Real Vim leaves the cursor on the last substituted line's
         // first non-blank -- `replace_range` already left it somewhere
@@ -181,6 +163,48 @@ fn substitute(buffer: &mut Buffer, cursor: &mut Cursor, spec: &SubstituteSpec) -
     Ok(())
 }
 
+/// Pure text-in/text-out find+replace -- the engine both `:s`'s own
+/// `substitute()` above and any host-level search/replace UI
+/// (`fenix-gui`'s `SPC s r`/`SPC s p`) share, so there's exactly one
+/// implementation of "how Fenix does find+replace," not a second,
+/// possibly-divergent one. `global` mirrors the `g` flag (every match
+/// per line, not just the first), `ignore_case` the `i` flag -- same
+/// semantics as real Vim's `:s`, including that a match is always
+/// scoped to a single line (`text` is split on `\n` and each line
+/// processed independently, exactly like `substitute()` always has) --
+/// a pattern can't match across a newline. Returns the transformed text
+/// and how many replacements were made (`0` and `text` unchanged if the
+/// pattern matched nothing).
+pub fn replace_in_text(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    ignore_case: bool,
+    global: bool,
+) -> Result<(String, usize), regex::Error> {
+    let pattern_src = if ignore_case { format!("(?i){pattern}") } else { pattern.to_string() };
+    let re = Regex::new(&pattern_src)?;
+    let translated = translate_replacement(replacement);
+
+    let mut count = 0usize;
+    let new_text: String = text
+        .split('\n')
+        .map(|line| {
+            if global {
+                count += re.find_iter(line).count();
+                re.replace_all(line, translated.as_str()).into_owned()
+            } else {
+                if re.is_match(line) {
+                    count += 1;
+                }
+                re.replace(line, translated.as_str()).into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((new_text, count))
+}
+
 /// Translates Vim's own `:s` replacement syntax into the `regex` crate's
 /// `$`-based one, so what Thomas types matches real Vim muscle memory:
 /// `&` (whole match) -> `${0}`, `\1`-`\9` (capture groups) -> `${1}`-
@@ -189,7 +213,7 @@ fn substitute(buffer: &mut Buffer, cursor: &mut Cursor, spec: &SubstituteSpec) -
 /// has no meaning as a literal char in Vim's own replacement syntax, so
 /// this is a pure implementation-detail escape, not a user-facing
 /// feature).
-fn translate_replacement(repl: &str) -> String {
+pub fn translate_replacement(repl: &str) -> String {
     let mut out = String::new();
     let mut chars = repl.chars().peekable();
     while let Some(c) = chars.next() {
@@ -325,6 +349,46 @@ mod tests {
         let (mut b, mut c) = cmd("hello world");
         run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4);
         assert_eq!(b.text(), "hello world");
+    }
+
+    #[test]
+    fn replace_in_text_global_replaces_every_match_and_counts_them() {
+        let (new_text, count) = replace_in_text("foo foo foo", "foo", "bar", false, true).unwrap();
+        assert_eq!(new_text, "bar bar bar");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn replace_in_text_non_global_replaces_only_the_first_match_per_line() {
+        let (new_text, count) = replace_in_text("foo foo\nfoo foo", "foo", "bar", false, false).unwrap();
+        assert_eq!(new_text, "bar foo\nbar foo");
+        assert_eq!(count, 2); // one per line, not per match
+    }
+
+    #[test]
+    fn replace_in_text_is_case_insensitive_when_asked() {
+        let (new_text, count) = replace_in_text("FOO foo Foo", "foo", "bar", true, true).unwrap();
+        assert_eq!(new_text, "bar bar bar");
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn replace_in_text_supports_ampersand_and_backreferences() {
+        let (new_text, count) = replace_in_text("hello world", r"(\w+) (\w+)", r"\2 \1: [&]", false, false).unwrap();
+        assert_eq!(new_text, "world hello: [hello world]");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn replace_in_text_with_no_matches_returns_the_original_text_and_zero() {
+        let (new_text, count) = replace_in_text("hello world", "xyz", "abc", false, true).unwrap();
+        assert_eq!(new_text, "hello world");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn replace_in_text_with_an_invalid_pattern_is_an_error_not_a_panic() {
+        assert!(replace_in_text("hello", "(unclosed", "x", false, true).is_err());
     }
 
     #[test]

@@ -68,6 +68,13 @@ pub enum VimAction {
     /// `*`/`#`: searches for the exact word under the cursor, forward or
     /// backward, with no prompt (the pattern's already known).
     SearchWord { forward: bool },
+    /// `m`: waits for exactly one more raw key (the mark's name) --
+    /// same "next key is special" shape as `FindCharPrompt`.
+    MarkSetPrompt,
+    /// `` ` ``/`'`: waits for one more raw key (the mark to jump to).
+    /// `linewise` picks which of the two forms: `` ` `` (exact position)
+    /// or `'` (first non-blank of the mark's line).
+    MarkJumpPrompt { linewise: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +95,11 @@ pub enum VisualAction {
     /// never restricts Visual indent to the selected columns.
     Indent,
     Dedent,
+    /// `r`: waits for one more raw key (the replacement char), then
+    /// overwrites every selected character with it -- same "next key is
+    /// special" shape as Normal mode's own `r`, just resolved against
+    /// the whole selection instead of `count` chars from the cursor.
+    ReplaceChar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +190,10 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('*')], "search word", VimAction::SearchWord { forward: true });
     t.insert(&[KeyPress::char('#')], "search word back", VimAction::SearchWord { forward: false });
 
+    t.insert(&[KeyPress::char('m')], "set mark", VimAction::MarkSetPrompt);
+    t.insert(&[KeyPress::char('`')], "jump to mark", VimAction::MarkJumpPrompt { linewise: false });
+    t.insert(&[KeyPress::char('\'')], "jump to mark (line)", VimAction::MarkJumpPrompt { linewise: true });
+
     t
 }
 
@@ -193,6 +209,7 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
     t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
+    t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
     t
 }
 
