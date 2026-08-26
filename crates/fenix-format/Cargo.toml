@@ -1,0 +1,6 @@
+[package]
+name = "fenix-format"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
