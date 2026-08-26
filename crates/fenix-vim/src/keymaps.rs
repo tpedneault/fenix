@@ -87,6 +87,13 @@ pub enum VimAction {
     /// host (`VimEvent::RepeatLastChange`), which owns the raw-keystroke
     /// capture this replays -- see `state.rs`'s `is_idle` doc comment.
     RepeatLastChange,
+    /// `g`+`c`: starts `gcc`/`gc{motion}` (comment toggling, the
+    /// `vim-commentary`/Comment.nvim convention) -- sets `pending_
+    /// comment`, awaiting either a doubled `c` (whole line(s)) or a
+    /// motion/text object, same shape `ys`'s own `Target` phase has.
+    /// Resolved into `VimEvent::ToggleComment` since only the host knows
+    /// the buffer's language-specific comment token.
+    ToggleCommentPrompt,
 }
 
 /// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
@@ -126,6 +133,19 @@ pub enum VisualAction {
     /// binding. Char/Line kinds only; a no-op in Block mode (matches
     /// real vim-surround's own lack of block support).
     Surround,
+    /// `~`/`u`/`U`: changes the case of every character in the
+    /// selection (real Vim's own Visual-mode case operators).
+    ChangeCase(CaseChange),
+}
+
+/// What `~`/`u`/`U` do to a character -- shared by Visual mode's own
+/// `ChangeCase` and Normal mode's single-char `~` (`VimState::toggle_
+/// case` calls `Toggle` directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseChange {
+    Toggle,
+    Upper,
+    Lower,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +206,7 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char(':')], "command line", VimAction::EnterCommandLine);
 
     t.insert(&[KeyPress::char('g'), KeyPress::char('v')], "reselect visual", VimAction::ReselectVisual);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('c')], "toggle comment...", VimAction::ToggleCommentPrompt);
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);
@@ -247,6 +268,9 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
     t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
     t.insert(&[KeyPress::char('S')], "surround selection", VisualAction::Surround);
+    t.insert(&[KeyPress::char('~')], "toggle case", VisualAction::ChangeCase(CaseChange::Toggle));
+    t.insert(&[KeyPress::char('u')], "lowercase", VisualAction::ChangeCase(CaseChange::Lower));
+    t.insert(&[KeyPress::char('U')], "uppercase", VisualAction::ChangeCase(CaseChange::Upper));
     t
 }
 

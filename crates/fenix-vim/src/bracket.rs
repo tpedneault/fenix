@@ -37,6 +37,22 @@ fn find_forward(buffer: &Buffer, from: usize, open: char, close: char) -> Option
     }
 }
 
+/// The next `open`/`close` pair starting at or after `at`, bounded to
+/// `line_end` (exclusive) -- `targets.vim`'s own "not inside a pair yet?
+/// search forward on the line" fallback for `enclosing_pair`, the same
+/// "search forward, don't just fail" behavior `quote_positions` already
+/// has for quote objects. `None` if there's no `open` in `at..line_end`.
+pub fn next_pair_on_line(buffer: &Buffer, at: usize, open: char, close: char, line_end: usize) -> Option<(usize, usize)> {
+    let mut i = at;
+    while i < line_end {
+        if buffer.char_at(i) == Some(open) {
+            return find_forward(buffer, i, open, close).map(|c| (i, c));
+        }
+        i += 1;
+    }
+    None
+}
+
 /// The innermost bracket pair enclosing `char_idx` -- unlike `find_match`,
 /// which requires the cursor to already be sitting *on* a bracket, this
 /// works from anywhere inside the pair (real Vim's `di(` doesn't require
@@ -187,5 +203,30 @@ mod tests {
         // Looking for () around 'a' (index 1), which is only inside [],
         // not any (): must not accidentally match the unrelated pair.
         assert_eq!(enclosing_pair(&b, 1, '(', ')'), None);
+    }
+
+    #[test]
+    fn next_pair_on_line_finds_a_pair_starting_ahead_of_the_cursor() {
+        let b = buf("x = (hello)");
+        assert_eq!(next_pair_on_line(&b, 0, '(', ')', b.len_chars()), Some((4, 10)));
+    }
+
+    #[test]
+    fn next_pair_on_line_finds_the_pair_it_already_starts_on() {
+        let b = buf("(hello)");
+        assert_eq!(next_pair_on_line(&b, 0, '(', ')', b.len_chars()), Some((0, 6)));
+    }
+
+    #[test]
+    fn next_pair_on_line_returns_none_past_line_end() {
+        let b = buf("x = (hello)");
+        // Bounded to stop before the '(' -- nothing to find.
+        assert_eq!(next_pair_on_line(&b, 0, '(', ')', 4), None);
+    }
+
+    #[test]
+    fn next_pair_on_line_returns_none_with_no_open_at_all() {
+        let b = buf("no brackets here");
+        assert_eq!(next_pair_on_line(&b, 0, '(', ')', b.len_chars()), None);
     }
 }

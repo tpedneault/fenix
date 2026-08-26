@@ -40,11 +40,94 @@ pub fn run_ex_command(
         return VimEvent::None;
     }
 
+    // `:g!`/`:v` before bare `:g` -- otherwise the `!`/`v` would be
+    // swallowed as part of the pattern delimiter by the plain `g`
+    // branch. Unlike `:s`, `:g` defaults to the *whole buffer* with no
+    // range prefix (matching real Vim); range-restricted `:N,Mg/.../`
+    // isn't supported here, same scope-limited posture `parse_range`'s
+    // own doc comment already states for `:s`.
+    if let Some(rest) = cmd.strip_prefix("g!").or_else(|| cmd.strip_prefix('v')) {
+        return run_global(buffer, cursor, rest, true, last_search);
+    }
+    if let Some(rest) = cmd.strip_prefix('g') {
+        return run_global(buffer, cursor, rest, false, last_search);
+    }
+
     let (range, rest) = parse_range(cmd, motion::last_line(buffer));
     if let Some(spec) = rest.strip_prefix('s') {
         let (cur_line, _) = buffer.line_col(cursor);
         let (start_line, end_line) = range.unwrap_or((cur_line, cur_line));
         return run_substitute(buffer, cursor, start_line, end_line, spec, last_search);
+    }
+    VimEvent::None
+}
+
+/// `:g/pattern/subcommand` (`invert` -- `:g!`/`:v` -- keeps the
+/// *non*-matching lines instead). `rest` is everything after the `g`/
+/// `g!`/`v`, delimiter-first exactly like `run_substitute`'s own `spec`
+/// (an empty pattern falls back to `last_search`). Scope: exactly two
+/// subcommands, matching this file's own established "common cases,
+/// not the full Ex language" posture --
+///
+/// - `d`: deletes every matching line.
+/// - `s/old/new/flags`: runs the *existing* `run_substitute` once per
+///   matching line -- substitution never changes line count, so the
+///   original match list stays valid across the whole loop.
+///
+/// Anything else -- including a bare `:g/pattern/` with no subcommand,
+/// real Vim's own "print matching lines" default (meaningless here,
+/// there's no line-listing UI to print into) -- is a silent no-op, not
+/// a default to `d`: an unrecognized subcommand silently deleting the
+/// user's lines would be a dangerous surprise.
+fn run_global(buffer: &mut Buffer, cursor: &mut Cursor, rest: &str, invert: bool, last_search: Option<&str>) -> VimEvent {
+    let Some(delim) = rest.chars().next() else { return VimEvent::None };
+    let parts: Vec<&str> = rest[delim.len_utf8()..].splitn(2, delim).collect();
+    let pattern = parts.first().copied().unwrap_or("");
+    let pattern = if pattern.is_empty() { last_search.unwrap_or("") } else { pattern };
+    if pattern.is_empty() {
+        return VimEvent::None;
+    }
+    let subcommand = parts.get(1).copied().unwrap_or("").trim();
+
+    let re = match Regex::new(pattern) {
+        Ok(re) => re,
+        Err(err) => return VimEvent::Error(format!(":g pattern error: {err}")),
+    };
+    let matching: Vec<usize> = (0..buffer.line_count())
+        .filter(|&line| {
+            let start = buffer.line_start_char(line);
+            let text = buffer.text_range(start, start + buffer.line_len(line));
+            re.is_match(&text) != invert
+        })
+        .collect();
+    if matching.is_empty() {
+        return VimEvent::None;
+    }
+
+    if subcommand == "d" {
+        // Highest index first: each deletion only ever shifts indices
+        // already processed, never the ones still queued, so `line_
+        // start_char`/`line_count` stay correct for every remaining
+        // (lower) match with no reindexing needed -- both are re-
+        // queried fresh here, deliberately, rather than cached from
+        // before the loop started.
+        for &line in matching.iter().rev() {
+            let start = buffer.line_start_char(line);
+            let end = if line + 1 < buffer.line_count() { buffer.line_start_char(line + 1) } else { buffer.len_chars() };
+            buffer.delete_range(cursor, start, end);
+        }
+        cursor.char_idx = cursor.char_idx.min(buffer.len_chars().saturating_sub(1));
+        return VimEvent::None;
+    }
+    if let Some(spec) = subcommand.strip_prefix('s') {
+        let mut event = VimEvent::None;
+        for &line in &matching {
+            let result = run_substitute(buffer, cursor, line, line, spec, last_search);
+            if matches!(result, VimEvent::Error(_)) {
+                event = result;
+            }
+        }
+        return event;
     }
     VimEvent::None
 }
@@ -369,6 +452,68 @@ mod tests {
         let (mut b, mut c) = cmd("hello world");
         run_ex_command("s//bye/", &mut b, &mut c, &mut 4, Some("hello"));
         assert_eq!(b.text(), "bye world");
+    }
+
+    // -- `:g`/`:g!`/`:v` --------------------------------------------------
+
+    #[test]
+    fn g_d_deletes_every_matching_line() {
+        let (mut b, mut c) = cmd("keep\nDROP me\nkeep\nDROP me too\n");
+        run_ex_command("g/DROP/d", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "keep\nkeep\n");
+    }
+
+    #[test]
+    fn g_bang_d_deletes_the_non_matching_lines() {
+        let (mut b, mut c) = cmd("keep\nDROP me\nkeep\nDROP me too\n");
+        run_ex_command("g!/DROP/d", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "DROP me\nDROP me too\n");
+    }
+
+    #[test]
+    fn v_is_an_alias_for_g_bang() {
+        let (mut b, mut c) = cmd("keep\nDROP me\nkeep\nDROP me too\n");
+        run_ex_command("v/DROP/d", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "DROP me\nDROP me too\n");
+    }
+
+    #[test]
+    fn g_s_substitutes_on_every_matching_line_only() {
+        let (mut b, mut c) = cmd("foo one\nbar two\nfoo three\n");
+        run_ex_command("g/foo/s/foo/baz/", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "baz one\nbar two\nbaz three\n");
+    }
+
+    #[test]
+    fn g_with_an_unrecognized_subcommand_is_a_noop_not_a_delete() {
+        // A missing/unknown subcommand must never default to deleting --
+        // that would be a dangerous surprise for a typo'd command.
+        let (mut b, mut c) = cmd("keep\nDROP me\n");
+        run_ex_command("g/DROP/", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "keep\nDROP me\n");
+        run_ex_command("g/DROP/xyz", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "keep\nDROP me\n");
+    }
+
+    #[test]
+    fn g_with_no_matches_is_a_noop() {
+        let (mut b, mut c) = cmd("keep\nkeep too\n");
+        run_ex_command("g/DROP/d", &mut b, &mut c, &mut 4, None);
+        assert_eq!(b.text(), "keep\nkeep too\n");
+    }
+
+    #[test]
+    fn g_with_an_empty_pattern_reuses_the_last_search_pattern() {
+        let (mut b, mut c) = cmd("keep\nDROP me\n");
+        run_ex_command("g//d", &mut b, &mut c, &mut 4, Some("DROP"));
+        assert_eq!(b.text(), "keep\n");
+    }
+
+    #[test]
+    fn g_with_an_invalid_pattern_raises_an_error_event() {
+        let (mut b, mut c) = cmd("a\nb\n");
+        let event = run_ex_command("g/(unclosed/d", &mut b, &mut c, &mut 4, None);
+        assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 
     #[test]

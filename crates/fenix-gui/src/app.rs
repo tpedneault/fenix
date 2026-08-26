@@ -1704,6 +1704,22 @@ fn format_with_external_tool(language: fenix_syntax::LanguageId, source: &str, p
     }
 }
 
+/// `toggle_comment_lines`'s own language -> line-comment-token table.
+/// `None` for a language with no clean single-token *line* comment --
+/// JSON (no comments at all in the spec), Markdown (block `<!-- -->`
+/// only), Batch (`REM`/`::` are both real but neither is unambiguous
+/// enough to toggle automatically) -- same "no-op, not a wrong guess"
+/// posture `format_with_external_tool` already has for a language with
+/// no formatter wired up.
+fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str> {
+    use fenix_syntax::LanguageId;
+    match language {
+        LanguageId::Rust | LanguageId::C | LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some("//"),
+        LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
+        LanguageId::Json | LanguageId::Markdown | LanguageId::Batch => None,
+    }
+}
+
 /// The char index of the first non-blank (non-space, non-tab) character
 /// on `line`, or the line's own start if it's blank/empty -- `'{mark}`'s
 /// landing spot (`goto_jump_entry`), real Vim's own `'` (vs. `` ` ``,
@@ -3328,9 +3344,92 @@ impl App {
 
     /// The focused buffer's detected language -- a path-extension check
     /// used to gate Tcl-only formatting (`format_buffer`/`format_
-    /// selection`) and the Tcl-specific slice of `completion_candidates`.
+    /// selection`), the Tcl-specific slice of `completion_candidates`,
+    /// and `toggle_comment_lines`'s own comment-token lookup.
     fn focused_language(&self) -> Option<fenix_syntax::LanguageId> {
         self.open().buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
+    }
+
+    /// `gcc`/`gc{motion}` (`VimEvent::ToggleComment`) -- toggles a
+    /// line-comment prefix across `start_line..=end_line`. Blank lines
+    /// (after trimming leading whitespace) are never touched either
+    /// direction, matching Comment.nvim/vim-commentary. If every non-
+    /// blank line in range is already commented, uncomments all of
+    /// them; otherwise comments every one that *isn't* already
+    /// commented (leaving already-commented lines alone -- the standard
+    /// "mixed selection comments the rest" convention those plugins
+    /// share). A no-op (with a message, same posture `format_buffer`
+    /// already has for "no formatter configured") if the language has
+    /// no single-token line comment (`line_comment_token`), or the
+    /// range is entirely blank.
+    pub(crate) fn toggle_comment_lines(&mut self, start_line: usize, end_line: usize) {
+        let Some(token) = self.focused_language().and_then(line_comment_token) else {
+            self.set_error("no comment syntax known for this buffer's language");
+            return;
+        };
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let end_line = end_line.min(buffer.line_count().saturating_sub(1));
+
+        // One pass over the *original* text: `first` (a char offset, not
+        // byte -- indentation is assumed ASCII, same assumption this
+        // codebase's other leading-whitespace helpers already make) and
+        // whether this line is already commented. Bottom-to-top
+        // processing below never invalidates a not-yet-processed
+        // (lower) line's own `line_start_char`, so none of this needs
+        // re-reading after an edit.
+        let mut lines: Vec<(usize, usize, bool)> = Vec::new();
+        let mut all_commented = true;
+        for line in start_line..=end_line {
+            let start = buffer.line_start_char(line);
+            let text = buffer.text_range(start, start + buffer.line_len(line));
+            let chars: Vec<char> = text.chars().collect();
+            let Some(first) = chars.iter().position(|&c| c != ' ' && c != '\t') else { continue };
+            let rest: String = chars[first..].iter().collect();
+            let commented = rest.starts_with(token);
+            if !commented {
+                all_commented = false;
+            }
+            lines.push((line, first, commented));
+        }
+        if lines.is_empty() {
+            return;
+        }
+
+        for &(line, first, commented) in lines.iter().rev() {
+            let start = buffer.line_start_char(line);
+            if all_commented {
+                let mut remove_len = token.chars().count();
+                if buffer.char_at(start + first + remove_len) == Some(' ') {
+                    remove_len += 1;
+                }
+                buffer.delete_range(cursor, start + first, start + first + remove_len);
+            } else if !commented {
+                // Uses the *real* pane cursor here (not a throwaway
+                // local `Cursor`) -- a throwaway one would leave the
+                // real cursor's `char_idx` stale relative to the just-
+                // inserted text, silently pointing at the wrong
+                // character for whatever runs next (a follow-up motion,
+                // or `.` replaying this same command from a different
+                // line).
+                cursor.char_idx = start + first;
+                buffer.insert_str(cursor, &format!("{token} "));
+            }
+        }
+        // Lands on the first affected line's own start, a stable and
+        // predictable spot regardless of which lines above got
+        // commented/uncommented (rather than wherever the loop's last
+        // per-line edit happened to leave the cursor).
+        cursor.char_idx = buffer.line_start_char(start_line).min(buffer.len_chars());
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        // The mutation happens here, *after* `vim.handle_key` already
+        // returned (outside `route_keypress`'s own edit_count comparison
+        // window) -- without this, `.` would silently fail to capture
+        // `gcc`/`gc{motion}` as a repeatable change. Same guard as the
+        // automatic `` `. `` mark write for the same reason.
+        if !self.replaying_change {
+            self.change_capture_dirty = true;
+        }
     }
 
     /// `SPC c F` -- formats the whole focused buffer in place via an
@@ -8199,14 +8298,29 @@ impl App {
         let vim_event = {
             let Some(ob) = self.buffers.get_mut(id) else { return };
             let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
+            let mode_before = self.vim.mode();
             let edit_count_before = ob.buffer.edit_count();
             let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress);
             // See `dispatch_keypress`'s own doc comment for `change_
             // capture`/`replaying_change` -- suppressed only while `.`
             // itself is replaying, so its own outer span doesn't get
             // polluted by the edits its replayed keys make.
-            if !self.replaying_change && ob.buffer.edit_count() != edit_count_before {
-                self.change_capture_dirty = true;
+            if ob.buffer.edit_count() != edit_count_before {
+                if !self.replaying_change {
+                    self.change_capture_dirty = true;
+                }
+                // Automatic `` `. `` mark (real Vim's own "position of
+                // the last change") -- `resolve_mark`/`jump_to_mark`
+                // already accept any char as a mark name, so writing
+                // this entry is the only piece that's missing; `` `. ``
+                // itself works for free the moment it exists.
+                self.marks.insert('.', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            }
+            // Automatic `` `^ `` mark (real Vim's own "position when
+            // Insert mode was last exited") -- same reasoning, on the
+            // Insert -> non-Insert transition instead of an edit.
+            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
             }
             event
         };
@@ -8249,6 +8363,7 @@ impl App {
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
+            VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
                 self.pulse = Some(Pulse { range, started: Instant::now() });
             }
@@ -11009,12 +11124,19 @@ impl App {
         let vim_event = {
             let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
             let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
+            let mode_before = self.vim.mode();
             let edit_count_before = ob.buffer.edit_count();
             let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, kp);
             // Mirrors `route_keypress`'s own instrumentation -- see
             // `dispatch_keypress`'s doc comment.
-            if !self.replaying_change && ob.buffer.edit_count() != edit_count_before {
-                self.change_capture_dirty = true;
+            if ob.buffer.edit_count() != edit_count_before {
+                if !self.replaying_change {
+                    self.change_capture_dirty = true;
+                }
+                self.marks.insert('.', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            }
+            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
             }
             event
         };
@@ -11031,6 +11153,7 @@ impl App {
             VimEvent::MacroPlay { register, count } => self.test_play_macro(register, count),
             VimEvent::RepeatLastChange => self.test_repeat_last_change(),
             VimEvent::Error(msg) => self.set_error(msg),
+            VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             _ => {}
         }
     }
@@ -12191,6 +12314,82 @@ mod tests {
         assert_eq!(app.vim.mode(), Mode::Visual);
     }
 
+    // -- `gcc`/`gc{motion}` (comment toggling) ---------------------------
+
+    #[test]
+    fn gcc_comments_a_tcl_line_with_a_hash() {
+        let dir = TempDir::new("gcc_tcl");
+        let file = dir.write("foo.tcl", "set x 1\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        assert_eq!(app.open().buffer.text(), "# set x 1\n");
+    }
+
+    #[test]
+    fn gcc_uncomments_an_already_commented_tcl_line() {
+        let dir = TempDir::new("gcc_tcl_uncomment");
+        let file = dir.write("foo.tcl", "# set x 1\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        assert_eq!(app.open().buffer.text(), "set x 1\n");
+    }
+
+    #[test]
+    fn gcc_uses_double_slash_for_a_rust_buffer() {
+        let dir = TempDir::new("gcc_rust");
+        let file = dir.write("foo.rs", "let x = 1;\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        assert_eq!(app.open().buffer.text(), "// let x = 1;\n");
+    }
+
+    #[test]
+    fn gcap_comments_every_line_in_the_paragraph_but_not_the_blank_line() {
+        let dir = TempDir::new("gcap_tcl");
+        let file = dir.write("foo.tcl", "set x 1\nset y 2\n\nset z 3\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('a'));
+        app.test_dispatch_key(KeyPress::char('p'));
+        assert_eq!(app.open().buffer.text(), "# set x 1\n# set y 2\n\nset z 3\n");
+    }
+
+    #[test]
+    fn gcc_is_a_noop_for_a_language_with_no_line_comment_token() {
+        let dir = TempDir::new("gcc_json_noop");
+        let file = dir.write("foo.json", "{}\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        assert_eq!(app.open().buffer.text(), "{}\n");
+    }
+
+    #[test]
+    fn dot_repeats_gcc_on_a_different_line() {
+        // Confirms the manual `change_capture_dirty` fix actually works
+        // -- `gcc`'s buffer mutation happens *after* `vim.handle_key`
+        // returns, outside the ordinary edit_count comparison window.
+        let dir = TempDir::new("gcc_dot_repeat");
+        let file = dir.write("foo.tcl", "set x 1\nset y 2\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        app.test_dispatch_key(KeyPress::char('c'));
+        assert_eq!(app.open().buffer.text(), "# set x 1\nset y 2\n");
+
+        app.test_dispatch_key(KeyPress::char('j'));
+        app.test_dispatch_key(KeyPress::char('.'));
+        assert_eq!(app.open().buffer.text(), "# set x 1\n# set y 2\n");
+    }
+
     #[test]
     fn accept_completion_replaces_the_typed_prefix_with_the_full_label() {
         let dir = TempDir::new("completion_accept");
@@ -12618,6 +12817,38 @@ mod tests {
         let origin = app.focused_buffer_id();
         app.jump_to_mark('z', false);
         assert_eq!(app.focused_buffer_id(), origin);
+    }
+
+    #[test]
+    fn an_edit_automatically_sets_the_dot_mark() {
+        let mut app = macro_app("hello world");
+        assert!(!app.marks.contains_key(&'.'));
+        app.test_dispatch_key(KeyPress::char('x')); // deletes 'h' -- a real edit
+        assert!(app.marks.contains_key(&'.'));
+        let after_edit = app.cursor().char_idx;
+        app.test_dispatch_key(KeyPress::char('$')); // move away
+        app.jump_to_mark('.', false);
+        assert_eq!(app.cursor().char_idx, after_edit);
+    }
+
+    #[test]
+    fn a_plain_motion_does_not_set_the_dot_mark() {
+        let mut app = macro_app("hello world");
+        app.test_dispatch_key(KeyPress::char('l')); // motion only, no edit
+        assert!(!app.marks.contains_key(&'.'));
+    }
+
+    #[test]
+    fn leaving_insert_mode_automatically_sets_the_caret_mark() {
+        let mut app = macro_app("hello");
+        app.test_dispatch_key(KeyPress::char('A')); // append at end -> Insert mode
+        app.test_dispatch_key(KeyPress::char('!'));
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.marks.contains_key(&'^'));
+        let after_insert = app.cursor().char_idx;
+        app.test_dispatch_key(KeyPress::char('0')); // move to start
+        app.jump_to_mark('^', false);
+        assert_eq!(app.cursor().char_idx, after_insert);
     }
 
     #[test]

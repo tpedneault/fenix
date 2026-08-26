@@ -147,11 +147,20 @@ fn matching_close(open: char) -> char {
     }
 }
 
-/// A no-op empty range at the cursor when there's no enclosing pair --
-/// same posture as `quote_span`'s own "nothing to select" fallback.
+/// Tries `enclosing_pair` first (cursor already inside a pair); if
+/// that fails, falls back to `targets.vim`'s own "search forward on the
+/// line for the next pair" (mirrors `quote_span`'s existing forward-
+/// search behavior, so `di(` becomes as forgiving as `di"` already is).
+/// A no-op empty range at the cursor if neither finds anything.
 fn bracket_span(buffer: &Buffer, cursor: &Cursor, open: char, around: bool) -> Range<usize> {
     let close = matching_close(open);
-    match bracket::enclosing_pair(buffer, cursor.char_idx, open, close) {
+    let at = cursor.char_idx;
+    let found = bracket::enclosing_pair(buffer, at, open, close).or_else(|| {
+        let (line, _) = buffer.line_col(cursor);
+        let line_end = buffer.line_start_char(line) + buffer.line_len(line);
+        bracket::next_pair_on_line(buffer, at, open, close, line_end)
+    });
+    match found {
         Some((o, c)) => {
             if around {
                 o..(c + 1)
@@ -160,7 +169,7 @@ fn bracket_span(buffer: &Buffer, cursor: &Cursor, open: char, around: bool) -> R
             }
         }
         None => {
-            let at = cursor.char_idx.min(buffer.len_chars().saturating_sub(1));
+            let at = at.min(buffer.len_chars().saturating_sub(1));
             at..at
         }
     }
@@ -306,6 +315,14 @@ mod tests {
         let b = buf("no brackets here");
         let at = cur(3);
         assert_eq!(span(&b, &at, TextObject::InnerBracket('(')), 3..3);
+    }
+
+    #[test]
+    fn bracket_object_before_any_pair_on_the_line_finds_the_upcoming_one() {
+        // targets.vim-style forward search -- the same forgiveness
+        // `di"` already has for quotes, now extended to brackets.
+        let b = buf("x = (hello)");
+        assert_eq!(span(&b, &cur(0), TextObject::InnerBracket('(')), 5..10); // "hello"
     }
 
     #[test]

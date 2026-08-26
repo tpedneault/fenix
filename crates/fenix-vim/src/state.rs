@@ -6,7 +6,7 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
 use crate::bracket;
 use crate::indent;
-use crate::keymaps::{self, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
+use crate::keymaps::{self, CaseChange, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
 use crate::keynotation;
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
@@ -103,6 +103,11 @@ pub enum VimEvent {
     /// reason it owns macro storage/replay (`MacroPlay`'s own doc
     /// comment) -- `fenix-vim` only ever sees one key at a time.
     RepeatLastChange,
+    /// `gcc`/`gc{motion}` -- asks the host to toggle line-comments across
+    /// `start_line..=end_line` (inclusive). Host-resolved since only it
+    /// knows the buffer's language-specific comment token; `fenix-vim`
+    /// only computed *which lines* the motion/text-object touched.
+    ToggleComment { start_line: usize, end_line: usize },
 }
 
 struct Register {
@@ -279,6 +284,23 @@ pub struct VimState {
     /// Visual mode's `S`: the *next* key is the surround char -- same
     /// "next key is special" shape as `pending_visual_replace`.
     pending_visual_surround: bool,
+    /// `g`+`c` (`gcc`/`gc{motion}`): awaiting either a doubled `c` (whole
+    /// line(s)) or a motion/text object -- same shape `pending_surround`'s
+    /// own `Target` phase has, just without needing an enum of its own
+    /// (there's only ever this one phase).
+    pending_comment: bool,
+    /// The count that was accumulated *before* `gc` itself was entered
+    /// (`3gcc`) -- `self.count` is unconditionally cleared the moment
+    /// any normal-trie action resolves (including `gc`'s own two-key
+    /// resolution), so without capturing it here it would be lost
+    /// before `handle_comment_key` ever sees it. Combined
+    /// multiplicatively with whatever count is typed *between* `gc`
+    /// and the motion/doubled key (`gc3j`, `3gcc`) at resolution time --
+    /// exactly mirrors `pending_op_count`'s own reason for existing.
+    pending_comment_count: u32,
+    /// Set once `pending_comment` resolves to a line range; consumed by
+    /// `handle_key` and turned into `VimEvent::ToggleComment`.
+    pending_comment_lines: Option<(usize, usize)>,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -333,6 +355,9 @@ impl VimState {
             pending_replace: None,
             pending_visual_replace: false,
             pending_visual_surround: false,
+            pending_comment: false,
+            pending_comment_count: 1,
+            pending_comment_lines: None,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
@@ -491,11 +516,23 @@ impl VimState {
 
     /// No command is currently "in progress" -- Normal mode, no pending
     /// operator/register/replace/find/mark/surround, no count prefix
-    /// typed. The boundary a repeatable command's key-capture starts and
-    /// ends at: the host (`App::dispatch_keypress`) watches this to know
-    /// when to reset its capture buffer and when a just-completed span
-    /// is a candidate for `.` to replay -- see that function's own doc
-    /// comment. Doesn't need to check `pending_scroll`/`pending_pulse`/
+    /// typed, and not mid-way through a multi-key Normal-trie sequence
+    /// (`normal_matcher.is_pending()` -- catches a bare `g` waiting for
+    /// `g`/`v`/`c`, `z` waiting for `z`/`t`/`b`, etc.: none of those set
+    /// any of the other fields checked here, so without this check a
+    /// leading key like `g` would look "idle" the instant it's typed
+    /// and get dropped from `.`'s own capture -- a real bug, found via
+    /// `gcc` specifically since it was the first `g`-prefixed command
+    /// that actually edits the buffer; `gg`/`gv` never exposed it since
+    /// neither produces an edit for the capture logic to notice). The
+    /// boundary a repeatable command's key-capture starts and ends at:
+    /// the host (`App::dispatch_keypress`) watches this to know when to
+    /// reset its capture buffer and when a just-completed span is a
+    /// candidate for `.` to replay -- see that function's own doc
+    /// comment. `visual_matcher` is checked too for the same reason,
+    /// even though no Visual-trie sequence is currently more than one
+    /// key -- cheap insurance against the identical bug the moment one
+    /// is added. Doesn't need to check `pending_scroll`/`pending_pulse`/
     /// etc: those are transient output flags, always drained back to
     /// `None` by the end of the very `handle_key` call that set them
     /// (see its own doc comment), never still-`Some` by the time a
@@ -510,6 +547,9 @@ impl VimState {
             && self.pending_find.is_none()
             && self.pending_mark.is_none()
             && self.pending_surround.is_none()
+            && !self.pending_comment
+            && !self.normal_matcher.is_pending()
+            && !self.visual_matcher.is_pending()
     }
 
     /// Register `name`'s content, decoded (`keynotation::decode`) back
@@ -620,6 +660,7 @@ impl VimState {
         let macro_play = self.pending_macro_play.take();
         let scroll = self.pending_scroll.take();
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
+        let comment_lines = self.pending_comment_lines.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
@@ -640,6 +681,7 @@ impl VimState {
             .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
+            .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .unwrap_or(event)
     }
 
@@ -957,6 +999,13 @@ impl VimState {
             return VimEvent::None;
         }
 
+        // `gc{motion}`/`gcc` -- same "stays live across multiple keys
+        // until explicitly resolved" shape as `pending_surround`.
+        if self.pending_comment {
+            self.handle_comment_key(buffer, cursor, key);
+            return VimEvent::None;
+        }
+
         if let Some(op) = self.pending_op {
             self.handle_operator_pending_key(buffer, cursor, op, key);
             return VimEvent::None;
@@ -1231,6 +1280,10 @@ impl VimState {
             // count-override semantics (`3.` isn't "repeat with count 3
             // instead" the way real Vim's is) -- out of scope for now.
             VimAction::RepeatLastChange => self.pending_repeat_last_change = true,
+            VimAction::ToggleCommentPrompt => {
+                self.pending_comment = true;
+                self.pending_comment_count = count;
+            }
         }
     }
 
@@ -1302,13 +1355,7 @@ impl VimState {
     /// multi-char cases).
     fn toggle_case(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
         let Some(c) = buffer.char_at(cursor.char_idx) else { return };
-        let toggled = if c.is_uppercase() {
-            c.to_lowercase().next().unwrap_or(c)
-        } else if c.is_lowercase() {
-            c.to_uppercase().next().unwrap_or(c)
-        } else {
-            c
-        };
+        let toggled = apply_case(c, CaseChange::Toggle);
         let start = cursor.char_idx;
         buffer.delete_range(cursor, start, start + 1);
         buffer.insert_str(cursor, &toggled.to_string());
@@ -1396,6 +1443,52 @@ impl VimState {
                         continue;
                     }
                     buffer.replace_range(cursor, idx, idx + 1, &c.to_string());
+                }
+                cursor.char_idx = start;
+            }
+        }
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        self.mode = Mode::Normal;
+    }
+
+    /// Visual mode's `~`/`u`/`U`: changes the case of every character in
+    /// the selection (newlines left alone), leaving the buffer's line
+    /// structure untouched -- same three-way `visual_kind` dispatch and
+    /// "exit to Normal at the selection's start" shape as `visual_
+    /// replace_char`, just applying `apply_case` per-character instead
+    /// of overwriting with one literal char.
+    fn visual_change_case(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, mode: CaseChange) {
+        self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+        match self.visual_kind {
+            VisualKind::Block => {
+                let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
+                for line in line_lo..=line_hi {
+                    let start = buffer.line_start_char(line);
+                    let len = buffer.line_len(line);
+                    let lo = col_lo.min(len);
+                    let hi = col_hi.min(len);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let original = buffer.text_range(start + lo, start + hi);
+                    let replacement: String = original.chars().map(|c| apply_case(c, mode)).collect();
+                    buffer.replace_range(cursor, start + lo, start + hi, &replacement);
+                }
+                cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
+            }
+            VisualKind::Char | VisualKind::Line => {
+                let (range, _) = self.visual_range(buffer, cursor);
+                let start = range.start;
+                for idx in range {
+                    let Some(c) = buffer.char_at(idx) else { continue };
+                    if c == '\n' {
+                        continue;
+                    }
+                    let changed = apply_case(c, mode);
+                    if changed != c {
+                        buffer.replace_range(cursor, idx, idx + 1, &changed.to_string());
+                    }
                 }
                 cursor.char_idx = start;
             }
@@ -1730,6 +1823,53 @@ impl VimState {
         }
     }
 
+    /// `gc{motion}`/`gcc`'s own key handler -- resolves to a line range
+    /// (`pending_comment_lines`), never touching the buffer directly
+    /// (only the host knows the language's comment token). Comment
+    /// toggling always operates on whole lines regardless of whether the
+    /// motion itself was charwise, matching real Comment.nvim/vim-
+    /// commentary (`gcap` comments every line in the paragraph, `gcj`
+    /// comments the current+next line) -- so a resolved char range is
+    /// converted to `(start_line, end_line)` via `range_to_lines` rather
+    /// than kept as-is.
+    fn handle_comment_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) {
+        if key.code == KeyCode::Named(NamedKey::Escape) {
+            self.pending_comment = false;
+            self.pending_matcher.cancel();
+            self.count = None;
+            return;
+        }
+        // `gcc`: doubled form, current line(s) -- same count-aware shape
+        // `dd`/`cc`/`yy`'s own doubled form has (`pending_comment_count`,
+        // typed *before* `gc`, combines multiplicatively with whatever's
+        // typed between `gc` and this doubled key).
+        if !self.pending_matcher.is_pending() && key == KeyPress::char('c') {
+            self.pending_comment = false;
+            let total_count = self.pending_comment_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
+            let (line, _) = buffer.line_col(cursor);
+            let end_line = (line + total_count as usize - 1).min(motion::last_line(buffer));
+            self.pending_comment_lines = Some((line, end_line));
+            return;
+        }
+        match self.pending_matcher.feed(key) {
+            Step::Pending(_) => {}
+            Step::NoMatch => {
+                self.pending_comment = false;
+                self.count = None;
+            }
+            Step::Matched(target) => {
+                let target = *target;
+                self.pending_comment = false;
+                let total_count = self.pending_comment_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
+                let range = match target {
+                    PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, total_count),
+                    PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj),
+                };
+                self.pending_comment_lines = Some(range_to_lines(buffer, &range));
+            }
+        }
+    }
+
     /// Writes `text` into whatever register `"{name}` most recently
     /// selected (consuming that one-shot selection), or the unnamed
     /// register if none was selected -- shared by every yank/delete/
@@ -1937,6 +2077,9 @@ impl VimState {
                 VisualAction::Surround => {
                     self.pending_visual_surround = true;
                 }
+                VisualAction::ChangeCase(mode) => {
+                    self.visual_change_case(buffer, cursor, mode);
+                }
             }
             // Same one-shot reset as `handle_normal_key`'s own
             // `Step::Matched` arm -- a register selected via `"{name}`
@@ -2138,6 +2281,44 @@ fn surround_pair_for(c: char) -> Option<(String, String)> {
         '\'' => Some(("'".to_string(), "'".to_string())),
         '`' => Some(("`".to_string(), "`".to_string())),
         _ => None,
+    }
+}
+
+/// Which lines `range` (an ordinary char range from a resolved motion or
+/// text object) touches -- `gc{motion}`'s own "always whole lines"
+/// conversion. Uses `range.end.saturating_sub(1)` (the last *included*
+/// char), not `range.end` itself, so an exclusive range that lands
+/// exactly on the next line's first char (e.g. a linewise motion, or
+/// `w` stopping at the start of a following line) doesn't spuriously
+/// pull that next line in as "touched." An empty range still resolves
+/// to its own single line.
+fn range_to_lines(buffer: &Buffer, range: &Range<usize>) -> (usize, usize) {
+    let start_char = range.start.min(buffer.len_chars().saturating_sub(1));
+    let end_char = range.end.saturating_sub(1).max(range.start).min(buffer.len_chars().saturating_sub(1));
+    let (start_line, _) = buffer.line_col(&Cursor { char_idx: start_char, sticky_col: 0 });
+    let (end_line, _) = buffer.line_col(&Cursor { char_idx: end_char, sticky_col: 0 });
+    (start_line, end_line.max(start_line))
+}
+
+/// What `~`/`u`/`U` (Normal mode's single char and Visual mode's own
+/// `ChangeCase`) turn `c` into. Takes only the *first* char of Rust's
+/// `to_uppercase`/`to_lowercase` iterator -- lossy for the rare
+/// multi-char mappings (German `ß` -> `"SS"`), a disclosed
+/// simplification: every call site here replaces exactly one char with
+/// the result, so a multi-char mapping would desync buffer indices.
+fn apply_case(c: char, mode: CaseChange) -> char {
+    match mode {
+        CaseChange::Toggle => {
+            if c.is_uppercase() {
+                c.to_lowercase().next().unwrap_or(c)
+            } else if c.is_lowercase() {
+                c.to_uppercase().next().unwrap_or(c)
+            } else {
+                c
+            }
+        }
+        CaseChange::Upper => c.to_uppercase().next().unwrap_or(c),
+        CaseChange::Lower => c.to_lowercase().next().unwrap_or(c),
     }
 }
 
@@ -2913,6 +3094,113 @@ mod tests {
         vim.handle_key(&mut b, &mut c, KeyPress::char('"'));
         assert_eq!(b.text(), "\"hel\"lo world");
         assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn visual_tilde_toggles_case_of_the_selection() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vll~"); // selects+toggles "hel"
+        assert_eq!(b.text(), "HELlo world");
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn visual_shift_u_uppercases_the_selection() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vllU");
+        assert_eq!(b.text(), "HELlo world");
+    }
+
+    #[test]
+    fn visual_lowercase_u_lowercases_the_selection() {
+        let mut b = buf("HELLO WORLD");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "vllu");
+        assert_eq!(b.text(), "helLO WORLD");
+    }
+
+    #[test]
+    fn visual_line_change_case_leaves_the_newline_alone() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "VU");
+        assert_eq!(b.text(), "ABC\ndef");
+    }
+
+    #[test]
+    fn visual_block_change_case_only_touches_the_rectangle() {
+        let mut b = buf("abc\ndef");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "lj");
+        keys(&mut vim, &mut b, &mut c, "U");
+        assert_eq!(b.text(), "ABc\nDEf");
+    }
+
+    // -- `gcc`/`gc{motion}` (comment toggling) ---------------------------
+
+    #[test]
+    fn gcc_resolves_the_doubled_form_to_the_current_line() {
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let event = { keys(&mut vim, &mut b, &mut c, "gc"); vim.handle_key(&mut b, &mut c, KeyPress::char('c')) };
+        assert_eq!(event, VimEvent::ToggleComment { start_line: 0, end_line: 0 });
+    }
+
+    #[test]
+    fn gcc_with_a_count_covers_that_many_lines() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3gc");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('c'));
+        assert_eq!(event, VimEvent::ToggleComment { start_line: 0, end_line: 2 });
+    }
+
+    #[test]
+    fn gc_with_a_motion_resolves_via_the_motion_path_not_just_doubled() {
+        // `gcw` -- a plain charwise motion, distinct code path from
+        // `gcc`'s doubled form and `gcap`'s text-object form (both
+        // covered by their own tests). `Motion::Down`/`Up` aren't
+        // linewise in this codebase (a disclosed simplification, see
+        // `Motion::is_linewise`), so a motion that stays within one
+        // line is the representative, unambiguous case here.
+        let mut b = buf("one two three");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "gc");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('w'));
+        assert_eq!(event, VimEvent::ToggleComment { start_line: 0, end_line: 0 });
+    }
+
+    #[test]
+    fn gc_with_a_text_object_resolves_to_the_lines_it_touches() {
+        let mut b = buf("a\nb\n\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "gc");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('a'));
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('p')); // gcap: whole paragraph
+        assert_eq!(event, VimEvent::ToggleComment { start_line: 0, end_line: 2 }); // includes the trailing blank line
+    }
+
+    #[test]
+    fn gc_escape_cancels_without_raising_an_event() {
+        let mut b = buf("one\ntwo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "gc");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Escape));
+        assert_eq!(event, VimEvent::None);
+        assert!(vim.is_idle());
     }
 
     // -- `zz`/`zt`/`zb`, `Ctrl-a`/`Ctrl-x` -------------------------------
