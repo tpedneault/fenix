@@ -14,9 +14,25 @@ use crate::schema;
 /// an unknown field name); a line with more values than the schema has
 /// columns silently drops the extras, matching the reference elisp
 /// implementation's own `cl-loop ... for value in values` zip.
+///
+/// A missing file stays silent -- a MIB root only has a handful of the
+/// ~35 known tables, so `MibIndex::refresh` trying every table against
+/// every root means most of these calls are expected to find nothing.
+/// A file that *exists* but fails to read (permission denied, a lock
+/// held by something else, non-UTF-8 content) is a real anomaly, not
+/// the normal case -- reported loudly instead of silently degrading a
+/// whole root's worth of one table to "no rows," which otherwise reads
+/// identically to "this root genuinely has none."
 pub fn parse_table_file(root_index: usize, root_label: &str, table: &str, file: &Path) -> Vec<Row> {
     let Some(columns) = schema::columns(table) else { return Vec::new() };
-    let Ok(contents) = std::fs::read_to_string(file) else { return Vec::new() };
+    let contents = match std::fs::read_to_string(file) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            eprintln!("fenix: couldn't read {} for MIB root {root_label} ({err})", file.display());
+            return Vec::new();
+        }
+    };
     let mut rows = Vec::new();
     for (i, line) in contents.lines().enumerate() {
         if line.is_empty() {
@@ -124,6 +140,20 @@ mod tests {
     fn a_missing_file_yields_no_rows_not_an_error() {
         let dir = temp_dir("missing");
         let file = dir.join("prv.dat");
+        assert!(parse_table_file(0, "TEST", "prv", &file).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_exists_but_is_not_valid_utf8_yields_no_rows_not_a_panic() {
+        // Still degrades gracefully (never a hard error/panic for
+        // callers) -- only the *diagnostic* changed, from silent to a
+        // loud `eprintln!`, since this is the kind of anomaly that
+        // otherwise reads identically to "this root genuinely has no
+        // rows in this table."
+        let dir = temp_dir("bad-utf8");
+        let file = dir.join("prv.dat");
+        std::fs::write(&file, [0xff, 0xfe, 0x00, 0x01]).unwrap();
         assert!(parse_table_file(0, "TEST", "prv", &file).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -13561,6 +13561,84 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_second_mib_root_keeps_the_first_one_after_a_simulated_restart() {
+        let mib_dir_a = TempDir::new("mib_two_roots_a");
+        let mib_dir_b = TempDir::new("mib_two_roots_b");
+        let config_dir = TempDir::new("mib_two_roots_config");
+        let config_path = config_dir.path().join("config.ini");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_path.clone());
+
+        app.project_root = Some(mib_dir_a.path().to_path_buf());
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        for ch in "MIB-A".chars() {
+            app.mib_root_prompt_key(KeyPress::char(ch));
+        }
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        app.project_root = Some(mib_dir_b.path().to_path_buf());
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        for ch in "MIB-B".chars() {
+            app.mib_root_prompt_key(KeyPress::char(ch));
+        }
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.config.mib_roots.len(), 2, "both roots should be in memory right after adding them");
+
+        // Simulate a restart: a brand new `Config` loaded fresh from the
+        // same path, the same way `App::with_file` does at startup.
+        let reloaded = fenix_config::Config::load_or_default(config_path);
+        assert_eq!(reloaded.mib_roots.len(), 2, "both roots should survive a reload, not just the most recently added one");
+        let labels: Vec<&str> = reloaded.mib_roots.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, vec!["MIB-A", "MIB-B"]);
+    }
+
+    #[test]
+    fn adding_a_mib_root_alongside_one_already_on_disk_keeps_both_after_a_restart() {
+        // Closer to the real reported scenario than the sequential-add
+        // test above: one root already persisted (from a previous
+        // session, or hand-edited into config.ini) *before* this App
+        // ever loads its config, then a second one added via `SPC m a`
+        // in this session.
+        let mib_dir_a = TempDir::new("mib_preexisting_a");
+        let mib_dir_b = TempDir::new("mib_preexisting_b");
+        let config_dir = TempDir::new("mib_preexisting_config");
+        let config_path = config_dir.path().join("config.ini");
+
+        let mut seed = fenix_config::Config::load_or_default(config_path.clone());
+        let canonical_a = std::fs::canonicalize(mib_dir_a.path()).unwrap();
+        seed.mib_roots = vec![("MIB-A".to_string(), canonical_a.clone())];
+        seed.save().unwrap();
+
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_path.clone());
+        app.mib_roots = app
+            .config
+            .mib_roots
+            .iter()
+            .map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() })
+            .collect();
+        assert_eq!(app.config.mib_roots.len(), 1, "sanity check: the pre-existing root loaded correctly");
+
+        app.project_root = Some(mib_dir_b.path().to_path_buf());
+        app.picker_add_mib_root_prompt();
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+        for ch in "MIB-B".chars() {
+            app.mib_root_prompt_key(KeyPress::char(ch));
+        }
+        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.config.mib_roots.len(), 2, "the pre-existing root must survive add_mib_root, not get dropped");
+
+        let reloaded = fenix_config::Config::load_or_default(config_path);
+        assert_eq!(reloaded.mib_roots.len(), 2, "both roots should survive a reload");
+        let labels: Vec<&str> = reloaded.mib_roots.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, vec!["MIB-A", "MIB-B"]);
+    }
+
+    #[test]
     fn mib_root_prompt_enter_with_an_empty_label_registers_nothing() {
         let mib_dir = TempDir::new("mib_root_prompt_empty_target");
         let config_dir = TempDir::new("mib_root_prompt_empty_config");
