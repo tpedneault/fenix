@@ -4091,8 +4091,16 @@ impl App {
     }
 
     /// `ActivePicker::MibArgumentAlias` confirm -- records `alias` as the
-    /// current parameter's value and advances to the next one.
+    /// current parameter's value and advances to the next one. Resets
+    /// `main_view` back to `Editor` (picking a candidate left it on
+    /// `Picker`) the same way every other picker-confirm path already
+    /// does, whether inline (`Theme`/`TableColumn`) or via whatever it
+    /// hands off to (`mib_start_insert`/`mib_open_detail`) -- missing
+    /// here left the wizard's remaining stages (and the eventual insert
+    /// itself) rendering behind a stale, now-buffer-less picker view
+    /// until the user manually backed out of it.
     fn mib_resume_insert(&mut self, alias: String) {
+        self.main_view = MainView::Editor;
         let Some(insert) = &self.mib_insert else { return };
         let idx = insert.collected.len();
         let Some(param) = insert.variable_params.get(idx) else { return };
@@ -12079,6 +12087,7 @@ mod tests {
             other => panic!("expected an open MibArgumentAlias picker, got is_some={}", other.is_some()),
         }
         app.picker_confirm(); // picks "OFF" (the first/only-selected row)
+        assert_eq!(app.main_view, MainView::Editor, "confirming the alias picker must not leave main_view stuck on Picker");
 
         // Second variable parameter is GAIN, ranged but not aliased --
         // free-text capture.
@@ -12096,6 +12105,35 @@ mod tests {
             }
             other => panic!("expected Confirm after both arguments, got a different stage: {other:?}"),
         }
+    }
+
+    #[test]
+    fn mib_insert_telecommand_with_an_aliased_argument_returns_to_the_editor_after_committing() {
+        let dir = TempDir::new("mib_insert_aliased_commit");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
+
+        let candidates = app.mib_tc_candidates().unwrap();
+        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
+        app.mib_start_insert(ccf);
+        app.mib_insert_key(KeyPress::char('y'));
+        app.picker_confirm(); // MODE = OFF, via the aliased-argument picker
+        for ch in "50".chars() {
+            app.mib_insert_key(KeyPress::char(ch));
+        }
+        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter)); // GAIN = 50, into Confirm
+        app.mib_insert_key(KeyPress::char('y')); // confirm the insert
+
+        assert!(app.mib_insert.is_none());
+        assert!(app.active_picker.is_none());
+        assert_eq!(
+            app.main_view,
+            MainView::Editor,
+            "should land back on the text buffer, not a stale picker view, once the insert commits"
+        );
+        assert!(app.open().buffer.text().contains("MODE=OFF"));
+        assert!(app.open().buffer.text().contains("GAIN=50"));
     }
 
     #[test]
