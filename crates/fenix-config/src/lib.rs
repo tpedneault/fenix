@@ -49,6 +49,22 @@ pub struct Config {
     pub mib_telecommand_template: Option<String>,
     pub mib_telecommand_argument_template: Option<String>,
     pub mib_telecommand_argument_separator: Option<String>,
+    /// The self-hosted Jira instance's own REST API root (e.g.
+    /// `https://jira.mycompany.com`), and a personal access token for
+    /// it -- plaintext, same as every other setting in this file (a
+    /// deliberate choice, not an oversight: `fenix-jira`'s own design
+    /// notes cover the tradeoff against an OS credential store).
+    pub jira_base_url: Option<String>,
+    pub jira_token: Option<String>,
+    /// Tracked projects, `(key, display name)` -- same numbered-key
+    /// `[jira]` list convention `mib_roots` already established, just a
+    /// plain `(String, String)` pair instead of `(String, PathBuf)`.
+    /// Hand-typed by the user (`SPC j p a`), not looked up against a
+    /// live Jira API at add-time.
+    pub jira_projects: Vec<(String, String)>,
+    /// Tracked users, `(id, display name)` -- same shape/convention as
+    /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
+    pub jira_users: Vec<(String, String)>,
 }
 
 impl Config {
@@ -72,6 +88,7 @@ impl Config {
         let editor = sections.get("editor");
         let completion = sections.get("completion");
         let mib = sections.get("mib");
+        let jira = sections.get("jira");
 
         Ok(Self {
             path,
@@ -85,6 +102,10 @@ impl Config {
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
+            jira_base_url: jira.and_then(|s| s.get("base_url")).cloned(),
+            jira_token: jira.and_then(|s| s.get("token")).cloned(),
+            jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
+            jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
         })
     }
 
@@ -105,6 +126,10 @@ impl Config {
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
+            jira_base_url: None,
+            jira_token: None,
+            jira_projects: Vec::new(),
+            jira_users: Vec::new(),
         })
     }
 
@@ -154,6 +179,20 @@ impl Config {
         if let Some(separator) = &self.mib_telecommand_argument_separator {
             out.push_str(&format!("telecommand_argument_separator = {}\n", ini::quote_if_needed(separator)));
         }
+        out.push('\n');
+        out.push_str("[jira]\n");
+        if let Some(base_url) = &self.jira_base_url {
+            out.push_str(&format!("base_url = {}\n", ini::quote_if_needed(base_url)));
+        }
+        if let Some(token) = &self.jira_token {
+            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
+        }
+        for (i, (key, name)) in self.jira_projects.iter().enumerate() {
+            out.push_str(&format!("project{} = {key}|{name}\n", i + 1));
+        }
+        for (i, (id, name)) in self.jira_users.iter().enumerate() {
+            out.push_str(&format!("user{} = {id}|{name}\n", i + 1));
+        }
         std::fs::write(&self.path, out)
     }
 
@@ -174,16 +213,31 @@ impl Config {
 /// every other field in this file already has. Sorted by the numeric
 /// ordinal, not by key string, so `root2` sorts before `root10`.
 fn parse_mib_roots(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
-    let mut roots: Vec<(usize, String, PathBuf)> = section
+    parse_pair_list(section, "root").into_iter().map(|(label, path)| (label, PathBuf::from(path))).collect()
+}
+
+/// Parses a numbered-key `{prefix}1 = a|b`, `{prefix}2 = a|b`, ... list
+/// into an ordered `Vec<(String, String)>`, sorted by the numeric
+/// ordinal (not the key string, so `{prefix}2` sorts before `{prefix}10`)
+/// -- the shared engine behind `parse_mib_roots` (which further maps
+/// the second field into a `PathBuf`) and the `[jira]` section's own
+/// `project`/`user` lists, which need this exact `(String, String)`
+/// shape directly. `|` splits the two halves (not `:`, which a Windows
+/// path -- `parse_mib_roots`'s own second field -- can contain); any
+/// key that doesn't match `{prefix}N`, or a value with no `|`, is
+/// silently skipped, same "a bad entry loses only itself" posture every
+/// other field in this file already has.
+fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(usize, String, String)> = section
         .iter()
         .filter_map(|(key, value)| {
-            let n = key.strip_prefix("root")?.parse::<usize>().ok()?;
-            let (label, path) = value.split_once('|')?;
-            Some((n, label.trim().to_string(), PathBuf::from(path.trim())))
+            let n = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
+            let (a, b) = value.split_once('|')?;
+            Some((n, a.trim().to_string(), b.trim().to_string()))
         })
         .collect();
-    roots.sort_by_key(|(n, _, _)| *n);
-    roots.into_iter().map(|(_, label, path)| (label, path)).collect()
+    pairs.sort_by_key(|(n, _, _)| *n);
+    pairs.into_iter().map(|(_, a, b)| (a, b)).collect()
 }
 
 #[cfg(test)]
@@ -265,6 +319,41 @@ mod tests {
         assert_eq!(reloaded.mib_telecommand_template, Some("TC {mnemo}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_template, Some("{name}:{value}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_separator, Some(";".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn jira_settings_round_trip_through_save_and_load() {
+        let path = temp_path("jira_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.jira_base_url = Some("https://jira.example.com".to_string());
+        config.jira_token = Some("secret-token-value".to_string());
+        config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other Project".to_string())];
+        config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.jira_base_url, Some("https://jira.example.com".to_string()));
+        assert_eq!(reloaded.jira_token, Some("secret-token-value".to_string()));
+        assert_eq!(
+            reloaded.jira_projects,
+            vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other Project".to_string())]
+        );
+        assert_eq!(reloaded.jira_users, vec![("jo1111111".to_string(), "John Doe".to_string())]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn jira_projects_are_ordered_by_numeric_ordinal_not_key_string() {
+        let path = temp_path("jira_ordinal_order");
+        let mut config = Config::load_or_default(path.clone());
+        // 10 project entries so lexical-vs-numeric key ordering actually
+        // differs ("project10" sorts before "project2" as plain strings).
+        config.jira_projects = (1..=10).map(|i| (format!("P{i}"), format!("Project {i}"))).collect();
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.jira_projects, config.jira_projects);
         std::fs::remove_file(&path).ok();
     }
 

@@ -1,0 +1,8 @@
+[package]
+name = "fenix-jira"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde_json = "1"
+ureq = { version = "2", features = ["tls"] }

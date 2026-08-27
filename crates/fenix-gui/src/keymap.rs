@@ -169,6 +169,21 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
 
+        // Jira dashboard -- read-only browsing this phase (see the Jira
+        // dashboard plan's own scope notes). `p`/`u` add/delete letters
+        // mirror `SPC p a`/`SPC p d`'s own add/delete-from-a-persisted-
+        // list convention, same as the `m`ib group already reuses it.
+        t.label_group(&[spc, KeyPress::char('j')], "jira");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('j')], "open jira panel", "jira.open");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('q')], "close jira panel", "jira.close");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('r')], "refresh jira panel", "jira.refresh");
+        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('p')], "jira projects");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('a')], "add project", "jira.add_project");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('d')], "delete project", "jira.delete_project");
+        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('u')], "jira users");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('a')], "add user", "jira.add_user");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('d')], "delete user", "jira.delete_user");
+
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('r')],
@@ -481,6 +496,56 @@ mod tests {
         match m.feed(KeyPress::char('q')) {
             fenix_keymap::Step::Matched(&"docker.close") => {}
             _ => panic!("expected SPC d q to resolve to docker.close"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_jira_open_close_and_refresh() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('j')) {
+            fenix_keymap::Step::Matched(&"jira.open") => {}
+            _ => panic!("expected SPC j j to resolve to jira.open"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('q')) {
+            fenix_keymap::Step::Matched(&"jira.close") => {}
+            _ => panic!("expected SPC j q to resolve to jira.close"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('r')) {
+            fenix_keymap::Step::Matched(&"jira.refresh") => {}
+            _ => panic!("expected SPC j r to resolve to jira.refresh"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_jira_project_and_user_add_delete() {
+        let trie = leader_trie();
+        let cases = [
+            (['j', 'p', 'a'], "jira.add_project"),
+            (['j', 'p', 'd'], "jira.delete_project"),
+            (['j', 'u', 'a'], "jira.add_user"),
+            (['j', 'u', 'd'], "jira.delete_user"),
+        ];
+        for (keys, expected) in cases {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            for k in &keys[..keys.len() - 1] {
+                m.feed(KeyPress::char(*k));
+            }
+            match m.feed(KeyPress::char(*keys.last().unwrap())) {
+                fenix_keymap::Step::Matched(&matched) if matched == expected => {}
+                _ => panic!("expected SPC {} to resolve to {expected}", keys.iter().collect::<String>()),
+            }
         }
     }
 

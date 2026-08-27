@@ -29,6 +29,7 @@ use crate::docker_panel;
 use crate::git_panel;
 use crate::gpu::GpuState;
 use crate::icon;
+use crate::jira_panel;
 use crate::keymap;
 use crate::popup;
 use crate::rect::RectRenderer;
@@ -679,6 +680,77 @@ struct GitPrompt {
     input: String,
 }
 
+/// The active Jira multi-pane session (`SPC j j`) -- mirrors `GitSession`,
+/// minus a poller: nothing in this phase needs to auto-refresh (no
+/// polling endpoint is even called), `SPC j r` covers a manual refresh
+/// instead. `tracked_projects`/`tracked_users` are seeded from `Config`
+/// on open and kept in lockstep with it on every add/remove (see
+/// `jira_prompt_advance`/`picker_confirm`'s own `DeleteJiraProject`/
+/// `DeleteJiraUser` arms) so this session never has to re-read the
+/// config file to reflect its own edits.
+struct JiraSession {
+    workspace_index: usize,
+    projects_pane: fenix_window::WindowId,
+    users_pane: fenix_window::WindowId,
+    issues_pane: fenix_window::WindowId,
+    detail_pane: fenix_window::WindowId,
+    projects_buffer: BufferId,
+    users_buffer: BufferId,
+    issues_buffer: BufferId,
+    detail_buffer: BufferId,
+    tracked_projects: Vec<(String, String)>,
+    tracked_users: Vec<(String, String)>,
+    issues: Vec<fenix_jira::IssueSummary>,
+    detail: Option<fenix_jira::IssueDetail>,
+    /// The user id `jira_sync_issues` last actually fetched issues for --
+    /// lets it skip re-fetching when the cursor hasn't moved to a
+    /// *different* user row. Mirrors `GitSession::last_main_entry`.
+    last_selected_user: Option<String>,
+    /// Bumped every time `jira_sync_issues` issues a real async fetch --
+    /// `apply_jira_issues` discards a completed fetch whose id no longer
+    /// matches this. Mirrors `GitSession::main_request_id`.
+    issues_request_id: u64,
+    /// Same role as `last_selected_user`, one pane deeper (Issues ->
+    /// Detail).
+    last_selected_issue: Option<String>,
+    /// Same role as `issues_request_id`, for `jira_sync_detail`/`apply_
+    /// jira_detail`.
+    detail_request_id: u64,
+}
+
+/// Which of a `JiraSession`'s four panes is currently focused, if any --
+/// mirrors `GitPaneRole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JiraPaneRole {
+    Projects,
+    Users,
+    Issues,
+    Detail,
+}
+
+/// Which step of the two-step "add a tracked project/user" text prompt
+/// is capturing the next keystrokes -- unlike `GitPromptKind`'s single-
+/// field prompts (a commit message, a branch name), tracking a project
+/// or user needs *two* free-text fields (key/id, then a display name)
+/// with no filesystem browse step in between (ruling out `mib_root_
+/// prompt`'s own browse-then-label shape as the template -- that one's
+/// specific to picking a directory). The `ProjectName`/`UserName`
+/// variants carry the first field's already-captured value forward, so
+/// the second `Enter` has everything it needs to append the pair and
+/// save `Config` in one step (`jira_prompt_advance`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JiraPromptKind {
+    ProjectKey,
+    ProjectName { key: String },
+    UserId,
+    UserName { id: String },
+}
+
+struct JiraPrompt {
+    kind: JiraPromptKind,
+    input: String,
+}
+
 /// Cross-thread wake events -- the only way anything outside the winit
 /// event loop's own thread (the Docker panel's stats poller/log
 /// follower, Phases 5-6) can get `App` to mutate state and request a
@@ -733,6 +805,16 @@ pub enum FenixUserEvent {
     /// Terminal` (holding `Box<dyn Child>` et al.) has no `Debug` impl
     /// of its own, and doesn't need one anywhere else.
     TerminalSpawned(TerminalSpawnResult),
+    /// A completed Jira issue search, from the one-shot background
+    /// thread `jira_sync_issues` spawned. Carries the `request_id` the
+    /// fetch was issued under, same stale-result guard as `GitMainReady`
+    /// -- see `JiraSession::issues_request_id`'s own doc comment. Both
+    /// payload types here already derive `Debug` (unlike the terminal
+    /// panel's `Terminal`), so no wrapper type is needed.
+    JiraIssuesReady { request_id: u64, issues: Result<Vec<fenix_jira::IssueSummary>, String> },
+    /// Same shape as `JiraIssuesReady`, one pane deeper -- a completed
+    /// single-issue detail fetch from `jira_sync_detail`.
+    JiraDetailReady { request_id: u64, detail: Result<fenix_jira::IssueDetail, String> },
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -968,6 +1050,14 @@ enum ActivePicker {
     /// `known_projects` -- payload is the full `(label, path)` pair,
     /// see `mib_root_candidates`.
     DeleteMibRoot(fenix_picker::PickerState<(String, PathBuf)>),
+    /// `SPC j p d`: same "list what's configured, confirming removes
+    /// it" shape as `DeleteMibRoot`, for `config.jira_projects` --
+    /// payload is the full `(key, name)` pair, see `jira_project_
+    /// candidates`.
+    DeleteJiraProject(fenix_picker::PickerState<(String, String)>),
+    /// `SPC j u d`: same shape as `DeleteJiraProject`, for `config.
+    /// jira_users` -- payload is the full `(id, name)` pair.
+    DeleteJiraUser(fenix_picker::PickerState<(String, String)>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -1034,6 +1124,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::DeleteMibRoot(s) => s.push_char(c),
+        ActivePicker::DeleteJiraProject(s) => s.push_char(c),
+        ActivePicker::DeleteJiraUser(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
@@ -1055,6 +1147,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchBuffer(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::DeleteMibRoot(s) => s.backspace(),
+        ActivePicker::DeleteJiraProject(s) => s.backspace(),
+        ActivePicker::DeleteJiraUser(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibTelecommandLookup(s) => s.backspace(),
@@ -1076,6 +1170,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::DeleteMibRoot(s) => s.move_selection(delta),
+        ActivePicker::DeleteJiraProject(s) => s.move_selection(delta),
+        ActivePicker::DeleteJiraUser(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
@@ -1097,6 +1193,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchBuffer(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::DeleteMibRoot(s) => s.query(),
+        ActivePicker::DeleteJiraProject(s) => s.query(),
+        ActivePicker::DeleteJiraUser(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibTelecommandLookup(s) => s.query(),
@@ -1118,6 +1216,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBuffer(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::DeleteMibRoot(s) => s.len(),
+        ActivePicker::DeleteJiraProject(s) => s.len(),
+        ActivePicker::DeleteJiraUser(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibTelecommandLookup(s) => s.len(),
@@ -1139,6 +1239,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::DeleteMibRoot(s) => s.selected_row(),
+        ActivePicker::DeleteJiraProject(s) => s.selected_row(),
+        ActivePicker::DeleteJiraUser(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
@@ -1164,6 +1266,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteMibRoot(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::DeleteJiraProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::DeleteJiraUser(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2079,6 +2183,54 @@ fn git_highlights_for_visible_range(
     ranges
 }
 
+/// `JiraBadgeColor` -> a real theme color -- mirrors `git_badge_color`,
+/// reusing the same staged/modified/conflicted/gutter roles since a
+/// self-hosted instance's own workflow colors aren't known ahead of
+/// time (see `jira_panel::status_color`'s own doc comment).
+fn jira_badge_color(color: jira_panel::JiraBadgeColor, theme: &Theme) -> glyphon::Color {
+    match color {
+        jira_panel::JiraBadgeColor::Good => theme.git_staged,
+        jira_panel::JiraBadgeColor::Warn => theme.git_modified,
+        jira_panel::JiraBadgeColor::Bad => theme.git_conflicted,
+        jira_panel::JiraBadgeColor::Neutral => theme.gutter_fg,
+    }
+}
+
+/// Resolves a real `BufferKind::Jira` buffer's per-line syntax-highlight
+/// ranges from its cached `JiraLine` metadata -- mirrors `git_highlights_
+/// for_visible_range`. `Empty`/`Detail`/`Comment` rows render dimmed in
+/// their entirety (unlike Git's `Detail`, there's no `dim_from` split --
+/// see `jira_panel::JiraLine`'s own doc comment for why).
+fn jira_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<jira_panel::JiraLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        match meta.style {
+            jira_panel::JiraLineStyle::Empty | jira_panel::JiraLineStyle::Detail | jira_panel::JiraLineStyle::Comment => {
+                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
+            }
+            jira_panel::JiraLineStyle::Project | jira_panel::JiraLineStyle::User | jira_panel::JiraLineStyle::Issue => {}
+        }
+        if let Some((badge_len, color)) = meta.badge {
+            let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
+            ranges.push((line_start_byte..badge_end_byte, jira_badge_color(color, theme)));
+        }
+    }
+    ranges
+}
+
 /// One-letter badge for an explorer row's git status.
 fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
     match status {
@@ -2639,6 +2791,19 @@ pub struct App {
     /// `GitSession`'s own doc comment.
     git_session: Option<GitSession>,
 
+    /// Per-line metadata for every real `BufferKind::Jira` buffer
+    /// currently open (`SPC j j`) -- mirrors `git_lines` exactly.
+    jira_lines: HashMap<BufferId, Vec<Option<jira_panel::JiraLine>>>,
+    /// Capturing a tracked project's key/name or a tracked user's id/
+    /// name, two fields in sequence -- mirrors `git_prompt`'s "next
+    /// keystrokes are text input" shape, extended to a second field
+    /// (see `JiraPromptKind`'s own doc comment for why Git's single-
+    /// field shape doesn't fit here).
+    jira_prompt: Option<JiraPrompt>,
+    /// The active Jira multi-pane session (`SPC j j`), if any -- see
+    /// `JiraSession`'s own doc comment.
+    jira_session: Option<JiraSession>,
+
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
     /// per-buffer-keyed precedent as `dashboard_lines`/`docker_lines`.
@@ -3026,6 +3191,9 @@ impl App {
             git_prompt: None,
             git_menu_open: false,
             git_session: None,
+            jira_lines: HashMap::new(),
+            jira_prompt: None,
+            jira_session: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -6605,6 +6773,442 @@ impl App {
         self.git_refresh_session();
     }
 
+    /// `SPC j j`: opens (or refocuses) the Jira dashboard -- mirrors
+    /// `open_git_panel`'s WindowTree-split recipe, just four panes
+    /// instead of seven and no background poller (see `JiraSession`'s
+    /// own doc comment for why). Left to right: Projects | Users |
+    /// Issues | Detail -- Issues is the main/widest pane, same
+    /// "narrowest/most-filtering to widest/most-detail" cascade `open_
+    /// git_panel`'s own Files/Branches/Commits/Stash -> Main already
+    /// uses. `tracked_projects`/`tracked_users` are seeded fresh from
+    /// `Config` every time this runs (including on refocus), so an edit
+    /// made to `config.ini` by hand between sessions shows up too.
+    pub(crate) fn open_jira_panel(&mut self) {
+        if let Some(session) = &self.jira_session {
+            let (workspace_index, projects_pane) = (session.workspace_index, session.projects_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(projects_pane);
+            self.wake_caret();
+            return;
+        }
+
+        let tracked_projects = self.config.jira_projects.clone();
+        let tracked_users = self.config.jira_users.clone();
+
+        let projects_panel = jira_panel::render_projects(&tracked_projects);
+        let users_panel = jira_panel::render_users(&tracked_users);
+        let issues_panel = jira_panel::render_issues(&[]);
+        let detail_panel = jira_panel::render_detail(None);
+
+        let projects_buffer = self.buffers.open_jira(&projects_panel.text);
+        let users_buffer = self.buffers.open_jira(&users_panel.text);
+        let issues_buffer = self.buffers.open_jira(&issues_panel.text);
+        let detail_buffer = self.buffers.open_jira(&detail_panel.text);
+        self.jira_lines.insert(projects_buffer, projects_panel.lines);
+        self.jira_lines.insert(users_buffer, users_panel.lines);
+        self.jira_lines.insert(issues_buffer, issues_panel.lines);
+        self.jira_lines.insert(detail_buffer, detail_panel.lines);
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(projects_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let projects_pane = self.focused_pane_id();
+
+        // Right column first, at the outer split -- Detail gets the
+        // same ~15% narrower-than-half share `open_git_panel`'s own
+        // Main pane carves out, for the same reason: list rows don't
+        // need much width, a detail view does.
+        let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
+        self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.15);
+
+        // Left column: Projects/Users/Issues stacked. Projects is
+        // shrunk below the default 50/50 split (it's a short hand-typed
+        // list, not the main content); Users keeps the biggest
+        // remaining share "for free," Issues takes half of what's left
+        // -- same cascade `open_git_panel`'s own Status/Staged split
+        // uses.
+        self.windows_mut().focus(projects_pane);
+        let users_pane = self.windows_mut().split(SplitKind::Horizontal, users_buffer);
+        self.workspaces.active_pane_states_mut().insert(users_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.35);
+        let issues_pane = self.windows_mut().split(SplitKind::Horizontal, issues_buffer);
+        self.workspaces.active_pane_states_mut().insert(issues_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().focus(projects_pane);
+
+        self.pane_titles.insert(projects_pane, "1. Projects".to_string());
+        self.pane_titles.insert(users_pane, "2. Users".to_string());
+        self.pane_titles.insert(issues_pane, "3. Issues".to_string());
+        self.pane_titles.insert(detail_pane, "4. Detail".to_string());
+
+        self.jira_session = Some(JiraSession {
+            workspace_index,
+            projects_pane,
+            users_pane,
+            issues_pane,
+            detail_pane,
+            projects_buffer,
+            users_buffer,
+            issues_buffer,
+            detail_buffer,
+            tracked_projects,
+            tracked_users,
+            issues: Vec::new(),
+            detail: None,
+            last_selected_user: None,
+            issues_request_id: 0,
+            last_selected_issue: None,
+            detail_request_id: 0,
+        });
+
+        self.wake_caret();
+    }
+
+    /// `SPC j q`: closes the Jira dashboard session -- mirrors `git_
+    /// session_close` exactly (no poller to stop, unlike Docker/Git).
+    pub(crate) fn jira_session_close(&mut self) {
+        let Some(session) = self.jira_session.take() else { return };
+        for id in [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer] {
+            self.buffers.close(id);
+            self.jira_lines.remove(&id);
+        }
+        for pane in [session.projects_pane, session.users_pane, session.issues_pane, session.detail_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.wake_caret();
+    }
+
+    /// Rewrites `id`'s buffer text from a freshly-rendered `JiraPanel`,
+    /// resetting every pane currently showing it back to the top --
+    /// mirrors `set_git_buffer`.
+    fn set_jira_buffer(&mut self, id: BufferId, panel: jira_panel::JiraPanel) {
+        self.jira_lines.insert(id, panel.lines);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    fn jira_focused_role(&self) -> Option<JiraPaneRole> {
+        let session = self.jira_session.as_ref()?;
+        if self.workspaces.active_index() != session.workspace_index {
+            return None;
+        }
+        let focused = self.focused_pane_id();
+        if focused == session.projects_pane {
+            Some(JiraPaneRole::Projects)
+        } else if focused == session.users_pane {
+            Some(JiraPaneRole::Users)
+        } else if focused == session.issues_pane {
+            Some(JiraPaneRole::Issues)
+        } else if focused == session.detail_pane {
+            Some(JiraPaneRole::Detail)
+        } else {
+            None
+        }
+    }
+
+    /// The pane whose title bar is numbered `n` (`1. Projects` etc.,
+    /// see `open_jira_panel`'s own title strings) -- mirrors `git_pane_
+    /// by_number`, backs the same digit-key jump-to-pane shortcut.
+    fn jira_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.jira_session.as_ref()?;
+        match n {
+            1 => Some(session.projects_pane),
+            2 => Some(session.users_pane),
+            3 => Some(session.issues_pane),
+            4 => Some(session.detail_pane),
+            _ => None,
+        }
+    }
+
+    /// What the cursor's current line on a Jira buffer targets --
+    /// mirrors `git_entry_at_cursor`.
+    fn jira_entry_at_cursor(&self) -> Option<jira_panel::JiraEntry> {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        self.jira_lines.get(&self.focused_buffer_id()).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).and_then(|meta| meta.entry.clone())
+    }
+
+    /// A ready-to-use `fenix_jira::JiraClient` built from `Config`'s
+    /// `[jira]` settings, or `None` (with a surfaced error) when either
+    /// `base_url` or `token` isn't configured yet.
+    fn jira_client(&mut self) -> Option<fenix_jira::JiraClient> {
+        let base_url = self.config.jira_base_url.clone();
+        let token = self.config.jira_token.clone();
+        match (base_url, token) {
+            (Some(base_url), Some(token)) => Some(fenix_jira::JiraClient::new(base_url, token)),
+            _ => {
+                self.set_error("Jira isn't configured yet: set base_url/token in the [jira] section of config.ini");
+                None
+            }
+        }
+    }
+
+    /// Re-fetches Issues from whichever row is now under the cursor in
+    /// Users -- a no-op when the cursor hasn't actually moved to a
+    /// *different* user (mirrors `git_sync_main`'s own "cheap, derive
+    /// fresh from whatever's under the cursor now" posture, including
+    /// the same background-thread-for-a-real-app/synchronous-for-tests
+    /// split via `self.event_proxy`).
+    fn jira_sync_issues(&mut self) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        let selected_user = match self.jira_entry_at_cursor() {
+            Some(jira_panel::JiraEntry::User(id)) => Some(id),
+            _ => return,
+        };
+        if selected_user == session.last_selected_user {
+            return;
+        }
+
+        let Some(client) = self.jira_client() else { return };
+        let Some(session) = self.jira_session.as_mut() else { return };
+        session.last_selected_user = selected_user.clone();
+        session.issues_request_id += 1;
+        let request_id = session.issues_request_id;
+        let project_keys: Vec<String> = session.tracked_projects.iter().map(|(key, _)| key.clone()).collect();
+        let Some(user_id) = selected_user else { return };
+        let jql = fenix_jira::build_jql(&user_id, &project_keys);
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let issues = client.search_issues(&jql, 50);
+                    let _ = proxy.send_event(FenixUserEvent::JiraIssuesReady { request_id, issues });
+                });
+            }
+            None => {
+                let issues = client.search_issues(&jql, 50);
+                self.apply_jira_issues(request_id, issues);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::JiraIssuesReady` handling: applies a completed
+    /// background issue search, unless a newer request has since
+    /// superseded it (mirrors `apply_git_main`'s own staleness guard).
+    fn apply_jira_issues(&mut self, request_id: u64, issues: Result<Vec<fenix_jira::IssueSummary>, String>) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        if session.issues_request_id != request_id {
+            return;
+        }
+        let issues_buffer = session.issues_buffer;
+        match issues {
+            Ok(issues) => {
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.issues = issues.clone();
+                }
+                self.set_jira_buffer(issues_buffer, jira_panel::render_issues(&issues));
+            }
+            Err(err) => self.set_error(format!("Jira search failed: {err}")),
+        }
+    }
+
+    /// Same shape as `jira_sync_issues`, one pane deeper -- re-fetches
+    /// the full issue detail from whichever row is now under the cursor
+    /// in Issues.
+    fn jira_sync_detail(&mut self) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        let selected_issue = match self.jira_entry_at_cursor() {
+            Some(jira_panel::JiraEntry::Issue(key)) => Some(key),
+            _ => return,
+        };
+        if selected_issue == session.last_selected_issue {
+            return;
+        }
+
+        let Some(client) = self.jira_client() else { return };
+        let Some(session) = self.jira_session.as_mut() else { return };
+        session.last_selected_issue = selected_issue.clone();
+        session.detail_request_id += 1;
+        let request_id = session.detail_request_id;
+        let Some(issue_key) = selected_issue else { return };
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let detail = client.get_issue(&issue_key);
+                    let _ = proxy.send_event(FenixUserEvent::JiraDetailReady { request_id, detail });
+                });
+            }
+            None => {
+                let detail = client.get_issue(&issue_key);
+                self.apply_jira_detail(request_id, detail);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::JiraDetailReady` handling -- mirrors `apply_
+    /// jira_issues`.
+    fn apply_jira_detail(&mut self, request_id: u64, detail: Result<fenix_jira::IssueDetail, String>) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        if session.detail_request_id != request_id {
+            return;
+        }
+        let detail_buffer = session.detail_buffer;
+        match detail {
+            Ok(detail) => {
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.detail = Some(detail.clone());
+                }
+                self.set_jira_buffer(detail_buffer, jira_panel::render_detail(Some(&detail)));
+            }
+            Err(err) => self.set_error(format!("Jira issue fetch failed: {err}")),
+        }
+    }
+
+    /// `SPC j r`: manual refresh -- forces `jira_sync_issues`/`jira_
+    /// sync_detail` to re-fetch even though the selected user/issue
+    /// hasn't changed, by clearing the "last selected" guard each reads
+    /// before calling it. The closest thing to Docker/Git's own poller
+    /// for this phase, deliberately manual rather than timer-driven
+    /// (see `JiraSession`'s own doc comment).
+    pub(crate) fn jira_refresh(&mut self) {
+        if let Some(session) = self.jira_session.as_mut() {
+            session.last_selected_user = None;
+        }
+        self.jira_sync_issues();
+        if let Some(session) = self.jira_session.as_mut() {
+            session.last_selected_issue = None;
+        }
+        self.jira_sync_detail();
+    }
+
+    /// `SPC j p a`: starts the two-step "add a tracked project" prompt
+    /// (key, then display name) -- mirrors `git_start_commit_prompt`'s
+    /// "just arm the prompt" shape.
+    pub(crate) fn jira_start_add_project_prompt(&mut self) {
+        self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::ProjectKey, input: String::new() });
+    }
+
+    /// `SPC j u a`: same shape as `jira_start_add_project_prompt`, for a
+    /// tracked user's id.
+    pub(crate) fn jira_start_add_user_prompt(&mut self) {
+        self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::UserId, input: String::new() });
+    }
+
+    /// What to show in place of the modeline while `jira_prompt` is
+    /// active -- mirrors `git_prompt_text`.
+    fn jira_prompt_text(&self) -> Option<String> {
+        let prompt = self.jira_prompt.as_ref()?;
+        Some(match &prompt.kind {
+            JiraPromptKind::ProjectKey => format!("Project key: {}", prompt.input),
+            JiraPromptKind::ProjectName { .. } => format!("Project name: {}", prompt.input),
+            JiraPromptKind::UserId => format!("User id: {}", prompt.input),
+            JiraPromptKind::UserName { .. } => format!("User display name: {}", prompt.input),
+        })
+    }
+
+    /// Mirrors `git_prompt_key`'s text-accumulation shape exactly.
+    fn jira_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(prompt), Some(text)) = (&mut self.jira_prompt, pasted) {
+                prompt.input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some(prompt) = &mut self.jira_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.jira_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let JiraPrompt { kind, input } = self.jira_prompt.take().unwrap();
+                self.jira_prompt_advance(kind, input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// `Enter` on `jira_prompt`: either advances to the second field
+    /// (key/id captured, now prompting for its display name) or, on the
+    /// second field, appends the completed `(id, name)` pair to the
+    /// tracked list, persists it to `Config`, and re-renders the
+    /// matching pane. An empty field at either step silently cancels
+    /// the whole prompt (mirrors `git_prompt_submit`'s own "blank input
+    /// does nothing" guard).
+    fn jira_prompt_advance(&mut self, kind: JiraPromptKind, input: String) {
+        let value = input.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        match kind {
+            JiraPromptKind::ProjectKey => {
+                self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::ProjectName { key: value }, input: String::new() });
+            }
+            JiraPromptKind::ProjectName { key } => {
+                self.config.jira_projects.push((key, value));
+                if let Err(err) = self.config.save() {
+                    self.set_error(format!("couldn't save config.ini: {err}"));
+                }
+                let projects = self.config.jira_projects.clone();
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.tracked_projects = projects.clone();
+                }
+                if let Some(session) = self.jira_session.as_ref() {
+                    let buffer = session.projects_buffer;
+                    self.set_jira_buffer(buffer, jira_panel::render_projects(&projects));
+                }
+            }
+            JiraPromptKind::UserId => {
+                self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::UserName { id: value }, input: String::new() });
+            }
+            JiraPromptKind::UserName { id } => {
+                self.config.jira_users.push((id, value));
+                if let Err(err) = self.config.save() {
+                    self.set_error(format!("couldn't save config.ini: {err}"));
+                }
+                let users = self.config.jira_users.clone();
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.tracked_users = users.clone();
+                }
+                if let Some(session) = self.jira_session.as_ref() {
+                    let buffer = session.users_buffer;
+                    self.set_jira_buffer(buffer, jira_panel::render_users(&users));
+                }
+            }
+        }
+    }
+
+    /// Candidates for `SPC j p d` -- one per tracked project, keyed by
+    /// the full `(key, name)` pair. Mirrors `mib_root_candidates`.
+    fn jira_project_candidates(&self) -> Vec<fenix_picker::Candidate<(String, String)>> {
+        self.config.jira_projects.iter().map(|(key, name)| fenix_picker::Candidate::new(format!("{key}  {name}"), (key.clone(), name.clone()))).collect()
+    }
+
+    /// Candidates for `SPC j u d` -- same shape as `jira_project_
+    /// candidates`, for tracked users.
+    fn jira_user_candidates(&self) -> Vec<fenix_picker::Candidate<(String, String)>> {
+        self.config.jira_users.iter().map(|(id, name)| fenix_picker::Candidate::new(format!("{name}  ({id})"), (id.clone(), name.clone()))).collect()
+    }
+
+    /// `SPC j p d`: mirrors `picker_delete_mib_root` exactly.
+    pub(crate) fn picker_delete_jira_project(&mut self) {
+        let candidates = self.jira_project_candidates();
+        self.enter_picker(ActivePicker::DeleteJiraProject(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC j u d`: mirrors `picker_delete_jira_project`, for tracked
+    /// users.
+    pub(crate) fn picker_delete_jira_user(&mut self) {
+        let candidates = self.jira_user_candidates();
+        self.enter_picker(ActivePicker::DeleteJiraUser(fenix_picker::PickerState::new(candidates)));
+    }
+
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
@@ -6671,6 +7275,40 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.config.mib_roots.retain(|entry| entry != &target);
                 self.persist_mib_roots();
+            }
+            Some(ActivePicker::DeleteJiraProject(state)) => {
+                let Some(target) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.config.jira_projects.retain(|entry| entry != &target);
+                if let Err(err) = self.config.save() {
+                    self.set_error(format!("couldn't save config.ini: {err}"));
+                }
+                let projects = self.config.jira_projects.clone();
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.tracked_projects = projects.clone();
+                }
+                if let Some(session) = self.jira_session.as_ref() {
+                    let buffer = session.projects_buffer;
+                    self.set_jira_buffer(buffer, jira_panel::render_projects(&projects));
+                }
+            }
+            Some(ActivePicker::DeleteJiraUser(state)) => {
+                let Some(target) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.config.jira_users.retain(|entry| entry != &target);
+                if let Err(err) = self.config.save() {
+                    self.set_error(format!("couldn't save config.ini: {err}"));
+                }
+                let users = self.config.jira_users.clone();
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.tracked_users = users.clone();
+                }
+                if let Some(session) = self.jira_session.as_ref() {
+                    let buffer = session.users_buffer;
+                    self.set_jira_buffer(buffer, jira_panel::render_users(&users));
+                }
             }
             Some(ActivePicker::Theme(state)) => {
                 let Some(theme) = state.selected().map(|c| c.payload) else { return };
@@ -7702,6 +8340,8 @@ impl App {
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(bytes) => self.apply_terminal_output(bytes),
             FenixUserEvent::TerminalSpawned(result) => self.apply_terminal_spawned(result.0),
+            FenixUserEvent::JiraIssuesReady { request_id, issues } => self.apply_jira_issues(request_id, issues),
+            FenixUserEvent::JiraDetailReady { request_id, detail } => self.apply_jira_detail(request_id, detail),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -7823,6 +8463,12 @@ impl App {
         }
         if self.git_prompt.is_some() {
             self.git_prompt_key(keypress);
+            return;
+        }
+        // Same capturing shape for the Jira dashboard's two-step add-
+        // project/add-user prompt -- mirrors `git_prompt` exactly.
+        if self.jira_prompt.is_some() {
+            self.jira_prompt_key(keypress);
             return;
         }
 
@@ -8381,6 +9027,27 @@ impl App {
             }
         }
 
+        // Jira dashboard -- read-only browsing this phase (see the Jira
+        // dashboard plan's own scope notes), so the only pane-scoped key
+        // is the same digit-key jump-to-pane shortcut the Docker/Git
+        // blocks above already have (`1. Projects`, `2. Users`, ...).
+        if self.jira_focused_role().is_some() {
+            if let KeyCode::Char(c) = keypress.code {
+                if keypress.mods == Mods::default() && c.is_ascii_digit() {
+                    if let Some(pane) = self.jira_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                        self.windows_mut().focus(pane);
+                        match self.jira_focused_role() {
+                            Some(JiraPaneRole::Users) => self.jira_sync_issues(),
+                            Some(JiraPaneRole::Issues) => self.jira_sync_detail(),
+                            _ => {}
+                        }
+                        self.wake_caret();
+                    }
+                    return;
+                }
+            }
+        }
+
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
@@ -8434,6 +9101,15 @@ impl App {
         // own to show -- see `git_sync_main`'s own doc comment).
         if matches!(self.git_focused_role(), Some(GitPaneRole::Staged | GitPaneRole::Unstaged | GitPaneRole::Commits | GitPaneRole::Stash)) {
             self.git_sync_main();
+        }
+        // Same re-sync for the Jira dashboard: ordinary movement in
+        // Users re-fetches Issues, ordinary movement in Issues re-
+        // fetches Detail (see `jira_sync_issues`/`jira_sync_detail`'s
+        // own doc comments).
+        match self.jira_focused_role() {
+            Some(JiraPaneRole::Users) => self.jira_sync_issues(),
+            Some(JiraPaneRole::Issues) => self.jira_sync_detail(),
+            _ => {}
         }
         match vim_event {
             VimEvent::RequestSave => {
@@ -8745,6 +9421,8 @@ impl App {
                 "*docker*".to_string()
             } else if ob.kind == BufferKind::Git {
                 "*git*".to_string()
+            } else if ob.kind == BufferKind::Jira {
+                "*jira*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -8780,6 +9458,7 @@ impl App {
             || self.docker_confirm_remove.is_some()
             || self.git_confirm.is_some()
             || self.git_prompt.is_some()
+            || self.jira_prompt.is_some()
             || self.mib_insert.is_some()
             || self.replace_wizard.is_some()
             || self.project_replace.as_ref().is_some_and(|s| s.confirming)
@@ -8838,6 +9517,8 @@ impl App {
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
+                Some(picker @ ActivePicker::DeleteJiraProject(_)) => ("DELJIRAPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::DeleteJiraUser(_)) => ("DELJIRAUSER", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -8905,6 +9586,9 @@ impl App {
             return confirm_text;
         }
         if let Some(prompt_text) = self.git_prompt_text() {
+            return prompt_text;
+        }
+        if let Some(prompt_text) = self.jira_prompt_text() {
             return prompt_text;
         }
         if let Some(insert_text) = self.mib_insert_text() {
@@ -9125,6 +9809,7 @@ impl App {
             || ob.kind == BufferKind::Explorer
             || ob.kind == BufferKind::Docker
             || ob.kind == BufferKind::Git
+            || ob.kind == BufferKind::Jira
             || ob.kind == BufferKind::Table
             || ob.kind == BufferKind::SearchReplace
         {
@@ -9295,6 +9980,7 @@ impl App {
         let dashboard_lines = self.dashboard_lines.get(&id).cloned();
         let docker_lines = self.docker_lines.get(&id).cloned();
         let git_lines = self.git_lines.get(&id).cloned();
+        let jira_lines = self.jira_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -9326,6 +10012,9 @@ impl App {
         }
         if ob.kind == BufferKind::Git {
             return git_highlights_for_visible_range(ob, git_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Jira {
+            return jira_highlights_for_visible_range(ob, jira_lines.as_deref(), render_base_line, rows, theme);
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -10596,6 +11285,8 @@ impl App {
         } else if let Some(confirm_text) = self.git_confirm_text() {
             Some(confirm_text)
         } else if let Some(prompt_text) = self.git_prompt_text() {
+            Some(prompt_text)
+        } else if let Some(prompt_text) = self.jira_prompt_text() {
             Some(prompt_text)
         } else if let Some(insert_text) = self.mib_insert_text() {
             Some(insert_text)
@@ -17560,5 +18251,348 @@ mod tests {
         app.new_scratch_buffer();
         app.start_delete_file_confirm();
         assert!(!app.delete_file_confirm);
+    }
+
+    #[test]
+    fn open_jira_panel_creates_a_four_pane_session_with_titles() {
+        let mut app = App::with_file(None);
+        app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
+        app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+
+        app.open_jira_panel();
+
+        let session = app.jira_session.as_ref().unwrap();
+        assert_eq!(session.tracked_projects, vec![("PROJ".to_string(), "My Project".to_string())]);
+        assert_eq!(session.tracked_users, vec![("jo1111111".to_string(), "John Doe".to_string())]);
+        assert_eq!(app.pane_titles.get(&session.projects_pane), Some(&"1. Projects".to_string()));
+        assert_eq!(app.pane_titles.get(&session.users_pane), Some(&"2. Users".to_string()));
+        assert_eq!(app.pane_titles.get(&session.issues_pane), Some(&"3. Issues".to_string()));
+        assert_eq!(app.pane_titles.get(&session.detail_pane), Some(&"4. Detail".to_string()));
+
+        let projects_text = app.buffers.get(session.projects_buffer).unwrap().buffer.text();
+        assert!(projects_text.contains("PROJ"));
+        let users_text = app.buffers.get(session.users_buffer).unwrap().buffer.text();
+        assert!(users_text.contains("John Doe (jo1111111)"));
+    }
+
+    #[test]
+    fn open_jira_panel_refocuses_an_already_open_session_instead_of_duplicating_it() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let first_projects_buffer = app.jira_session.as_ref().unwrap().projects_buffer;
+
+        app.open_jira_panel();
+
+        assert_eq!(app.jira_session.as_ref().unwrap().projects_buffer, first_projects_buffer);
+        assert_eq!(app.focused_pane_id(), app.jira_session.as_ref().unwrap().projects_pane);
+    }
+
+    #[test]
+    fn jira_session_close_removes_every_buffer_and_pane_title_but_config_survives() {
+        let mut app = App::with_file(None);
+        app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
+        app.open_jira_panel();
+        let session_buffers =
+            [app.jira_session.as_ref().unwrap().projects_buffer, app.jira_session.as_ref().unwrap().users_buffer, app.jira_session.as_ref().unwrap().issues_buffer, app.jira_session.as_ref().unwrap().detail_buffer];
+
+        app.jira_session_close();
+
+        assert!(app.jira_session.is_none());
+        for id in session_buffers {
+            assert!(app.buffers.get(id).is_none());
+            assert!(app.jira_lines.get(&id).is_none());
+        }
+        // Tracked lists live in `Config`, independent of the session --
+        // closing the panel must not lose them.
+        assert_eq!(app.config.jira_projects, vec![("PROJ".to_string(), "My Project".to_string())]);
+    }
+
+    #[test]
+    fn jira_pane_by_number_matches_each_titles_own_number() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_ref().unwrap();
+        let (projects, users, issues, detail) = (session.projects_pane, session.users_pane, session.issues_pane, session.detail_pane);
+
+        assert_eq!(app.jira_pane_by_number(1), Some(projects));
+        assert_eq!(app.jira_pane_by_number(2), Some(users));
+        assert_eq!(app.jira_pane_by_number(3), Some(issues));
+        assert_eq!(app.jira_pane_by_number(4), Some(detail));
+        assert_eq!(app.jira_pane_by_number(5), None);
+        assert_eq!(app.jira_pane_by_number(0), None);
+
+        app.jira_session_close();
+        assert_eq!(app.jira_pane_by_number(1), None);
+    }
+
+    #[test]
+    fn jira_entry_at_cursor_resolves_project_user_and_issue_rows() {
+        let mut app = App::with_file(None);
+        app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
+        app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+        app.open_jira_panel();
+        let session = app.jira_session.as_ref().unwrap();
+        let (projects_pane, users_pane, issues_pane, issues_buffer) = (session.projects_pane, session.users_pane, session.issues_pane, session.issues_buffer);
+
+        app.windows_mut().focus(projects_pane);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        assert_eq!(app.jira_entry_at_cursor(), Some(jira_panel::JiraEntry::Project("PROJ".to_string())));
+
+        app.windows_mut().focus(users_pane);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        assert_eq!(app.jira_entry_at_cursor(), Some(jira_panel::JiraEntry::User("jo1111111".to_string())));
+
+        let issue = fenix_jira::IssueSummary {
+            key: "PROJ-1".to_string(),
+            summary: "Fix the thing".to_string(),
+            status: "Open".to_string(),
+            assignee: None,
+            updated: "2024-01-01T00:00:00.000+0000".to_string(),
+        };
+        app.set_jira_buffer(issues_buffer, jira_panel::render_issues(&[issue]));
+        app.windows_mut().focus(issues_pane);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        assert_eq!(app.jira_entry_at_cursor(), Some(jira_panel::JiraEntry::Issue("PROJ-1".to_string())));
+    }
+
+    #[test]
+    fn jira_prompt_add_project_two_step_flow_appends_and_persists() {
+        // An isolated `config.ini` under a temp dir -- otherwise this
+        // would save into (and pollute) the real machine-wide config
+        // file `Config::default_path()` resolves to, same reasoning
+        // `picker_confirm_on_delete_mib_root_removes_it_and_persists`
+        // already established.
+        let config_dir = TempDir::new("jira_add_project_prompt_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.open_jira_panel();
+
+        app.jira_start_add_project_prompt();
+        assert_eq!(app.jira_prompt_text(), Some("Project key: ".to_string()));
+        for c in "PROJ".chars() {
+            app.jira_prompt_key(KeyPress::char(c));
+        }
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        // First Enter only advances the field -- nothing tracked yet.
+        assert!(app.config.jira_projects.is_empty());
+        assert_eq!(app.jira_prompt_text(), Some("Project name: ".to_string()));
+
+        for c in "My Project".chars() {
+            app.jira_prompt_key(KeyPress::char(c));
+        }
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.jira_prompt.is_none());
+        assert_eq!(app.config.jira_projects, vec![("PROJ".to_string(), "My Project".to_string())]);
+        assert_eq!(app.jira_session.as_ref().unwrap().tracked_projects, vec![("PROJ".to_string(), "My Project".to_string())]);
+        let projects_buffer = app.jira_session.as_ref().unwrap().projects_buffer;
+        let text = app.buffers.get(projects_buffer).unwrap().buffer.text();
+        assert!(text.contains("My Project"));
+    }
+
+    #[test]
+    fn jira_prompt_add_user_two_step_flow_appends_and_persists() {
+        let config_dir = TempDir::new("jira_add_user_prompt_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.open_jira_panel();
+
+        app.jira_start_add_user_prompt();
+        for c in "jo1111111".chars() {
+            app.jira_prompt_key(KeyPress::char(c));
+        }
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        for c in "John Doe".chars() {
+            app.jira_prompt_key(KeyPress::char(c));
+        }
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.config.jira_users, vec![("jo1111111".to_string(), "John Doe".to_string())]);
+        assert_eq!(app.jira_session.as_ref().unwrap().tracked_users, vec![("jo1111111".to_string(), "John Doe".to_string())]);
+    }
+
+    #[test]
+    fn jira_prompt_escape_cancels_without_tracking_anything() {
+        let config_dir = TempDir::new("jira_prompt_escape_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.open_jira_panel();
+        app.jira_start_add_project_prompt();
+        app.jira_prompt_key(KeyPress::char('X'));
+
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.jira_prompt.is_none());
+        assert!(app.config.jira_projects.is_empty());
+    }
+
+    #[test]
+    fn jira_prompt_empty_field_cancels_the_whole_prompt() {
+        let config_dir = TempDir::new("jira_prompt_empty_field_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.open_jira_panel();
+        app.jira_start_add_project_prompt();
+
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.jira_prompt.is_none());
+        assert!(app.config.jira_projects.is_empty());
+    }
+
+    #[test]
+    fn picker_confirm_on_delete_jira_project_removes_it_and_persists() {
+        let config_dir = TempDir::new("delete_jira_project_confirm_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other".to_string())];
+        app.open_jira_panel();
+
+        app.picker_delete_jira_project();
+        match &app.active_picker {
+            Some(ActivePicker::DeleteJiraProject(state)) => assert_eq!(state.len(), 2),
+            other => panic!("expected an open DeleteJiraProject picker, got is_some={}", other.is_some()),
+        }
+
+        app.picker_confirm();
+
+        assert_eq!(app.config.jira_projects, vec![("OTHER".to_string(), "Other".to_string())]);
+        assert_eq!(app.jira_session.as_ref().unwrap().tracked_projects, vec![("OTHER".to_string(), "Other".to_string())]);
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn picker_confirm_on_delete_jira_user_removes_it_and_persists() {
+        let config_dir = TempDir::new("delete_jira_user_confirm_config");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+        app.open_jira_panel();
+
+        app.picker_delete_jira_user();
+        app.picker_confirm();
+
+        assert!(app.config.jira_users.is_empty());
+        assert!(app.jira_session.as_ref().unwrap().tracked_users.is_empty());
+    }
+
+    #[test]
+    fn apply_jira_issues_discards_a_result_from_a_superseded_request() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.issues_request_id = 5;
+        let issues_buffer = session.issues_buffer;
+
+        let stale = fenix_jira::IssueSummary {
+            key: "STALE-1".to_string(),
+            summary: "stale".to_string(),
+            status: "Open".to_string(),
+            assignee: None,
+            updated: "2024-01-01T00:00:00.000+0000".to_string(),
+        };
+        app.apply_jira_issues(3, Ok(vec![stale]));
+        assert!(app.jira_session.as_ref().unwrap().issues.is_empty());
+        let text = app.buffers.get(issues_buffer).unwrap().buffer.text();
+        assert!(!text.contains("STALE-1"));
+
+        let fresh = fenix_jira::IssueSummary {
+            key: "PROJ-1".to_string(),
+            summary: "fresh".to_string(),
+            status: "Open".to_string(),
+            assignee: None,
+            updated: "2024-01-01T00:00:00.000+0000".to_string(),
+        };
+        app.apply_jira_issues(5, Ok(vec![fresh]));
+        assert_eq!(app.jira_session.as_ref().unwrap().issues.len(), 1);
+        let text = app.buffers.get(issues_buffer).unwrap().buffer.text();
+        assert!(text.contains("PROJ-1"));
+    }
+
+    #[test]
+    fn apply_jira_issues_error_surfaces_via_set_error_without_touching_the_session() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.issues_request_id = 1;
+
+        app.apply_jira_issues(1, Err("bad token".to_string()));
+
+        assert!(app.jira_session.as_ref().unwrap().issues.is_empty());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("bad token")));
+    }
+
+    #[test]
+    fn apply_jira_detail_discards_a_result_from_a_superseded_request() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.detail_request_id = 5;
+        let detail_buffer = session.detail_buffer;
+
+        let stale = fenix_jira::IssueDetail {
+            key: "STALE-1".to_string(),
+            summary: "stale".to_string(),
+            description: None,
+            status: "Open".to_string(),
+            assignee: None,
+            reporter: None,
+            created: "2024-01-01T00:00:00.000+0000".to_string(),
+            updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            comments: Vec::new(),
+        };
+        app.apply_jira_detail(3, Ok(stale));
+        assert!(app.jira_session.as_ref().unwrap().detail.is_none());
+        let text = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        assert!(!text.contains("STALE-1"));
+
+        let fresh = fenix_jira::IssueDetail {
+            key: "PROJ-1".to_string(),
+            summary: "fresh".to_string(),
+            description: None,
+            status: "Open".to_string(),
+            assignee: None,
+            reporter: None,
+            created: "2024-01-01T00:00:00.000+0000".to_string(),
+            updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            comments: Vec::new(),
+        };
+        app.apply_jira_detail(5, Ok(fresh));
+        assert!(app.jira_session.as_ref().unwrap().detail.is_some());
+        let text = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        assert!(text.contains("PROJ-1"));
+    }
+
+    #[test]
+    fn apply_jira_detail_error_surfaces_via_set_error_without_touching_the_session() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.detail_request_id = 1;
+
+        app.apply_jira_detail(1, Err("issue not found".to_string()));
+
+        assert!(app.jira_session.as_ref().unwrap().detail.is_none());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("issue not found")));
+    }
+
+    #[test]
+    fn jira_sync_issues_without_a_configured_client_surfaces_an_error_instead_of_panicking() {
+        // No `event_proxy` and no `[jira]` base_url/token configured --
+        // `jira_client` should surface an error and `jira_sync_issues`
+        // should return without touching the session's `issues`.
+        let mut app = App::with_file(None);
+        app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+        app.open_jira_panel();
+        let session = app.jira_session.as_ref().unwrap();
+        let users_pane = session.users_pane;
+
+        app.windows_mut().focus(users_pane);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.jira_sync_issues();
+
+        assert!(app.jira_session.as_ref().unwrap().issues.is_empty());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
     }
 }

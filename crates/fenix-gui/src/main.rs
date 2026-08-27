@@ -6,6 +6,7 @@ mod docker_panel;
 mod git_panel;
 mod gpu;
 mod icon;
+mod jira_panel;
 mod keymap;
 mod popup;
 mod rect;

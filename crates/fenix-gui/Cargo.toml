@@ -21,6 +21,7 @@ fenix-docker = { path = "../fenix-docker" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-format = { path = "../fenix-format" }
 fenix-git = { path = "../fenix-git" }
+fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-mib = { path = "../fenix-mib" }
 fenix-picker = { path = "../fenix-picker" }

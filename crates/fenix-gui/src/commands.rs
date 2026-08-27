@@ -83,6 +83,13 @@ impl CommandRegistry {
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
+        registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
+        registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
+        registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
+        registry.register("jira.add_project", "Track a new Jira project by key", cmd_jira_add_project);
+        registry.register("jira.delete_project", "Stop tracking a Jira project", cmd_jira_delete_project);
+        registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
+        registry.register("jira.delete_user", "Stop tracking a Jira user", cmd_jira_delete_user);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -283,6 +290,34 @@ fn cmd_git_open(ctx: &mut CommandCtx) {
 
 fn cmd_git_close(ctx: &mut CommandCtx) {
     ctx.app.git_session_close();
+}
+
+fn cmd_jira_open(ctx: &mut CommandCtx) {
+    ctx.app.open_jira_panel();
+}
+
+fn cmd_jira_close(ctx: &mut CommandCtx) {
+    ctx.app.jira_session_close();
+}
+
+fn cmd_jira_refresh(ctx: &mut CommandCtx) {
+    ctx.app.jira_refresh();
+}
+
+fn cmd_jira_add_project(ctx: &mut CommandCtx) {
+    ctx.app.jira_start_add_project_prompt();
+}
+
+fn cmd_jira_delete_project(ctx: &mut CommandCtx) {
+    ctx.app.picker_delete_jira_project();
+}
+
+fn cmd_jira_add_user(ctx: &mut CommandCtx) {
+    ctx.app.jira_start_add_user_prompt();
+}
+
+fn cmd_jira_delete_user(ctx: &mut CommandCtx) {
+    ctx.app.picker_delete_jira_user();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {

@@ -31,6 +31,10 @@ pub enum BufferKind {
     /// A Lazygit-style repo status/files/branches/commits/stash panel
     /// (`SPC g g`) -- same "real buffer, just tagged" shape as `Docker`.
     Git,
+    /// The Jira dashboard's projects/users/issues/detail panel
+    /// (`SPC j j`) -- same "real buffer, just tagged" shape as `Docker`/
+    /// `Git`.
+    Jira,
     /// A tab-separated `Text` buffer toggled into elastic-column table
     /// view (`SPC f t`) -- unlike `Dashboard`/`Explorer`/`Docker`/`Git`,
     /// this isn't a distinct generated buffer: it's the *same* buffer,
@@ -147,6 +151,14 @@ impl BufferList {
     /// `text` via `Buffer::replace_range` on refresh.
     pub fn open_git(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Git)
+    }
+
+    /// A real buffer seeded with `text` (a rendered projects/users/
+    /// issues/detail listing) and tagged `Jira` -- `SPC j j`. Same "real
+    /// buffer, just tagged" shape as `open_docker`/`open_git`; the host
+    /// re-renders `text` via `Buffer::replace_range` on refresh.
+    pub fn open_jira(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Jira)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
