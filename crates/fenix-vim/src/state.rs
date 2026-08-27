@@ -736,15 +736,47 @@ impl VimState {
                 // coalesces into the same undo step as the surrounding
                 // Insert-mode session, same as ordinary typed chars do.
                 let (line, _) = buffer.line_col(cursor);
-                let mut new_indent = indent::leading_whitespace(buffer, line);
+                let base_indent = indent::leading_whitespace(buffer, line);
                 let bumps = cursor.char_idx > 0
                     && buffer.char_at(cursor.char_idx - 1).is_some_and(indent::is_opening_bracket);
+                let mut new_indent = base_indent.clone();
                 if bumps {
                     new_indent.push_str(&" ".repeat(self.indent_width));
                 }
+                // Enter right between an open/close bracket pair (`{|}`,
+                // almost always auto-paired a moment ago) splits across
+                // three lines, not two: without this, the close bracket
+                // was just left trailing on the cursor's own bumped-
+                // indent line (`        }` sitting a full extra level
+                // deep, wherever that bump happened to land -- not
+                // actually related to any other bracket on the line, it
+                // only looked that way) instead of dropping back onto its
+                // own line at the *open* bracket's own indent.
+                let splits_closing_bracket = bumps
+                    && buffer.char_at(cursor.char_idx).is_some_and(|c| {
+                        matches!(buffer.char_at(cursor.char_idx - 1), Some(open) if indent::matching_close_bracket(open) == Some(c))
+                    });
                 buffer.insert_char(cursor, '\n');
                 for ch in new_indent.chars() {
                     buffer.insert_char(cursor, ch);
+                }
+                if splits_closing_bracket {
+                    // Insert the close bracket's own line past the
+                    // cursor's real resting spot, then step back --
+                    // same "insert past, then pull back" idiom the
+                    // auto-pair insert above this uses for the same
+                    // reason (`insert_char` always advances the cursor
+                    // it's given; stepping back with a manual `char_idx`
+                    // assignment instead of `move_left` keeps this whole
+                    // sequence one coalesced pending edit).
+                    let resting_at = cursor.char_idx;
+                    buffer.insert_char(cursor, '\n');
+                    for ch in base_indent.chars() {
+                        buffer.insert_char(cursor, ch);
+                    }
+                    cursor.char_idx = resting_at;
+                    let (_, col) = buffer.line_col(cursor);
+                    cursor.sticky_col = col;
                 }
             }
             KeyCode::Named(NamedKey::Tab) => {
@@ -2469,6 +2501,55 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "i");
         named(&mut vim, &mut b, &mut c, NamedKey::Enter);
         assert_eq!(b.text(), "    if x {\n        "); // 4 carried + 4 bumped
+    }
+
+    #[test]
+    fn enter_between_an_empty_bracket_pair_splits_the_close_bracket_onto_its_own_dedented_line() {
+        let mut b = buf("    if x {}");
+        let mut c = Cursor { char_idx: 10, sticky_col: 10 }; // between "{" and "}"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "    if x {\n        \n    }");
+        // Cursor rests on the middle (bumped-indent) line, not on the
+        // close bracket's own line.
+        assert_eq!(c.char_idx, "    if x {\n        ".chars().count());
+    }
+
+    #[test]
+    fn enter_between_an_empty_bracket_pair_at_top_level_dedents_the_close_bracket_to_column_zero() {
+        let mut b = buf("if x {}");
+        let mut c = Cursor { char_idx: 6, sticky_col: 6 }; // between "{" and "}"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "if x {\n    \n}");
+    }
+
+    #[test]
+    fn enter_between_mismatched_brackets_does_not_split() {
+        // The char right after the cursor isn't the *matching* close for
+        // the open bracket right before it -- e.g. `{)` -- so this isn't
+        // an empty-pair split, just an ordinary bumped-indent Enter.
+        let mut b = buf("foo {)");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 }; // between "{" and ")"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "foo {\n    )");
+    }
+
+    #[test]
+    fn enter_before_a_close_bracket_not_immediately_after_an_open_one_does_not_split() {
+        // Cursor sits right before "}" but the char *before* the cursor
+        // isn't an opening bracket -- e.g. mid-content -- so this is
+        // ordinary Enter, not the empty-pair-split case.
+        let mut b = buf("{ foo}");
+        let mut c = Cursor { char_idx: 5, sticky_col: 5 }; // between "foo" and "}"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "{ foo\n}");
     }
 
     #[test]

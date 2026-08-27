@@ -12143,7 +12143,14 @@ mod tests {
 
     #[test]
     fn animations_are_on_by_default() {
-        let app = App::with_file(None);
+        // `App::with_file(None)` reads the *real* machine config (see
+        // `set_shiftwidth_command_persists_the_new_width`'s own doc
+        // comment) -- explicitly reset to unset here so this test
+        // exercises `animations_enabled`'s own default rather than
+        // whatever this dev machine's config.ini currently has saved
+        // (e.g. from actually trying `SPC t a` by hand).
+        let mut app = App::with_file(None);
+        app.config.animations = None;
         assert!(app.animations_enabled());
     }
 
@@ -12265,6 +12272,10 @@ mod tests {
     #[test]
     fn small_scroll_change_starts_an_animation_not_an_instant_jump() {
         let mut app = App::with_file(None);
+        // Forced on -- `App::with_file(None)` reads the real machine
+        // config.ini, whose `animations` setting shouldn't decide
+        // whether *this* test (of the animated-by-default path) passes.
+        app.config.animations = Some(true);
         for _ in 0..5 {
             app.test_insert('\n');
         }
@@ -12296,6 +12307,7 @@ mod tests {
         // chasing a few lines behind the cursor for as long as the key
         // stays held, instead of ever catching up.
         let mut app = App::with_file(None);
+        app.config.animations = Some(true); // see the same note above
         for _ in 0..30 {
             app.test_insert('\n');
         }
