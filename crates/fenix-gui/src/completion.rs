@@ -49,6 +49,40 @@ pub fn prefix_at_cursor(buffer: &Buffer, cursor: &Cursor) -> Option<(usize, Stri
     Some((start, prefix))
 }
 
+/// Best-effort "is the cursor typing inside a string literal that
+/// hasn't been closed yet" check, purely textual -- counts unescaped
+/// `"` characters from the start of the cursor's line up to the
+/// cursor; an odd count means an opening quote has been typed with no
+/// closing one yet. This exists because a tree-sitter parse can't help
+/// here the way it can for a comment: an *unterminated* string almost
+/// always parses as an `ERROR` node with no useful capture at all
+/// (verified against the Tcl grammar -- `puts "se` produces `(ERROR
+/// (simple_word))`, not a `quoted_word` node), so a capture-based check
+/// only ever catches a string that's already been *closed* elsewhere
+/// on the line (e.g. the cursor landed back inside an existing one).
+/// This is what catches the much more common case: actively typing a
+/// brand new string from scratch. A disclosed simplification, not a
+/// real lexer: single-line and `"`-only (doesn't know about `'` or a
+/// language's own triple-quote/heredoc syntax), so it can go wrong for
+/// a multi-line string or a language that doesn't use `"` at all --
+/// acceptable for a completion-suppression heuristic, not attempted
+/// for anything that needs to be exactly right.
+pub fn cursor_in_unterminated_string(buffer: &Buffer, cursor: &Cursor) -> bool {
+    let (line, col) = buffer.line_col(cursor);
+    let line_start = buffer.line_start_char(line);
+    let mut quote_count = 0u32;
+    let mut i = line_start;
+    while i < line_start + col {
+        match buffer.char_at(i) {
+            Some('\\') => i += 1, // skip whatever's escaped, quote or not
+            Some('"') => quote_count += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    quote_count % 2 == 1
+}
+
 /// Every distinct identifier-like token already present in `buffer` --
 /// the "complete a word from what's already been typed in this file"
 /// source real Vim's own `<C-n>`/`<C-p>` draws on, and the only
@@ -151,6 +185,41 @@ mod tests {
         let (start, prefix) = prefix_at_cursor(&buffer, &cur(6)).unwrap();
         assert_eq!(start, 0);
         assert_eq!(prefix, "my_var");
+    }
+
+    #[test]
+    fn cursor_in_unterminated_string_is_false_with_no_quotes_on_the_line() {
+        let buffer = buf("puts se");
+        assert!(!cursor_in_unterminated_string(&buffer, &cur(7)));
+    }
+
+    #[test]
+    fn cursor_in_unterminated_string_is_true_right_after_an_opening_quote() {
+        let buffer = buf("puts \"se");
+        assert!(cursor_in_unterminated_string(&buffer, &cur(8)));
+    }
+
+    #[test]
+    fn cursor_in_unterminated_string_is_false_after_a_closed_string() {
+        let buffer = buf("puts \"hi\" se");
+        assert!(!cursor_in_unterminated_string(&buffer, &cur(12)));
+    }
+
+    #[test]
+    fn cursor_in_unterminated_string_ignores_an_escaped_quote() {
+        // `\"` doesn't close the string it's inside -- still one open
+        // quote (the very first one), not two.
+        let buffer = buf("puts \"a\\\"se");
+        assert!(cursor_in_unterminated_string(&buffer, &cur(11)));
+    }
+
+    #[test]
+    fn cursor_in_unterminated_string_only_looks_at_the_current_line() {
+        // A quote left open on an earlier line shouldn't leak into the
+        // next one -- this heuristic is deliberately single-line only
+        // (see its own doc comment).
+        let buffer = buf("puts \"unterminated\nse");
+        assert!(!cursor_in_unterminated_string(&buffer, &cur(21)));
     }
 
     #[test]

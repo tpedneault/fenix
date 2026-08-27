@@ -3433,14 +3433,78 @@ impl App {
         self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// Whether the char immediately before the cursor sits inside a
+    /// comment or string literal -- `sync_completion`'s auto-trigger
+    /// gate, so typing an ordinary word inside a comment or a string
+    /// literal doesn't pop the completion popup (real code identifiers
+    /// aren't what's being typed there). Two checks, since neither
+    /// alone covers both: `completion::cursor_in_unterminated_string`'s
+    /// textual heuristic catches a string still being typed (open
+    /// quote, cursor right after it); the focused buffer's own syntax
+    /// tree catches a comment (always parses cleanly) and a string
+    /// that's already been *closed* elsewhere on the line (a real
+    /// capture by then). Deliberately only gates *auto*-trigger: `Ctrl-
+    /// Space`'s `force_open_completion` bypasses this, the same "auto-
+    /// trigger is context-gated, manual invoke always works" split
+    /// most editors make. `false` (never suppress) for any buffer with
+    /// no syntax tree at all -- an unrecognized language, or a non-
+    /// editor buffer kind -- since there's no way to know the context
+    /// without one; that's just today's pre-existing behavior.
+    ///
+    /// `spell` counts as a comment marker too: Tcl's own `highlights.
+    /// scm` captures a comment node as both `@spell @comment` on the
+    /// exact same span, and `resolve_overlaps` only ever keeps one
+    /// capture of an exact tie (see its own doc comment) -- so either
+    /// name showing up here means the same thing, and checking only
+    /// `"comment"` would silently miss the tie going the other way.
+    fn cursor_in_comment_or_string(&mut self) -> bool {
+        let cursor = self.cursor();
+        let id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get_mut(id) else { return false };
+        // Catches a freshly-typed, still-open string before the syntax
+        // tree can (see `cursor_in_unterminated_string`'s own doc
+        // comment for why the tree alone can't) -- checked first since
+        // it needs no syntax-tree work at all.
+        if completion::cursor_in_unterminated_string(&ob.buffer, &cursor) {
+            return true;
+        }
+        // Same "drain this buffer's pending edits, apply them to its
+        // syntax tree, then query" shape `content_highlights_for_
+        // visible_range` already uses -- draining here and again
+        // (with an empty leftover list) at the next redraw is harmless,
+        // per `SyntaxState::apply_edits`'s own doc comment.
+        let edits: Vec<fenix_syntax::RawEdit> = ob
+            .buffer
+            .drain_edits()
+            .into_iter()
+            .map(|d| fenix_syntax::RawEdit { start_char: d.start_char, new_end_char: d.new_end_char, removed: d.removed })
+            .collect();
+        let Some(syntax) = &mut ob.syntax else { return false };
+        let source = ob.buffer.text();
+        syntax.apply_edits(&source, &edits);
+
+        let byte_idx = ob.buffer.char_to_byte(cursor.char_idx.min(ob.buffer.len_chars()));
+        let Some(check_at) = byte_idx.checked_sub(1) else { return false };
+        syntax
+            .highlights_in_range(&source, check_at..byte_idx)
+            .into_iter()
+            .any(|(_, name)| name.starts_with("comment") || name.starts_with("string") || name == "spell")
+    }
+
     /// Re-derives the completion popup's state from whatever's current --
     /// called once right after every keystroke that reaches Vim while
     /// Insert-relevant (`handle_key`'s Vim-fallthrough tier). Closes the
     /// popup (via `None`) the instant any of its preconditions stop
-    /// holding: not in Insert mode, not a Tcl buffer, no identifier
-    /// prefix at the cursor, or the prefix no longer matches anything.
+    /// holding: not in Insert mode, the cursor's inside a comment or
+    /// string (`cursor_in_comment_or_string`), not a Tcl buffer, no
+    /// identifier prefix at the cursor, or the prefix no longer matches
+    /// anything.
     fn sync_completion(&mut self) {
         if self.vim.mode() != Mode::Insert {
+            self.completion = None;
+            return;
+        }
+        if self.cursor_in_comment_or_string() {
             self.completion = None;
             return;
         }
@@ -13198,6 +13262,61 @@ mod tests {
         let state = app.completion.as_ref().expect("popup should be open");
         let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
         assert!(labels.contains(&"seek_value".to_string()), "expected a buffer-word candidate, got {labels:?}");
+    }
+
+    #[test]
+    fn sync_completion_does_not_trigger_inside_a_tcl_comment() {
+        let dir = TempDir::new("completion_no_trigger_in_comment");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("# se");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none(), "a word typed inside a comment should not open the popup");
+    }
+
+    #[test]
+    fn sync_completion_does_not_trigger_inside_a_tcl_string() {
+        let dir = TempDir::new("completion_no_trigger_in_string");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("puts \"se");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none(), "a word typed inside a string literal should not open the popup");
+    }
+
+    #[test]
+    fn sync_completion_still_triggers_right_after_a_tcl_comment_ends() {
+        let dir = TempDir::new("completion_triggers_after_comment_line");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("# a comment\nse");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_some(), "real code on the next line after a comment should still trigger completion");
+    }
+
+    #[test]
+    fn force_open_completion_still_works_inside_a_tcl_comment() {
+        // Ctrl-Space is a deliberate manual override -- unlike sync_
+        // completion's auto-trigger, it should work anywhere, comments
+        // included.
+        let dir = TempDir::new("force_open_completion_in_comment");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("# se");
+
+        app.force_open_completion();
+
+        assert!(app.completion.is_some(), "Ctrl-Space should still open the popup inside a comment");
     }
 
     #[test]
