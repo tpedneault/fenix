@@ -178,6 +178,18 @@ for anyone curious to poke around or build on it.
   selection already superseded) so scrolling through many files never
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
+- **JIRA dashboard** (`SPC j ...`, phase 1: read-only browsing): track
+  projects and users by hand (`SPC j p a`/`SPC j u a` to add, `SPC j p
+  d`/`SPC j u d` to remove), then `SPC j j` opens a four-pane workspace
+  -- Projects | Users | Issues | Detail. Moving the cursor onto a
+  tracked user runs a JQL search for every issue assigned to them,
+  scoped to every currently-tracked project, and lists the results in
+  Issues; moving onto an issue shows its full detail (description,
+  status, assignee, reporter, dates, comments) in Detail. `SPC j r`
+  refreshes, `SPC j q` closes the session. Talks to a self-hosted Jira
+  Server/Data Center instance's REST API via a personal access token
+  (see [Configuration](#configuration)) -- creating/updating issues,
+  comments, time-logging, and transitions aren't implemented yet.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -324,6 +336,7 @@ popup shows what keys continue it.
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
+| `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |
@@ -340,6 +353,11 @@ popup shows what keys continue it.
 | `SPC d q` | Close the Docker panel session |
 | `SPC g g` | Open (or refocus/refresh) the Git panel |
 | `SPC g q` | Close the Git panel session |
+| `SPC j j` | Open (or refocus) the JIRA dashboard |
+| `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
+| `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |
+| `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
+| `SPC j q` | Close the JIRA dashboard session |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -525,6 +543,7 @@ font_size = 16
 font_family = Fira Code
 indent_width = 4
 tab_width = 8
+animations = true
 
 [completion]
 symbols_file = /home/you/tcl-symbols.txt
@@ -535,6 +554,12 @@ root2 = MIB-B|C:\data\mib-b
 telecommand_template = telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]
 telecommand_argument_template = {name}={value}
 telecommand_argument_separator = ", "
+
+[jira]
+base_url = https://jira.example.com
+token = your-personal-access-token
+project1 = PROJ|My Project
+user1 = jo1111111|John Doe
 ```
 
 | Section | Key | Meaning |
@@ -544,11 +569,16 @@ telecommand_argument_separator = ", "
 | `editor` | `font_family` | Body text font family, by name, as installed on your system. Overrides whatever the active theme names; unset falls back to the theme's own choice (and from there to your system's default monospace font) |
 | `editor` | `indent_width` | Spaces per indent level (`>>`/`<<`, Tab, auto-indent) |
 | `editor` | `tab_width` | Visual columns a literal tab character expands to when rendered (real Vim's own `:set tabstop`) -- distinct from `indent_width`, which governs what Tab/`>>`/`<<` actually insert (always spaces) |
+| `editor` | `animations` | `true`/`false` -- whether caret-fade, scroll-ease, and yank/paste-pulse animations play at all; unset defaults to `true`. `SPC t a` toggles and persists this live |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
 | `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
 | `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
 | `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
+| `jira` | `base_url` | The self-hosted Jira Server/Data Center instance's REST API root (e.g. `https://jira.example.com`) — see the JIRA dashboard feature above |
+| `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
+| `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
+| `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path
@@ -576,6 +606,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` |
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
+| `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) for the terminal panel — no thread/event-loop knowledge of its own |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
