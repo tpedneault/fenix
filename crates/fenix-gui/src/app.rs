@@ -815,6 +815,12 @@ pub enum FenixUserEvent {
     /// Same shape as `JiraIssuesReady`, one pane deeper -- a completed
     /// single-issue detail fetch from `jira_sync_detail`.
     JiraDetailReady { request_id: u64, detail: Result<fenix_jira::IssueDetail, String> },
+    /// File paths handed off from a *later* `fenix` launch via the
+    /// single-instance IPC server (`crate::ipc`) -- e.g. double-
+    /// clicking a file in Explorer while Fenix is already running. An
+    /// empty list means "just focus me," no file to open (a bare
+    /// relaunch with no arguments).
+    OpenFiles(Vec<String>),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -7394,6 +7400,36 @@ impl App {
         self.main_view = MainView::Editor;
     }
 
+    /// Opens every file argument this launch was given beyond the
+    /// first -- `App::new`/`with_file` already seeded the initial
+    /// buffer from `args[0]` itself, but Explorer's "Open With" can
+    /// hand a launch multiple selected files at once. Reuses `open_
+    /// file_from_picker`'s exact "point the focused pane at it"
+    /// behavior; called once per extra path, right after startup, from
+    /// `main.rs`.
+    pub(crate) fn open_startup_file(&mut self, path: &Path) {
+        self.open_file_from_picker(path);
+    }
+
+    /// `FenixUserEvent::OpenFiles`: a *later* `fenix` launch handed its
+    /// file arguments off to this (the already-running) instance via
+    /// the single-instance IPC server (see `crate::ipc`) instead of
+    /// opening its own window. Opens each path the same way `open_
+    /// startup_file` does, then pulls this window to the front -- the
+    /// whole point of the hand-off is that the user just double-
+    /// clicked a file expecting *something* to respond, not a window
+    /// left sitting behind others.
+    fn apply_open_files(&mut self, paths: Vec<String>) {
+        for path in &paths {
+            self.open_file_from_picker(Path::new(path));
+        }
+        if let Some(window) = &self.window {
+            window.focus_window();
+            window.request_redraw();
+        }
+        self.wake_caret();
+    }
+
     /// `SPC f f`: starts the type-a-path find-file prompt.
     pub(crate) fn start_find_file_prompt(&mut self) {
         self.find_file_prompt = Some(String::new());
@@ -8370,6 +8406,7 @@ impl App {
             FenixUserEvent::TerminalSpawned(result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::JiraIssuesReady { request_id, issues } => self.apply_jira_issues(request_id, issues),
             FenixUserEvent::JiraDetailReady { request_id, detail } => self.apply_jira_detail(request_id, detail),
+            FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -17105,6 +17142,38 @@ mod tests {
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.open().buffer.text(), "hello");
         assert_eq!(app.open().kind, BufferKind::Text);
+    }
+
+    #[test]
+    fn open_startup_file_points_the_focused_pane_at_it() {
+        let dir = TempDir::new("open_startup_file");
+        let file = dir.write("extra.txt", "second file");
+        let mut app = App::with_file(None);
+        app.open_startup_file(&file);
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.open().buffer.text(), "second file");
+    }
+
+    #[test]
+    fn apply_open_files_opens_every_path_ending_on_the_last_one() {
+        let dir = TempDir::new("apply_open_files");
+        let a = dir.write("a.txt", "file a");
+        let b = dir.write("b.txt", "file b");
+        let mut app = App::with_file(None);
+        app.apply_open_files(vec![a.display().to_string(), b.display().to_string()]);
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.open().buffer.text(), "file b");
+    }
+
+    #[test]
+    fn apply_open_files_with_an_empty_list_does_not_panic_without_a_real_window() {
+        // The IPC hand-off path always tries to focus the window
+        // afterward; `App::window` is only ever `Some` after a real
+        // winit `resumed` callback (see `toggle_fullscreen_is_a_no_op_
+        // without_a_real_window`), so this just confirms an empty
+        // "just focus me" hand-off doesn't panic in a headless test.
+        let mut app = App::with_file(None);
+        app.apply_open_files(vec![]);
     }
 
     #[test]
