@@ -35,6 +35,12 @@ pub struct Config {
     /// a real tab character itself). Consulted by `fenix-gui`'s
     /// `tabstops` module.
     pub tab_width: Option<usize>,
+    /// Whether caret-fade, scroll-ease, and yank/paste-pulse animations
+    /// play at all -- `None`/unset means "on" (the default look); `false`
+    /// snaps every one of them straight to its end state instead, for a
+    /// user who wants to rule animation cost in/out of a responsiveness
+    /// complaint, or who just prefers snappier motion.
+    pub animations: Option<bool>,
     pub completion_symbols_file: Option<PathBuf>,
     /// Configured SCOS-2000 MIB directories, `(label, path)`, in the
     /// order they appear in `config.ini`'s `[mib]` section -- an actual
@@ -97,6 +103,7 @@ impl Config {
             font_family: editor.and_then(|s| s.get("font_family")).cloned(),
             indent_width: editor.and_then(|s| s.get("indent_width")).and_then(|v| v.parse().ok()),
             tab_width: editor.and_then(|s| s.get("tab_width")).and_then(|v| v.parse().ok()),
+            animations: editor.and_then(|s| s.get("animations")).and_then(|v| v.parse().ok()),
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
             mib_roots: mib.map(parse_mib_roots).unwrap_or_default(),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
@@ -121,6 +128,7 @@ impl Config {
             font_family: None,
             indent_width: None,
             tab_width: None,
+            animations: None,
             completion_symbols_file: None,
             mib_roots: Vec::new(),
             mib_telecommand_template: None,
@@ -159,6 +167,9 @@ impl Config {
         }
         if let Some(tab_width) = self.tab_width {
             out.push_str(&format!("tab_width = {tab_width}\n"));
+        }
+        if let Some(animations) = self.animations {
+            out.push_str(&format!("animations = {animations}\n"));
         }
         out.push('\n');
         out.push_str("[completion]\n");
@@ -259,6 +270,7 @@ mod tests {
         assert!(config.font_family.is_none());
         assert!(config.indent_width.is_none());
         assert!(config.tab_width.is_none());
+        assert!(config.animations.is_none());
         assert!(config.completion_symbols_file.is_none());
         assert!(config.mib_roots.is_empty());
         assert!(config.mib_telecommand_template.is_none());
@@ -319,6 +331,18 @@ mod tests {
         assert_eq!(reloaded.mib_telecommand_template, Some("TC {mnemo}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_template, Some("{name}:{value}".to_string()));
         assert_eq!(reloaded.mib_telecommand_argument_separator, Some(";".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn animations_setting_round_trips_through_save_and_load() {
+        let path = temp_path("animations_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.animations = Some(false);
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.animations, Some(false));
         std::fs::remove_file(&path).ok();
     }
 

@@ -1179,7 +1179,14 @@ impl VimState {
                 }
             }
             VimAction::DeleteCharUnder => {
-                let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
+                // Real Vim's `x` never eats the line's own newline, even
+                // with a count that overruns the line (`5x` on a
+                // 2-char line deletes just those 2 chars, not the `\n`
+                // after them) -- clamp to the line's own content end,
+                // not the whole buffer's.
+                let (line, _) = buffer.line_col(cursor);
+                let line_end = buffer.line_start_char(line) + buffer.line_len(line);
+                let end = (cursor.char_idx + count as usize).min(line_end);
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
                     self.write_register(text, false);
@@ -3362,6 +3369,24 @@ mod tests {
         assert_eq!(b.text(), "bc");
         keys(&mut vim, &mut b, &mut c, "p");
         assert_eq!(b.text(), "bac");
+    }
+
+    #[test]
+    fn x_at_the_end_of_a_line_never_deletes_the_newline() {
+        let mut b = buf("ab\ncd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "llx"); // cursor on 'b', the last char of line 1
+        assert_eq!(b.text(), "a\ncd");
+    }
+
+    #[test]
+    fn x_with_a_count_overrunning_the_line_stops_at_the_newline() {
+        let mut b = buf("ab\ncd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "5x"); // only 2 chars ("ab") exist before the newline
+        assert_eq!(b.text(), "\ncd");
     }
 
     #[test]

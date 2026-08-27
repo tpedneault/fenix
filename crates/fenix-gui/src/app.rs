@@ -8300,6 +8300,31 @@ impl App {
         self.adjust_font_size(text::FONT_SIZE);
     }
 
+    /// Whether caret-fade/scroll-ease/pulse animations should play at
+    /// all -- `config.animations` unset defaults to on (today's look).
+    /// A single flag consulted at every animation's own trigger site
+    /// (`ensure_cursor_visible`'s scroll-anim insertion, the `Pulse`
+    /// vim event, and `about_to_wait`'s blink-fade cadence check) rather
+    /// than one central gate, since each animation is started from a
+    /// different place and "just render it instantly instead" reads
+    /// more clearly at the call site than a wrapped condition would.
+    pub(crate) fn animations_enabled(&self) -> bool {
+        self.config.animations.unwrap_or(true)
+    }
+
+    /// `SPC t a`: flips `config.animations` and persists it -- lets the
+    /// user A/B a responsiveness complaint against animation cost
+    /// without editing `config.ini` by hand.
+    pub(crate) fn toggle_animations(&mut self) {
+        let enabled = !self.animations_enabled();
+        self.config.animations = Some(enabled);
+        if let Err(err) = self.config.save() {
+            self.set_error(format!("couldn't save config.ini: {err}"));
+        } else {
+            self.set_message(if enabled { "Animations on" } else { "Animations off" });
+        }
+    }
+
     /// Resets the caret blink timer so an edit or navigation always leaves
     /// the caret visible instead of possibly mid-blink.
     fn wake_caret(&mut self) {
@@ -8319,6 +8344,9 @@ impl App {
     /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
     /// whichever state the caret last toggled into.
     fn caret_alpha(&self) -> f32 {
+        if !self.animations_enabled() {
+            return if self.blink_visible { 1.0 } else { 0.0 };
+        }
         let elapsed = Instant::now().duration_since(self.blink_transition_start);
         let t = ease_out_cubic(elapsed.as_secs_f32() / BLINK_FADE.as_secs_f32());
         if self.blink_visible { t } else { 1.0 - t }
@@ -9130,7 +9158,9 @@ impl App {
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
-                self.pulse = Some(Pulse { range, started: Instant::now() });
+                if self.animations_enabled() {
+                    self.pulse = Some(Pulse { range, started: Instant::now() });
+                }
             }
             VimEvent::IndentWidthChanged(width) => {
                 self.config.indent_width = Some(width);
@@ -9329,7 +9359,7 @@ impl App {
             // lines behind the cursor instead of ever catching up -- the
             // opposite of the "never sits between a keypress and its
             // effect" goal this animation was built for.
-            if jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.workspaces.active_scroll_anims().contains_key(&pane) {
+            if !self.animations_enabled() || jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.workspaces.active_scroll_anims().contains_key(&pane) {
                 self.workspaces.active_scroll_anims_mut().remove(&pane);
                 self.pane_state_mut(pane).rendered_scroll = target as f32;
             } else {
@@ -11833,7 +11863,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // everything settles, fall back to the long, efficient wait for
         // the next blink toggle -- an idle editor still does no per-frame
         // work between blinks.
-        let blink_transitioning = now.duration_since(self.blink_transition_start) < BLINK_FADE;
+        let blink_transitioning = self.animations_enabled() && now.duration_since(self.blink_transition_start) < BLINK_FADE;
         let pulse_active = match &self.pulse {
             Some(p) if now.duration_since(p.started) < PULSE_DURATION => true,
             Some(_) => {
@@ -12112,6 +12142,43 @@ mod tests {
     }
 
     #[test]
+    fn animations_are_on_by_default() {
+        let app = App::with_file(None);
+        assert!(app.animations_enabled());
+    }
+
+    #[test]
+    fn toggle_animations_flips_and_persists_the_setting() {
+        // Isolated `Config` -- same reasoning as `set_shiftwidth_command_
+        // persists_the_new_width`: `toggle_animations` calls `config.
+        // save()`, which must not write into the real dev machine's
+        // config.ini.
+        let dir = TempDir::new("toggle_animations_persists");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        assert!(app.animations_enabled());
+
+        app.toggle_animations();
+        assert!(!app.animations_enabled());
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.animations, Some(false));
+
+        app.toggle_animations();
+        assert!(app.animations_enabled());
+    }
+
+    #[test]
+    fn caret_alpha_snaps_instantly_when_animations_are_disabled() {
+        let mut app = App::with_file(None);
+        app.config.animations = Some(false);
+        app.blink_visible = true;
+        app.blink_transition_start = Instant::now(); // mid-fade, if fading were happening
+        assert_eq!(app.caret_alpha(), 1.0);
+        app.blink_visible = false;
+        assert_eq!(app.caret_alpha(), 0.0);
+    }
+
+    #[test]
     fn scroll_stays_put_when_cursor_already_visible() {
         assert_eq!(scroll_to_include(5, 7, 10), 5);
     }
@@ -12205,6 +12272,19 @@ mod tests {
         assert!(app.workspaces.active_scroll_anims().contains_key(&app.focused_pane_id()));
         let ps = app.pane_state(app.focused_pane_id());
         assert_ne!(ps.rendered_scroll, ps.scroll_line as f32); // still mid-ease, not snapped
+    }
+
+    #[test]
+    fn small_scroll_change_snaps_instantly_when_animations_are_disabled() {
+        let mut app = App::with_file(None);
+        app.config.animations = Some(false);
+        for _ in 0..5 {
+            app.test_insert('\n');
+        }
+        app.ensure_cursor_visible(3);
+        assert!(!app.workspaces.active_scroll_anims().contains_key(&app.focused_pane_id()));
+        let ps = app.pane_state(app.focused_pane_id());
+        assert_eq!(ps.rendered_scroll, ps.scroll_line as f32); // snapped, not mid-ease
     }
 
     #[test]

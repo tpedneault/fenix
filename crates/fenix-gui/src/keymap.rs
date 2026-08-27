@@ -110,6 +110,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('f')], "fullscreen", "view.toggle_fullscreen");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "animations", "view.toggle_animations");
 
         t.label_group(&[spc, KeyPress::char('e')], "explorer");
         t.insert(
@@ -327,6 +328,18 @@ mod tests {
         match m.feed(KeyPress::char('f')) {
             fenix_keymap::Step::Matched(&"view.toggle_fullscreen") => {}
             _ => panic!("expected SPC t f to resolve to view.toggle_fullscreen"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_animations_toggle() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('t'));
+        match m.feed(KeyPress::char('a')) {
+            fenix_keymap::Step::Matched(&"view.toggle_animations") => {}
+            _ => panic!("expected SPC t a to resolve to view.toggle_animations"),
         }
     }
 
