@@ -34,17 +34,26 @@ pub struct IssueDetail {
 }
 
 /// The JQL for "every issue assigned to `user_id`, scoped to whichever
-/// projects are currently tracked" -- pure and directly testable. The
-/// `AND project IN (...)` clause is omitted entirely when `project_keys`
-/// is empty (an empty `IN ()` is invalid JQL, and "no projects tracked
-/// yet" should mean "search everywhere," not "search nothing"), and
-/// project keys are joined verbatim (Jira project keys are always plain
+/// projects are currently tracked, minus whichever statuses are
+/// currently excluded" -- pure and directly testable. The `AND project
+/// IN (...)` clause is omitted entirely when `project_keys` is empty
+/// (an empty `IN ()` is invalid JQL, and "no projects tracked yet"
+/// should mean "search everywhere," not "search nothing"), and project
+/// keys are joined verbatim (Jira project keys are always plain
 /// alphanumeric identifiers, no quoting/escaping needed the way a
-/// free-text value would).
-pub fn build_jql(user_id: &str, project_keys: &[String]) -> String {
+/// free-text value would). `excluded_statuses` gets the same
+/// conditional-clause treatment -- omitted when empty -- but each name
+/// *is* quoted (unlike project keys, a status name routinely contains
+/// spaces, e.g. `"In Progress"`), with any embedded `"` escaped so a
+/// status name can't break out of its own JQL string literal.
+pub fn build_jql(user_id: &str, project_keys: &[String], excluded_statuses: &[String]) -> String {
     let mut jql = format!("assignee = \"{user_id}\"");
     if !project_keys.is_empty() {
         jql.push_str(&format!(" AND project IN ({})", project_keys.join(",")));
+    }
+    if !excluded_statuses.is_empty() {
+        let quoted: Vec<String> = excluded_statuses.iter().map(|s| format!("\"{}\"", s.replace('"', "\\\""))).collect();
+        jql.push_str(&format!(" AND status NOT IN ({})", quoted.join(",")));
     }
     jql.push_str(" ORDER BY updated DESC");
     jql
@@ -130,13 +139,13 @@ mod tests {
 
     #[test]
     fn build_jql_with_no_tracked_projects_omits_the_project_clause() {
-        assert_eq!(build_jql("jo1111111", &[]), r#"assignee = "jo1111111" ORDER BY updated DESC"#);
+        assert_eq!(build_jql("jo1111111", &[], &[]), r#"assignee = "jo1111111" ORDER BY updated DESC"#);
     }
 
     #[test]
     fn build_jql_with_one_project() {
         assert_eq!(
-            build_jql("jo1111111", &["PROJ".to_string()]),
+            build_jql("jo1111111", &["PROJ".to_string()], &[]),
             r#"assignee = "jo1111111" AND project IN (PROJ) ORDER BY updated DESC"#
         );
     }
@@ -144,8 +153,49 @@ mod tests {
     #[test]
     fn build_jql_with_several_projects_joins_them_with_commas() {
         assert_eq!(
-            build_jql("jo1111111", &["PROJ".to_string(), "OTHER".to_string()]),
+            build_jql("jo1111111", &["PROJ".to_string(), "OTHER".to_string()], &[]),
             r#"assignee = "jo1111111" AND project IN (PROJ,OTHER) ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_with_no_excluded_statuses_omits_the_status_clause() {
+        assert_eq!(build_jql("jo1111111", &[], &[]), r#"assignee = "jo1111111" ORDER BY updated DESC"#);
+    }
+
+    #[test]
+    fn build_jql_with_one_excluded_status() {
+        assert_eq!(
+            build_jql("jo1111111", &[], &["Done".to_string()]),
+            r#"assignee = "jo1111111" AND status NOT IN ("Done") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_with_several_excluded_statuses_quotes_each_one() {
+        assert_eq!(
+            build_jql("jo1111111", &[], &["Done".to_string(), "In Progress".to_string()]),
+            r#"assignee = "jo1111111" AND status NOT IN ("Done","In Progress") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_escapes_an_embedded_double_quote_in_an_excluded_status() {
+        // Contrived (real workflow status names essentially never
+        // contain a literal `"`), but confirms the escaping code path
+        // actually runs rather than producing broken JQL with an
+        // unescaped quote breaking out of the string literal.
+        assert_eq!(
+            build_jql("jo1111111", &[], &["Weird\"Status".to_string()]),
+            r#"assignee = "jo1111111" AND status NOT IN ("Weird\"Status") ORDER BY updated DESC"#
+        );
+    }
+
+    #[test]
+    fn build_jql_combines_project_and_status_clauses() {
+        assert_eq!(
+            build_jql("jo1111111", &["PROJ".to_string()], &["Done".to_string()]),
+            r#"assignee = "jo1111111" AND project IN (PROJ) AND status NOT IN ("Done") ORDER BY updated DESC"#
         );
     }
 

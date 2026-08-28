@@ -91,6 +91,9 @@ impl CommandRegistry {
         registry.register("jira.delete_project", "Stop tracking a Jira project", cmd_jira_delete_project);
         registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
         registry.register("jira.delete_user", "Stop tracking a Jira user", cmd_jira_delete_user);
+        registry.register("jira.create_issue", "Create a new Jira issue in a tracked project", cmd_jira_create_issue);
+        registry.register("jira.submit_edit", "Submit the pending Jira comment/description edit", cmd_jira_submit_edit);
+        registry.register("jira.cancel_edit", "Cancel the pending Jira comment/description edit", cmd_jira_cancel_edit);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -323,6 +326,18 @@ fn cmd_jira_add_user(ctx: &mut CommandCtx) {
 
 fn cmd_jira_delete_user(ctx: &mut CommandCtx) {
     ctx.app.picker_delete_jira_user();
+}
+
+fn cmd_jira_create_issue(ctx: &mut CommandCtx) {
+    ctx.app.picker_create_jira_issue();
+}
+
+fn cmd_jira_submit_edit(ctx: &mut CommandCtx) {
+    ctx.app.jira_submit_edit();
+}
+
+fn cmd_jira_cancel_edit(ctx: &mut CommandCtx) {
+    ctx.app.jira_cancel_edit();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {

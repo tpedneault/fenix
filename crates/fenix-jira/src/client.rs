@@ -33,6 +33,31 @@ impl JiraClient {
         let body = response.into_string().map_err(|err| format!("couldn't read response body: {err}"))?;
         serde_json::from_str(&body).map_err(|err| format!("couldn't parse response as JSON: {err}"))
     }
+
+    /// The write-side counterpart to `request` -- `method` is a plain
+    /// verb (`"POST"`/`"PUT"`), `body` is serialized by hand (`serde_
+    /// json::to_string`, not `ureq`'s own `send_json`) so this crate
+    /// still doesn't need `ureq`'s `json` feature on top of `tls`, same
+    /// reasoning `request` already has for GET. Jira's own write
+    /// endpoints routinely answer with an empty 204 No Content body
+    /// (`PUT /issue/{key}`, `POST .../transitions`) -- treated as `Ok
+    /// (None)` rather than a JSON-parse failure; `POST /issue` and
+    /// `POST .../comment` do send a real body back, surfaced as `Ok
+    /// (Some(value))`.
+    pub(crate) fn send(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+        let url = format!("{}{path}", self.base_url);
+        let payload = serde_json::to_string(body).map_err(|err| format!("couldn't encode request body: {err}"))?;
+        let req = ureq::request(method, &url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Accept", "application/json")
+            .set("Content-Type", "application/json");
+        let response = req.send_string(&payload).map_err(|err| describe_error(&err))?;
+        let text = response.into_string().map_err(|err| format!("couldn't read response body: {err}"))?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(&text).map(Some).map_err(|err| format!("couldn't parse response as JSON: {err}"))
+    }
 }
 
 /// `ureq::Error` already carries a real HTTP status + response body for

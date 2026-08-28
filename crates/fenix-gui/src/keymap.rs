@@ -184,6 +184,18 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('u')], "jira users");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('a')], "add user", "jira.add_user");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('d')], "delete user", "jira.delete_user");
+        // Create/update issues, phase 2: `i` mirrors `p`/`u`'s own
+        // two-level shape for one leaf so far (just create -- there's no
+        // "delete an issue" analog to `p d`/`u d`).
+        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('i')], "jira issue");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('i'), KeyPress::char('a')], "create issue", "jira.create_issue");
+        // Submit/cancel a pending comment/description edit (`c`/`e` on
+        // Issues/Detail) -- leader bindings, not pane-scoped bare keys,
+        // since the edit buffer is genuinely free-typed prose (see
+        // `App::jira_edit`'s own doc comment for why that's load-
+        // bearing, not stylistic).
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('s')], "submit jira edit", "jira.submit_edit");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('x')], "cancel jira edit", "jira.cancel_edit");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(
@@ -559,6 +571,36 @@ mod tests {
                 fenix_keymap::Step::Matched(&matched) if matched == expected => {}
                 _ => panic!("expected SPC {} to resolve to {expected}", keys.iter().collect::<String>()),
             }
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_jira_create_issue_and_edit_submit_cancel() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        m.feed(KeyPress::char('i'));
+        match m.feed(KeyPress::char('a')) {
+            fenix_keymap::Step::Matched(&"jira.create_issue") => {}
+            _ => panic!("expected SPC j i a to resolve to jira.create_issue"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('s')) {
+            fenix_keymap::Step::Matched(&"jira.submit_edit") => {}
+            _ => panic!("expected SPC j s to resolve to jira.submit_edit"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('x')) {
+            fenix_keymap::Step::Matched(&"jira.cancel_edit") => {}
+            _ => panic!("expected SPC j x to resolve to jira.cancel_edit"),
         }
     }
 
