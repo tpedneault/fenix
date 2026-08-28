@@ -178,18 +178,31 @@ for anyone curious to poke around or build on it.
   selection already superseded) so scrolling through many files never
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
-- **JIRA dashboard** (`SPC j ...`, phase 1: read-only browsing): track
-  projects and users by hand (`SPC j p a`/`SPC j u a` to add, `SPC j p
-  d`/`SPC j u d` to remove), then `SPC j j` opens a four-pane workspace
-  -- Projects | Users | Issues | Detail. Moving the cursor onto a
-  tracked user runs a JQL search for every issue assigned to them,
-  scoped to every currently-tracked project, and lists the results in
-  Issues; moving onto an issue shows its full detail (description,
-  status, assignee, reporter, dates, comments) in Detail. `SPC j r`
-  refreshes, `SPC j q` closes the session. Talks to a self-hosted Jira
-  Server/Data Center instance's REST API via a personal access token
-  (see [Configuration](#configuration)) -- creating/updating issues,
-  comments, time-logging, and transitions aren't implemented yet.
+- **JIRA dashboard** (`SPC j ...`): track projects and users by hand
+  (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
+  then `SPC j j` opens a four-pane workspace -- Projects | Users |
+  Issues | Detail. Moving the cursor onto a tracked user runs a JQL
+  search for every issue assigned to them, scoped to every currently-
+  tracked project, and lists the results in Issues; moving onto an
+  issue shows its full detail (description, status, assignee, reporter,
+  dates, comments) in Detail. `SPC j r` refreshes, `SPC j q` closes the
+  session. Talks to a self-hosted Jira Server/Data Center instance's
+  REST API via a personal access token (see
+  [Configuration](#configuration)).
+  `SPC j i a` creates a new issue in a tracked project (pick the
+  project, type an issue type and a summary). On Issues or Detail: `t`
+  transitions the issue's status (fetches the real available
+  transitions for its current workflow state and offers a picker --
+  never a fixed list), `T` edits the title, `l` logs time (Jira's own
+  duration syntax, e.g. `2h 30m`), and `c`/`e` open a real, Vim-
+  navigable scratch buffer -- empty for a new comment, pre-filled with
+  the current text for a description edit -- so you get full editing
+  power for anything longer than one line; `SPC j s` submits it,
+  `SPC j x` discards it. On Issues, `f` opens a toggleable checklist of
+  every status seen so far this session (`Space` toggles, `a`/`Enter`
+  applies) to hide statuses you don't want cluttering the list (e.g.
+  Done/Closed) -- folded into the JQL query itself, so it stays applied
+  across refreshes; resets when you close and reopen the panel.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -356,8 +369,10 @@ popup shows what keys continue it.
 | `SPC j j` | Open (or refocus) the JIRA dashboard |
 | `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
 | `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |
+| `SPC j i a` | Create a new issue in a tracked project |
 | `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
 | `SPC j q` | Close the JIRA dashboard session |
+| `SPC j s` / `SPC j x` | Submit / cancel a pending comment or description edit |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -511,6 +526,47 @@ Real lazygit's own `<space>` stage-toggle isn't used here, since `SPC`
 is already Fenix's global leader-key trigger -- Files uses separate
 `s`/`S` keys instead, the same distinct-keys-per-action convention the
 Docker panel's own `s`/`S`/`R` already established.
+
+### JIRA dashboard (`SPC j j`)
+
+Opens its own workspace with four real, titled panes -- Projects and
+Users stacked on the left, Issues (the main pane) and Detail on the
+right. Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...`
+all work). Moving the cursor onto a tracked user re-runs the query
+behind Issues; moving onto an issue re-fetches Detail. Only these are
+special, and only on the pane named:
+
+| Keys | Pane | Action |
+|---|---|---|
+| `1`-`4` | any | Jump to the pane numbered that in its title bar |
+| `t` | Issues, Detail | Transition the issue's status (fetches the real available transitions, offers a picker) |
+| `T` | Issues, Detail | Edit the title |
+| `c` | Issues, Detail | Add a comment (opens a real scratch buffer) |
+| `e` | Issues, Detail | Edit the description (opens a real scratch buffer, pre-filled) |
+| `l` | Issues, Detail | Log time (Jira's own duration syntax, e.g. `2h 30m`) |
+| `f` | Issues | Open the status-filter checklist |
+
+`c`/`e` hand you a genuine, full-featured buffer -- write as much as
+you want, over as many lines as you want, with every ordinary Vim
+motion and edit available. `SPC j s` submits it (posts the comment, or
+saves the new description) and restores Detail to its normal view;
+`SPC j x` discards it the same way, without submitting anything. These
+are leader bindings rather than pane-scoped bare keys on purpose: real
+prose routinely contains the letters `c`/`e`/`t`/`T`/`l`, and a bare-key
+trigger would hijack ordinary typing the moment it did.
+
+The status-filter checklist (`f`) is itself a real buffer, listing
+every status Issues has shown at least once this session:
+
+| Keys | Action |
+|---|---|
+| `Space` / `t` | Toggle the status under the cursor in/out of the filter |
+| `a` / `Enter` | Apply -- excluded statuses drop out of Issues immediately and stay out across `SPC j r` |
+| `q` / `Esc` | Cancel -- closes the checklist, changes nothing |
+
+The filter is folded directly into the JQL query (`AND status NOT IN
+(...)`), and resets when the panel is closed and reopened -- it isn't
+saved to `config.ini`.
 
 ### Autocompletion popup (Tcl, Insert mode)
 
