@@ -10206,29 +10206,15 @@ impl App {
         self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
     }
 
-    /// (mode label, rest-of-modeline suffix) -- `None` while typing a `:`
-    /// command or a `/`/`?` search query, since either replaces the
-    /// whole modeline with raw prompt text instead of the usual badge +
-    /// filename + position layout.
-    fn modeline_pieces(&self) -> Option<(&'static str, String)> {
-        if self.vim.mode() == Mode::Command
-            || self.vim.mode() == Mode::Search
-            || self.pending_grep_query.is_some()
-            || self.explorer_prompt.is_some()
-            || self.docker_confirm_remove.is_some()
-            || self.git_confirm.is_some()
-            || self.git_prompt.is_some()
-            || self.jira_prompt.is_some()
-            || self.mib_insert.is_some()
-            || self.replace_wizard.is_some()
-            || self.project_replace.as_ref().is_some_and(|s| s.confirming)
-            || self.find_file_prompt.is_some()
-            || self.rename_file_prompt.is_some()
-            || self.mib_root_prompt.is_some()
-            || self.delete_file_confirm
-        {
-            return None;
-        }
+    /// (mode label, rest-of-modeline suffix) -- always returns real
+    /// content now, even while a capturing prompt (`:command`, `/`
+    /// search, a git commit prompt, ...) is active: that text lives in
+    /// its own floating popup now (`App::prompt_popup`), so the
+    /// modeline itself just keeps showing its ordinary badge/filename/
+    /// position underneath it, the same "additive, doesn't replace the
+    /// real indicator" posture `recording_indicator`/`workspace_
+    /// indicator` already have below.
+    fn modeline_pieces(&self) -> (&'static str, String) {
         // A live status/error message pre-empts even the Explorer/Picker
         // badge -- it's telling the user something just happened,
         // regardless of what view they're in. Uses the plain mode badge
@@ -10240,7 +10226,7 @@ impl App {
             if msg.set_at.elapsed() < MESSAGE_DURATION {
                 let mode_label =
                     if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
-                return Some((mode_label, format!("│ {} ", msg.text)));
+                return (mode_label, format!("│ {} ", msg.text));
             }
         }
         if self.main_view == MainView::Explorer {
@@ -10267,7 +10253,7 @@ impl App {
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
                 ExplorerPurpose::PickMibRootDir => "ADDMIB",
             };
-            return Some((badge, suffix));
+            return (badge, suffix);
         }
         if self.main_view == MainView::Picker {
             let (label, count) = match &self.active_picker {
@@ -10293,7 +10279,7 @@ impl App {
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 None => ("PICKER", 0),
             };
-            return Some((label, format!("│ {count} matches ")));
+            return (label, format!("│ {count} matches "));
         }
         let ob = self.open();
         let filename = self.buffer_display_name(self.focused_buffer_id());
@@ -10320,43 +10306,56 @@ impl App {
             };
         let suffix =
             format!("│ {filename}{modified}{workspace_indicator}{recording_indicator}   Ln {}, Col {} ", line + 1, col + 1);
-        Some((mode_label, suffix))
+        (mode_label, suffix)
+    }
+
+    /// The text currently occupying the app's one shared "capturing
+    /// prompt" slot -- whichever of Vim's own `:command`/`/`-`?`-search,
+    /// the project-wide grep query, or one of this app's many single-
+    /// line prompts/confirmations is active right now. `None` when
+    /// nothing is capturing input, the common case. These are mutually
+    /// exclusive states (`route_keypress`'s own capturing-prompt
+    /// dispatch already treats them that way), so this priority order
+    /// only matters for readability, not correctness. Feeds `prompt_
+    /// popup` -- the only thing that changed here from this function's
+    /// own predecessor (the old `modeline_command_text` local `redraw`
+    /// used to compute inline) is *where* this text ends up shown, not
+    /// what it is or how it's computed; every individual `*_text()`
+    /// function this calls is untouched.
+    fn active_prompt_text(&self) -> Option<String> {
+        if let Some(query) = &self.pending_grep_query {
+            return Some(format!("rg: {query}"));
+        }
+        if self.vim.mode() == Mode::Search {
+            let prefix = if self.vim.search_forward() { "/" } else { "?" };
+            return Some(format!("{prefix}{}", self.vim.search_query()));
+        }
+        if self.vim.mode() == Mode::Command {
+            return Some(format!(":{}", self.vim.command_line()));
+        }
+        self.explorer_prompt_text()
+            .or_else(|| self.docker_confirm_text())
+            .or_else(|| self.git_confirm_text())
+            .or_else(|| self.git_prompt_text())
+            .or_else(|| self.jira_prompt_text())
+            .or_else(|| self.mib_insert_text())
+            .or_else(|| self.replace_wizard_text())
+            .or_else(|| self.project_replace_confirm_text())
+            .or_else(|| self.find_file_prompt_text())
+            .or_else(|| self.rename_file_prompt_text())
+            .or_else(|| self.mib_root_prompt_text())
+            .or_else(|| self.delete_file_confirm_text())
     }
 
     /// Test-only: the modeline as one plain string, for assertions --
     /// `redraw` renders it as separately-colored spans instead (see
     /// `modeline_pieces`/`mode_colors`), so nothing else needs this.
+    /// Always the modeline's own ordinary badge/filename/position now --
+    /// a capturing prompt's own text lives in `prompt_popup`/`active_
+    /// prompt_text` instead, asserted on separately.
     #[cfg(test)]
     fn modeline_text(&self) -> String {
-        if self.vim.mode() == Mode::Command {
-            return format!(":{}", self.vim.command_line());
-        }
-        if self.vim.mode() == Mode::Search {
-            let prefix = if self.vim.search_forward() { "/" } else { "?" };
-            return format!("{prefix}{}", self.vim.search_query());
-        }
-        if let Some(query) = &self.pending_grep_query {
-            return format!("rg: {query}");
-        }
-        if let Some(prompt_text) = self.explorer_prompt_text() {
-            return prompt_text;
-        }
-        if let Some(confirm_text) = self.docker_confirm_text() {
-            return confirm_text;
-        }
-        if let Some(confirm_text) = self.git_confirm_text() {
-            return confirm_text;
-        }
-        if let Some(prompt_text) = self.git_prompt_text() {
-            return prompt_text;
-        }
-        if let Some(prompt_text) = self.jira_prompt_text() {
-            return prompt_text;
-        }
-        if let Some(insert_text) = self.mib_insert_text() {
-            return insert_text;
-        }
-        let (mode_label, suffix) = self.modeline_pieces().unwrap();
+        let (mode_label, suffix) = self.modeline_pieces();
         format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
     }
 
@@ -10998,6 +10997,36 @@ impl App {
             return None;
         }
         Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
+    }
+
+    /// Whichever prompt/confirmation `active_prompt_text` says is
+    /// currently active, as a one-row floating popup just above the
+    /// modeline -- `None` when nothing is. Shares the modeline's own
+    /// background/text color (`bg_modeline`/`fg_modeline`), since this
+    /// is exactly the text the modeline itself used to show inline
+    /// before this popup existed. Unlike `which_key_popup`, not capped
+    /// at `WHICH_KEY_MAX_WIDTH` (480px, tuned for short which-key
+    /// labels) -- prompt text routinely needs to be longer (a file
+    /// path, a commit message), so the only ceiling here is the same
+    /// window-width-based one `which_key_popup` itself computes before
+    /// *additionally* clamping to `WHICH_KEY_MAX_WIDTH`.
+    fn prompt_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        let content = self.active_prompt_text()?;
+
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+
+        let content_chars = content.chars().count();
+        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING).clamp(text::WHICH_KEY_MIN_WIDTH, max_width);
+        let height = line_height + WHICH_KEY_PADDING;
+
+        let theme = self.theme;
+        let spans = vec![(content, theme.fg_modeline, false)];
+        let rect = popup::resolve(popup::Anchor::BottomLeft { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
+        Some((rect, spans))
     }
 
     /// The which-key popup's rich-text spans (key column in
@@ -12036,40 +12065,6 @@ impl App {
         }
 
         let modeline_pieces = self.modeline_pieces();
-        let modeline_command_text = if let Some(query) = &self.pending_grep_query {
-            Some(format!("rg: {query}"))
-        } else if self.vim.mode() == Mode::Search {
-            let prefix = if self.vim.search_forward() { "/" } else { "?" };
-            Some(format!("{prefix}{}", self.vim.search_query()))
-        } else if let Some(prompt_text) = self.explorer_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(confirm_text) = self.docker_confirm_text() {
-            Some(confirm_text)
-        } else if let Some(confirm_text) = self.git_confirm_text() {
-            Some(confirm_text)
-        } else if let Some(prompt_text) = self.git_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(prompt_text) = self.jira_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(insert_text) = self.mib_insert_text() {
-            Some(insert_text)
-        } else if let Some(replace_text) = self.replace_wizard_text() {
-            Some(replace_text)
-        } else if let Some(confirm_text) = self.project_replace_confirm_text() {
-            Some(confirm_text)
-        } else if let Some(prompt_text) = self.find_file_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(prompt_text) = self.rename_file_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(prompt_text) = self.mib_root_prompt_text() {
-            Some(prompt_text)
-        } else if let Some(confirm_text) = self.delete_file_confirm_text() {
-            Some(confirm_text)
-        } else if modeline_pieces.is_none() {
-            Some(format!(":{}", self.vim.command_line()))
-        } else {
-            None
-        };
         let (badge_bg, badge_fg) = self.mode_colors();
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
@@ -12093,6 +12088,9 @@ impl App {
         let completion_popup = panes_render.iter().find(|p| p.pane == focused_pane).and_then(|focused| {
             self.completion_popup(window_width, modeline_top, focused.rect, focused.caret, focused.gutter_px, focused.content_frac)
         });
+        // See `popup::PopupId::Prompt`'s own doc comment for why this
+        // never coexists with any popup above.
+        let prompt_popup = self.prompt_popup(window_width, modeline_top);
         let caret_alpha = self.caret_alpha();
 
         let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
@@ -12138,28 +12136,20 @@ impl App {
                 terminal_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_terminal_rich(&terminal_refs);
         }
-        let existing_chars = match &modeline_pieces {
-            Some((mode_label, suffix)) => {
-                let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
-                let existing_chars = badge.chars().count() + suffix.chars().count();
-                // An unexpired error message tints the suffix red (`git_
-                // conflicted`'s accent -- no dedicated error color exists
-                // yet, and this reads as a reasonable semantic reuse
-                // rather than a new theme field x6 themes) instead of the
-                // ordinary modeline foreground.
-                let is_error_message = self
-                    .status_message
-                    .as_ref()
-                    .is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
-                let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
-                text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), suffix_fg)]);
-                existing_chars
-            }
-            None => {
-                let cmd = modeline_command_text.as_deref().unwrap_or("");
-                text.set_modeline_text(&[(cmd, theme.fg_modeline)]);
-                cmd.chars().count()
-            }
+        let existing_chars = {
+            let (mode_label, suffix) = &modeline_pieces;
+            let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
+            let existing_chars = badge.chars().count() + suffix.chars().count();
+            // An unexpired error message tints the suffix red (`git_
+            // conflicted`'s accent -- no dedicated error color exists
+            // yet, and this reads as a reasonable semantic reuse
+            // rather than a new theme field x6 themes) instead of the
+            // ordinary modeline foreground.
+            let is_error_message =
+                self.status_message.as_ref().is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
+            let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
+            text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), suffix_fg)]);
+            existing_chars
         };
         // A *separate* buffer/`TextArea` from the modeline's own, right-
         // aligned via cosmic-text's own `Align::Right` layout rather than
@@ -12207,6 +12197,11 @@ impl App {
             text.set_popup_rich(popup::PopupId::Completion, rect.w, &refs);
             popup_rects.push((popup::PopupId::Completion, *rect));
             popup_selected_row = *selected_row;
+        }
+        if let Some((rect, spans)) = &prompt_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::Prompt, rect.w, &refs);
+            popup_rects.push((popup::PopupId::Prompt, *rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
@@ -12264,15 +12259,17 @@ impl App {
             }
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
-        if modeline_pieces.is_some() {
-            // Starts at PAD_LEFT, matching where the badge text itself
-            // starts rendering (`text.rs`'s modeline TextArea uses the same
-            // left inset) -- starting this at the window edge instead left
-            // the rendered label overflowing past the badge's right edge,
-            // throwing off how centered it looked inside the colored badge.
-            let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
-            bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, modeline_height, badge_bg);
-        }
+        // Starts at PAD_LEFT, matching where the badge text itself starts
+        // rendering (`text.rs`'s modeline TextArea uses the same left
+        // inset) -- starting this at the window edge instead left the
+        // rendered label overflowing past the badge's right edge, throwing
+        // off how centered it looked inside the colored badge. Always
+        // drawn now: `modeline_pieces` always returns real badge content
+        // (a capturing prompt's own text lives in its own popup instead of
+        // blanking this out), so there's no longer a "raw text, no badge"
+        // state to skip this for.
+        let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
+        bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, modeline_height, badge_bg);
         // Popup backgrounds are deliberately *not* pushed into this batch --
         // see the big comment at the two-pass render sequence below for why.
         if show_sidebar {
@@ -13120,21 +13117,25 @@ mod tests {
     }
 
     #[test]
-    fn modeline_shows_command_line_while_typing_an_ex_command() {
+    fn prompt_popup_shows_command_line_while_typing_an_ex_command() {
         let mut app = App::with_file(None);
         for ch in [':', 'w', 'q'] {
             app.test_vim_key(KeyPress::char(ch));
         }
-        assert_eq!(app.modeline_text(), ":wq");
+        assert_eq!(app.active_prompt_text(), Some(":wq".to_string()));
+        // The modeline itself keeps showing its ordinary content
+        // underneath -- a capturing prompt no longer blanks it out.
+        assert!(app.modeline_text().contains("Ln 1, Col"));
     }
 
     #[test]
-    fn modeline_shows_the_search_prompt_while_typing_a_query() {
+    fn prompt_popup_shows_the_search_query_while_typing_it() {
         let mut app = App::with_file(None);
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
-        assert_eq!(app.modeline_text(), "/foo");
+        assert_eq!(app.active_prompt_text(), Some("/foo".to_string()));
+        assert!(app.modeline_text().contains("Ln 1, Col"));
     }
 
     #[test]
@@ -15395,7 +15396,7 @@ mod tests {
         assert!(!app.terminal_open);
         assert!(!app.terminal_spawning);
         assert!(app.terminal.is_none());
-        assert!(app.modeline_pieces().unwrap().1.contains("couldn't start a terminal"));
+        assert!(app.modeline_pieces().1.contains("couldn't start a terminal"));
     }
 
     #[test]
@@ -15911,6 +15912,69 @@ mod tests {
         assert!(joined.contains("more"));
     }
 
+    #[test]
+    fn prompt_popup_is_none_when_nothing_is_capturing_input() {
+        let app = App::with_file(None);
+        assert!(app.prompt_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn prompt_popup_shows_a_live_command_lines_text() {
+        let mut app = App::with_file(None);
+        for ch in [':', 'w', 'q'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let (_, spans) = app.prompt_popup(800.0, 580.0).unwrap();
+        assert_eq!(spans[0].0, ":wq");
+        assert_eq!(spans[0].1, app.theme.fg_modeline);
+    }
+
+    #[test]
+    fn prompt_popup_rect_never_extends_past_the_window_or_under_the_modeline() {
+        let mut app = App::with_file(None);
+        for ch in [':', 'w', 'q'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let modeline_top = 40.0;
+        let (rect, _) = app.prompt_popup(300.0, modeline_top).unwrap();
+
+        assert!(rect.x >= 0.0);
+        assert!(rect.y >= 0.0);
+        assert!(rect.x + rect.w <= 300.0 + 0.01);
+        assert!(rect.y + rect.h <= modeline_top + 0.01);
+    }
+
+    #[test]
+    fn prompt_popup_sits_just_above_the_modeline_left_aligned() {
+        let mut app = App::with_file(None);
+        for ch in [':', 'w', 'q'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let modeline_top = 580.0;
+        let (rect, _) = app.prompt_popup(800.0, modeline_top).unwrap();
+        assert_eq!(rect.x, text::WHICH_KEY_MARGIN);
+        assert_eq!(rect.y, modeline_top - rect.h - text::WHICH_KEY_MARGIN);
+    }
+
+    #[test]
+    fn prompt_popup_widens_to_fit_a_longer_prompt_than_the_minimum() {
+        let mut app = App::with_file(None);
+        for ch in [':', 'w', 'q'] {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let (short_rect, _) = app.prompt_popup(800.0, 580.0).unwrap();
+        assert_eq!(short_rect.w, text::WHICH_KEY_MIN_WIDTH); // a 3-char command clamps to the floor
+
+        app.test_vim_key(KeyPress::named(FenixNamedKey::Escape));
+        for ch in ": a very long command line that should widen the popup".chars() {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let (long_rect, spans) = app.prompt_popup(800.0, 580.0).unwrap();
+        assert!(long_rect.w > short_rect.w);
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("a very long command line"));
+    }
+
     fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<fenix_completion::CompletionItem> {
         fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind })
     }
@@ -16092,7 +16156,7 @@ mod tests {
     }
 
     #[test]
-    fn modeline_shows_the_rename_prompt_as_it_is_typed() {
+    fn prompt_popup_shows_the_rename_prompt_as_it_is_typed() {
         // Previously nothing rendered `explorer_prompt` at all -- typing
         // a rename/create/copy/move was silently invisible even though
         // the state was captured correctly.
@@ -16103,13 +16167,13 @@ mod tests {
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginRename);
-        assert_eq!(app.modeline_text(), "Rename to: old.txt");
+        assert_eq!(app.active_prompt_text(), Some("Rename to: old.txt".to_string()));
         app.explorer_prompt_key(KeyPress::char('x'));
-        assert_eq!(app.modeline_text(), "Rename to: old.txtx");
+        assert_eq!(app.active_prompt_text(), Some("Rename to: old.txtx".to_string()));
     }
 
     #[test]
-    fn modeline_shows_the_delete_confirmation_with_the_target_count() {
+    fn prompt_popup_shows_the_delete_confirmation_with_the_target_count() {
         let dir = TempDir::new("delete_prompt_modeline");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
@@ -16117,20 +16181,20 @@ mod tests {
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
-        assert_eq!(app.modeline_text(), "Delete 1 item? (y/n)");
+        assert_eq!(app.active_prompt_text(), Some("Delete 1 item? (y/n)".to_string()));
     }
 
     #[test]
-    fn modeline_shows_the_create_file_prompt_from_the_sidebar_too() {
+    fn prompt_popup_shows_the_create_file_prompt_from_the_sidebar_too() {
         let dir = TempDir::new("create_prompt_sidebar");
         let mut app = App::with_file(None);
         app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
         app.sidebar_focused = true;
 
         app.explorer_handle_action(ExplorerAction::BeginCreateFile);
-        assert_eq!(app.modeline_text(), "Create file: ");
+        assert_eq!(app.active_prompt_text(), Some("Create file: ".to_string()));
         app.explorer_prompt_key(KeyPress::char('x'));
-        assert_eq!(app.modeline_text(), "Create file: x");
+        assert_eq!(app.active_prompt_text(), Some("Create file: x".to_string()));
     }
 
     #[test]
@@ -17726,7 +17790,7 @@ mod tests {
         let entry = app.docker_entry_at_cursor().unwrap();
         app.docker_confirm_remove = Some(entry);
         assert!(app.docker_confirm_text().unwrap().contains("image"));
-        assert!(app.modeline_text().contains("Remove this image?"));
+        assert!(app.active_prompt_text().unwrap().contains("Remove this image?"));
 
         app.docker_confirm_key(KeyPress::char('n'));
         assert!(app.docker_confirm_remove.is_none());
@@ -18382,14 +18446,14 @@ mod tests {
     #[test]
     fn modeline_shows_a_recording_indicator_only_while_actually_recording() {
         let mut app = macro_app("x");
-        assert!(!app.modeline_pieces().unwrap().1.contains("recording"));
+        assert!(!app.modeline_pieces().1.contains("recording"));
 
         app.test_dispatch_key(KeyPress::char('q'));
         app.test_dispatch_key(KeyPress::char('a'));
-        assert!(app.modeline_pieces().unwrap().1.contains("recording @a"));
+        assert!(app.modeline_pieces().1.contains("recording @a"));
 
         app.test_dispatch_key(KeyPress::char('q'));
-        assert!(!app.modeline_pieces().unwrap().1.contains("recording"));
+        assert!(!app.modeline_pieces().1.contains("recording"));
     }
 
     // -- Status/error messages ------------------------------------------
@@ -18398,10 +18462,10 @@ mod tests {
     fn set_message_and_set_error_show_in_the_modeline_suffix() {
         let mut app = App::with_file(None);
         app.set_message("hello there");
-        assert!(app.modeline_pieces().unwrap().1.contains("hello there"));
+        assert!(app.modeline_pieces().1.contains("hello there"));
 
         app.set_error("something broke");
-        assert!(app.modeline_pieces().unwrap().1.contains("something broke"));
+        assert!(app.modeline_pieces().1.contains("something broke"));
     }
 
     #[test]
@@ -18409,7 +18473,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.set_message("fresh");
         app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
-        assert!(!app.modeline_pieces().unwrap().1.contains("fresh"));
+        assert!(!app.modeline_pieces().1.contains("fresh"));
     }
 
     #[test]
@@ -18417,7 +18481,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.set_message("stale");
         app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
-        assert!(app.modeline_pieces().unwrap().1.contains("Ln 1, Col"));
+        assert!(app.modeline_pieces().1.contains("Ln 1, Col"));
     }
 
     // -- Dot-repeat (`.`) -------------------------------------------------
@@ -18525,7 +18589,7 @@ mod tests {
         app.test_insert('!');
         assert!(app.arm_quit_confirm_if_dirty());
         assert!(app.quit_confirm);
-        assert!(app.modeline_pieces().unwrap().1.contains("unsaved buffer"));
+        assert!(app.modeline_pieces().1.contains("unsaved buffer"));
     }
 
     #[test]
