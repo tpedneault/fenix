@@ -7279,28 +7279,57 @@ impl App {
 
     /// Re-fetches Issues from whichever row is now under the cursor in
     /// Users -- a no-op when the cursor hasn't actually moved to a
-    /// *different* user (mirrors `git_sync_main`'s own "cheap, derive
-    /// fresh from whatever's under the cursor now" posture, including
-    /// the same background-thread-for-a-real-app/synchronous-for-tests
-    /// split via `self.event_proxy`).
+    /// *different* user, **and** a no-op whenever the Users pane isn't
+    /// what's actually focused right now (`jira_entry_at_cursor` reads
+    /// the *focused* pane's cursor, so this is only ever meaningful from
+    /// there). Purely a cursor-reading wrapper -- the real fetch is
+    /// `jira_fetch_issues`, shared with `jira_force_fetch_issues` for
+    /// contexts that need to refetch regardless of what's focused (`SPC
+    /// j r`, the status filter being applied, a completed write action's
+    /// own refresh -- none of which necessarily run with Users focused).
     fn jira_sync_issues(&mut self) {
-        let Some(session) = self.jira_session.as_ref() else { return };
         let selected_user = match self.jira_entry_at_cursor() {
             Some(jira_panel::JiraEntry::User(id)) => Some(id),
             _ => return,
         };
+        let Some(session) = self.jira_session.as_ref() else { return };
         if selected_user == session.last_selected_user {
             return;
         }
+        self.jira_fetch_issues(selected_user);
+    }
 
+    /// Force-refetches Issues for `session.last_selected_user` -- the
+    /// user already tracked as selected, independent of which pane
+    /// currently has focus (unlike `jira_sync_issues`, which only ever
+    /// does anything while the Users pane itself is focused). What `SPC
+    /// j r`, the status-filter picker's own apply, and every completed
+    /// write action's refresh (`apply_jira_action_done`) actually need:
+    /// those can all run while Issues or Detail has focus, where `jira_
+    /// sync_issues` would silently no-op.
+    fn jira_force_fetch_issues(&mut self) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        let user_id = session.last_selected_user.clone();
+        self.jira_fetch_issues(user_id);
+    }
+
+    /// The actual fetch, independent of what's focused or of any
+    /// "did the selection change" dedup -- always refetches `user_id`
+    /// (mirrors `git_sync_main`'s own background-thread-for-a-real-app/
+    /// synchronous-for-tests split via `self.event_proxy`). `None`
+    /// bumps the request id (invalidating any older in-flight fetch)
+    /// without starting a new one, leaving Issues showing whatever it
+    /// last had -- same as before this was split out of `jira_sync_
+    /// issues`.
+    fn jira_fetch_issues(&mut self, user_id: Option<String>) {
         let Some(client) = self.jira_client() else { return };
         let Some(session) = self.jira_session.as_mut() else { return };
-        session.last_selected_user = selected_user.clone();
+        session.last_selected_user = user_id.clone();
         session.issues_request_id += 1;
         let request_id = session.issues_request_id;
         let project_keys: Vec<String> = session.tracked_projects.iter().map(|(key, _)| key.clone()).collect();
         let excluded_statuses = session.excluded_statuses.clone();
-        let Some(user_id) = selected_user else { return };
+        let Some(user_id) = user_id else { return };
         let jql = fenix_jira::build_jql(&user_id, &project_keys, &excluded_statuses);
 
         match self.event_proxy.clone() {
@@ -7409,21 +7438,30 @@ impl App {
         }
     }
 
-    /// `SPC j r`: manual refresh -- forces `jira_sync_issues`/`jira_
-    /// sync_detail` to re-fetch even though the selected user/issue
-    /// hasn't changed, by clearing the "last selected" guard each reads
-    /// before calling it. The closest thing to Docker/Git's own poller
-    /// for this phase, deliberately manual rather than timer-driven
-    /// (see `JiraSession`'s own doc comment).
+    /// Force-refetches Detail for `session.last_selected_issue` -- same
+    /// "independent of focus" reasoning as `jira_force_fetch_issues`,
+    /// one pane deeper. `jira_fetch_detail` itself has no dedup guard
+    /// (that lives in `jira_sync_detail`, the cursor-driven wrapper), so
+    /// this just calls it directly whenever there's a current issue.
+    fn jira_force_fetch_detail(&mut self) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        if let Some(key) = session.last_selected_issue.clone() {
+            self.jira_fetch_detail(key);
+        }
+    }
+
+    /// `SPC j r`: manual refresh -- also what a completed write action
+    /// (`apply_jira_action_done`) and the status-filter picker's own
+    /// apply use to pick up whatever changed, since neither necessarily
+    /// runs with Users/Issues focused (`jira_force_fetch_*` refetches
+    /// using the *tracked* selection, not the focused pane's cursor --
+    /// see their own doc comments for why `jira_sync_issues`/`jira_sync_
+    /// detail` alone used to silently no-op here). The closest thing to
+    /// Docker/Git's own poller for this phase, deliberately manual
+    /// rather than timer-driven (see `JiraSession`'s own doc comment).
     pub(crate) fn jira_refresh(&mut self) {
-        if let Some(session) = self.jira_session.as_mut() {
-            session.last_selected_user = None;
-        }
-        self.jira_sync_issues();
-        if let Some(session) = self.jira_session.as_mut() {
-            session.last_selected_issue = None;
-        }
-        self.jira_sync_detail();
+        self.jira_force_fetch_issues();
+        self.jira_force_fetch_detail();
     }
 
     /// `SPC j p a`: starts the two-step "add a tracked project" prompt
@@ -8040,9 +8078,13 @@ impl App {
                 self.main_view = MainView::Editor;
                 if let Some(session) = self.jira_session.as_mut() {
                     session.excluded_statuses = excluded.clone();
-                    session.last_selected_user = None;
                 }
-                self.jira_sync_issues();
+                // Not `jira_sync_issues` -- `f` is pressed with Issues
+                // focused, not Users, so the cursor-driven wrapper would
+                // silently no-op here (see its own doc comment). This
+                // force-refetches the already-tracked selected user
+                // regardless of what's focused.
+                self.jira_force_fetch_issues();
                 if excluded.is_empty() {
                     self.set_message("Jira: showing all statuses");
                 } else {
@@ -19786,6 +19828,73 @@ mod tests {
         app.jira_sync_issues();
 
         assert!(app.jira_session.as_ref().unwrap().issues.is_empty());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_force_fetch_issues_refetches_the_tracked_selection_even_while_issues_is_focused() {
+        // Regression test for a real reported bug: applying the status
+        // filter (`f` on Issues) used to clear `last_selected_user` and
+        // call the *cursor-driven* `jira_sync_issues`, which reads
+        // whatever's under the cursor in the currently *focused* pane --
+        // Issues, not Users, when `f` is pressed -- so it silently did
+        // nothing and the filter never actually took effect. `jira_
+        // force_fetch_issues` must attempt a real fetch using the
+        // *tracked* `last_selected_user`, regardless of which pane has
+        // focus.
+        let mut app = App::with_file(None);
+        app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.last_selected_user = Some("jo1111111".to_string());
+        let issues_pane = app.jira_session.as_ref().unwrap().issues_pane;
+        app.windows_mut().focus(issues_pane); // deliberately not Users
+
+        app.jira_force_fetch_issues();
+
+        // No [jira] base_url/token configured -- jira_client() surfacing
+        // an error is proof the fetch was actually attempted, not
+        // silently skipped for being on the wrong pane.
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_force_fetch_detail_refetches_the_tracked_selection_even_while_detail_is_focused() {
+        // Same regression as above, one pane deeper: a completed write
+        // action's own refresh (`apply_jira_action_done` -> `jira_
+        // refresh`) runs while Issues or Detail is focused, never
+        // Users -- `jira_sync_detail` alone (cursor-driven, needs an
+        // `Issue` entry under the cursor) silently no-ops on Detail,
+        // which never has cursor entries at all.
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(detail_pane);
+
+        app.jira_force_fetch_detail();
+
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_refresh_refetches_issues_and_detail_regardless_of_which_pane_is_focused() {
+        // Regression test for the second reported bug: transitioning
+        // (or commenting/reassigning/...) an issue calls `jira_refresh`
+        // via `apply_jira_action_done` -- but that action is always
+        // triggered from Issues or Detail, never Users, so the old
+        // clear-then-cursor-resync trick left both Issues and Detail
+        // stale after every completed action.
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_mut().unwrap();
+        session.last_selected_user = Some("jo1111111".to_string());
+        session.last_selected_issue = Some("PROJ-1".to_string());
+        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(detail_pane);
+
+        app.jira_refresh();
+
         assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
     }
 
