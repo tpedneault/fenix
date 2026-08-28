@@ -181,28 +181,37 @@ for anyone curious to poke around or build on it.
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
-  Issues | Detail. Moving the cursor onto a tracked user runs a JQL
+  Issues | Detail, every pane read-only (like the Docker/Git panels --
+  it's a generated listing, not something you edit; `x` on any pane
+  shows its own key list, the same which-key-style popup Docker/Git
+  already have). Moving the cursor onto a tracked user runs a JQL
   search for every issue assigned to them, scoped to every currently-
   tracked project, and lists the results in Issues; moving onto an
   issue shows its full detail (description, status, assignee, reporter,
   dates, comments) in Detail. `SPC j r` refreshes, `SPC j q` closes the
-  session. Talks to a self-hosted Jira Server/Data Center instance's
-  REST API via a personal access token (see
+  session, `SPC j g` jumps straight to any issue by key (even one not
+  present in the current query). Talks to a self-hosted Jira Server/
+  Data Center instance's REST API via a personal access token (see
   [Configuration](#configuration)).
   `SPC j i a` creates a new issue in a tracked project (pick the
   project, type an issue type and a summary). On Issues or Detail: `t`
   transitions the issue's status (fetches the real available
   transitions for its current workflow state and offers a picker --
-  never a fixed list), `T` edits the title, `l` logs time (Jira's own
-  duration syntax, e.g. `2h 30m`), and `c`/`e` open a real, Vim-
+  never a fixed list), `T` edits the title, `A` reassigns to one of
+  your tracked users, `P` changes priority (fetched live from the
+  instance's real configured scheme, not a guessed list), `l` logs
+  time (Jira's own duration syntax, e.g. `2h 30m`), `y` copies the
+  issue's browse URL to the clipboard, and `c`/`e` open a real, Vim-
   navigable scratch buffer -- empty for a new comment, pre-filled with
   the current text for a description edit -- so you get full editing
   power for anything longer than one line; `SPC j s` submits it,
-  `SPC j x` discards it. On Issues, `f` opens a toggleable checklist of
-  every status seen so far this session (`Space` toggles, `a`/`Enter`
-  applies) to hide statuses you don't want cluttering the list (e.g.
-  Done/Closed) -- folded into the JQL query itself, so it stays applied
-  across refreshes; resets when you close and reopen the panel.
+  `SPC j x` discards it. On Issues, `f` opens a multi-select picker
+  over every status seen so far this session (`Tab` toggles a status
+  on/off without closing the picker, `Enter` applies -- an empty
+  selection means "show everything") to hide statuses you don't want
+  cluttering the list (e.g. Done/Closed) -- folded into the JQL query
+  itself, so it stays applied across refreshes; resets when you close
+  and reopen the panel.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -370,6 +379,7 @@ popup shows what keys continue it.
 | `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
 | `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |
 | `SPC j i a` | Create a new issue in a tracked project |
+| `SPC j g` | Jump straight to any issue by key |
 | `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
 | `SPC j q` | Close the JIRA dashboard session |
 | `SPC j s` / `SPC j x` | Submit / cancel a pending comment or description edit |
@@ -532,19 +542,25 @@ Docker panel's own `s`/`S`/`R` already established.
 Opens its own workspace with four real, titled panes -- Projects and
 Users stacked on the left, Issues (the main pane) and Detail on the
 right. Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...`
-all work). Moving the cursor onto a tracked user re-runs the query
-behind Issues; moving onto an issue re-fetches Detail. Only these are
-special, and only on the pane named:
+all work) but genuinely read-only, like the Docker/Git panels -- it's
+a generated listing, not something you edit; any edit that slips
+through is silently reverted. Moving the cursor onto a tracked user
+re-runs the query behind Issues; moving onto an issue re-fetches
+Detail. Only these are special, and only on the pane named:
 
 | Keys | Pane | Action |
 |---|---|---|
 | `1`-`4` | any | Jump to the pane numbered that in its title bar |
 | `t` | Issues, Detail | Transition the issue's status (fetches the real available transitions, offers a picker) |
 | `T` | Issues, Detail | Edit the title |
+| `A` | Issues, Detail | Reassign to one of your tracked users (picker) |
+| `P` | Issues, Detail | Change priority (picker, fetched live from the instance's real configured scheme) |
 | `c` | Issues, Detail | Add a comment (opens a real scratch buffer) |
 | `e` | Issues, Detail | Edit the description (opens a real scratch buffer, pre-filled) |
 | `l` | Issues, Detail | Log time (Jira's own duration syntax, e.g. `2h 30m`) |
-| `f` | Issues | Open the status-filter checklist |
+| `y` | Issues, Detail | Copy the issue's browse URL to the clipboard |
+| `f` | Issues | Open the multi-select status filter |
+| `x` | Issues, Detail | Show this pane's available keys |
 
 `c`/`e` hand you a genuine, full-featured buffer -- write as much as
 you want, over as many lines as you want, with every ordinary Vim
@@ -555,18 +571,15 @@ are leader bindings rather than pane-scoped bare keys on purpose: real
 prose routinely contains the letters `c`/`e`/`t`/`T`/`l`, and a bare-key
 trigger would hijack ordinary typing the moment it did.
 
-The status-filter checklist (`f`) is itself a real buffer, listing
-every status Issues has shown at least once this session:
-
-| Keys | Action |
-|---|---|
-| `Space` / `t` | Toggle the status under the cursor in/out of the filter |
-| `a` / `Enter` | Apply -- excluded statuses drop out of Issues immediately and stay out across `SPC j r` |
-| `q` / `Esc` | Cancel -- closes the checklist, changes nothing |
-
-The filter is folded directly into the JQL query (`AND status NOT IN
-(...)`), and resets when the panel is closed and reopened -- it isn't
-saved to `config.ini`.
+`f` opens a multi-select picker over every status Issues has shown at
+least once this session -- `Tab` toggles the entry under the cursor
+on/off without closing the picker (any already-excluded statuses show
+up pre-checked), `Enter` applies whatever's checked (nothing checked
+means "show everything," the normal way to clear the filter), `Esc`
+cancels without changing anything. The filter is folded directly into
+the JQL query (`AND status NOT IN (...)`), so it stays applied across
+`SPC j r` refreshes; it resets when the panel is closed and reopened,
+and isn't saved to `config.ini`.
 
 ### Autocompletion popup (Tcl, Insert mode)
 
