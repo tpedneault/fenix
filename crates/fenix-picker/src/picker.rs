@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::fuzzy::fuzzy_match;
 
 /// One entry in a picker: `label` is what's displayed and fuzzy-matched
@@ -33,13 +35,46 @@ pub struct PickerState<T> {
     query: String,
     filtered: Vec<Scored>,
     selected: usize,
+    marks: HashSet<usize>,
 }
 
 impl<T> PickerState<T> {
     pub fn new(candidates: Vec<Candidate<T>>) -> Self {
-        let mut state = Self { all: candidates, query: String::new(), filtered: Vec::new(), selected: 0 };
+        let mut state =
+            Self { all: candidates, query: String::new(), filtered: Vec::new(), selected: 0, marks: HashSet::new() };
         state.refilter();
         state
+    }
+
+    /// Like `new`, but pre-marks the candidates at `marked_indices`
+    /// (original, unfiltered indices) -- for a multi-select picker that
+    /// reopens over a set that's already partly chosen (e.g. the status
+    /// filter's currently-excluded statuses).
+    pub fn new_with_marks(candidates: Vec<Candidate<T>>, marked_indices: impl IntoIterator<Item = usize>) -> Self {
+        let mut state = Self::new(candidates);
+        state.marks = marked_indices.into_iter().collect();
+        state
+    }
+
+    /// Toggles the mark on the currently selected (filtered) row. A no-op
+    /// if there's no selection (empty filtered list).
+    pub fn toggle_mark(&mut self) {
+        if let Some(index) = self.filtered.get(self.selected).map(|s| s.index) {
+            if !self.marks.remove(&index) {
+                self.marks.insert(index);
+            }
+        }
+    }
+
+    /// Whether the candidate at filtered row `row` is marked.
+    pub fn is_marked(&self, row: usize) -> bool {
+        self.filtered.get(row).is_some_and(|s| self.marks.contains(&s.index))
+    }
+
+    /// Every marked payload, in original candidate order (not filtered/
+    /// ranked order -- stable regardless of the query at confirm time).
+    pub fn marked(&self) -> impl Iterator<Item = &T> {
+        self.all.iter().enumerate().filter(|(index, _)| self.marks.contains(index)).map(|(_, c)| &c.payload)
     }
 
     pub fn query(&self) -> &str {
@@ -217,5 +252,65 @@ mod tests {
         picker.move_selection(2);
         picker.set_query("");
         assert_eq!(picker.selected_row(), 0);
+    }
+
+    #[test]
+    fn toggle_mark_marks_and_unmarks_the_selected_row() {
+        let mut picker = PickerState::new(candidates(&["a", "b", "c"]));
+        assert!(!picker.is_marked(0));
+        picker.toggle_mark();
+        assert!(picker.is_marked(0));
+        picker.toggle_mark();
+        assert!(!picker.is_marked(0));
+    }
+
+    #[test]
+    fn marks_survive_refiltering() {
+        let mut picker = PickerState::new(candidates(&["apple", "banana", "apricot"]));
+        // Mark "banana" (row 1 in the unfiltered list).
+        picker.move_selection(1);
+        assert_eq!(picker.selected().unwrap().label, "banana");
+        picker.toggle_mark();
+
+        // Filter it out of view, then back in -- it should still be marked.
+        picker.push_char('a');
+        picker.push_char('p');
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert!(!labels.contains(&"banana"));
+
+        picker.set_query("");
+        let row = picker.visible_rows(0, 10).position(|(_, c)| c.label == "banana").unwrap();
+        assert!(picker.is_marked(row));
+    }
+
+    #[test]
+    fn marked_returns_payloads_in_original_order() {
+        let mut picker = PickerState::new(candidates(&["a", "b", "c"]));
+        // Mark "c" then "a" (reverse of original order).
+        picker.move_selection(2);
+        picker.toggle_mark();
+        picker.move_selection(-2);
+        picker.toggle_mark();
+        let marked: Vec<usize> = picker.marked().copied().collect();
+        assert_eq!(marked, vec![0, 2]); // original order: "a" (0), "c" (2)
+    }
+
+    #[test]
+    fn new_with_marks_pre_marks_the_given_indices() {
+        let picker = PickerState::new_with_marks(candidates(&["a", "b", "c"]), [0, 2]);
+        assert!(picker.is_marked(0));
+        assert!(!picker.is_marked(1));
+        assert!(picker.is_marked(2));
+        let marked: Vec<usize> = picker.marked().copied().collect();
+        assert_eq!(marked, vec![0, 2]);
+    }
+
+    #[test]
+    fn toggle_mark_on_empty_results_is_a_no_op() {
+        let mut picker = PickerState::new(candidates(&["a"]));
+        picker.push_char('z'); // no match
+        assert!(picker.is_empty());
+        picker.toggle_mark(); // must not panic
+        assert_eq!(picker.marked().count(), 0);
     }
 }

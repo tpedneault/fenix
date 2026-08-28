@@ -178,6 +178,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('j')], "open jira panel", "jira.open");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('q')], "close jira panel", "jira.close");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('r')], "refresh jira panel", "jira.refresh");
+        // Jump straight to any issue by key, even one not already showing
+        // in the current Issues list -- see `App::jira_start_goto_issue_
+        // prompt`'s own doc comment.
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('g')], "go to issue", "jira.goto_issue");
         t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('p')], "jira projects");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('a')], "add project", "jira.add_project");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('d')], "delete project", "jira.delete_project");
@@ -549,6 +553,14 @@ mod tests {
         match m.feed(KeyPress::char('r')) {
             fenix_keymap::Step::Matched(&"jira.refresh") => {}
             _ => panic!("expected SPC j r to resolve to jira.refresh"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('j'));
+        match m.feed(KeyPress::char('g')) {
+            fenix_keymap::Step::Matched(&"jira.goto_issue") => {}
+            _ => panic!("expected SPC j g to resolve to jira.goto_issue"),
         }
     }
 

@@ -34,6 +34,11 @@ pub enum PopupId {
     /// same non-coexistence reasoning as `DockerMenu`, just for the Git
     /// session instead.
     GitMenu,
+    /// The Jira panel's own contextual "view command options" popup
+    /// (`x` on an Issues/Detail pane) -- same shape and same non-
+    /// coexistence reasoning as `DockerMenu`/`GitMenu`, just for the
+    /// Jira session instead.
+    JiraMenu,
     /// Whichever single-line prompt/confirmation is currently capturing
     /// input (Vim's own `:command`/`/`-`?`-search, the project-grep
     /// query, or one of this app's many others -- see `App::active_

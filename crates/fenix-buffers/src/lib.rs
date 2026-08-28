@@ -50,12 +50,6 @@ pub enum BufferKind {
     /// pending replace would touch, one row each, toggle-able before
     /// anything is actually written to disk.
     SearchReplace,
-    /// The Jira Issues pane's status-filter checklist (`f`) -- same
-    /// "real buffer, just tagged" shape as `SearchReplace`: a real,
-    /// Vim-navigable, generated listing of every status seen so far this
-    /// session, one row each, toggle-able before the exclusion list is
-    /// actually applied to the Issues search.
-    JiraStatusFilter,
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's

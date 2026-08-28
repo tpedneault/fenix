@@ -21,6 +21,6 @@ mod actions;
 mod client;
 mod issue;
 
-pub use actions::Transition;
+pub use actions::{Priority, Transition};
 pub use client::JiraClient;
 pub use issue::{build_jql, Comment, IssueDetail, IssueSummary};

@@ -87,6 +87,7 @@ impl CommandRegistry {
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
         registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
         registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
+        registry.register("jira.goto_issue", "Jump straight to any issue by key", cmd_jira_goto_issue);
         registry.register("jira.add_project", "Track a new Jira project by key", cmd_jira_add_project);
         registry.register("jira.delete_project", "Stop tracking a Jira project", cmd_jira_delete_project);
         registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
@@ -310,6 +311,10 @@ fn cmd_jira_close(ctx: &mut CommandCtx) {
 
 fn cmd_jira_refresh(ctx: &mut CommandCtx) {
     ctx.app.jira_refresh();
+}
+
+fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
+    ctx.app.jira_start_goto_issue_prompt();
 }
 
 fn cmd_jira_add_project(ctx: &mut CommandCtx) {

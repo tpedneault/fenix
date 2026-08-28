@@ -18,6 +18,18 @@ pub struct Transition {
     pub name: String,
 }
 
+/// One of the instance's real configured priorities (`GET .../priority`)
+/// -- `id` is Jira-internal and unused here; `name` is what both the
+/// picker shows and `update_priority` sends back (the same name-based
+/// convention `update_assignee`'s `name` field and `apply_transition`'s
+/// workflow names already use). Fetched live rather than hardcoded --
+/// see `list_priorities`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Priority {
+    pub id: String,
+    pub name: String,
+}
+
 impl JiraClient {
     /// `POST /rest/api/2/issue` -- creates a new issue, returns its key
     /// (e.g. `PROJ-123`). `issue_type` is a plain typed name (`"Task"`,
@@ -89,10 +101,45 @@ impl JiraClient {
         self.send("POST", &path, &serde_json::json!({"timeSpent": time_spent}))?;
         Ok(())
     }
+
+    /// `PUT /rest/api/2/issue/{key}/assignee` -- its own dedicated
+    /// endpoint, *not* the general fields-update `PUT /issue/{key}`
+    /// `update_summary`/`update_description` use. Body is `{"name":
+    /// user_id}`, Server/DC's own username-based convention (not Cloud's
+    /// `accountId`) -- matches the plain-username `id` shape tracked
+    /// users already use (e.g. `"jo1111111"`).
+    pub fn update_assignee(&self, key: &str, user_id: &str) -> Result<(), String> {
+        let path = format!("/rest/api/2/issue/{key}/assignee");
+        self.send("PUT", &path, &serde_json::json!({"name": user_id}))?;
+        Ok(())
+    }
+
+    /// `GET /rest/api/2/priority` -- the instance's real configured
+    /// priority scheme, fetched live rather than hardcoded (a guessed
+    /// default like Highest/High/Medium/Low/Lowest might not match what
+    /// this instance actually has configured). Unlike `list_transitions`'
+    /// response, this one is a plain top-level JSON array, not wrapped in
+    /// an object field.
+    pub fn list_priorities(&self) -> Result<Vec<Priority>, String> {
+        let body = self.request("/rest/api/2/priority", &[])?;
+        let priorities = body.as_array().ok_or_else(|| "unexpected priority response shape".to_string())?;
+        Ok(priorities.iter().filter_map(parse_priority).collect())
+    }
+
+    /// Same shape as `update_summary`/`update_description` -- `PUT
+    /// /rest/api/2/issue/{key}` via the shared `update_fields` helper,
+    /// with `{"priority": {"name": priority_name}}`.
+    pub fn update_priority(&self, key: &str, priority_name: &str) -> Result<(), String> {
+        self.update_fields(key, serde_json::json!({"priority": {"name": priority_name}}))
+    }
 }
 
 fn parse_transition(v: &serde_json::Value) -> Option<Transition> {
     Some(Transition { id: v.get("id")?.as_str()?.to_string(), name: v.get("name")?.as_str()?.to_string() })
+}
+
+fn parse_priority(v: &serde_json::Value) -> Option<Priority> {
+    Some(Priority { id: v.get("id")?.as_str()?.to_string(), name: v.get("name")?.as_str()?.to_string() })
 }
 
 #[cfg(test)]
@@ -117,5 +164,25 @@ mod tests {
     fn parse_transition_returns_none_when_name_is_missing() {
         let v: serde_json::Value = serde_json::from_str(r#"{"id": "31"}"#).unwrap();
         assert!(parse_transition(&v).is_none());
+    }
+
+    #[test]
+    fn parse_priority_reads_a_typical_row() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"id": "3", "name": "Medium"}"#).unwrap();
+        let priority = parse_priority(&v).unwrap();
+        assert_eq!(priority.id, "3");
+        assert_eq!(priority.name, "Medium");
+    }
+
+    #[test]
+    fn parse_priority_returns_none_for_a_malformed_row() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"nope": true}"#).unwrap();
+        assert!(parse_priority(&v).is_none());
+    }
+
+    #[test]
+    fn parse_priority_returns_none_when_name_is_missing() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"id": "3"}"#).unwrap();
+        assert!(parse_priority(&v).is_none());
     }
 }

@@ -720,16 +720,19 @@ struct JiraSession {
     /// fetch -- same staleness-guard role as `issues_request_id`/
     /// `detail_request_id`, for `apply_jira_transitions_ready`.
     transitions_request_id: u64,
+    /// Same staleness-guard role as `transitions_request_id`, for `jira_
+    /// start_priority_picker`/`apply_jira_priorities_ready`.
+    priorities_request_id: u64,
     /// Every distinct `IssueSummary.status` ever seen in a successful
     /// `apply_jira_issues` fetch this session -- accumulated, never
     /// cleared. Since `excluded_statuses` starts empty, the very first
     /// fetch is always unfiltered, so every real status is guaranteed to
     /// be captured at least once before it could ever be excluded. Feeds
-    /// `jira_start_status_filter`'s checklist.
+    /// `jira_start_status_filter`'s picker candidates.
     known_statuses: HashSet<String>,
     /// Status names currently excluded from the Issues search -- set by
-    /// `jira_status_filter_apply`, session-only (not part of `Config`,
-    /// per the user's own choice: resets on reopen/restart).
+    /// `picker_confirm`'s `JiraStatusFilter` arm, session-only (not part
+    /// of `Config`, per the user's own choice: resets on reopen/restart).
     excluded_statuses: Vec<String>,
 }
 
@@ -773,6 +776,11 @@ enum JiraPromptKind {
     /// `l` on Issues/Detail: a duration string (Jira's own syntax, e.g.
     /// `"2h 30m"`) for `key`, submitted via `add_worklog`.
     LogTime { key: String },
+    /// `SPC j g`: a plain issue key (e.g. `PROJ-456`), no enumerable
+    /// candidate list to pick from the way tracked projects/users have
+    /// (the issue doesn't need to already appear in the current Issues
+    /// list) -- submitted via `jira_fetch_detail`.
+    GotoIssue,
 }
 
 struct JiraPrompt {
@@ -857,6 +865,11 @@ pub enum FenixUserEvent {
     /// thread. Same staleness-guard shape as `JiraIssuesReady` (see
     /// `JiraSession::transitions_request_id`'s own doc comment).
     JiraTransitionsReady { request_id: u64, transitions: Result<Vec<fenix_jira::Transition>, String> },
+    /// A completed fetch of the instance's real configured priorities,
+    /// from `jira_start_priority_picker`'s background thread -- same
+    /// staleness-guard shape as `JiraTransitionsReady` (see `JiraSession
+    /// ::priorities_request_id`'s own doc comment).
+    JiraPrioritiesReady { request_id: u64, priorities: Result<Vec<fenix_jira::Priority>, String> },
     /// File paths handed off from a *later* `fenix` launch via the
     /// single-instance IPC server (`crate::ipc`) -- e.g. double-
     /// clicking a file in Explorer while Fenix is already running. An
@@ -1116,6 +1129,21 @@ enum ActivePicker {
     /// they're workflow-dependent, not a fixed list -- confirming calls
     /// `apply_transition`.
     JiraTransition(fenix_picker::PickerState<fenix_jira::Transition>),
+    /// `f` on Issues: a genuine multi-select picker (`Tab` marks/unmarks,
+    /// `Enter` applies) over every status seen so far this session --
+    /// replaces phase 2's full-pane toggle-buffer checklist. Payload is
+    /// the plain status name; confirming collects `marked()` as the new
+    /// `excluded_statuses` (see `picker_confirm`'s own arm).
+    JiraStatusFilter(fenix_picker::PickerState<String>),
+    /// `A` on Issues/Detail: `session.tracked_users`, same candidate
+    /// shape as `DeleteJiraUser`/`jira_user_candidates` -- confirming
+    /// calls `update_assignee`.
+    JiraAssignee(fenix_picker::PickerState<(String, String)>),
+    /// `P` on Issues/Detail: the instance's real configured priorities,
+    /// fetched fresh (`jira_start_priority_picker`) since they're
+    /// instance-specific, not a fixed list -- confirming calls `update_
+    /// priority`.
+    JiraPriority(fenix_picker::PickerState<fenix_jira::Priority>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -1186,6 +1214,9 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::DeleteJiraUser(s) => s.push_char(c),
         ActivePicker::CreateJiraIssue(s) => s.push_char(c),
         ActivePicker::JiraTransition(s) => s.push_char(c),
+        ActivePicker::JiraStatusFilter(s) => s.push_char(c),
+        ActivePicker::JiraAssignee(s) => s.push_char(c),
+        ActivePicker::JiraPriority(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
@@ -1211,6 +1242,9 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::DeleteJiraUser(s) => s.backspace(),
         ActivePicker::CreateJiraIssue(s) => s.backspace(),
         ActivePicker::JiraTransition(s) => s.backspace(),
+        ActivePicker::JiraStatusFilter(s) => s.backspace(),
+        ActivePicker::JiraAssignee(s) => s.backspace(),
+        ActivePicker::JiraPriority(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibTelecommandLookup(s) => s.backspace(),
@@ -1236,6 +1270,9 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::DeleteJiraUser(s) => s.move_selection(delta),
         ActivePicker::CreateJiraIssue(s) => s.move_selection(delta),
         ActivePicker::JiraTransition(s) => s.move_selection(delta),
+        ActivePicker::JiraStatusFilter(s) => s.move_selection(delta),
+        ActivePicker::JiraAssignee(s) => s.move_selection(delta),
+        ActivePicker::JiraPriority(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
@@ -1246,6 +1283,37 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::MibArgumentAlias(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
+    }
+}
+
+/// `Tab` on any picker -- toggles the mark on the currently selected row.
+/// Harmless no-op for every single-select variant (nothing ever reads
+/// their marks); real effect only for `JiraStatusFilter` today.
+fn picker_toggle_mark(picker: &mut ActivePicker) {
+    match picker {
+        ActivePicker::FindFile(s) => s.toggle_mark(),
+        ActivePicker::Grep(s) => s.toggle_mark(),
+        ActivePicker::SwitchProject(s) => s.toggle_mark(),
+        ActivePicker::SwitchBuffer(s) => s.toggle_mark(),
+        ActivePicker::DeleteProject(s) => s.toggle_mark(),
+        ActivePicker::DeleteMibRoot(s) => s.toggle_mark(),
+        ActivePicker::DeleteJiraProject(s) => s.toggle_mark(),
+        ActivePicker::DeleteJiraUser(s) => s.toggle_mark(),
+        ActivePicker::CreateJiraIssue(s) => s.toggle_mark(),
+        ActivePicker::JiraTransition(s) => s.toggle_mark(),
+        ActivePicker::JiraStatusFilter(s) => s.toggle_mark(),
+        ActivePicker::JiraAssignee(s) => s.toggle_mark(),
+        ActivePicker::JiraPriority(s) => s.toggle_mark(),
+        ActivePicker::Theme(s) => s.toggle_mark(),
+        ActivePicker::Symbol(s) => s.toggle_mark(),
+        ActivePicker::MibTelecommandLookup(s) => s.toggle_mark(),
+        ActivePicker::MibTelecommandInsert(s) => s.toggle_mark(),
+        ActivePicker::MibTmPacket(s) => s.toggle_mark(),
+        ActivePicker::MibTmParameter(s) => s.toggle_mark(),
+        ActivePicker::MibCalibration(s) => s.toggle_mark(),
+        ActivePicker::MibArgumentAlias(s) => s.toggle_mark(),
+        ActivePicker::TableColumn(s) => s.toggle_mark(),
+        ActivePicker::BufferSearch(s) => s.toggle_mark(),
     }
 }
 
@@ -1261,6 +1329,9 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::DeleteJiraUser(s) => s.query(),
         ActivePicker::CreateJiraIssue(s) => s.query(),
         ActivePicker::JiraTransition(s) => s.query(),
+        ActivePicker::JiraStatusFilter(s) => s.query(),
+        ActivePicker::JiraAssignee(s) => s.query(),
+        ActivePicker::JiraPriority(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibTelecommandLookup(s) => s.query(),
@@ -1286,6 +1357,9 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::DeleteJiraUser(s) => s.len(),
         ActivePicker::CreateJiraIssue(s) => s.len(),
         ActivePicker::JiraTransition(s) => s.len(),
+        ActivePicker::JiraStatusFilter(s) => s.len(),
+        ActivePicker::JiraAssignee(s) => s.len(),
+        ActivePicker::JiraPriority(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibTelecommandLookup(s) => s.len(),
@@ -1311,6 +1385,9 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::DeleteJiraUser(s) => s.selected_row(),
         ActivePicker::CreateJiraIssue(s) => s.selected_row(),
         ActivePicker::JiraTransition(s) => s.selected_row(),
+        ActivePicker::JiraStatusFilter(s) => s.selected_row(),
+        ActivePicker::JiraAssignee(s) => s.selected_row(),
+        ActivePicker::JiraPriority(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
@@ -1340,6 +1417,21 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::DeleteJiraUser(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CreateJiraIssue(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::JiraTransition(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        // The one rendering site that differs from an ordinary single-
+        // select picker: each row gets a `[x] `/`[ ] ` prefix from `is_
+        // marked`, keyed by the *filtered* row index `visible_rows`
+        // already yields (matching `is_marked`'s own filtered-row
+        // contract) rather than the label alone.
+        ActivePicker::JiraStatusFilter(s) => s
+            .visible_rows(offset, count)
+            .enumerate()
+            .map(|(i, (sel, c))| {
+                let prefix = if s.is_marked(offset + i) { "[x] " } else { "[ ] " };
+                (sel, format!("{prefix}{}", c.label))
+            })
+            .collect(),
+        ActivePicker::JiraAssignee(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::JiraPriority(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2659,44 +2751,17 @@ struct JiraEditSession {
     original_buffer: BufferId,
 }
 
-/// One row of the `f`-on-Issues status-filter checklist -- mirrors
-/// `ProjectReplaceEntry`, just a status name and whether it's currently
-/// checked for exclusion instead of a file and whether it's included.
-#[derive(Clone)]
-struct JiraStatusFilterEntry {
-    name: String,
-    excluded: bool,
-}
-
-/// The active `f`-on-Issues status-filter session -- mirrors
-/// `ProjectReplaceSession`'s own singleton shape (minus a `confirming`
-/// sub-state: applying a filter is harmless, unlike overwriting files on
-/// disk, so no extra y/n gate is needed). `pane`/`original_buffer` are
-/// the Issues pane's own identity and its real Jira-rendered buffer, for
-/// the same direct-restore reasoning `JiraEditSession` has.
-struct JiraStatusFilterSession {
-    entries: Vec<JiraStatusFilterEntry>,
-    pane: fenix_window::WindowId,
-    buffer_id: BufferId,
-    original_buffer: BufferId,
-}
-
-/// The `BufferKind::JiraStatusFilter` checklist's real, plain-text
-/// content -- mirrors `render_project_replace` exactly: a non-
-/// interactive header row followed by one `[x]`/`[ ]` row per `entries`,
-/// paired with which `entries` index each generated line corresponds to
-/// (`None` for the header).
-fn render_jira_status_filter(entries: &[JiraStatusFilterEntry]) -> (String, Vec<Option<usize>>) {
-    let excluded = entries.iter().filter(|e| e.excluded).count();
-    let mut text = format!("Jira status filter -- {} status(es), {excluded} excluded", entries.len());
-    let mut lines = vec![None];
-    for (i, entry) in entries.iter().enumerate() {
-        text.push('\n');
-        let check = if entry.excluded { "[x]" } else { "[ ]" };
-        text.push_str(&format!("{check} {}", entry.name));
-        lines.push(Some(i));
-    }
-    (text, lines)
+/// Whether `kind` may never be edited directly -- Docker/Git/Jira panel
+/// buffers are all generated, wholesale-regenerated on every refresh, so
+/// letting Vim edits slip through and then reverting them (see `route_
+/// keypress`'s own enforcement, right where it already tracks `edit_
+/// count_before`/`after` for the `` `. `` mark) costs nothing real: a
+/// locally-corrupted undo stack on a buffer that gets fully rewritten on
+/// the next refresh anyway has no observable consequence. Navigation
+/// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
+/// dispatch that actually mutates the buffer text is ever reverted.
+fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
+    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira)
 }
 
 pub struct App {
@@ -2942,6 +3007,9 @@ pub struct App {
     /// The active Git multi-pane session (`SPC g g`), if any -- see
     /// `GitSession`'s own doc comment.
     git_session: Option<GitSession>,
+    /// Set by `x` on a Jira Issues/Detail pane -- mirrors `docker_menu_
+    /// open`/`git_menu_open` exactly.
+    jira_menu_open: bool,
 
     /// Per-line metadata for every real `BufferKind::Jira` buffer
     /// currently open (`SPC j j`) -- mirrors `git_lines` exactly.
@@ -2964,13 +3032,6 @@ pub struct App {
     /// is genuinely free-typed prose that will routinely contain those
     /// same letters.
     jira_edit: Option<JiraEditSession>,
-    /// The active `f`-on-Issues status-filter session, if any -- see
-    /// `JiraStatusFilterSession`'s own doc comment.
-    jira_status_filter: Option<JiraStatusFilterSession>,
-    /// Per-line metadata for the real `BufferKind::JiraStatusFilter`
-    /// buffer currently open (at most one at a time), keyed by
-    /// `BufferId` -- mirrors `project_replace_lines` exactly.
-    jira_status_filter_lines: HashMap<BufferId, Vec<Option<usize>>>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -3359,12 +3420,11 @@ impl App {
             git_prompt: None,
             git_menu_open: false,
             git_session: None,
+            jira_menu_open: false,
             jira_lines: HashMap::new(),
             jira_prompt: None,
             jira_session: None,
             jira_edit: None,
-            jira_status_filter: None,
-            jira_status_filter_lines: HashMap::new(),
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -7095,6 +7155,7 @@ impl App {
             last_selected_issue: None,
             detail_request_id: 0,
             transitions_request_id: 0,
+            priorities_request_id: 0,
             known_statuses: HashSet::new(),
             excluded_statuses: Vec::new(),
         });
@@ -7106,19 +7167,16 @@ impl App {
     /// session_close` exactly (no poller to stop, unlike Docker/Git).
     pub(crate) fn jira_session_close(&mut self) {
         let Some(session) = self.jira_session.take() else { return };
-        // A mid-flight `c`/`e` edit or `f` status-filter session holds a
-        // scratch buffer pointed at from one of this session's own panes
-        // -- closing the whole panel out from under it must not leave
-        // that buffer orphaned. No pane restore needed here (the panes
-        // themselves are about to go away with the workspace below), so
-        // this is just the buffer cleanup half of `jira_edit_restore`/
-        // `jira_status_filter_cancel`.
+        // A mid-flight `c`/`e` edit holds a scratch buffer pointed at
+        // from one of this session's own panes -- closing the whole
+        // panel out from under it must not leave that buffer orphaned.
+        // No pane restore needed here (the panes themselves are about to
+        // go away with the workspace below), so this is just the buffer
+        // cleanup half of `jira_edit_restore`. The status filter is a
+        // picker now (`ActivePicker::JiraStatusFilter`), not a buffer --
+        // no cleanup needed here for it.
         if let Some(edit) = self.jira_edit.take() {
             self.buffers.close(edit.edit_buffer);
-        }
-        if let Some(filter) = self.jira_status_filter.take() {
-            self.jira_status_filter_lines.remove(&filter.buffer_id);
-            self.buffers.close(filter.buffer_id);
         }
         for id in [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer] {
             self.buffers.close(id);
@@ -7284,7 +7342,10 @@ impl App {
 
     /// Same shape as `jira_sync_issues`, one pane deeper -- re-fetches
     /// the full issue detail from whichever row is now under the cursor
-    /// in Issues.
+    /// in Issues, when it's actually a *different* issue than the one
+    /// already showing. Purely a cursor-reading wrapper now -- the real
+    /// fetch is `jira_fetch_detail`, shared with the `SPC j g` goto-issue
+    /// prompt.
     fn jira_sync_detail(&mut self) {
         let Some(session) = self.jira_session.as_ref() else { return };
         let selected_issue = match self.jira_entry_at_cursor() {
@@ -7294,23 +7355,36 @@ impl App {
         if selected_issue == session.last_selected_issue {
             return;
         }
+        let Some(issue_key) = selected_issue else { return };
+        self.jira_fetch_detail(issue_key);
+    }
 
+    /// The shared fetch-on-cursor-move body, factored out of `jira_sync_
+    /// detail` so the goto-issue prompt (`SPC j g`, explicit-key-driven
+    /// rather than cursor-driven) can reuse the exact same request-id-
+    /// guarded background fetch instead of duplicating it. Sets `last_
+    /// selected_issue` as part of kicking the fetch off (mirrors `jira_
+    /// sync_detail`'s own prior behavior: only once a real client exists
+    /// to fetch with, so an unconfigured client doesn't silently mark an
+    /// issue "already showing" when nothing was actually fetched) --
+    /// this alone is what makes a later cursor move onto that same issue
+    /// in Issues a correct no-op re-select, for either caller.
+    fn jira_fetch_detail(&mut self, key: String) {
         let Some(client) = self.jira_client() else { return };
         let Some(session) = self.jira_session.as_mut() else { return };
-        session.last_selected_issue = selected_issue.clone();
+        session.last_selected_issue = Some(key.clone());
         session.detail_request_id += 1;
         let request_id = session.detail_request_id;
-        let Some(issue_key) = selected_issue else { return };
 
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let detail = client.get_issue(&issue_key);
+                    let detail = client.get_issue(&key);
                     let _ = proxy.send_event(FenixUserEvent::JiraDetailReady { request_id, detail });
                 });
             }
             None => {
-                let detail = client.get_issue(&issue_key);
+                let detail = client.get_issue(&key);
                 self.apply_jira_detail(request_id, detail);
             }
         }
@@ -7378,6 +7452,7 @@ impl App {
             JiraPromptKind::NewIssueSummary { .. } => format!("Summary: {}", prompt.input),
             JiraPromptKind::EditTitle { .. } => format!("Title: {}", prompt.input),
             JiraPromptKind::LogTime { .. } => format!("Log time (e.g. \"2h 30m\"): {}", prompt.input),
+            JiraPromptKind::GotoIssue => format!("Go to issue: {}", prompt.input),
         })
     }
 
@@ -7476,7 +7551,25 @@ impl App {
                     Ok(format!("Logged {value} on {key}"))
                 });
             }
+            JiraPromptKind::GotoIssue => {
+                self.jira_fetch_detail(value);
+                if let Some(session) = self.jira_session.as_ref() {
+                    let detail_pane = session.detail_pane;
+                    self.windows_mut().focus(detail_pane);
+                }
+            }
         }
+    }
+
+    /// `SPC j g`: starts the plain-text goto-issue prompt -- doesn't
+    /// require the issue to already appear in the current Issues list
+    /// (a teammate references `PROJ-456` in Slack; you weren't already
+    /// browsing it).
+    pub(crate) fn jira_start_goto_issue_prompt(&mut self) {
+        if self.jira_session.is_none() {
+            return;
+        }
+        self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::GotoIssue, input: String::new() });
     }
 
     /// Candidates for `SPC j p d` -- one per tracked project, keyed by
@@ -7567,6 +7660,26 @@ impl App {
         self.jira_session.as_ref()?.last_selected_issue.clone()
     }
 
+    /// `y` on Issues/Detail: copies the current issue's real web URL to
+    /// the clipboard -- pure local string construction (no REST call),
+    /// `format!("{base}/browse/{key}")`. Reuses the same `arboard::
+    /// Clipboard` `yank_file_path` already writes onto. A no-op (with a
+    /// surfaced error) when either the current issue or `config.jira_
+    /// base_url` is missing -- nothing sensible to build a URL from.
+    pub(crate) fn jira_copy_issue_url(&mut self) {
+        let Some(key) = self.jira_current_issue_key() else { return };
+        let Some(base_url) = self.config.jira_base_url.clone() else {
+            self.set_error("Jira isn't configured yet: set base_url in the [jira] section of config.ini");
+            return;
+        };
+        let url = format!("{}/browse/{key}", base_url.trim_end_matches('/'));
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(url.clone());
+        }
+        self.set_message(format!("Copied: {url}"));
+        self.wake_caret();
+    }
+
     /// `t` on Issues/Detail: fetches the current issue's available
     /// workflow transitions fresh (they're workflow-dependent, not a
     /// fixed list) and opens a picker over them once the fetch
@@ -7608,6 +7721,62 @@ impl App {
                 self.enter_picker(ActivePicker::JiraTransition(fenix_picker::PickerState::new(candidates)));
             }
             Err(err) => self.set_error(format!("Jira transitions fetch failed: {err}")),
+        }
+    }
+
+    /// `A` on Issues/Detail: opens a picker over `session.tracked_users`
+    /// (same candidate shape as `jira_user_candidates`/`DeleteJiraUser`)
+    /// -- no fetch needed, unlike `jira_start_transition_picker`/`jira_
+    /// start_priority_picker`, since tracked users are already local
+    /// state. Confirming calls `update_assignee`.
+    pub(crate) fn jira_start_assignee_picker(&mut self) {
+        if self.jira_current_issue_key().is_none() {
+            return;
+        }
+        let candidates = self.jira_user_candidates();
+        self.enter_picker(ActivePicker::JiraAssignee(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `P` on Issues/Detail: fetches the instance's real configured
+    /// priorities fresh (avoids hardcoding a guessed default that might
+    /// not match this instance's actual scheme) and opens a picker over
+    /// them once the fetch completes (`apply_jira_priorities_ready`) --
+    /// mirrors `jira_start_transition_picker` exactly.
+    pub(crate) fn jira_start_priority_picker(&mut self) {
+        if self.jira_current_issue_key().is_none() {
+            return;
+        }
+        let Some(client) = self.jira_client() else { return };
+        let Some(session) = self.jira_session.as_mut() else { return };
+        session.priorities_request_id += 1;
+        let request_id = session.priorities_request_id;
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let priorities = client.list_priorities();
+                    let _ = proxy.send_event(FenixUserEvent::JiraPrioritiesReady { request_id, priorities });
+                });
+            }
+            None => {
+                let priorities = client.list_priorities();
+                self.apply_jira_priorities_ready(request_id, priorities);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::JiraPrioritiesReady` handling -- mirrors `apply_
+    /// jira_transitions_ready`'s own staleness guard.
+    fn apply_jira_priorities_ready(&mut self, request_id: u64, priorities: Result<Vec<fenix_jira::Priority>, String>) {
+        let Some(session) = self.jira_session.as_ref() else { return };
+        if session.priorities_request_id != request_id {
+            return;
+        }
+        match priorities {
+            Ok(priorities) => {
+                let candidates = priorities.into_iter().map(|p| fenix_picker::Candidate::new(p.name.clone(), p)).collect();
+                self.enter_picker(ActivePicker::JiraPriority(fenix_picker::PickerState::new(candidates)));
+            }
+            Err(err) => self.set_error(format!("Jira priorities fetch failed: {err}")),
         }
     }
 
@@ -7721,11 +7890,12 @@ impl App {
         self.wake_caret();
     }
 
-    /// `f` on Issues: opens the status-filter checklist over every
-    /// status seen so far this session (`session.known_statuses`,
-    /// sorted alphabetically for a stable display order), each entry
-    /// pre-checked to match the currently-excluded set. A no-op (just a
-    /// `set_message`) if nothing's been fetched yet -- nothing to filter.
+    /// `f` on Issues: opens a multi-select picker over every status seen
+    /// so far this session (`session.known_statuses`, sorted
+    /// alphabetically for a stable display order), pre-marked to match
+    /// the currently-excluded set (`new_with_marks`) -- replaces phase
+    /// 2's full-pane toggle-buffer checklist. A no-op (just a `set_
+    /// message`) if nothing's been fetched yet -- nothing to filter.
     pub(crate) fn jira_start_status_filter(&mut self) {
         let Some(session) = self.jira_session.as_ref() else { return };
         if session.known_statuses.is_empty() {
@@ -7736,87 +7906,10 @@ impl App {
         let mut names: Vec<String> = session.known_statuses.iter().cloned().collect();
         names.sort();
         let excluded_set: HashSet<&String> = session.excluded_statuses.iter().collect();
-        let entries: Vec<JiraStatusFilterEntry> =
-            names.into_iter().map(|name| JiraStatusFilterEntry { excluded: excluded_set.contains(&name), name }).collect();
-
-        let (text, lines) = render_jira_status_filter(&entries);
-        let id = self.buffers.open_text_view(&text);
-        if let Some(ob) = self.buffers.get_mut(id) {
-            ob.kind = BufferKind::JiraStatusFilter;
-        }
-        self.jira_status_filter_lines.insert(id, lines);
-        let pane = session.issues_pane;
-        let original_buffer = session.issues_buffer;
-        self.set_pane_content(pane, id);
-        self.jira_status_filter = Some(JiraStatusFilterSession { entries, pane, buffer_id: id, original_buffer });
-        self.wake_caret();
-    }
-
-    /// Regenerates the filter buffer's rope text from `jira_status_
-    /// filter`'s current `entries` -- mirrors `refresh_project_replace_
-    /// buffer` exactly.
-    fn refresh_jira_status_filter_buffer(&mut self) {
-        let Some(session) = &self.jira_status_filter else { return };
-        let id = session.buffer_id;
-        let (text, lines) = render_jira_status_filter(&session.entries);
-        if let Some(ob) = self.buffers.get_mut(id) {
-            let end = ob.buffer.len_chars();
-            let mut scratch_cursor = Cursor::at_start();
-            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
-        }
-        self.jira_status_filter_lines.insert(id, lines);
-    }
-
-    /// `Space`/`t` on the filter buffer: toggles the status under the
-    /// cursor -- mirrors `project_replace_toggle_selected`.
-    fn jira_status_filter_toggle_selected(&mut self) {
-        let id = self.focused_buffer_id();
-        let line = self.open().buffer.line_col(&self.cursor()).0;
-        let Some(Some(idx)) = self.jira_status_filter_lines.get(&id).and_then(|l| l.get(line)).copied() else { return };
-        if let Some(session) = &mut self.jira_status_filter {
-            if let Some(entry) = session.entries.get_mut(idx) {
-                entry.excluded = !entry.excluded;
-            }
-        }
-        self.refresh_jira_status_filter_buffer();
-        self.wake_caret();
-    }
-
-    /// `a`/`Enter` on the filter buffer: writes the checked entries into
-    /// `session.excluded_statuses`, restores the Issues pane, and force-
-    /// refetches (same "clear the last-selected guard first" technique
-    /// `jira_refresh` already uses) so the new filter takes effect
-    /// immediately. No confirmation sub-state, unlike `project_replace`'s
-    /// own apply gate -- toggling a filter is harmless, nothing is
-    /// overwritten on disk.
-    fn jira_status_filter_apply(&mut self) {
-        let Some(session) = self.jira_status_filter.take() else { return };
-        self.jira_status_filter_lines.remove(&session.buffer_id);
-        self.set_pane_content(session.pane, session.original_buffer);
-        self.buffers.close(session.buffer_id);
-
-        let excluded: Vec<String> = session.entries.iter().filter(|e| e.excluded).map(|e| e.name.clone()).collect();
-        if let Some(jira_session) = self.jira_session.as_mut() {
-            jira_session.excluded_statuses = excluded.clone();
-            jira_session.last_selected_user = None;
-        }
-        self.jira_sync_issues();
-        if excluded.is_empty() {
-            self.set_message("Jira: showing all statuses");
-        } else {
-            self.set_message(format!("Jira: excluding {}", excluded.join(", ")));
-        }
-        self.wake_caret();
-    }
-
-    /// `q`/`Esc` on the filter buffer: restores the Issues pane without
-    /// applying anything.
-    fn jira_status_filter_cancel(&mut self) {
-        let Some(session) = self.jira_status_filter.take() else { return };
-        self.jira_status_filter_lines.remove(&session.buffer_id);
-        self.set_pane_content(session.pane, session.original_buffer);
-        self.buffers.close(session.buffer_id);
-        self.wake_caret();
+        let marked_indices = names.iter().enumerate().filter(|(_, name)| excluded_set.contains(name)).map(|(i, _)| i);
+        let candidates: Vec<fenix_picker::Candidate<String>> = names.iter().map(|name| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
+        let picker = fenix_picker::PickerState::new_with_marks(candidates, marked_indices);
+        self.enter_picker(ActivePicker::JiraStatusFilter(picker));
     }
 
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
@@ -7934,6 +8027,46 @@ impl App {
                 self.spawn_jira_action(move |client| {
                     client.apply_transition(&key, &transition.id)?;
                     Ok(format!("Transitioned {key} to {}", transition.name))
+                });
+            }
+            Some(ActivePicker::JiraStatusFilter(state)) => {
+                // An empty marked set is a completely valid, meaningful
+                // result -- "show every status," the normal way to clear
+                // the filter, not a fallback edge case -- so this arm,
+                // unlike every other one here, doesn't early-return on
+                // "nothing selected."
+                let excluded: Vec<String> = state.marked().cloned().collect();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                if let Some(session) = self.jira_session.as_mut() {
+                    session.excluded_statuses = excluded.clone();
+                    session.last_selected_user = None;
+                }
+                self.jira_sync_issues();
+                if excluded.is_empty() {
+                    self.set_message("Jira: showing all statuses");
+                } else {
+                    self.set_message(format!("Jira: excluding {}", excluded.join(", ")));
+                }
+            }
+            Some(ActivePicker::JiraAssignee(state)) => {
+                let Some((user_id, _name)) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(key) = self.jira_current_issue_key() else { return };
+                self.spawn_jira_action(move |client| {
+                    client.update_assignee(&key, &user_id)?;
+                    Ok(format!("Reassigned {key}"))
+                });
+            }
+            Some(ActivePicker::JiraPriority(state)) => {
+                let Some(priority) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(key) = self.jira_current_issue_key() else { return };
+                self.spawn_jira_action(move |client| {
+                    client.update_priority(&key, &priority.name)?;
+                    Ok(format!("Set priority of {key} to {}", priority.name))
                 });
             }
             Some(ActivePicker::Theme(state)) => {
@@ -8459,6 +8592,12 @@ impl App {
             KeyCode::Named(FenixNamedKey::Up) => picker_move_selection(picker, -1),
             KeyCode::Char('n') if key.mods.ctrl => picker_move_selection(picker, 1),
             KeyCode::Char('p') if key.mods.ctrl => picker_move_selection(picker, -1),
+            // Toggles-and-does-not-close, unlike `Enter` -- a no-op for
+            // every single-select picker (nothing ever reads their
+            // marks). Chosen over `Space` since status names routinely
+            // contain spaces (`"In Progress"`), which would make it
+            // impossible to type a query that filters a long status list.
+            KeyCode::Named(FenixNamedKey::Tab) => picker_toggle_mark(picker),
             KeyCode::Char(c) if !key.mods.ctrl => picker_push_char(picker, c),
             _ => {}
         }
@@ -9028,6 +9167,7 @@ impl App {
             FenixUserEvent::JiraDetailReady { request_id, detail } => self.apply_jira_detail(request_id, detail),
             FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
+            FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
         }
         if let Some(window) = &self.window {
@@ -9095,6 +9235,8 @@ impl App {
         self.docker_menu_open = false;
         // Same reasoning, for the Git panel's own `x` which-key menu.
         self.git_menu_open = false;
+        // Same reasoning, for the Jira panel's own `x` which-key menu.
+        self.jira_menu_open = false;
 
         // The terminal panel, when focused, owns *every* key -- checked
         // before even the capturing prompts/confirms below, since a
@@ -9714,40 +9856,6 @@ impl App {
             }
         }
 
-        // The `f`-on-Issues status-filter checklist -- ordinary motions
-        // navigate it like any real buffer, but its own action keys are
-        // claimed here first, same "claim a few keys" shape as `Search
-        // Replace`'s own block above (mirrored closely: `Space`/`t`
-        // toggle, `a`/`Enter` apply, `q`/`Esc` cancel). Positioned before
-        // the Jira pane-scoped block below, same relative ordering
-        // `SearchReplace`'s own check has ahead of Docker/Git's. Also
-        // gated on Normal mode -- a deliberate small hardening beyond
-        // `SearchReplace`'s own precedent (which doesn't check mode):
-        // cheap here since this buffer has no legitimate reason to ever
-        // be typed into, and it closes off the same class of collision
-        // `jira_edit.is_none()` exists to prevent below.
-        if self.open().kind == BufferKind::JiraStatusFilter && self.vim.mode() == Mode::Normal {
-            match keypress.code {
-                KeyCode::Named(FenixNamedKey::Escape) | KeyCode::Char('q') if keypress.mods == Mods::default() => {
-                    self.jira_status_filter_cancel();
-                    return;
-                }
-                KeyCode::Char(' ') | KeyCode::Char('t') if keypress.mods == Mods::default() => {
-                    self.jira_status_filter_toggle_selected();
-                    return;
-                }
-                KeyCode::Char('a') if keypress.mods == Mods::default() => {
-                    self.jira_status_filter_apply();
-                    return;
-                }
-                KeyCode::Named(FenixNamedKey::Enter) => {
-                    self.jira_status_filter_apply();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         // Jira dashboard -- the digit-key jump-to-pane shortcut the
         // Docker/Git blocks above already have (`1. Projects`, `2.
         // Users`, ...), plus the per-issue action keys on Issues/Detail
@@ -9802,6 +9910,26 @@ impl App {
                     self.jira_start_status_filter();
                     return;
                 }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('A')) if keypress.mods == Mods::default() => {
+                    self.jira_start_assignee_picker();
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('P')) if keypress.mods == Mods::default() => {
+                    self.jira_start_priority_picker();
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('y')) if keypress.mods == Mods::default() => {
+                    self.jira_copy_issue_url();
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                    self.jira_menu_open = true;
+                    self.wake_caret();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -9829,6 +9957,17 @@ impl App {
                 // this entry is the only piece that's missing; `` `. ``
                 // itself works for free the moment it exists.
                 self.marks.insert('.', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+                // Docker/Git/Jira panel buffers are read-only -- an edit
+                // slipped through Vim's own dispatch anyway (there's no
+                // clean "is this an edit" answer available *before* the
+                // fact), so it's immediately reverted here instead. Safe
+                // specifically because these buffers get wholesale-
+                // regenerated on every refresh anyway -- a locally-
+                // corrupted undo stack has no real consequence. See `is_
+                // readonly_buffer_kind`'s own doc comment.
+                if is_readonly_buffer_kind(ob.kind) {
+                    ob.buffer.undo(&mut pane_state.cursor);
+                }
             }
             // Automatic `` `^ `` mark (real Vim's own "position when
             // Insert mode was last exited") -- same reasoning, on the
@@ -10267,6 +10406,9 @@ impl App {
                 Some(picker @ ActivePicker::DeleteJiraUser(_)) => ("DELJIRAUSER", picker_len(picker)),
                 Some(picker @ ActivePicker::CreateJiraIssue(_)) => ("NEWJIRAISSUE", picker_len(picker)),
                 Some(picker @ ActivePicker::JiraTransition(_)) => ("JIRATRANSITION", picker_len(picker)),
+                Some(picker @ ActivePicker::JiraStatusFilter(_)) => ("JIRASTATUSFILTER", picker_len(picker)),
+                Some(picker @ ActivePicker::JiraAssignee(_)) => ("JIRAASSIGNEE", picker_len(picker)),
+                Some(picker @ ActivePicker::JiraPriority(_)) => ("JIRAPRIORITY", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -10573,7 +10715,6 @@ impl App {
             || ob.kind == BufferKind::Jira
             || ob.kind == BufferKind::Table
             || ob.kind == BufferKind::SearchReplace
-            || ob.kind == BufferKind::JiraStatusFilter
         {
             return 0;
         }
@@ -11192,6 +11333,70 @@ impl App {
             GitPaneRole::Commits => &[("u", "refresh")],
             GitPaneRole::Stash => &[("a", "apply"), ("g", "pop"), ("d", "drop"), ("u", "refresh")],
             GitPaneRole::Status | GitPaneRole::Main => return None,
+        };
+
+        let (char_width, line_height) = match &self.text {
+            Some(text) => (text.char_width(), text.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+
+        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING).max(1);
+        let shown_count = bindings.len().min(max_rows);
+
+        const KEY_COLUMN_CHARS: usize = 6;
+        let longest_label = bindings[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
+        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
+        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        for (i, (key, label)) in bindings[..shown_count].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            spans.push((format!("{key:<KEY_COLUMN_CHARS$}"), theme.caret_text, false));
+            spans.push(((*label).to_string(), theme.fg_modeline, false));
+        }
+
+        let height = shown_count as f32 * line_height + WHICH_KEY_PADDING;
+        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
+        Some((rect, spans))
+    }
+
+    /// The Jira panel's own contextual "view command options" popup (`x`
+    /// on an Issues/Detail pane) -- mirrors `docker_menu_popup`/`git_
+    /// menu_popup` exactly. `None` on Projects/Users, which have no
+    /// pane-scoped keys of their own (add/delete are leader-bound) --
+    /// same "nothing to show" posture Docker's Status/Logs already have.
+    fn jira_menu_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        if !self.jira_menu_open {
+            return None;
+        }
+        let bindings: &[(&str, &str)] = match self.jira_focused_role()? {
+            JiraPaneRole::Projects | JiraPaneRole::Users => return None,
+            JiraPaneRole::Issues => &[
+                ("t", "transition"),
+                ("T", "edit title"),
+                ("c", "comment"),
+                ("e", "edit description"),
+                ("l", "log time"),
+                ("A", "assignee"),
+                ("P", "priority"),
+                ("y", "copy URL"),
+                ("f", "status filter"),
+            ],
+            JiraPaneRole::Detail => &[
+                ("t", "transition"),
+                ("T", "edit title"),
+                ("c", "comment"),
+                ("e", "edit description"),
+                ("l", "log time"),
+                ("A", "assignee"),
+                ("P", "priority"),
+                ("y", "copy URL"),
+            ],
         };
 
         let (char_width, line_height) = match &self.text {
@@ -12081,6 +12286,8 @@ impl App {
         // Same non-coexistence reasoning as `docker_menu_popup` above,
         // just for the Git session.
         let git_menu_popup = self.git_menu_popup(window_width, modeline_top);
+        // Same non-coexistence reasoning again, for the Jira session.
+        let jira_menu_popup = self.jira_menu_popup(window_width, modeline_top);
         // Never `Some` at the same time as `which_key_popup` -- one only
         // appears mid-Normal/-pending-sequence, the other only in Insert
         // mode -- so `popup_rects` below never ends up with more than one
@@ -12191,6 +12398,11 @@ impl App {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::GitMenu, rect.w, &refs);
             popup_rects.push((popup::PopupId::GitMenu, *rect));
+        }
+        if let Some((rect, spans)) = &jira_menu_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::JiraMenu, rect.w, &refs);
+            popup_rects.push((popup::PopupId::JiraMenu, *rect));
         }
         if let Some((rect, spans, selected_row)) = &completion_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -12699,6 +12911,11 @@ impl App {
                     self.change_capture_dirty = true;
                 }
                 self.marks.insert('.', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+                // Mirrors `route_keypress`'s own read-only enforcement --
+                // see `is_readonly_buffer_kind`'s doc comment.
+                if is_readonly_buffer_kind(ob.kind) {
+                    ob.buffer.undo(&mut pane_state.cursor);
+                }
             }
             if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
                 self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
@@ -19889,105 +20106,78 @@ mod tests {
 
         app.jira_start_status_filter();
 
-        assert!(app.jira_status_filter.is_none());
+        assert!(app.active_picker.is_none());
         assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error));
     }
 
     #[test]
-    fn jira_start_status_filter_builds_a_sorted_checklist_pre_checked_from_excluded_statuses() {
+    fn jira_start_status_filter_opens_a_sorted_picker_pre_marked_from_excluded_statuses() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         let session = app.jira_session.as_mut().unwrap();
         session.known_statuses = HashSet::from(["Done".to_string(), "Open".to_string(), "In Progress".to_string()]);
         session.excluded_statuses = vec!["Done".to_string()];
-        let issues_pane = session.issues_pane;
-        let issues_buffer = session.issues_buffer;
 
         app.jira_start_status_filter();
 
-        let filter = app.jira_status_filter.as_ref().expect("expected an active status filter session");
-        assert_eq!(filter.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), vec!["Done", "In Progress", "Open"]);
-        assert!(filter.entries.iter().find(|e| e.name == "Done").unwrap().excluded);
-        assert!(!filter.entries.iter().find(|e| e.name == "Open").unwrap().excluded);
-        assert_eq!(filter.pane, issues_pane);
-        assert_eq!(filter.original_buffer, issues_buffer);
-        assert_eq!(app.buffers.get(filter.buffer_id).unwrap().kind, BufferKind::JiraStatusFilter);
-        assert_eq!(app.windows().content(issues_pane), Some(&filter.buffer_id));
-        let text = app.buffers.get(filter.buffer_id).unwrap().buffer.text();
-        assert!(text.contains("[x] Done"));
-        assert!(text.contains("[ ] Open"));
+        match &app.active_picker {
+            Some(ActivePicker::JiraStatusFilter(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
+                assert_eq!(labels, vec!["Done", "In Progress", "Open"]);
+                assert!(state.is_marked(0)); // "Done" pre-marked (excluded)
+                assert!(!state.is_marked(1));
+                assert!(!state.is_marked(2));
+            }
+            other => panic!("expected an open JiraStatusFilter picker, got is_some={}", other.is_some()),
+        }
     }
 
     #[test]
-    fn jira_status_filter_toggle_selected_flips_the_entry_under_the_cursor() {
+    fn jira_status_filter_picker_tab_toggles_a_mark_without_closing_the_picker() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().known_statuses = HashSet::from(["Done".to_string(), "Open".to_string()]);
         app.jira_start_status_filter();
-        let issues_pane = app.jira_status_filter.as_ref().unwrap().pane;
-        app.windows_mut().focus(issues_pane);
 
-        let line1_start = app.open().buffer.line_start_char(1); // line 0 is the non-interactive header
-        app.test_set_cursor(Cursor { char_idx: line1_start, sticky_col: 0 });
-        app.jira_status_filter_toggle_selected();
+        app.picker_key(KeyPress::named(FenixNamedKey::Tab));
 
-        assert!(app.jira_status_filter.as_ref().unwrap().entries[0].excluded); // "Done" sorts first
+        assert!(app.active_picker.is_some());
+        match &app.active_picker {
+            Some(ActivePicker::JiraStatusFilter(state)) => assert!(state.is_marked(0)), // "Done" sorts first
+            other => panic!("expected the JiraStatusFilter picker to stay open, got is_some={}", other.is_some()),
+        }
     }
 
     #[test]
-    fn jira_status_filter_apply_writes_excluded_statuses_and_restores_the_issues_pane() {
+    fn picker_confirm_on_jira_status_filter_with_marks_applies_them_as_excluded_statuses() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
-        let session = app.jira_session.as_mut().unwrap();
-        session.known_statuses = HashSet::from(["Done".to_string(), "Open".to_string()]);
-        let issues_pane = session.issues_pane;
-        let issues_buffer = session.issues_buffer;
+        app.jira_session.as_mut().unwrap().known_statuses = HashSet::from(["Done".to_string(), "Open".to_string()]);
         app.jira_start_status_filter();
-        let filter_buffer = app.jira_status_filter.as_ref().unwrap().buffer_id;
-        app.windows_mut().focus(issues_pane);
-        let line1_start = app.open().buffer.line_start_char(1);
-        app.test_set_cursor(Cursor { char_idx: line1_start, sticky_col: 0 });
-        app.jira_status_filter_toggle_selected(); // excludes "Done" (sorts first)
+        app.picker_key(KeyPress::named(FenixNamedKey::Tab)); // marks "Done" (sorts first)
 
-        app.jira_status_filter_apply();
+        app.picker_confirm();
 
-        assert!(app.jira_status_filter.is_none());
+        assert!(app.active_picker.is_none());
         assert_eq!(app.jira_session.as_ref().unwrap().excluded_statuses, vec!["Done".to_string()]);
-        assert_eq!(app.windows().content(issues_pane), Some(&issues_buffer));
-        assert!(app.buffers.get(filter_buffer).is_none());
         assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("Done")));
     }
 
     #[test]
-    fn jira_status_filter_apply_with_nothing_excluded_shows_the_showing_all_message() {
-        let mut app = App::with_file(None);
-        app.open_jira_panel();
-        app.jira_session.as_mut().unwrap().known_statuses = HashSet::from(["Open".to_string()]);
-        app.jira_start_status_filter();
-
-        app.jira_status_filter_apply();
-
-        assert!(app.jira_session.as_ref().unwrap().excluded_statuses.is_empty());
-        assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("showing all statuses")));
-    }
-
-    #[test]
-    fn jira_status_filter_cancel_restores_the_issues_pane_without_applying() {
+    fn picker_confirm_on_jira_status_filter_with_no_marks_clears_the_filter() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         let session = app.jira_session.as_mut().unwrap();
-        session.known_statuses = HashSet::from(["Done".to_string()]);
-        let issues_pane = session.issues_pane;
-        let issues_buffer = session.issues_buffer;
-        app.jira_start_status_filter();
-        let filter_buffer = app.jira_status_filter.as_ref().unwrap().buffer_id;
+        session.known_statuses = HashSet::from(["Open".to_string()]);
+        session.excluded_statuses = vec!["Open".to_string()]; // previously filtered
+        app.jira_start_status_filter(); // opens pre-marked from excluded_statuses
+        app.picker_key(KeyPress::named(FenixNamedKey::Tab)); // un-marks "Open"
 
-        app.jira_status_filter_cancel();
+        app.picker_confirm();
 
-        assert!(app.jira_status_filter.is_none());
-        assert_eq!(app.windows().content(issues_pane), Some(&issues_buffer));
-        assert!(app.buffers.get(filter_buffer).is_none());
+        assert!(app.active_picker.is_none());
         assert!(app.jira_session.as_ref().unwrap().excluded_statuses.is_empty());
+        assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("showing all statuses")));
     }
 
     #[test]
@@ -20006,17 +20196,336 @@ mod tests {
     }
 
     #[test]
-    fn jira_session_close_cleans_up_a_mid_flight_status_filter_session() {
+    fn is_readonly_buffer_kind_covers_docker_git_and_jira_only() {
+        assert!(is_readonly_buffer_kind(BufferKind::Docker));
+        assert!(is_readonly_buffer_kind(BufferKind::Git));
+        assert!(is_readonly_buffer_kind(BufferKind::Jira));
+        assert!(!is_readonly_buffer_kind(BufferKind::Text));
+        assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
+        assert!(!is_readonly_buffer_kind(BufferKind::Explorer));
+        assert!(!is_readonly_buffer_kind(BufferKind::Table));
+        assert!(!is_readonly_buffer_kind(BufferKind::SearchReplace));
+    }
+
+    #[test]
+    fn an_edit_attempt_on_a_docker_buffer_is_silently_reverted() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let text_before = app.open().buffer.text();
+
+        app.test_dispatch_key(KeyPress::char('x')); // delete-char under cursor
+
+        assert_eq!(app.open().buffer.text(), text_before);
+    }
+
+    #[test]
+    fn an_edit_attempt_on_a_git_buffer_is_silently_reverted() {
+        let mut app = App::with_file(None);
+        app.open_git_panel();
+        let text_before = app.open().buffer.text();
+
+        app.test_dispatch_key(KeyPress::char('i'));
+        app.test_dispatch_key(KeyPress::char('z'));
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert_eq!(app.open().buffer.text(), text_before);
+    }
+
+    #[test]
+    fn an_edit_attempt_on_a_jira_buffer_is_silently_reverted() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
-        app.jira_session.as_mut().unwrap().known_statuses = HashSet::from(["Done".to_string()]);
-        app.jira_start_status_filter();
-        let filter_buffer = app.jira_status_filter.as_ref().unwrap().buffer_id;
+        let text_before = app.open().buffer.text();
 
-        app.jira_session_close();
+        app.test_dispatch_key(KeyPress::char('x'));
 
-        assert!(app.jira_status_filter.is_none());
-        assert!(app.buffers.get(filter_buffer).is_none());
-        assert!(app.jira_session.is_none());
+        assert_eq!(app.open().buffer.text(), text_before);
+    }
+
+    #[test]
+    fn navigation_on_a_readonly_buffer_is_unaffected() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        assert_eq!(app.cursor().char_idx, 0);
+
+        app.test_dispatch_key(KeyPress::char('j')); // move down a line
+        let after_j = app.cursor().char_idx;
+        // Only asserts movement actually happened when there's more than
+        // one line to move to -- a single-line buffer would make `j` a
+        // legitimate no-op, not a sign navigation is broken.
+        if app.open().buffer.visual_line_count() > 1 {
+            assert_ne!(after_j, 0);
+        }
+
+        app.test_dispatch_key(KeyPress::char('G')); // jump to the last line
+        let (last_line, _) = app.open().buffer.line_col(&app.cursor());
+        assert_eq!(last_line, app.open().buffer.visual_line_count().saturating_sub(1));
+
+        app.test_dispatch_key(KeyPress::char('g'));
+        app.test_dispatch_key(KeyPress::char('g')); // back to the first line
+        let (first_line, _) = app.open().buffer.line_col(&app.cursor());
+        assert_eq!(first_line, 0);
+    }
+
+    #[test]
+    fn jira_menu_popup_is_none_when_not_open() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        assert!(app.jira_menu_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn jira_menu_popup_is_none_outside_a_jira_session() {
+        let mut app = App::with_file(None);
+        app.jira_menu_open = true;
+        assert!(app.jira_menu_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn jira_menu_popup_is_none_on_projects_and_users() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let session = app.jira_session.as_ref().unwrap();
+        let (projects_pane, users_pane) = (session.projects_pane, session.users_pane);
+        app.jira_menu_open = true;
+        app.windows_mut().focus(projects_pane);
+        assert!(app.jira_menu_popup(800.0, 580.0).is_none());
+        app.windows_mut().focus(users_pane);
+        assert!(app.jira_menu_popup(800.0, 580.0).is_none());
+    }
+
+    #[test]
+    fn jira_menu_popup_lists_the_issues_pane_bindings_including_f() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let issues_pane = app.jira_session.as_ref().unwrap().issues_pane;
+        app.windows_mut().focus(issues_pane);
+        app.jira_menu_open = true;
+        let (_, spans) = app.jira_menu_popup(800.0, 580.0).unwrap();
+        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        for key in ["t", "T", "c", "e", "l", "A", "P", "y", "f"] {
+            assert!(text.contains(key), "expected the Issues menu to mention '{key}': {text}");
+        }
+    }
+
+    #[test]
+    fn jira_menu_popup_lists_the_detail_pane_bindings_excluding_f() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(detail_pane);
+        app.jira_menu_open = true;
+        let (_, spans) = app.jira_menu_popup(800.0, 580.0).unwrap();
+        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        for key in ["t", "T", "c", "e", "l", "A", "P", "y"] {
+            assert!(text.contains(key), "expected the Detail menu to mention '{key}': {text}");
+        }
+        assert!(!text.contains("status filter"));
+    }
+
+    #[test]
+    fn jira_start_assignee_picker_opens_over_tracked_users() {
+        let mut app = App::with_file(None);
+        app.config.jira_users = vec![("jo1111111".to_string(), "Jo Smith".to_string())];
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+
+        app.jira_start_assignee_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::JiraAssignee(state)) => assert_eq!(state.len(), 1),
+            other => panic!("expected an open JiraAssignee picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn jira_start_assignee_picker_without_a_current_issue_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.config.jira_users = vec![("jo1111111".to_string(), "Jo Smith".to_string())];
+        app.open_jira_panel();
+
+        app.jira_start_assignee_picker();
+
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn picker_confirm_on_jira_assignee_without_a_configured_client_surfaces_an_error() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+        let candidates = vec![fenix_picker::Candidate::new("Jo Smith  (jo1111111)", ("jo1111111".to_string(), "Jo Smith".to_string()))];
+        app.enter_picker(ActivePicker::JiraAssignee(fenix_picker::PickerState::new(candidates)));
+
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_start_priority_picker_without_a_configured_client_surfaces_an_error_and_opens_no_picker() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+
+        app.jira_start_priority_picker();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_start_priority_picker_without_a_current_issue_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+
+        app.jira_start_priority_picker();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn apply_jira_priorities_ready_discards_a_result_from_a_superseded_request() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().priorities_request_id = 5;
+
+        app.apply_jira_priorities_ready(1, Ok(vec![fenix_jira::Priority { id: "1".to_string(), name: "High".to_string() }]));
+
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn apply_jira_priorities_ready_opens_a_picker_over_the_fetched_priorities() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().priorities_request_id = 1;
+
+        app.apply_jira_priorities_ready(
+            1,
+            Ok(vec![
+                fenix_jira::Priority { id: "1".to_string(), name: "High".to_string() },
+                fenix_jira::Priority { id: "2".to_string(), name: "Low".to_string() },
+            ]),
+        );
+
+        match &app.active_picker {
+            Some(ActivePicker::JiraPriority(state)) => assert_eq!(state.len(), 2),
+            other => panic!("expected an open JiraPriority picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_jira_priority_without_a_configured_client_surfaces_an_error() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+        let priority = fenix_jira::Priority { id: "1".to_string(), name: "High".to_string() };
+        let candidates = vec![fenix_picker::Candidate::new(priority.name.clone(), priority)];
+        app.enter_picker(ActivePicker::JiraPriority(fenix_picker::PickerState::new(candidates)));
+
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_fetch_detail_without_a_configured_client_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+
+        app.jira_fetch_detail("PROJ-999".to_string());
+
+        assert!(app.jira_session.as_ref().unwrap().last_selected_issue.is_none());
+    }
+
+    #[test]
+    fn jira_start_goto_issue_prompt_arms_an_empty_goto_issue_prompt() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+
+        app.jira_start_goto_issue_prompt();
+
+        match &app.jira_prompt {
+            Some(prompt) => assert_eq!(prompt.kind, JiraPromptKind::GotoIssue),
+            None => panic!("expected an active goto-issue prompt"),
+        }
+        assert_eq!(app.jira_prompt_text(), Some("Go to issue: ".to_string()));
+    }
+
+    #[test]
+    fn jira_start_goto_issue_prompt_without_an_open_session_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.jira_start_goto_issue_prompt();
+        assert!(app.jira_prompt.is_none());
+    }
+
+    #[test]
+    fn goto_issue_prompt_submit_fetches_the_issue_and_focuses_detail() {
+        // No `[jira]` base_url/token configured, so the fetch itself
+        // reaches `jira_client`'s own error path rather than attempting
+        // a network call -- same posture every other unconfigured-client
+        // test here already uses. Still exercises the real behavior this
+        // feature is about: an issue key typed by hand, not already in
+        // the current Issues list, is looked up directly and Detail is
+        // focused so the (eventual) result is immediately visible.
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        let issues_pane = app.jira_session.as_ref().unwrap().issues_pane;
+        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(issues_pane);
+
+        app.jira_start_goto_issue_prompt();
+        for c in "PROJ-999".chars() {
+            app.jira_prompt_key(KeyPress::char(c));
+        }
+        app.jira_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.jira_prompt.is_none());
+        assert_eq!(app.focused_pane_id(), detail_pane);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error)); // unconfigured client
+    }
+
+    #[test]
+    fn jira_copy_issue_url_without_a_current_issue_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.config.jira_base_url = Some("https://jira.example.com".to_string());
+
+        app.jira_copy_issue_url();
+
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn jira_copy_issue_url_without_a_configured_base_url_surfaces_an_error() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+
+        app.jira_copy_issue_url();
+
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn jira_copy_issue_url_copies_the_browse_url_and_shows_a_message() {
+        // Serialized against every other real-OS-clipboard test in this
+        // module -- see `CLIPBOARD_TEST_LOCK`'s own doc comment.
+        let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        app.config.jira_base_url = Some("https://jira.example.com/".to_string());
+        app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
+
+        app.jira_copy_issue_url();
+
+        if let Some(clipboard) = &mut app.clipboard {
+            assert_eq!(clipboard.get_text().unwrap(), "https://jira.example.com/browse/PROJ-1");
+        }
+        assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("PROJ-1")));
     }
 }
