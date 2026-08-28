@@ -2293,6 +2293,24 @@ fn jira_highlights_for_visible_range(
             jira_panel::JiraLineStyle::Empty | jira_panel::JiraLineStyle::Detail | jira_panel::JiraLineStyle::Comment => {
                 ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
             }
+            // The Detail pane's page title -- reads as more prominent
+            // than everything else in the pane, same accent `syntax_
+            // function` already lends a function name in real code.
+            jira_panel::JiraLineStyle::Title => {
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_function));
+            }
+            // "Description"/"Comments (N)" section headers, and their
+            // own underline row -- `syntax_keyword`'s accent, distinct
+            // from both the dim metadata and the bright body text it
+            // separates.
+            jira_panel::JiraLineStyle::SectionHeader => {
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            }
+            // Real prose (description/comment body) -- full brightness,
+            // unlike the dim metadata/byline rows around it.
+            jira_panel::JiraLineStyle::Body => {
+                ranges.push((line_start_byte..line_end_byte, theme.fg));
+            }
             jira_panel::JiraLineStyle::Project | jira_panel::JiraLineStyle::User | jira_panel::JiraLineStyle::Issue => {}
         }
         if let Some((badge_len, color)) = meta.badge {
