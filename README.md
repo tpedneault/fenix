@@ -231,7 +231,9 @@ for anyone curious to poke around or build on it.
   `SPC r f`/`SPC r w` fit the page/width, with `hjkl` panning around
   whatever doesn't fit in the pane at the current zoom. The render
   re-fits automatically on window resize (except at a fixed percentage
-  zoom, which stays put across a resize on purpose). Requires
+  zoom, which stays put across a resize on purpose). `SPC r o` toggles a
+  split-pane outline/bookmarks panel -- a real, Vim-navigable listing
+  where `Enter` on an entry jumps the PDF straight to its page. Requires
   `pdfium.dll` (see [Optional external tools](#optional-external-tools))
   -- without it, opening a PDF shows an error instead of a blank pane.
 - **Autocompletion**: a popup that's always available, sourced from
@@ -429,6 +431,7 @@ popup shows what keys continue it.
 | `SPC r =` / `SPC r -` | Zoom the focused PDF session in / out |
 | `SPC r f` | Fit the page to the pane |
 | `SPC r w` | Fit the page's width to the pane |
+| `SPC r o` | Toggle the focused PDF session's outline/bookmarks panel |
 | `h` / `j` / `k` / `l` | Pan around the rendered page while it's larger than the pane (PDF panes only) |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
@@ -679,6 +682,19 @@ can be open at once.
 | `SPC r f` | Fit the whole page to the pane (the default) |
 | `SPC r w` | Fit the page's width to the pane -- a tall page then scrolls vertically instead of shrinking further |
 | `h` / `j` / `k` / `l` | Pan around the page once it's larger than the pane in some direction |
+| `SPC r o` | Toggle the outline/bookmarks panel |
+
+The outline panel (`SPC r o`) opens as a split next to the PDF pane,
+listing the document's bookmark tree flattened into indented lines (a
+nested bookmark just gets deeper indentation -- there's no tree widget,
+so this is the whole tree in one flat, ordinary buffer). It's real,
+Vim-navigable text: move around it with `j`/`k`/`gg`/`G`/`/` like
+anything else, and press `Enter` on an entry to jump the PDF straight to
+its page. `SPC r o` again -- from either the outline pane or the PDF
+pane -- closes it. The outline is fetched once per document (a PDF's
+bookmarks can't change while it's open) and cached, so reopening it is
+instant after the first time; a PDF with no bookmarks at all shows a
+single explanatory line instead of an empty pane.
 
 The page re-renders to fit whenever its pane is resized, *except* at a
 fixed zoom percentage (`SPC r =`/`SPC r -`), which stays exactly where
