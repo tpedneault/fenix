@@ -226,10 +226,14 @@ for anyone curious to poke around or build on it.
 - **PDF viewer** (`SPC r ...`): open a `.pdf` file the same way you'd
   open any other file (typed path, the explorer, a CLI argument) and it
   renders as a scaled-to-fit page in an ordinary, splittable pane instead
-  of loading as text. `SPC r n`/`SPC r p` turn the page; the render
-  re-fits automatically on window resize. Requires `pdfium.dll` (see
-  [Optional external tools](#optional-external-tools)) -- without it,
-  opening a PDF shows an error instead of a blank pane.
+  of loading as text. `SPC r n`/`SPC r p` turn the page; `SPC r g` jumps
+  straight to a typed page number; `SPC r =`/`SPC r -` zoom in/out and
+  `SPC r f`/`SPC r w` fit the page/width, with `hjkl` panning around
+  whatever doesn't fit in the pane at the current zoom. The render
+  re-fits automatically on window resize (except at a fixed percentage
+  zoom, which stays put across a resize on purpose). Requires
+  `pdfium.dll` (see [Optional external tools](#optional-external-tools))
+  -- without it, opening a PDF shows an error instead of a blank pane.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -421,6 +425,11 @@ popup shows what keys continue it.
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
 | `SPC r n` | Turn the focused PDF session to the next page |
 | `SPC r p` | Turn the focused PDF session to the previous page |
+| `SPC r g` | Prompt for a page number and jump to it |
+| `SPC r =` / `SPC r -` | Zoom the focused PDF session in / out |
+| `SPC r f` | Fit the page to the pane |
+| `SPC r w` | Fit the page's width to the pane |
+| `h` / `j` / `k` / `l` | Pan around the rendered page while it's larger than the pane (PDF panes only) |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -665,15 +674,26 @@ can be open at once.
 |---|---|
 | `SPC r n` | Next page |
 | `SPC r p` | Previous page |
+| `SPC r g` | Prompt for a page number and jump to it |
+| `SPC r =` / `SPC r -` | Zoom in / out, in coarse 10% steps |
+| `SPC r f` | Fit the whole page to the pane (the default) |
+| `SPC r w` | Fit the page's width to the pane -- a tall page then scrolls vertically instead of shrinking further |
+| `h` / `j` / `k` / `l` | Pan around the page once it's larger than the pane in some direction |
 
-The page re-renders to fit whenever its pane is resized. A PDF pane's
-buffer is always empty and pathless -- the rendered page lives in a GPU
-texture, not the buffer's own text -- so `:w`/`SPC f s` on one is a
-no-op, same as every other generated panel in Fenix; there's no risk of
-a stray save overwriting the real PDF file on disk. Needs `pdfium.dll`
-(see [Optional external tools](#optional-external-tools)) -- without
-it, opening a PDF reports the error in the status line rather than
-rendering.
+The page re-renders to fit whenever its pane is resized, *except* at a
+fixed zoom percentage (`SPC r =`/`SPC r -`), which stays exactly where
+you left it across a resize instead of silently re-fitting -- panning
+with `hjkl` then just shows a different part of the same render, no
+fresh page turn needed. Fit-page/fit-width do still re-render on
+resize, since what "fits" depends on the pane's own size by definition.
+
+A PDF pane's buffer is always empty and pathless -- the rendered page
+lives in a GPU texture, not the buffer's own text -- so `:w`/`SPC f s`
+on one is a no-op, same as every other generated panel in Fenix;
+there's no risk of a stray save overwriting the real PDF file on disk.
+Needs `pdfium.dll` (see [Optional external tools](#optional-external-tools))
+-- without it, opening a PDF reports the error in the status line
+rather than rendering.
 
 ### Autocompletion popup (Tcl, Insert mode)
 
