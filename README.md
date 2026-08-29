@@ -212,6 +212,17 @@ for anyone curious to poke around or build on it.
   cluttering the list (e.g. Done/Closed) -- folded into the JQL query
   itself, so it stays applied across refreshes; resets when you close
   and reopen the panel.
+- **VNC console panes** (`SPC v ...`): configure VM hosts by hand under
+  `[vnc]`, then `SPC v v` fuzzy-picks one by name to open (or switch
+  back to) a live VNC connection as an ordinary, splittable pane. Each
+  session connects once and stays live in the background indefinitely
+  (instant switching thereafter), auto-reconnects with backoff if it
+  drops, and throttles its poll rate while unfocused. Mouse and keyboard
+  forward straight to the VM while the pane is focused (`Ctrl-\` to
+  release, same convention as the terminal panel); clipboard is
+  mirrored both ways. `SPC v s` saves the current frame as a PNG.
+  Client-side scaling only, and no encryption/authentication at all --
+  trusted-network hosts only.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -383,6 +394,9 @@ popup shows what keys continue it.
 | `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
 | `SPC j q` | Close the JIRA dashboard session |
 | `SPC j s` / `SPC j x` | Submit / cancel a pending comment or description edit |
+| `SPC v v` | Open (or switch to) a configured VNC session by name |
+| `SPC v q` | Close the focused VNC session |
+| `SPC v s` | Save the focused VNC session's current frame as a PNG |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -581,6 +595,39 @@ the JQL query (`AND status NOT IN (...)`), so it stays applied across
 `SPC j r` refreshes; it resets when the panel is closed and reopened,
 and isn't saved to `config.ini`.
 
+### VNC console panes (`SPC v v`)
+
+Embeds a live VNC (RFB) connection to a VM as an ordinary, splittable
+pane -- configure hosts once under `[vnc]` (see Configuration below),
+then `SPC v v` fuzzy-picks one by name to open or switch straight to
+it. Each session connects the first time you pick it and then stays
+live in the background indefinitely, so switching back later is
+instant, not a fresh handshake; an unfocused/hidden session polls at a
+much slower rate to stay cheap while you're not looking at it, and a
+dropped connection retries automatically with backoff before giving up
+and leaving the pane on its last frame.
+
+| Keys | Action |
+|---|---|
+| `SPC v v` | Open or switch to a configured VNC session (picker by name) |
+| `SPC v q` | Close the focused VNC session |
+| `SPC v s` | Save the focused session's current frame as a timestamped PNG |
+| `Ctrl-\` | Release keyboard capture back to the editor (same chord as the terminal panel) |
+
+Clicking into a VNC pane both focuses it and starts sending your mouse
+there; every other key while it's focused is forwarded to the VM
+instead of Vim, exactly like the terminal panel. Clipboard content is
+mirrored in both directions: the VM's clipboard always flows to yours
+as it changes, and yours flows to the VM whenever you focus a session.
+
+Resizing is client-side only (the video scales to fit the pane; the
+VM's own resolution is never changed), and the connection is always
+made in the clear -- there's no encryption or authentication support at
+all, matching the assumption that every configured host is on a
+trusted local network. Don't point this at anything reachable over an
+untrusted network without your own tunnel (SSH port-forwarding, a VPN)
+in front of it.
+
 ### Autocompletion popup (Tcl, Insert mode)
 
 | Keys | Action |
@@ -629,6 +676,10 @@ base_url = https://jira.example.com
 token = your-personal-access-token
 project1 = PROJ|My Project
 user1 = jo1111111|John Doe
+
+[vnc]
+host1 = build-vm|10.0.0.5|5900
+host2 = test-vm|10.0.0.6|5900
 ```
 
 | Section | Key | Meaning |
@@ -648,6 +699,7 @@ user1 = jo1111111|John Doe
 | `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
+| `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path
