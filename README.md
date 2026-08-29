@@ -223,6 +223,13 @@ for anyone curious to poke around or build on it.
   mirrored both ways. `SPC v s` saves the current frame as a PNG.
   Client-side scaling only, and no encryption/authentication at all --
   trusted-network hosts only.
+- **PDF viewer** (`SPC r ...`): open a `.pdf` file the same way you'd
+  open any other file (typed path, the explorer, a CLI argument) and it
+  renders as a scaled-to-fit page in an ordinary, splittable pane instead
+  of loading as text. `SPC r n`/`SPC r p` turn the page; the render
+  re-fits automatically on window resize. Requires `pdfium.dll` (see
+  [Optional external tools](#optional-external-tools)) -- without it,
+  opening a PDF shows an error instead of a blank pane.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -338,6 +345,21 @@ and degrade gracefully (never a hard error) if they're not:
   unreachable daemon) the panel just shows an empty listing instead of
   failing.
 
+The PDF viewer (`SPC r ...`) needs a native library rather than a
+`PATH` executable, so it's set up once by hand rather than
+auto-detected:
+
+- [`pdfium`](https://github.com/bblanchon/pdfium-binaries) — download
+  the prebuilt release for your platform (`pdfium-win-x64.tgz` on
+  Windows) and place `pdfium.dll` (or `libpdfium.so`/`libpdfium.dylib`
+  elsewhere) next to `fenix.exe`, i.e. in whichever `target/debug/` or
+  `target/release/` directory you actually run the built binary from.
+  `FENIX_PDFIUM_PATH` can point at a different directory instead (handy
+  for switching between `debug`/`release` builds without copying it
+  twice), and a system-wide install is tried as a last resort. Without
+  it, opening a `.pdf` shows a status-line error naming where it looked
+  rather than a blank pane or a crash.
+
 ### Running the tests
 
 ```bash
@@ -397,6 +419,8 @@ popup shows what keys continue it.
 | `SPC v v` | Open (or switch to) a configured VNC session by name |
 | `SPC v q` | Close the focused VNC session |
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
+| `SPC r n` | Turn the focused PDF session to the next page |
+| `SPC r p` | Turn the focused PDF session to the previous page |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -627,6 +651,29 @@ all, matching the assumption that every configured host is on a
 trusted local network. Don't point this at anything reachable over an
 untrusted network without your own tunnel (SSH port-forwarding, a VPN)
 in front of it.
+
+### PDF viewer (`SPC r ...`)
+
+Opening a `.pdf` -- by typed path (`SPC f f`), the explorer, a recent
+file, or a CLI argument -- renders it as a scaled-to-fit page in an
+ordinary, splittable pane instead of loading its raw bytes as text.
+Rendering happens on one shared background worker (every open PDF
+shares it), so opening a document never blocks the editor and several
+can be open at once.
+
+| Keys | Action |
+|---|---|
+| `SPC r n` | Next page |
+| `SPC r p` | Previous page |
+
+The page re-renders to fit whenever its pane is resized. A PDF pane's
+buffer is always empty and pathless -- the rendered page lives in a GPU
+texture, not the buffer's own text -- so `:w`/`SPC f s` on one is a
+no-op, same as every other generated panel in Fenix; there's no risk of
+a stray save overwriting the real PDF file on disk. Needs `pdfium.dll`
+(see [Optional external tools](#optional-external-tools)) -- without
+it, opening a PDF reports the error in the status line rather than
+rendering.
 
 ### Autocompletion popup (Tcl, Insert mode)
 
