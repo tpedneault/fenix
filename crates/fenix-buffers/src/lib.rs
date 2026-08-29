@@ -50,6 +50,31 @@ pub enum BufferKind {
     /// pending replace would touch, one row each, toggle-able before
     /// anything is actually written to disk.
     SearchReplace,
+    /// A live VNC console view (`SPC v v`) -- same "real buffer, just
+    /// tagged" shape as `Docker`/`Git`/`Jira` in that it's a real pane
+    /// slot in the window tree, but unlike those there is nothing
+    /// meaningful to put in the buffer's own text at all: the actual
+    /// pixel content is a separate GPU-side texture layer keyed by this
+    /// buffer's pane, never stored in `buffer` itself (see
+    /// `BufferList::open_vnc`).
+    Vnc,
+}
+
+impl BufferKind {
+    /// Whether a dirty flag on a buffer of this kind reflects real,
+    /// savable user work. `Text` and `Table` are the same underlying,
+    /// path-backed `fenix_core::Buffer` a real file lives in (`Table`
+    /// is just `Text` retagged in place, see its own doc comment
+    /// above). `Dashboard`/`Explorer`/`Docker`/`Git`/`Jira`/
+    /// `SearchReplace`/`Vnc` are always pathless, host-regenerated (or,
+    /// for `Vnc`, never-written-to-at-all) views that can never be
+    /// saved -- for the text-generating ones, content gets rewritten by
+    /// the host on every refresh, which trips `dirty` with nothing the
+    /// user could ever do to clear it again, so treating that as
+    /// "unsaved work" is wrong.
+    pub fn tracks_unsaved_changes(self) -> bool {
+        matches!(self, BufferKind::Text | BufferKind::Table)
+    }
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -159,6 +184,16 @@ impl BufferList {
     /// re-renders `text` via `Buffer::replace_range` on refresh.
     pub fn open_jira(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Jira)
+    }
+
+    /// An empty, pathless buffer tagged `Vnc` -- `SPC v v`. Deliberately
+    /// `Buffer::empty()`, not `Buffer::from_text(...)` like `open_docker`/
+    /// `open_jira` seed a rendered text panel: a VNC pane's content is a
+    /// live pixel framebuffer, not text, so there is nothing to seed --
+    /// this buffer only exists to give the pane a `BufferId` slot in the
+    /// window tree; its own (always-empty) text is never shown.
+    pub fn open_vnc(&mut self) -> BufferId {
+        self.insert(Buffer::empty(), None, BufferKind::Vnc)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
@@ -310,6 +345,19 @@ mod tests {
     }
 
     #[test]
+    fn tracks_unsaved_changes_is_true_only_for_text_and_table() {
+        assert!(BufferKind::Text.tracks_unsaved_changes());
+        assert!(BufferKind::Table.tracks_unsaved_changes());
+        assert!(!BufferKind::Dashboard.tracks_unsaved_changes());
+        assert!(!BufferKind::Explorer.tracks_unsaved_changes());
+        assert!(!BufferKind::Docker.tracks_unsaved_changes());
+        assert!(!BufferKind::Git.tracks_unsaved_changes());
+        assert!(!BufferKind::Jira.tracks_unsaved_changes());
+        assert!(!BufferKind::SearchReplace.tracks_unsaved_changes());
+        assert!(!BufferKind::Vnc.tracks_unsaved_changes());
+    }
+
+    #[test]
     fn open_scratch_creates_an_empty_unnamed_buffer() {
         let mut list = BufferList::new();
         let id = list.open_scratch();
@@ -347,6 +395,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "containers\nimages\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn open_vnc_creates_an_empty_pathless_buffer_tagged_vnc() {
+        let mut list = BufferList::new();
+        let id = list.open_vnc();
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Vnc);
     }
 
     #[test]

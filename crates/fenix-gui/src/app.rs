@@ -17,8 +17,8 @@ use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::ModifiersState;
-use winit::window::{Icon, Window, WindowId};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
@@ -36,6 +36,7 @@ use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
+use crate::vnc_texture::{VncPipeline, VncTexture};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the caret takes to fade in/out at each blink toggle, instead
@@ -487,6 +488,103 @@ impl Drop for TerminalState {
     }
 }
 
+/// Streams decoded `fenix_vnc::VncFrame`s for one VNC session into
+/// `FenixUserEvent::VncFrame` -- same "background thread, stopped via a
+/// kill that unblocks its blocking read" shape as `TerminalReader`, just
+/// reading pre-decoded `VncFrame` values off an `mpsc::Receiver` instead
+/// of raw bytes off a `Read`. Carries the session's own key (`Config.
+/// vnc_hosts`'s name) since a frame can arrive well after focus moved
+/// elsewhere, same reasoning as `LogLine`'s explicit `BufferId`.
+struct VncReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl VncReader {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_vnc::VncFrame>, key: String, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match receiver.recv() {
+                Ok(frame) => {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if !send(FenixUserEvent::VncFrame(key.clone(), frame)) {
+                        return;
+                    }
+                }
+                Err(_) => return, // the VncClient side hung up -- session closed/dropped
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for VncReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Note: unlike `DockerLogFollower`, closing the connection isn't
+        // this type's job -- `VncSession`'s own field order (see its own
+        // doc comment) drops `client` first, which is what actually
+        // unblocks this thread's blocking `recv()` via the channel
+        // closing.
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// One live VNC console pane (`SPC v v`) -- one pane/buffer per session,
+/// unlike Docker's six/Git's seven/Jira's four, since a VM console is a
+/// single view, not a multi-pane dashboard. Field order matters: `client`
+/// must drop before `reader` (Rust drops struct fields in declaration
+/// order) -- closing the connection first is what unblocks `reader`'s
+/// blocking `recv()` via the channel closing, same "kill the source
+/// first" ordering `TerminalState` already establishes for its own
+/// `session`/`reader` pair.
+struct VncSession {
+    client: fenix_vnc::VncClient,
+    /// `None` when opened without a real `event_proxy` (every test) --
+    /// same posture as `TerminalState::reader`/`DockerSession::stats_
+    /// poller`. Held only for its `Drop` side effect once set.
+    #[allow(dead_code)]
+    reader: Option<VncReader>,
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    host: String,
+    port: u16,
+    /// The VM's framebuffer, kept as a plain BGRA byte buffer on the CPU
+    /// side (resized on `fenix_vnc::VncFrame::Resolution`) -- every
+    /// incoming `Rect`/`Copy` frame updates this first, then the same
+    /// region gets re-uploaded to `texture`. Keeping a full CPU-side copy
+    /// (rather than only ever touching the GPU texture) is what lets
+    /// `texture` be created lazily on the first redraw after a
+    /// resolution change and still show a complete picture immediately,
+    /// and is also what a screenshot (`SPC v s`) reads from.
+    framebuffer: Vec<u8>,
+    fb_width: u16,
+    fb_height: u16,
+    /// `None` until the GPU exists *and* a resolution is known -- created
+    /// lazily in `redraw` (see `VncPipeline::create_texture`), recreated
+    /// whenever `fb_width`/`fb_height` change.
+    texture: Option<VncTexture>,
+    /// The RFB pointer bitmask of currently-held mouse buttons -- resent
+    /// in full on every move/click/wheel tick, per RFB's stateful
+    /// pointer semantics (see `fenix_vnc::VncClient::send_pointer`'s own
+    /// doc comment).
+    pointer_buttons: u8,
+    /// Consecutive reconnect attempts since the last successful
+    /// connection -- `vnc_reconnect_delay` backs off based on this, and
+    /// `MAX_VNC_RECONNECT_ATTEMPTS` caps it so a permanently-unreachable
+    /// VM eventually stops retrying instead of retrying forever.
+    reconnect_attempts: u32,
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -876,6 +974,23 @@ pub enum FenixUserEvent {
     /// empty list means "just focus me," no file to open (a bare
     /// relaunch with no arguments).
     OpenFiles(Vec<String>),
+    /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
+    /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
+    /// spawns it on -- same "can't afford to block the main thread"
+    /// reasoning as `TerminalSpawned` (a slow/unreachable VM would
+    /// otherwise freeze the whole editor). `name` is the VM's configured
+    /// name (`Config.vnc_hosts`'s own key), not implicitly "whatever's
+    /// focused," since the connect can finish well after the user's
+    /// moved on; `host`/`port` ride along explicitly (not re-derived
+    /// from config on arrival) so a reconnect still completes correctly
+    /// even if the config changed or that entry's since been removed.
+    /// Wrapped (`VncConnectResult`) for the same reason `TerminalSpawned`
+    /// wraps its own result -- `fenix_vnc::VncClient` has no `Debug` impl.
+    VncConnected { name: String, host: String, port: u16, result: VncConnectResult },
+    /// One decoded VNC update, from a session's `VncReader` background
+    /// thread. Carries the VM's name explicitly, same reasoning as
+    /// `VncConnected`/`LogLine`.
+    VncFrame(String, fenix_vnc::VncFrame),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -887,6 +1002,19 @@ impl std::fmt::Debug for TerminalSpawnResult {
         match &self.0 {
             Ok(_) => write!(f, "TerminalSpawnResult(Ok(..))"),
             Err(err) => write!(f, "TerminalSpawnResult(Err({err:?}))"),
+        }
+    }
+}
+
+/// See `FenixUserEvent::VncConnected`'s own doc comment for why this
+/// wrapper exists.
+pub struct VncConnectResult(std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>);
+
+impl std::fmt::Debug for VncConnectResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Ok(_) => write!(f, "VncConnectResult(Ok(..))"),
+            Err(err) => write!(f, "VncConnectResult(Err({err:?}))"),
         }
     }
 }
@@ -1184,6 +1312,12 @@ enum ActivePicker {
     /// alias back into `mib_insert` and advances to the next parameter
     /// (`mib_resume_insert`).
     MibArgumentAlias(fenix_picker::PickerState<String>),
+    /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
+    /// `String`-identity shape as `MibArgumentAlias` -- confirming calls
+    /// `open_vnc_session` with the picked name (connects if this is the
+    /// first time it's been opened this run, otherwise just switches to
+    /// the already-live session).
+    VncHost(fenix_picker::PickerState<String>),
     /// `c` on a `BufferKind::Table` buffer: fuzzy-find a column by its
     /// synthesized name, confirming jumps the cursor to that column's
     /// start on the current row (`table_column_start`). The payload is
@@ -1225,6 +1359,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::MibTmParameter(s) => s.push_char(c),
         ActivePicker::MibCalibration(s) => s.push_char(c),
         ActivePicker::MibArgumentAlias(s) => s.push_char(c),
+        ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
         ActivePicker::BufferSearch(s) => s.push_char(c),
     }
@@ -1253,6 +1388,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::MibTmParameter(s) => s.backspace(),
         ActivePicker::MibCalibration(s) => s.backspace(),
         ActivePicker::MibArgumentAlias(s) => s.backspace(),
+        ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
         ActivePicker::BufferSearch(s) => s.backspace(),
     }
@@ -1281,6 +1417,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::MibTmParameter(s) => s.move_selection(delta),
         ActivePicker::MibCalibration(s) => s.move_selection(delta),
         ActivePicker::MibArgumentAlias(s) => s.move_selection(delta),
+        ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
     }
@@ -1312,6 +1449,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::MibTmParameter(s) => s.toggle_mark(),
         ActivePicker::MibCalibration(s) => s.toggle_mark(),
         ActivePicker::MibArgumentAlias(s) => s.toggle_mark(),
+        ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
     }
@@ -1340,6 +1478,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::MibTmParameter(s) => s.query(),
         ActivePicker::MibCalibration(s) => s.query(),
         ActivePicker::MibArgumentAlias(s) => s.query(),
+        ActivePicker::VncHost(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
         ActivePicker::BufferSearch(s) => s.query(),
     }
@@ -1368,6 +1507,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::MibTmParameter(s) => s.len(),
         ActivePicker::MibCalibration(s) => s.len(),
         ActivePicker::MibArgumentAlias(s) => s.len(),
+        ActivePicker::VncHost(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
         ActivePicker::BufferSearch(s) => s.len(),
     }
@@ -1396,6 +1536,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::MibTmParameter(s) => s.selected_row(),
         ActivePicker::MibCalibration(s) => s.selected_row(),
         ActivePicker::MibArgumentAlias(s) => s.selected_row(),
+        ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
         ActivePicker::BufferSearch(s) => s.selected_row(),
     }
@@ -1440,6 +1581,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::MibTmParameter(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibCalibration(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibArgumentAlias(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
@@ -2761,7 +2903,7 @@ struct JiraEditSession {
 /// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
 /// dispatch that actually mutates the buffer text is ever reverted.
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
-    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira)
+    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc)
 }
 
 pub struct App {
@@ -2776,6 +2918,12 @@ pub struct App {
     /// drawn after text instead of sharing this one.
     bg_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    /// The textured-quad pipeline every open VNC session's live
+    /// framebuffer is drawn through -- one pipeline shared by every
+    /// session (each owns its own `VncTexture`, see `VncSession`).
+    /// `None` until a real GPU exists, same posture as `text`/`bg_rect`/
+    /// `caret_rect`.
+    vnc_pipeline: Option<VncPipeline>,
 
     /// Every open buffer, keyed by `BufferId` -- syntax state lives on
     /// each buffer's own `OpenBuffer`. Live cursor/scroll position is
@@ -3023,6 +3171,25 @@ pub struct App {
     /// The active Jira multi-pane session (`SPC j j`), if any -- see
     /// `JiraSession`'s own doc comment.
     jira_session: Option<JiraSession>,
+    /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
+    /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
+    /// `Option<VncSession>` like `docker_session`/`git_session`/
+    /// `jira_session`: those are each a singleton tool where a second
+    /// concurrent session has no meaning, while several simultaneous,
+    /// independently-live VM consoles is the entire point here.
+    vnc_sessions: HashMap<String, VncSession>,
+    /// The VM name whose session currently owns raw keyboard input, if
+    /// any -- same "this pane eats every key, Vim doesn't apply" role as
+    /// `terminal_focused`, generalized to name *which* of up to several
+    /// concurrent sessions it refers to (there's still only ever one
+    /// focused at a time). `Ctrl-\` clears it, same chord/meaning as
+    /// `terminal_focused`'s own.
+    vnc_focused: Option<String>,
+    /// VM names with a connect currently in flight on a background
+    /// thread -- lets `open_vnc_session` show a "Connecting..."
+    /// placeholder and refuse a redundant second connect attempt if the
+    /// picker is used again on the same name before the first finishes.
+    vnc_connecting: HashSet<String>,
     /// The active `c`/`e` comment/description edit session, if any -- see
     /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
     /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
@@ -3285,6 +3452,65 @@ fn wheel_delta_lines(delta: MouseScrollDelta, line_height: f32) -> isize {
     }
 }
 
+/// How many consecutive automatic reconnect attempts a dropped VNC
+/// session gets before `apply_vnc_connected` gives up and leaves it for
+/// the user to reopen manually -- a permanently-unreachable VM (powered
+/// off, network gone) shouldn't retry forever.
+const MAX_VNC_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// Exponential backoff for VNC reconnect attempts: 2, 4, 8, 16, 30, 30...
+/// seconds, capped so a long-unreachable VM still gets retried at a
+/// sane, bounded interval rather than the delay growing without limit.
+fn vnc_reconnect_delay(attempts: u32) -> Duration {
+    let secs = 2u64.saturating_pow(attempts.min(4)).min(30);
+    Duration::from_secs(secs)
+}
+
+/// The ordered `(keysym, down)` pairs `App::send_vnc_key` should
+/// actually send for one logical key event, bracketed with `Control_L`/
+/// `Alt_L`/`Super_L` down/up for whichever of `mods` are held --
+/// `fenix_vnc::keysym::keysym_for` deliberately leaves that wrapping to
+/// the caller (see that module's own doc comment), since this app's
+/// `KeyPress` model bundles a held modifier onto the "real" key rather
+/// than reporting the modifier key's own press/release as a separate
+/// event. Without this, only the bare key ever reached the guest --
+/// Ctrl-C, Ctrl-Alt-F2, Alt-Tab *inside the guest*, none of it worked,
+/// only what typing the same key unmodified would've produced.
+///
+/// Modifiers go down before, and up after, the real key (down before on
+/// press, up after on release) -- correct for the common case of one
+/// modified key at a time. Holding two non-modifier keys under the same
+/// modifier simultaneously (e.g. Ctrl held while `a` and `b` are both
+/// down) can release that modifier a little early, right when the first
+/// of the two is released, even if the physical modifier key is still
+/// held for the second -- an inherent gap in this model (no standalone
+/// modifier-key events exist to bracket around instead), not something
+/// this per-keystroke bracketing can fully close. A plain function
+/// (not a method) so this ordering is unit-testable without a live
+/// `VncClient` connection.
+fn vnc_key_sequence(keysym: u32, mods: Mods, down: bool) -> Vec<(u32, bool)> {
+    let modifiers =
+        [(mods.ctrl, fenix_vnc::keysym::CONTROL_L), (mods.alt, fenix_vnc::keysym::ALT_L), (mods.super_, fenix_vnc::keysym::SUPER_L)];
+    let mut sequence = Vec::new();
+    if down {
+        sequence.extend(modifiers.into_iter().filter(|(held, _)| *held).map(|(_, sym)| (sym, true)));
+        sequence.push((keysym, true));
+    } else {
+        sequence.push((keysym, false));
+        sequence.extend(modifiers.into_iter().filter(|(held, _)| *held).map(|(_, sym)| (sym, false)));
+    }
+    sequence
+}
+
+/// What pressed key at the armed `quit_confirm` prompt resolves to --
+/// same "wait for exactly one more raw key" shape as `GitConfirmAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitConfirmAction {
+    Quit,
+    ShowDirtyBuffers,
+    Cancel,
+}
+
 impl App {
     /// `proxy` is what lets background threads (the Docker panel's
     /// stats poller/log follower, Phases 5-6) wake the main event loop
@@ -3380,6 +3606,7 @@ impl App {
             text: None,
             bg_rect: None,
             caret_rect: None,
+            vnc_pipeline: None,
             buffers,
             workspaces,
             line_number_mode: LineNumberMode::Absolute,
@@ -3424,6 +3651,9 @@ impl App {
             jira_lines: HashMap::new(),
             jira_prompt: None,
             jira_session: None,
+            vnc_sessions: HashMap::new(),
+            vnc_focused: None,
+            vnc_connecting: HashSet::new(),
             jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -4014,12 +4244,46 @@ impl App {
         self.wake_caret();
     }
 
-    /// Whether any open buffer has unsaved changes -- extends the
-    /// modeline's existing single-buffer `[+]` marker (`ob.buffer.
-    /// is_dirty()`) across every open buffer, not just the focused one.
-    /// `request_quit`'s own check.
+    /// Every open buffer whose kind can actually hold savable content
+    /// (`BufferKind::tracks_unsaved_changes`) and is currently dirty,
+    /// in `ids_sorted_by_path()` order. Single source of truth for
+    /// "what would `:qa` warn about" -- generated, pathless views like
+    /// the Jira/Docker/Git panels or the startup dashboard are never
+    /// savable in the first place (`App::save` refuses them outright),
+    /// so their `is_dirty()` -- which the host itself sets every time
+    /// it re-renders them -- would otherwise falsely and permanently
+    /// count as "unsaved work."
+    fn dirty_tracked_buffer_ids(&self) -> Vec<BufferId> {
+        self.buffers
+            .ids_sorted_by_path()
+            .into_iter()
+            .filter(|&id| self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty()))
+            .collect()
+    }
+
+    /// Whether any buffer has unsaved changes worth warning about --
+    /// extends the modeline's existing single-buffer `[+]` marker
+    /// across every open buffer. `request_quit`'s own check.
     fn any_buffer_dirty(&self) -> bool {
-        self.buffers.ids_sorted_by_path().iter().any(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
+        !self.dirty_tracked_buffer_ids().is_empty()
+    }
+
+    /// Up to this many dirty buffer names are listed by name in the
+    /// quit-confirm message before falling back to "(+N more)".
+    const QUIT_CONFIRM_NAME_CAP: usize = 4;
+
+    /// Builds the "N unsaved buffers: a, b, c -- quit anyway?" message
+    /// for `dirty`, naming buffers via `buffer_display_name` (the same
+    /// path/`*dashboard*`/`*docker*`/etc. fallback the modeline already
+    /// uses) so the user knows exactly what `:qa`/`SPC q q` is
+    /// blocking on, not just how many.
+    fn format_quit_confirm_message(&self, dirty: &[BufferId]) -> String {
+        let count = dirty.len();
+        let plural = if count == 1 { "" } else { "s" };
+        let names: Vec<String> = dirty.iter().take(Self::QUIT_CONFIRM_NAME_CAP).map(|&id| self.buffer_display_name(id)).collect();
+        let more = count.saturating_sub(Self::QUIT_CONFIRM_NAME_CAP);
+        let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+        format!("{count} unsaved buffer{plural}: {}{suffix} -- quit anyway? (y=yes / n=no / l=list)", names.join(", "))
     }
 
     /// The event-loop-independent half of `request_quit`: arms `quit_
@@ -4031,51 +4295,106 @@ impl App {
     /// `test_dispatch_key`'s own doc comment for the same limitation
     /// elsewhere in this file).
     fn arm_quit_confirm_if_dirty(&mut self) -> bool {
-        if !self.any_buffer_dirty() {
+        let dirty = self.dirty_tracked_buffer_ids();
+        if dirty.is_empty() {
             return false;
         }
         self.quit_confirm = true;
-        let count = self
-            .buffers
-            .ids_sorted_by_path()
-            .iter()
-            .filter(|&&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
-            .count();
-        let plural = if count == 1 { "" } else { "s" };
-        self.set_error(format!("{count} unsaved buffer{plural} -- quit anyway? (y/n)"));
+        self.set_error(self.format_quit_confirm_message(&dirty));
         true
     }
 
-    /// `:q`/`SPC q q`/the window's close button (`app.quit`) -- exits
-    /// immediately if every buffer is saved, otherwise arms `quit_
-    /// confirm` and shows a message instead of exiting, so an accidental
-    /// (or just habitual, forgetting there's unsaved work) `:q` can't
-    /// silently discard it. `:q!`/`app.quit_force` bypasses this
-    /// entirely (`commands::cmd_quit_force`) -- real Vim's own `!`
-    /// convention for "yes, I know, do it anyway."
+    /// `:qa`/`:quitall`/`SPC q q`/the window's close button
+    /// (`app.quit`) -- exits immediately if every buffer is saved,
+    /// otherwise arms `quit_confirm` and shows a message instead of
+    /// exiting, so an accidental (or just habitual, forgetting there's
+    /// unsaved work) quit can't silently discard it. `:qa!`/`app.
+    /// quit_force` bypasses this entirely (`commands::cmd_quit_force`)
+    /// -- real Vim's own `!` convention for "yes, I know, do it
+    /// anyway." Note this is no longer reachable from a bare `:q`/
+    /// `SPC b k` -- those only close the focused buffer now, see
+    /// `App::kill_buffer`.
     pub(crate) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
         if !self.arm_quit_confirm_if_dirty() {
             event_loop.exit();
         }
     }
 
+    /// Saves every dirty, tracked (`BufferKind::tracks_unsaved_
+    /// changes`) buffer that has a path. Refuses the whole operation
+    /// up front -- no partial saves -- if any such buffer has no path
+    /// (nothing to `:w` to yet), naming which one(s) need `:w <path>`
+    /// first. Returns whether it's now safe to quit; callers must not
+    /// quit on `false`, an error has already been set.
+    fn save_all(&mut self) -> bool {
+        let dirty = self.dirty_tracked_buffer_ids();
+        let unnamed: Vec<BufferId> = dirty.iter().copied().filter(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.path().is_none())).collect();
+        if !unnamed.is_empty() {
+            let names: Vec<String> = unnamed.iter().map(|&id| self.buffer_display_name(id)).collect();
+            self.set_error(format!("no file name for {} -- use :w <path> first", names.join(", ")));
+            return false;
+        }
+        for id in dirty {
+            let name = self.buffer_display_name(id);
+            let Some(ob) = self.buffers.get_mut(id) else { continue };
+            if let Err(err) = ob.buffer.save() {
+                self.set_error(format!("save failed for {name}: {err}"));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `:wqa`/`:xa` -- saves every unsaved, savable buffer, then quits
+    /// unconditionally. Deliberately bypasses the `quit_confirm` y/n
+    /// prompt entirely: once `save_all` returns `true` there is by
+    /// definition nothing left dirty to warn about, mirroring real
+    /// Vim's own `:wqa`, which either succeeds outright or errors, but
+    /// never prompts.
+    pub(crate) fn request_save_all_and_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.save_all() {
+            event_loop.exit();
+        }
+    }
+
     /// The event-loop-independent half of `quit_confirm_key`: clears
-    /// `quit_confirm` and reports whether the pressed key confirmed
-    /// (`y`) or cancelled (anything else). Split out for the same
-    /// testability reason as `arm_quit_confirm_if_dirty`.
-    fn resolve_quit_confirm(&mut self, keypress: KeyPress) -> bool {
+    /// `quit_confirm` and reports what the pressed key resolved to --
+    /// `y` confirms, `l` asks to see the offending buffers (chosen to
+    /// not collide with `y`/`n`), anything else cancels. Split out for
+    /// the same testability reason as `arm_quit_confirm_if_dirty`.
+    fn resolve_quit_confirm_action(&mut self, keypress: KeyPress) -> QuitConfirmAction {
         self.quit_confirm = false;
-        keypress.code == KeyCode::Char('y')
+        match keypress.code {
+            KeyCode::Char('y') => QuitConfirmAction::Quit,
+            KeyCode::Char('l') => QuitConfirmAction::ShowDirtyBuffers,
+            _ => QuitConfirmAction::Cancel,
+        }
     }
 
     /// Resolves an armed `quit_confirm` -- `y` quits unconditionally
-    /// (same as `:q!`), anything else cancels. Same "captures the very
+    /// (same as `:qa!`), `l` opens the buffer picker filtered to just
+    /// the dirty buffers so the user can jump to and save them instead
+    /// of guessing, anything else cancels. Same "captures the very
     /// next key" shape as `docker_confirm_key`/`git_confirm_key`.
     fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
-        if self.resolve_quit_confirm(keypress) {
-            event_loop.exit();
+        match self.resolve_quit_confirm_action(keypress) {
+            QuitConfirmAction::Quit => event_loop.exit(),
+            QuitConfirmAction::ShowDirtyBuffers => self.picker_switch_dirty_buffers(),
+            QuitConfirmAction::Cancel => {}
         }
         self.wake_caret();
+    }
+
+    /// `l` at the `quit_confirm` prompt -- the same `SPC b b` picker
+    /// machinery as `picker_switch_buffer`, restricted to just the
+    /// buffers blocking `:qa`/`SPC q q`.
+    fn picker_switch_dirty_buffers(&mut self) {
+        let candidates = self
+            .dirty_tracked_buffer_ids()
+            .into_iter()
+            .map(|id| fenix_picker::Candidate::new(format!("+ {}", self.buffer_display_name(id)), id))
+            .collect();
+        self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Directory the explorer opens in when asked to "start somewhere
@@ -4359,6 +4678,391 @@ impl App {
         let Some(state) = self.terminal.as_mut() else { return };
         state.session.process(&bytes);
         self.wake_caret();
+    }
+
+    /// `SPC v v`: opens (or, if already open, switches straight to) the
+    /// named VM's VNC console. Connects lazily -- the first selection of
+    /// a given name is what actually dials it; every later selection
+    /// just switches workspace/focus, since the session stays live in
+    /// the background once opened (this feature's own "each VM stays
+    /// connected" decision). Backgrounds the connect itself (mirrors
+    /// `toggle_terminal`'s own reasoning: a slow/unreachable host would
+    /// otherwise freeze the whole editor for as long as the handshake
+    /// takes).
+    pub(crate) fn open_vnc_session(&mut self, name: &str) {
+        if let Some(session) = self.vnc_sessions.get(name) {
+            let (workspace_index, pane) = (session.workspace_index, session.pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.sync_vnc_focus();
+            self.wake_caret();
+            return;
+        }
+        if self.vnc_connecting.contains(name) {
+            return; // already dialing this one -- SPC v v pressed twice in a row
+        }
+        let Some((_, host, port)) = self.config.vnc_hosts.iter().find(|(n, _, _)| n == name).cloned() else {
+            self.set_error(format!("no VNC host configured named {name}"));
+            return;
+        };
+        self.vnc_connecting.insert(name.to_string());
+        self.start_vnc_connect(name.to_string(), host, port);
+        self.set_message(format!("Connecting to {name}..."));
+        self.wake_caret();
+    }
+
+    /// `SPC v v`: a fuzzy picker over every configured VNC host name --
+    /// confirming calls `open_vnc_session`, same "one candidate list,
+    /// one picker variant" shape as `picker_pick_theme`.
+    pub(crate) fn start_vnc_picker(&mut self) {
+        let candidates = self.config.vnc_hosts.iter().map(|(name, _, _)| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
+        self.enter_picker(ActivePicker::VncHost(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The actual background-thread connect, shared by the first connect
+    /// (`open_vnc_session`) and every later reconnect attempt
+    /// (`schedule_vnc_reconnect`) -- both just need "dial this host:port,
+    /// report back via the same `FenixUserEvent::VncConnected`."
+    fn start_vnc_connect(&mut self, name: String, host: String, port: u16) {
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = fenix_vnc::VncClient::connect(&host, port);
+                    let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // run synchronously, same posture as `toggle_terminal`'s
+                // own `None` branch.
+                let result = fenix_vnc::VncClient::connect(&host, port);
+                self.apply_vnc_connected(name, host, port, result);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::VncConnected` handling -- covers both a brand
+    /// new session (nothing in `vnc_sessions` for `name` yet) and a
+    /// reconnect attempt after a `Disconnected` frame (the session, and
+    /// its pane/buffer/workspace, are kept alive across the gap -- see
+    /// `VncSession`'s own doc comment on field drop order). A failed
+    /// *first* connect just reports the error, no auto-retry -- retrying
+    /// forever against e.g. a typo'd hostname would be pure noise. A
+    /// failed *reconnect* backs off and tries again up to `MAX_VNC_
+    /// RECONNECT_ATTEMPTS` times before giving up and leaving the pane
+    /// showing its last-known frame, reopenable manually.
+    fn apply_vnc_connected(&mut self, name: String, host: String, port: u16, result: std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>) {
+        self.vnc_connecting.remove(&name);
+        if self.vnc_sessions.contains_key(&name) {
+            match result {
+                Ok((client, receiver)) => {
+                    let reader =
+                        self.event_proxy.clone().map(|proxy| VncReader::spawn(receiver, name.clone(), move |event| proxy.send_event(event).is_ok()));
+                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                        session.client = client;
+                        session.reader = reader;
+                        session.reconnect_attempts = 0;
+                    }
+                    self.set_message(format!("VNC {name} reconnected"));
+                }
+                Err(err) => {
+                    let attempts = self.vnc_sessions.get(&name).map_or(0, |s| s.reconnect_attempts) + 1;
+                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                        session.reconnect_attempts = attempts;
+                    }
+                    if attempts >= MAX_VNC_RECONNECT_ATTEMPTS {
+                        self.set_error(format!("VNC {name}: reconnect failed after {attempts} attempts ({err}) -- giving up; reopen manually with SPC v v"));
+                    } else {
+                        self.set_error(format!("VNC {name}: reconnect failed ({err}); retrying..."));
+                        self.schedule_vnc_reconnect(name, host, port, attempts);
+                    }
+                }
+            }
+            self.wake_caret();
+            return;
+        }
+
+        match result {
+            Ok((client, receiver)) => {
+                let buffer = self.buffers.open_vnc();
+                let cursor = Cursor::at_start();
+                self.workspaces.new_workspace(buffer, cursor);
+                let workspace_index = self.workspaces.active_index();
+                let pane = self.focused_pane_id();
+                self.pane_titles.insert(pane, format!("VNC: {name}"));
+                let reader =
+                    self.event_proxy.clone().map(|proxy| VncReader::spawn(receiver, name.clone(), move |event| proxy.send_event(event).is_ok()));
+                self.vnc_sessions.insert(
+                    name,
+                    VncSession {
+                        client,
+                        reader,
+                        workspace_index,
+                        pane,
+                        buffer,
+                        host,
+                        port,
+                        framebuffer: Vec::new(),
+                        fb_width: 0,
+                        fb_height: 0,
+                        texture: None,
+                        pointer_buttons: 0,
+                        reconnect_attempts: 0,
+                    },
+                );
+                self.sync_vnc_focus();
+            }
+            Err(err) => {
+                self.set_error(format!("couldn't connect to {name}: {err}"));
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// Backs off, then retries a dropped VNC connection -- spawned on its
+    /// own one-shot thread (a plain `std::thread::sleep` there costs
+    /// nothing real, unlike blocking the main thread would) that sleeps
+    /// for `vnc_reconnect_delay(attempts)` and then runs the exact same
+    /// connect `start_vnc_connect` does. A no-op without a real
+    /// `event_proxy` (every test) -- there's nothing to retry against in
+    /// a headless test anyway.
+    fn schedule_vnc_reconnect(&mut self, name: String, host: String, port: u16, attempts: u32) {
+        let Some(proxy) = self.event_proxy.clone() else { return };
+        let delay = vnc_reconnect_delay(attempts);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let result = fenix_vnc::VncClient::connect(&host, port);
+            let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+        });
+    }
+
+    /// `SPC v q`: closes whichever VNC session owns the currently focused
+    /// pane/buffer, if any -- unlike `docker.close`/`git.close`/`jira.
+    /// close` (which always mean "the one session," since only one of
+    /// each ever exists at a time), this needs its own "which one" scan
+    /// since several VNC sessions can be open at once.
+    pub(crate) fn vnc_close_focused_session(&mut self) {
+        let Some(key) = self.vnc_session_key_for_buffer(self.focused_buffer_id()) else {
+            self.set_error("no VNC session focused");
+            return;
+        };
+        self.vnc_session_close(&key);
+    }
+
+    /// Tears down one VNC session: drops the connection (closing the
+    /// socket, per `fenix_vnc::VncClient`'s own `Drop`), closes its
+    /// buffer, clears its pane title, and removes its workspace --
+    /// mirrors `docker_session_close`/`jira_session_close` exactly,
+    /// generalized to look the session up by name instead of assuming
+    /// there's only one.
+    pub(crate) fn vnc_session_close(&mut self, name: &str) {
+        let Some(session) = self.vnc_sessions.remove(name) else { return };
+        if self.vnc_focused.as_deref() == Some(name) {
+            self.set_vnc_focused(None);
+        }
+        self.buffers.close(session.buffer);
+        self.pane_titles.remove(&session.pane);
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Finds whichever VNC session (if any) owns `id` as its pane's
+    /// buffer -- a linear scan over at most a handful of sessions, not a
+    /// real cost; needed because sessions are keyed by name, not by
+    /// buffer, unlike Docker/Git/Jira's flat per-session buffer-id lists.
+    fn vnc_session_key_for_buffer(&self, id: BufferId) -> Option<String> {
+        self.vnc_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
+    }
+
+    /// Same as `vnc_session_key_for_buffer`, keyed by pane instead --
+    /// used by mouse-hit-testing, which resolves a click to a pane, not
+    /// directly to a buffer.
+    fn vnc_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<String> {
+        self.vnc_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
+    }
+
+    /// Recomputes `vnc_focused` from whichever pane is actually focused
+    /// right now -- called after every focus-changing action (opening a
+    /// session, pane navigation, a click) instead of trying to intercept
+    /// every such call site individually. Also throttles every *other*
+    /// open session down to `IDLE_REFRESH_MILLIS` and the newly-focused
+    /// one (if any) back up to full rate -- see `fenix_vnc::VncClient::
+    /// set_active`'s own doc comment for why this is safe to do on every
+    /// focus change rather than only on a real visibility transition.
+    fn sync_vnc_focus(&mut self) {
+        let focused_key = self.vnc_session_key_for_buffer(self.focused_buffer_id());
+        let newly_focused = focused_key.is_some() && focused_key != self.vnc_focused;
+        self.set_vnc_focused(focused_key.clone());
+        for (key, session) in self.vnc_sessions.iter() {
+            session.client.set_active(Some(key) == focused_key.as_ref());
+        }
+        // Mirror the local clipboard to the VM on genuinely *becoming*
+        // focused (not on every call -- most calls here are just
+        // reconfirming the same pane) -- simpler than intercepting `p`/
+        // `P` inside a focused VNC pane to inject a paste keystroke
+        // sequence, which would invent a keybinding meaning that only
+        // exists inside a VNC pane. The guest's own paste keystroke
+        // (typed normally) then just forwards as an ordinary keysym.
+        if newly_focused {
+            if let Some((key, text)) = focused_key.clone().zip(self.clipboard.as_mut().and_then(|c| c.get_text().ok())) {
+                if let Some(session) = self.vnc_sessions.get(&key) {
+                    session.client.send_clipboard(text);
+                }
+            }
+        }
+    }
+
+    /// The one place `vnc_focused` is actually written -- besides the
+    /// field itself, keeps the OS cursor grab in sync with input capture:
+    /// confined to the window while some VNC session has it, released
+    /// the moment it doesn't. Keyboard capture (`vnc_focused`) already
+    /// means every keystroke goes straight to the guest instead of vim's
+    /// own dispatch; without also confining the pointer, a drag started
+    /// inside a VNC pane can wander onto another window or monitor
+    /// mid-gesture and strand a mouse button held down in the guest.
+    /// `Confined`, not `Locked`: pointer forwarding (`handle_vnc_pointer_
+    /// move`) maps the cursor's real *absolute* window-local position
+    /// onto the framebuffer, which needs the actual cursor position, not
+    /// `Locked`'s relative-motion-from-center scheme. Best-effort -- not
+    /// every platform/backend supports grabbing at all (see `CursorGrab
+    /// Mode::Confined`'s own platform notes), and a failure here isn't
+    /// fatal to using the app, just to this one convenience.
+    fn set_vnc_focused(&mut self, key: Option<String>) {
+        if key == self.vnc_focused {
+            return;
+        }
+        self.vnc_focused = key;
+        if let Some(window) = &self.window {
+            let mode = if self.vnc_focused.is_some() { CursorGrabMode::Confined } else { CursorGrabMode::None };
+            let _ = window.set_cursor_grab(mode);
+        }
+    }
+
+    /// Sends one key event (down or up) to the named VNC session, mapped
+    /// through `fenix_vnc::keysym::keysym_for` -- `None` for a key with
+    /// no keysym mapping (silently dropped, same posture `encode_
+    /// terminal_key`'s own `None` case already has). The actual sequence
+    /// of keysyms this turns into (bracketed with any held modifiers) is
+    /// `vnc_key_sequence`'s own job -- split out as a plain function so
+    /// that ordering is unit-testable without a live `VncClient`
+    /// connection.
+    fn send_vnc_key(&mut self, key: &str, keypress: KeyPress, down: bool) {
+        let Some(keysym) = fenix_vnc::keysym::keysym_for(keypress) else { return };
+        let Some(session) = self.vnc_sessions.get(key) else { return };
+        for (sym, sym_down) in vnc_key_sequence(keysym, keypress.mods, down) {
+            session.client.send_key(sym, sym_down);
+        }
+    }
+
+    /// `FenixUserEvent::VncFrame` handling -- decodes/applies one update
+    /// from a session's background reader thread. A no-op if the named
+    /// session's since been closed (a stray frame from an already-
+    /// superseded/closed connection, same "arrived after the fact"
+    /// reasoning `apply_terminal_output` doesn't need but `GitMainReady`/
+    /// `GitRefreshReady` do).
+    fn apply_vnc_frame(&mut self, key: String, frame: fenix_vnc::VncFrame) {
+        match frame {
+            fenix_vnc::VncFrame::Resolution { width, height } => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                session.fb_width = width;
+                session.fb_height = height;
+                session.framebuffer = vec![0u8; width as usize * height as usize * 4];
+                // Recreated lazily next redraw, once the new size is
+                // known and (if not already) a real GPU exists.
+                session.texture = None;
+            }
+            fenix_vnc::VncFrame::Rect { x, y, width, height, bgra } => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                fenix_vnc::framebuffer::blit_rect(&mut session.framebuffer, session.fb_width, session.fb_height, x, y, width, height, &bgra);
+                if let (Some(gpu), Some(pipeline), Some(texture)) = (&self.gpu, &self.vnc_pipeline, &session.texture) {
+                    pipeline.upload_rect(gpu, texture, x as u32, y as u32, width as u32, height as u32, &bgra);
+                }
+                // Else: the texture doesn't exist yet (no GPU, or this is
+                // the first rect after a resolution change) -- `redraw`
+                // creates it and uploads the *whole* framebuffer once,
+                // which already covers this rect.
+            }
+            fenix_vnc::VncFrame::Copy { dst, src } => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                let (dst_x, dst_y, w, h) = dst;
+                let (src_x, src_y, _, _) = src;
+                if session.fb_width == 0 {
+                    return;
+                }
+                // Extract the source rect into a scratch buffer first --
+                // `session.framebuffer` can't be borrowed as both the
+                // copy source and destination at once, and the two
+                // rects can legitimately overlap (e.g. scrolling
+                // content down by a few rows within the same region).
+                let stride = session.fb_width as usize * 4;
+                let mut scratch = vec![0u8; w as usize * h as usize * 4];
+                for row in 0..h as usize {
+                    let src_off = (src_y as usize + row) * stride + src_x as usize * 4;
+                    let dst_off = row * w as usize * 4;
+                    if let Some(row_bytes) = session.framebuffer.get(src_off..src_off + w as usize * 4) {
+                        scratch[dst_off..dst_off + w as usize * 4].copy_from_slice(row_bytes);
+                    }
+                }
+                fenix_vnc::framebuffer::blit_rect(&mut session.framebuffer, session.fb_width, session.fb_height, dst_x, dst_y, w, h, &scratch);
+                if let (Some(gpu), Some(pipeline), Some(texture)) = (&self.gpu, &self.vnc_pipeline, &session.texture) {
+                    pipeline.upload_rect(gpu, texture, dst_x as u32, dst_y as u32, w as u32, h as u32, &scratch);
+                }
+            }
+            fenix_vnc::VncFrame::ClipboardText(text) => {
+                if let Some(clipboard) = &mut self.clipboard {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+            fenix_vnc::VncFrame::Bell => {}
+            fenix_vnc::VncFrame::Disconnected(reason) => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                session.reader = None;
+                let (host, port) = (session.host.clone(), session.port);
+                self.set_error(format!("VNC {key} disconnected: {reason} -- reconnecting..."));
+                self.schedule_vnc_reconnect(key, host, port, 0);
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC v s`: writes the focused VNC session's current framebuffer to
+    /// a timestamped PNG next to the project root (or the process's cwd,
+    /// same fallback `explorer_start_dir` already uses) -- a cheap extra
+    /// once the CPU-side `framebuffer` already exists for every session
+    /// regardless (see `VncSession::framebuffer`'s own doc comment).
+    pub(crate) fn vnc_screenshot(&mut self) {
+        let Some(key) = self.vnc_session_key_for_buffer(self.focused_buffer_id()) else {
+            self.set_error("no VNC session focused");
+            return;
+        };
+        let Some(session) = self.vnc_sessions.get(&key) else { return };
+        if session.fb_width == 0 || session.fb_height == 0 {
+            self.set_error(format!("VNC {key}: no frame to save yet"));
+            return;
+        }
+        let Some(image_buffer) =
+            image::RgbaImage::from_fn(session.fb_width as u32, session.fb_height as u32, |x, y| {
+                let i = (y as usize * session.fb_width as usize + x as usize) * 4;
+                let b = session.framebuffer[i];
+                let g = session.framebuffer[i + 1];
+                let r = session.framebuffer[i + 2];
+                let a = session.framebuffer[i + 3];
+                image::Rgba([r, g, b, a])
+            })
+            .into()
+        else {
+            self.set_error(format!("VNC {key}: couldn't build the screenshot image"));
+            return;
+        };
+        let dir = self.explorer_start_dir();
+        let filename = format!("vnc-{key}-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let path = dir.join(filename);
+        match image::DynamicImage::ImageRgba8(image_buffer).save(&path) {
+            Ok(()) => self.set_message(format!("saved {}", path.display())),
+            Err(err) => self.set_error(format!("couldn't save screenshot: {err}")),
+        }
     }
 
     /// Encodes `keypress` and writes it to the live terminal session, if
@@ -5575,7 +6279,7 @@ impl App {
     fn project_replace_cancel(&mut self) {
         let Some(session) = self.project_replace.take() else { return };
         self.project_replace_lines.remove(&session.buffer_id);
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// Writes every `included` entry's replacement -- an already-open
@@ -5640,7 +6344,7 @@ impl App {
         self.set_message(format!(
             "applied {total_replacements} replacement(s) across {files_changed} file(s) ({left_dirty} already open, not yet saved)"
         ));
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
@@ -5655,7 +6359,7 @@ impl App {
             .map(|&id| {
                 let ob = self.buffers.get(id).expect("mru only lists open buffers");
                 let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
-                let marker = if ob.buffer.is_dirty() { "+ " } else { "" };
+                let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
                 fenix_picker::Candidate::new(format!("{marker}{name}"), id)
             })
             .collect();
@@ -5718,15 +6422,22 @@ impl App {
         self.cycle_buffer(-1);
     }
 
-    /// `SPC b k`: closes the focused buffer. Any pane (in this window
+    /// The unconditional half of buffer-closing: closes the focused
+    /// buffer no matter what state it's in. Any pane (in this window
     /// tree) currently showing it falls back to the MRU-next open buffer,
     /// or a fresh scratch buffer if none remain -- never leaves a pane
-    /// pointing at a closed `BufferId`. Closing one of the Docker
-    /// session's six buffers this way really means "close the whole
+    /// pointing at a closed `BufferId`. Closing one of the Docker/Git/
+    /// Jira sessions' buffers this way really means "close the whole
     /// session" (they share live background state, not just a buffer
-    /// slot) -- routed to `docker_session_close` instead of the ordinary
-    /// single-buffer path below.
-    pub(crate) fn kill_buffer(&mut self) {
+    /// slot) -- routed to `docker_session_close`/`git_session_close`/
+    /// `jira_session_close` instead of the ordinary single-buffer path
+    /// below. Used directly (bypassing `kill_buffer`'s dirty guard) by
+    /// callers that are cancelling a generated review buffer
+    /// (`project_replace_cancel` and its apply-flow counterpart) or
+    /// have just deleted the buffer's file on purpose
+    /// (`apply_delete_file`) -- none of those are the user-facing
+    /// "close" action the guard exists for.
+    fn kill_buffer_now(&mut self) {
         let id = self.focused_buffer_id();
         if let Some(session) = &self.docker_session {
             if [
@@ -5759,6 +6470,16 @@ impl App {
                 return;
             }
         }
+        if let Some(session) = &self.jira_session {
+            if [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer].contains(&id) {
+                self.jira_session_close();
+                return;
+            }
+        }
+        if let Some(key) = self.vnc_session_key_for_buffer(id) {
+            self.vnc_session_close(&key);
+            return;
+        }
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -5774,6 +6495,59 @@ impl App {
         self.buffers.touch(fallback);
         self.refresh_project_root();
         self.wake_caret();
+    }
+
+    /// The guarded half both `:q`/`SPC b k` (`force = false`) and `:q!`
+    /// (`force = true`) share. Unlike the app-wide `quit_confirm` y/n
+    /// prompt, there's no ambiguity about *which* buffer a bare `:q`
+    /// means, so an unsaved tracked (`BufferKind::tracks_unsaved_
+    /// changes`) buffer is a hard refusal naming it, not a prompt.
+    /// `force = true` bypasses this entirely -- same "`!` means I know,
+    /// do it anyway" convention as `:qa!`.
+    fn close_focused_buffer(&mut self, force: bool) {
+        let id = self.focused_buffer_id();
+        if !force && self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty()) {
+            let name = self.buffer_display_name(id);
+            self.set_error(format!("{name} has unsaved changes -- use :q! to discard or :wq to save"));
+            return;
+        }
+        self.kill_buffer_now();
+    }
+
+    /// `SPC b k`/`:q`: closes the focused buffer, refusing (with a
+    /// named error) if it has unsaved changes -- never quits the
+    /// application, even if it's the last buffer open (falls back to a
+    /// fresh scratch buffer instead, per `kill_buffer_now`). See
+    /// `App::request_quit`/`app.quit` (`:qa`/`SPC q q`) for quitting.
+    pub(crate) fn kill_buffer(&mut self) {
+        self.close_focused_buffer(false);
+    }
+
+    /// `:q!`: closes the focused buffer unconditionally, discarding any
+    /// unsaved changes.
+    pub(crate) fn force_kill_buffer(&mut self) {
+        self.close_focused_buffer(true);
+    }
+
+    /// `:wq`/`:x`: saves the focused buffer first if it needs it, then
+    /// closes it. Refuses (naming the buffer) if it's dirty but has no
+    /// path to save to yet, rather than silently discarding it or
+    /// silently succeeding without writing anything.
+    pub(crate) fn save_and_close_buffer(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get(id) else { return };
+        if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() {
+            if ob.buffer.path().is_none() {
+                let name = self.buffer_display_name(id);
+                self.set_error(format!("no file name for {name} -- use :w <path> to save before closing"));
+                return;
+            }
+            self.save();
+            if self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()) {
+                return; // save() already reported the failure; refuse to close
+            }
+        }
+        self.kill_buffer_now();
     }
 
     /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
@@ -8155,6 +8929,12 @@ impl App {
                 self.active_picker = None;
                 self.mib_resume_insert(alias);
             }
+            Some(ActivePicker::VncHost(state)) => {
+                let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_vnc_session(&name);
+            }
             Some(ActivePicker::TableColumn(state)) => {
                 let Some(column) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -8411,7 +9191,7 @@ impl App {
             self.set_error(format!("couldn't delete {}: {err}", path.display()));
             return;
         }
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// What to show in place of the modeline while the delete
@@ -9211,6 +9991,8 @@ impl App {
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
+            FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
+            FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -9218,6 +10000,46 @@ impl App {
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        // Caps Lock has no `fenix_keymap::NamedKey` counterpart -- it's
+        // never a meaningful vim/leader keybinding, so `keymap::to_
+        // keypress` filters it out before either branch below would ever
+        // see it. Special-cased here instead, directly against the raw
+        // winit key: forwarded as an ordinary press/release, but only
+        // while a VNC session has input capture, so the guest's own OS
+        // handles the actual lock toggle exactly as it would from a
+        // directly-attached keyboard. Without this, physically toggling
+        // Caps Lock only flips *this* OS's own lock state (which is all
+        // that decides the case winit reports for the next letter typed)
+        // -- the guest never finds out, so the two lock states silently
+        // drift apart the moment they didn't already agree, with no key
+        // that can resync them afterward.
+        if event.logical_key == Key::Named(NamedKey::CapsLock) {
+            if let Some(key) = self.vnc_focused.clone() {
+                if let Some(session) = self.vnc_sessions.get(&key) {
+                    session.client.send_key(fenix_vnc::keysym::CAPS_LOCK, event.state == ElementState::Pressed);
+                }
+            }
+            return;
+        }
+        if event.state == ElementState::Released {
+            // A focused VNC pane is the one place a real key-*up* matters
+            // at all (RFB's `KeyEvent` genuinely distinguishes held keys
+            // -- auto-repeat, drag-select, etc. -- from a synthetic
+            // immediate down-then-up); nothing else in this app has ever
+            // needed release events, so this is intentionally the only
+            // path that looks at `ElementState::Released`, bypassing
+            // `dispatch_keypress`/`route_keypress` entirely (macro
+            // recording/dot-repeat have no meaningful notion of a key
+            // release either).
+            if let Some(key) = self.vnc_focused.clone() {
+                if let Some(keypress) = keymap::to_keypress(event, self.modifiers) {
+                    if keypress != KeyPress::char('\\').with_ctrl() {
+                        self.send_vnc_key(&key, keypress, false);
+                    }
+                }
+            }
+            return;
+        }
         if event.state != ElementState::Pressed {
             return;
         }
@@ -9292,6 +10114,30 @@ impl App {
                 self.terminal_focused = false;
             } else {
                 self.write_terminal_input(keypress);
+            }
+            self.wake_caret();
+            return;
+        }
+
+        // A focused VNC pane owns every key the same way a focused
+        // terminal does (same priority tier, same reserved `Ctrl-\`
+        // release chord) -- see `App::vnc_focused`'s own doc comment.
+        // Key *presses* are handled here; the corresponding key
+        // *releases* are handled earlier, directly in `handle_key`,
+        // since `route_keypress`/`dispatch_keypress` are never reached
+        // for anything but a press (see `handle_key`'s own doc comment).
+        if let Some(key) = self.vnc_focused.clone() {
+            if keypress == KeyPress::char('\\').with_ctrl() {
+                // Releases keyboard capture only -- the VNC pane stays
+                // exactly as focused/visible as it was; a plain click
+                // back into it (or reopening it via `SPC v v`) is what
+                // re-engages capture, not anything automatic here. Not
+                // `sync_vnc_focus()`: that derives `vnc_focused` from
+                // which pane is *focused*, which this doesn't change, so
+                // calling it here would just immediately re-capture.
+                self.set_vnc_focused(None);
+            } else {
+                self.send_vnc_key(&key, keypress, true);
             }
             self.wake_caret();
             return;
@@ -10054,15 +10900,23 @@ impl App {
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
             }
-            VimEvent::RequestQuit => {
+            VimEvent::RequestCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill");
+            }
+            VimEvent::RequestForceCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill_force");
+            }
+            VimEvent::RequestSaveAndCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.save_and_kill");
+            }
+            VimEvent::RequestQuitAll => {
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
             }
-            VimEvent::RequestForceQuit => {
+            VimEvent::RequestForceQuitAll => {
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit_force");
             }
-            VimEvent::RequestSaveAndQuit => {
-                CommandRegistry::with_builtins().run(self, event_loop, "file.save");
-                CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
+            VimEvent::RequestSaveAllAndQuit => {
+                CommandRegistry::with_builtins().run(self, event_loop, "app.save_all_and_quit");
             }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
@@ -10364,6 +11218,8 @@ impl App {
                 "*git*".to_string()
             } else if ob.kind == BufferKind::Jira {
                 "*jira*".to_string()
+            } else if ob.kind == BufferKind::Vnc {
+                "*vnc*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -10387,6 +11243,19 @@ impl App {
         self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
     }
 
+    /// The modeline's mode badge: "VNC" while some session has input
+    /// capture (`vnc_focused`), overriding the vim mode label the same
+    /// way a captured VNC pane already overrides every keystroke (see
+    /// `route_keypress`'s own VNC-focused branch) -- there's no Normal/
+    /// Insert/Visual distinction worth showing while every key goes
+    /// straight to the guest instead of vim's own dispatch.
+    fn mode_badge_label(&self) -> &'static str {
+        if self.vnc_focused.is_some() {
+            return "VNC";
+        }
+        if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() }
+    }
+
     /// (mode label, rest-of-modeline suffix) -- always returns real
     /// content now, even while a capturing prompt (`:command`, `/`
     /// search, a git commit prompt, ...) is active: that text lives in
@@ -10405,9 +11274,7 @@ impl App {
         // already have below.
         if let Some(msg) = &self.status_message {
             if msg.set_at.elapsed() < MESSAGE_DURATION {
-                let mode_label =
-                    if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
-                return (mode_label, format!("│ {} ", msg.text));
+                return (self.mode_badge_label(), format!("│ {} ", msg.text));
             }
         }
         if self.main_view == MainView::Explorer {
@@ -10459,6 +11326,7 @@ impl App {
                 Some(picker @ ActivePicker::MibTmParameter(_)) => ("MIB-PARAM", picker_len(picker)),
                 Some(picker @ ActivePicker::MibCalibration(_)) => ("MIB-CAL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibArgumentAlias(_)) => ("MIB-ARG", picker_len(picker)),
+                Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 None => ("PICKER", 0),
@@ -10467,10 +11335,9 @@ impl App {
         }
         let ob = self.open();
         let filename = self.buffer_display_name(self.focused_buffer_id());
-        let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
+        let modified = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
-        let mode_label =
-            if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
+        let mode_label = self.mode_badge_label();
         // Only shown once there's more than one workspace to distinguish --
         // stays out of the way for the common single-workspace case.
         let workspace_indicator = if self.workspaces.len() > 1 {
@@ -10757,6 +11624,7 @@ impl App {
             || ob.kind == BufferKind::Jira
             || ob.kind == BufferKind::Table
             || ob.kind == BufferKind::SearchReplace
+            || ob.kind == BufferKind::Vnc
         {
             return 0;
         }
@@ -11832,6 +12700,11 @@ impl App {
                 self.windows_mut().focus(id);
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
+                // Clicking a VNC pane both focuses and starts
+                // interacting with it (ordinary desktop convention);
+                // clicking anything else releases capture if some other
+                // VNC session had it.
+                self.sync_vnc_focus();
             }
             None => return,
         }
@@ -11919,7 +12792,23 @@ impl App {
                 }
             }
             ScrollTarget::Pane(pane) => {
-                if pane == self.focused_pane_id() {
+                if let Some(key) = self.vnc_session_key_for_pane(pane) {
+                    // A VNC pane has no text to scroll -- forward the
+                    // wheel as an RFB wheel button (bit 3 = up, bit 4 =
+                    // down) instead, a same-position press-then-release
+                    // pointer event pair, the RFB convention for a wheel
+                    // notch (there's no separate "wheel" message).
+                    let bit = if lines > 0 { 0x08 } else { 0x10 };
+                    if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane).copied() {
+                        if let Some(session) = self.vnc_sessions.get_mut(&key) {
+                            let local = (pos.0 - rect.x, pos.1 - rect.y);
+                            let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), (session.fb_width, session.fb_height));
+                            let held = session.pointer_buttons;
+                            session.client.send_pointer(fb_x, fb_y, held | bit);
+                            session.client.send_pointer(fb_x, fb_y, held);
+                        }
+                    }
+                } else if pane == self.focused_pane_id() {
                     self.scroll_focused_pane(lines);
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
                     // Every pane always renders a title bar (`redraw`'s own
@@ -11932,6 +12821,58 @@ impl App {
             }
         }
         self.wake_caret();
+    }
+
+    /// The pane (if any) at `pos` and its on-screen pixel rect, whether
+    /// or not it's a VNC pane -- the shared lookup `handle_vnc_pointer_
+    /// move`/`handle_vnc_pointer_button` both need before checking
+    /// `vnc_session_key_for_pane`.
+    fn pane_rect_at(&self, pos: (f32, f32)) -> Option<(fenix_window::WindowId, fenix_window::Rect)> {
+        let (window_width, window_height) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))?;
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some(ScrollTarget::Pane(pane)) = hit_test(&geometry, pos) else { return None };
+        geometry.panes.iter().find(|(id, _)| *id == pane).copied()
+    }
+
+    /// Forwards the current cursor position to whichever VNC session (if
+    /// any) is under it, resending its currently-held button mask along
+    /// with the new position -- RFB's pointer message is stateful, not
+    /// delta-based (see `fenix_vnc::VncClient::send_pointer`'s own doc
+    /// comment). A no-op when the cursor isn't over a VNC pane at all,
+    /// so this costs nothing on every ordinary editing mouse-move.
+    fn handle_vnc_pointer_move(&mut self, pos: (f32, f32)) {
+        let Some((pane, rect)) = self.pane_rect_at(pos) else { return };
+        let Some(key) = self.vnc_session_key_for_pane(pane) else { return };
+        let Some(session) = self.vnc_sessions.get(&key) else { return };
+        let local = (pos.0 - rect.x, pos.1 - rect.y);
+        let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), (session.fb_width, session.fb_height));
+        session.client.send_pointer(fb_x, fb_y, session.pointer_buttons);
+    }
+
+    /// Forwards a mouse button transition to whichever VNC session (if
+    /// any) is under `pos` -- updates that session's held-button mask
+    /// and resends the full mask, same reasoning as `handle_vnc_pointer_
+    /// move`. A no-op for anything not a VNC pane, and for any button
+    /// besides Left/Middle/Right (nothing else maps to an RFB bit).
+    fn handle_vnc_pointer_button(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) {
+        let Some((pane, rect)) = self.pane_rect_at(pos) else { return };
+        let Some(key) = self.vnc_session_key_for_pane(pane) else { return };
+        let bit = match button {
+            MouseButton::Left => 0x01,
+            MouseButton::Middle => 0x02,
+            MouseButton::Right => 0x04,
+            _ => return,
+        };
+        let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+        if pressed {
+            session.pointer_buttons |= bit;
+        } else {
+            session.pointer_buttons &= !bit;
+        }
+        let local = (pos.0 - rect.x, pos.1 - rect.y);
+        let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), (session.fb_width, session.fb_height));
+        session.client.send_pointer(fb_x, fb_y, session.pointer_buttons);
     }
 
     fn redraw(&mut self) {
@@ -12051,6 +12992,12 @@ impl App {
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
+        // Every pane this frame whose buffer is `BufferKind::Vnc`, with
+        // its on-screen content rect -- drawn as textured quads once
+        // `gpu`/`vnc_pipeline` are available, well after this CPU-side
+        // prep loop (see this function's own later `vnc_pipeline.draw`
+        // call site).
+        let mut vnc_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -12089,6 +13036,36 @@ impl App {
             let rect = pane_content_rect(rect, line_height, true);
             let is_focused = pane == focused_pane;
             let pane_visible_lines = text::lines_that_fit(rect.h, line_height);
+
+            // A VNC pane's content is a live pixel framebuffer, not
+            // text -- rendered as a separate textured-quad layer (see
+            // `vnc_panes`/`vnc_pipeline.draw`'s call site below, after
+            // `bg_rect`/`text` are available), regardless of whether
+            // this pane is focused (unlike Explorer/Picker, which are
+            // per-`MainView` overlays shown only in the focused pane).
+            // Still gets an ordinary (empty) `PaneRender` so its title
+            // bar renders normally and no other pane-bookkeeping in this
+            // loop needs a special case for it.
+            if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Vnc) {
+                vnc_panes.push((pane, rect));
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    title: pane_title,
+                    spans: Vec::new(),
+                    hl_row: None,
+                    hl_row_strong: false,
+                    marked_rows: Vec::new(),
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
+                    caret: None,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
 
             if is_focused && self.main_view == MainView::Explorer {
                 let rows = pane_visible_lines + 1;
@@ -12342,8 +13319,8 @@ impl App {
         let prompt_popup = self.prompt_popup(window_width, modeline_top);
         let caret_alpha = self.caret_alpha();
 
-        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
-            (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect)
+        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect), Some(vnc_pipeline)) =
+            (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect, &self.vnc_pipeline)
         else {
             return;
         };
@@ -12633,6 +13610,27 @@ impl App {
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
         text.prepare(gpu, theme, &prepare_panes, &title_rects, show_sidebar, show_terminal);
 
+        // Creates each visible VNC session's texture the first time it's
+        // needed (a fresh session, or one whose resolution just changed
+        // -- both leave `texture: None`, see `VncSession::texture`'s own
+        // doc comment), uploading the whole framebuffer once so the
+        // first frame after creation is already complete rather than
+        // waiting for the next several dirty-rect updates to fill it in
+        // piecemeal.
+        for (pane, _) in &vnc_panes {
+            // A direct `self.vnc_sessions` field access, not `self.vnc_
+            // session_key_for_pane(...)` -- that method takes `&self`
+            // for the whole struct, which the borrow checker can't
+            // reconcile with `gpu`/`text`/etc. already being borrowed as
+            // separate field-only bindings above.
+            let Some(session) = self.vnc_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
+            if session.texture.is_none() && session.fb_width > 0 && session.fb_height > 0 {
+                let texture = vnc_pipeline.create_texture(gpu, session.fb_width as u32, session.fb_height as u32);
+                vnc_pipeline.upload_rect(gpu, &texture, 0, 0, session.fb_width as u32, session.fb_height as u32, &session.framebuffer);
+                session.texture = Some(texture);
+            }
+        }
+
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -12675,6 +13673,16 @@ impl App {
                 multiview_mask: None,
             });
             bg_rect.render(&mut pass);
+            // Drawn before `text.render`, not after: a VNC pane's title
+            // bar is still ordinary glyphon text (from the same `text`
+            // pipeline, prepared just above) and needs to stay legible
+            // on top of the video frame, not painted over by it.
+            for (pane, rect) in &vnc_panes {
+                let Some(session) = self.vnc_sessions.values().find(|s| s.pane == *pane) else { continue };
+                if let Some(texture) = &session.texture {
+                    vnc_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
+                }
+            }
             text.render(&mut pass);
         }
         // Popups (background + text) and the caret are drawn in a second,
@@ -12776,12 +13784,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
         text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
+        let vnc_pipeline = VncPipeline::new(&gpu);
 
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);
         self.bg_rect = Some(bg_rect);
         self.caret_rect = Some(caret_rect);
+        self.vnc_pipeline = Some(vnc_pipeline);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -12805,12 +13815,30 @@ impl ApplicationHandler<FenixUserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
+            // Alt-Tabbing (or otherwise switching) away from the window
+            // while a VNC pane has input capture must release it: capture
+            // also confines the OS cursor to this window (`set_vnc_
+            // focused`'s own doc comment), and nothing here would ever
+            // ask the OS to un-confine it on the app's behalf once
+            // another window is in front -- on Windows in particular, a
+            // clip region set via a foreground window doesn't reliably
+            // get torn down just because focus moved elsewhere, which
+            // would otherwise strand the visible cursor at this window's
+            // edge until the user fights their way back into it.
+            WindowEvent::Focused(false) => self.set_vnc_focused(None),
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Some((position.x as f32, position.y as f32));
+                let pos = (position.x as f32, position.y as f32);
+                self.cursor_pos = Some(pos);
+                self.handle_vnc_pointer_move(pos);
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some(pos) = self.cursor_pos {
+                        self.handle_click(pos);
+                    }
+                }
                 if let Some(pos) = self.cursor_pos {
-                    self.handle_click(pos);
+                    self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -17135,7 +18163,8 @@ mod tests {
 
     #[test]
     fn picker_switch_buffer_marks_dirty_buffers() {
-        let mut app = App::with_file(None); // one scratch buffer, untouched
+        let mut app = App::with_file(None); // opens the dashboard, not a plain scratch buffer
+        app.new_scratch_buffer(); // an untouched, genuinely trackable Text buffer
         app.picker_switch_buffer();
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
@@ -17149,6 +18178,22 @@ mod tests {
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "+ *scratch*");
+            }
+            _ => panic!("expected a SwitchBuffer picker"),
+        }
+    }
+
+    #[test]
+    fn picker_switch_buffer_never_marks_a_docker_buffer_dirty() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+        app.picker_switch_buffer();
+        match &app.active_picker {
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                for (_, candidate) in state.visible_rows(0, 10) {
+                    assert!(!candidate.label.starts_with("+ "), "docker buffer wrongly marked dirty: {}", candidate.label);
+                }
             }
             _ => panic!("expected a SwitchBuffer picker"),
         }
@@ -17235,6 +18280,112 @@ mod tests {
         for pane in app.windows().windows() {
             assert_eq!(app.windows().content(pane), Some(&scratch_id));
         }
+    }
+
+    #[test]
+    fn kill_buffer_refuses_with_a_named_error_when_the_focused_text_buffer_is_dirty() {
+        let dir = TempDir::new("kill_buffer_dirty_guard");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.kill_buffer();
+
+        assert!(app.buffers.get(id).is_some(), "the dirty buffer should still be open");
+        assert_eq!(app.focused_buffer_id(), id);
+        assert!(app.modeline_pieces().1.contains("a.txt"));
+        assert!(app.modeline_pieces().1.contains("unsaved changes"));
+    }
+
+    #[test]
+    fn force_kill_buffer_discards_changes_and_closes_anyway() {
+        let dir = TempDir::new("force_kill_buffer");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let scratch_id = app.focused_buffer_id();
+        app.test_open_path(&a);
+        let dirty_id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.force_kill_buffer();
+
+        assert!(app.buffers.get(dirty_id).is_none());
+        assert_eq!(app.focused_buffer_id(), scratch_id);
+    }
+
+    #[test]
+    fn kill_buffer_on_a_dirty_jira_buffer_still_closes_because_jira_is_not_tracked() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        assert_eq!(app.buffers.get(app.focused_buffer_id()).unwrap().kind, BufferKind::Jira);
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+
+        app.kill_buffer();
+
+        assert!(app.jira_session.is_none(), "closing any Jira pane buffer should tear down the whole session");
+    }
+
+    #[test]
+    fn save_and_close_buffer_refuses_when_the_dirty_buffer_has_no_path() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.save_and_close_buffer();
+
+        assert!(app.buffers.get(id).is_some(), "should still be open");
+        assert_eq!(app.focused_buffer_id(), id);
+        assert!(app.modeline_pieces().1.contains(":w <path>"));
+    }
+
+    #[test]
+    fn save_and_close_buffer_saves_then_closes_a_named_dirty_buffer() {
+        let dir = TempDir::new("save_and_close_buffer");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.save_and_close_buffer();
+
+        assert!(app.buffers.get(id).is_none());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "!a");
+    }
+
+    #[test]
+    fn save_all_refuses_up_front_when_any_dirty_text_buffer_has_no_path() {
+        let dir = TempDir::new("save_all_refuses");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let named_id = app.focused_buffer_id();
+        app.test_insert('!');
+        app.new_scratch_buffer();
+        let unnamed_id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        assert!(!app.save_all());
+
+        assert!(app.buffers.get(named_id).unwrap().buffer.is_dirty(), "no partial save should have happened");
+        assert!(app.buffers.get(unnamed_id).unwrap().buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+    }
+
+    #[test]
+    fn save_all_saves_every_dirty_named_buffer() {
+        let dir = TempDir::new("save_all_saves");
+        let a = dir.write("a.txt", "a");
+        let b = dir.write("b.txt", "b");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        app.test_insert('!');
+        app.test_open_path(&b);
+        app.test_insert('!');
+
+        assert!(app.save_all());
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "!a");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "!b");
     }
 
     #[test]
@@ -17367,6 +18518,117 @@ mod tests {
     fn gutter_chars_is_zero_for_a_docker_buffer() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
+        assert_eq!(app.gutter_chars(app.open()), 0);
+    }
+
+    #[test]
+    fn open_vnc_session_on_an_unconfigured_name_errors_and_creates_nothing() {
+        let mut app = App::with_file(None);
+        let sessions_before = app.vnc_sessions.len();
+
+        app.open_vnc_session("no-such-vm");
+
+        assert_eq!(app.vnc_sessions.len(), sessions_before);
+        assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+    }
+
+    #[test]
+    fn modeline_shows_vnc_badge_only_while_input_capture_is_active() {
+        let mut app = App::with_file(None);
+        assert_ne!(app.modeline_pieces().0, "VNC");
+
+        app.set_vnc_focused(Some("build-vm".to_string()));
+        assert_eq!(app.modeline_pieces().0, "VNC");
+
+        app.set_vnc_focused(None);
+        assert_ne!(app.modeline_pieces().0, "VNC");
+    }
+
+    #[test]
+    fn vnc_key_sequence_sends_the_bare_key_alone_with_no_modifiers_held() {
+        assert_eq!(vnc_key_sequence(b'c' as u32, Mods::default(), true), vec![(b'c' as u32, true)]);
+        assert_eq!(vnc_key_sequence(b'c' as u32, Mods::default(), false), vec![(b'c' as u32, false)]);
+    }
+
+    #[test]
+    fn vnc_key_sequence_brackets_ctrl_before_on_press_and_after_on_release() {
+        let mods = Mods { ctrl: true, alt: false, super_: false };
+        assert_eq!(vnc_key_sequence(b'c' as u32, mods, true), vec![(fenix_vnc::keysym::CONTROL_L, true), (b'c' as u32, true)]);
+        assert_eq!(vnc_key_sequence(b'c' as u32, mods, false), vec![(b'c' as u32, false), (fenix_vnc::keysym::CONTROL_L, false)]);
+    }
+
+    #[test]
+    fn vnc_key_sequence_brackets_every_held_modifier() {
+        let mods = Mods { ctrl: true, alt: true, super_: true };
+        assert_eq!(
+            vnc_key_sequence(b'x' as u32, mods, true),
+            vec![
+                (fenix_vnc::keysym::CONTROL_L, true),
+                (fenix_vnc::keysym::ALT_L, true),
+                (fenix_vnc::keysym::SUPER_L, true),
+                (b'x' as u32, true),
+            ]
+        );
+        assert_eq!(
+            vnc_key_sequence(b'x' as u32, mods, false),
+            vec![
+                (b'x' as u32, false),
+                (fenix_vnc::keysym::CONTROL_L, false),
+                (fenix_vnc::keysym::ALT_L, false),
+                (fenix_vnc::keysym::SUPER_L, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn vnc_close_focused_session_errors_when_nothing_is_focused() {
+        let mut app = App::with_file(None);
+        app.vnc_close_focused_session();
+        assert!(app.modeline_pieces().1.contains("no VNC session focused"));
+    }
+
+    #[test]
+    fn start_vnc_picker_lists_every_configured_host_by_name() {
+        let mut app = App::with_file(None);
+        app.config.vnc_hosts = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
+
+        app.start_vnc_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::VncHost(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["build-vm", "test-vm"]);
+            }
+            other => panic!("expected an open VncHost picker, got is_some={}", other.is_some()),
+        }
+        assert_eq!(app.main_view, MainView::Picker);
+    }
+
+    #[test]
+    fn picker_confirm_on_vnc_host_calls_open_vnc_session_and_closes_the_picker() {
+        let mut app = App::with_file(None);
+        // No host actually configured under this name -- confirms the
+        // picker hands off to `open_vnc_session` (which then reports its
+        // own "not configured" error) rather than that this particular
+        // connect attempt succeeds.
+        app.start_vnc_picker();
+        app.active_picker = Some(ActivePicker::VncHost(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new(
+            "ghost-vm".to_string(),
+            "ghost-vm".to_string(),
+        )])));
+
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+    }
+
+    #[test]
+    fn gutter_chars_is_zero_for_a_vnc_buffer() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_vnc();
+        app.switch_focused_to_buffer(id);
         assert_eq!(app.gutter_chars(app.open()), 0);
     }
 
@@ -18842,13 +20104,15 @@ mod tests {
     }
 
     #[test]
-    fn arm_quit_confirm_if_dirty_arms_and_shows_a_message_when_dirty() {
+    fn arm_quit_confirm_if_dirty_arms_and_names_the_buffer_in_the_message() {
         let mut app = App::with_file(None);
         app.new_scratch_buffer();
         app.test_insert('!');
         assert!(app.arm_quit_confirm_if_dirty());
         assert!(app.quit_confirm);
-        assert!(app.modeline_pieces().1.contains("unsaved buffer"));
+        let message = app.modeline_pieces().1;
+        assert!(message.contains("unsaved buffer"));
+        assert!(message.contains("[No Name]"), "should name the dirty buffer, not just count it: {message}");
     }
 
     #[test]
@@ -18859,14 +20123,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_quit_confirm_only_confirms_on_y() {
+    fn arm_quit_confirm_if_dirty_ignores_non_tracked_buffer_kinds() {
+        // A Jira/Docker/Git/Dashboard buffer's `dirty` flag gets set by
+        // the host's own refresh (it has no path so it can never be
+        // saved to clear it again) -- it must never count as "unsaved
+        // work" blocking a quit.
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let id = app.focused_buffer_id();
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+        assert!(app.buffers.get(id).unwrap().buffer.is_dirty());
+        assert_eq!(app.buffers.get(id).unwrap().kind, BufferKind::Docker);
+
+        assert!(!app.any_buffer_dirty());
+        assert!(!app.arm_quit_confirm_if_dirty());
+        assert!(!app.quit_confirm);
+    }
+
+    #[test]
+    fn format_quit_confirm_message_truncates_after_four_names() {
+        let mut app = App::with_file(None);
+        for _ in 0..5 {
+            app.new_scratch_buffer();
+            app.test_insert('!');
+        }
+        let dirty = app.dirty_tracked_buffer_ids();
+        assert_eq!(dirty.len(), 5);
+        let message = app.format_quit_confirm_message(&dirty);
+        assert!(message.starts_with("5 unsaved buffers:"));
+        assert!(message.ends_with("(+1 more) -- quit anyway? (y=yes / n=no / l=list)"), "{message}");
+    }
+
+    #[test]
+    fn resolve_quit_confirm_action_dispatches_on_y_l_and_anything_else() {
         let mut app = App::with_file(None);
         app.quit_confirm = true;
-        assert!(!app.resolve_quit_confirm(KeyPress::char('n')));
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('n')), QuitConfirmAction::Cancel);
         assert!(!app.quit_confirm);
 
         app.quit_confirm = true;
-        assert!(app.resolve_quit_confirm(KeyPress::char('y')));
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('l')), QuitConfirmAction::ShowDirtyBuffers);
+        assert!(!app.quit_confirm);
+
+        app.quit_confirm = true;
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('y')), QuitConfirmAction::Quit);
         assert!(!app.quit_confirm);
     }
 
@@ -20305,10 +21605,11 @@ mod tests {
     }
 
     #[test]
-    fn is_readonly_buffer_kind_covers_docker_git_and_jira_only() {
+    fn is_readonly_buffer_kind_covers_docker_git_jira_and_vnc_only() {
         assert!(is_readonly_buffer_kind(BufferKind::Docker));
         assert!(is_readonly_buffer_kind(BufferKind::Git));
         assert!(is_readonly_buffer_kind(BufferKind::Jira));
+        assert!(is_readonly_buffer_kind(BufferKind::Vnc));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
         assert!(!is_readonly_buffer_kind(BufferKind::Explorer));

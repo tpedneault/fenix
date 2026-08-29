@@ -34,6 +34,7 @@ impl CommandRegistry {
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
         registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
+        registry.register("app.save_all_and_quit", "Save every unsaved buffer, then quit Fenix", cmd_save_all_and_quit);
         registry.register(
             "view.cycle_line_numbers",
             "Cycle the line-number gutter: off, absolute, relative",
@@ -82,6 +83,9 @@ impl CommandRegistry {
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
+        registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
+        registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
+        registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
@@ -108,7 +112,9 @@ impl CommandRegistry {
         registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
-        registry.register("buffer.kill", "Close the focused buffer", cmd_kill_buffer);
+        registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
+        registry.register("buffer.kill_force", "Close the focused buffer immediately, discarding any unsaved changes", cmd_kill_buffer_force);
+        registry.register("buffer.save_and_kill", "Save the focused buffer (if needed) then close it", cmd_save_and_kill_buffer);
         registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);
         registry.register("workspace.new", "Create a new workspace", cmd_new_workspace);
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
@@ -179,6 +185,10 @@ fn cmd_quit(ctx: &mut CommandCtx) {
 
 fn cmd_quit_force(ctx: &mut CommandCtx) {
     ctx.event_loop.exit();
+}
+
+fn cmd_save_all_and_quit(ctx: &mut CommandCtx) {
+    ctx.app.request_save_all_and_quit(ctx.event_loop);
 }
 
 fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
@@ -293,6 +303,18 @@ fn cmd_docker_close(ctx: &mut CommandCtx) {
     ctx.app.docker_session_close();
 }
 
+fn cmd_vnc_open(ctx: &mut CommandCtx) {
+    ctx.app.start_vnc_picker();
+}
+
+fn cmd_vnc_close(ctx: &mut CommandCtx) {
+    ctx.app.vnc_close_focused_session();
+}
+
+fn cmd_vnc_screenshot(ctx: &mut CommandCtx) {
+    ctx.app.vnc_screenshot();
+}
+
 fn cmd_git_open(ctx: &mut CommandCtx) {
     ctx.app.open_git_panel();
 }
@@ -399,6 +421,14 @@ fn cmd_prev_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_kill_buffer(ctx: &mut CommandCtx) {
     ctx.app.kill_buffer();
+}
+
+fn cmd_kill_buffer_force(ctx: &mut CommandCtx) {
+    ctx.app.force_kill_buffer();
+}
+
+fn cmd_save_and_kill_buffer(ctx: &mut CommandCtx) {
+    ctx.app.save_and_close_buffer();
 }
 
 fn cmd_new_scratch_buffer(ctx: &mut CommandCtx) {

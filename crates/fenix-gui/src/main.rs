@@ -14,6 +14,7 @@ mod rect;
 mod tabstops;
 mod text;
 mod theme;
+mod vnc_texture;
 
 use std::path::Path;
 

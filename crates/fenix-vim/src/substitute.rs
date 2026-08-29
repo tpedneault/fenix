@@ -5,9 +5,9 @@ use crate::motion;
 use crate::state::VimEvent;
 
 /// Parses and runs one confirmed `:` command line -- the bare `w`/`q`/
-/// `q!`/`wq`/`x` file/quit commands (unchanged from before this module
-/// existed, except `q!` now raises its own event -- see `VimEvent::
-/// RequestForceQuit`'s own doc comment), `set shiftwidth=N`/`set sw=N`
+/// `q!`/`wq`/`x` buffer-close commands and their whole-app `qa`/
+/// `quitall`/`qa!`/`quitall!`/`wqa`/`xa` counterparts (see `VimEvent`'s
+/// own doc comments for the buffer-vs-app distinction), `set shiftwidth=N`/`set sw=N`
 /// (mutates `indent_width` in place, since this is a plain function
 /// without access to `VimState`'s own field), or a `[range]s/pattern/
 /// replacement/flags` substitute (`last_search`, the most recently
@@ -26,9 +26,12 @@ pub fn run_ex_command(
     let cmd = cmd.trim();
     match cmd {
         "w" => return VimEvent::RequestSave,
-        "q" => return VimEvent::RequestQuit,
-        "q!" => return VimEvent::RequestForceQuit,
-        "wq" | "x" => return VimEvent::RequestSaveAndQuit,
+        "q" => return VimEvent::RequestCloseBuffer,
+        "q!" => return VimEvent::RequestForceCloseBuffer,
+        "wq" | "x" => return VimEvent::RequestSaveAndCloseBuffer,
+        "qa" | "quitall" => return VimEvent::RequestQuitAll,
+        "qa!" | "quitall!" => return VimEvent::RequestForceQuitAll,
+        "wqa" | "xa" => return VimEvent::RequestSaveAllAndQuit,
         _ => {}
     }
 
@@ -354,13 +357,24 @@ mod tests {
     }
 
     #[test]
-    fn w_q_wq_x_are_unchanged() {
+    fn w_q_wq_x_close_the_buffer_not_the_app() {
         let (mut b, mut c) = cmd("hi");
         assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4, None), VimEvent::RequestSave);
-        assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4, None), VimEvent::RequestQuit);
-        assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceQuit);
-        assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndQuit);
-        assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndQuit);
+        assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4, None), VimEvent::RequestCloseBuffer);
+        assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceCloseBuffer);
+        assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndCloseBuffer);
+        assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndCloseBuffer);
+    }
+
+    #[test]
+    fn qa_wqa_and_variants_target_the_whole_app() {
+        let (mut b, mut c) = cmd("hi");
+        assert_eq!(run_ex_command("qa", &mut b, &mut c, &mut 4, None), VimEvent::RequestQuitAll);
+        assert_eq!(run_ex_command("quitall", &mut b, &mut c, &mut 4, None), VimEvent::RequestQuitAll);
+        assert_eq!(run_ex_command("qa!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceQuitAll);
+        assert_eq!(run_ex_command("quitall!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceQuitAll);
+        assert_eq!(run_ex_command("wqa", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAllAndQuit);
+        assert_eq!(run_ex_command("xa", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAllAndQuit);
     }
 
     #[test]
