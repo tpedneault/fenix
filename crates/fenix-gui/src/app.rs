@@ -36,6 +36,7 @@ use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
+use crate::pdf_texture::{PdfPipeline, PdfTexture};
 use crate::vnc_texture::{VncPipeline, VncTexture};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -585,6 +586,53 @@ struct VncSession {
     reconnect_attempts: u32,
 }
 
+/// One open PDF document (`SPC r o`) -- one pane/buffer per document,
+/// same shape as `VncSession`. Keyed in `App::pdf_sessions` by the
+/// document's canonicalized path (not `fenix_pdf::PdfDocKey`, which is
+/// the worker's own internal identity for it) so reopening an
+/// already-open PDF switches to the existing pane instead of duplicating
+/// it, mirroring `vnc_sessions`'s own by-name dedup.
+struct PdfSession {
+    doc_key: fenix_pdf::PdfDocKey,
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    page_count: u32,
+    current_page: u32,
+    /// Which page `texture` currently shows, if any -- `None` until the
+    /// first `PageRendered` reply lands. Compared against `current_page`
+    /// so a page-turn only needs a new render dispatched, not applied
+    /// (and vice versa: a stale reply for a page the session has already
+    /// turned away from again is still applied here, just immediately
+    /// superseded by the next one -- see `pending_request_id`'s own doc
+    /// comment for the actual staleness guard).
+    rendered_page: Option<u32>,
+    /// The pixel size last asked for in a dispatched `RenderPage` request
+    /// -- compared against the pane's current on-screen content size
+    /// every frame (see `redraw`'s pane-classification loop) to decide
+    /// whether a resize needs a fresh render. `(0, 0)` until the first
+    /// request goes out.
+    last_requested_size: (u32, u32),
+    /// Bumped on every dispatched `RenderPage` request; a `PageRendered`/
+    /// `RenderFailed` reply whose own `request_id` doesn't match this is
+    /// stale (superseded by a later request, e.g. several resize events
+    /// in a row) and silently dropped -- see `fenix_pdf::PdfResponse::
+    /// PageRendered`'s own doc comment.
+    pending_request_id: u64,
+    /// The most recently rendered page's pixels, waiting to be uploaded
+    /// to `texture` on the next `redraw` -- set by `apply_pdf_response`'s
+    /// `PageRendered` arm, taken (cleared) once `redraw` uploads it.
+    /// Unlike `VncSession::framebuffer`, this is never partially updated
+    /// (a rendered PDF page always arrives whole, no dirty-rects), so
+    /// there's no need to keep it around after it's been applied.
+    pending_bgra: Option<(u32, u32, Vec<u8>)>,
+    /// `None` until the GPU exists *and* a page has actually been
+    /// rendered -- created lazily in `redraw` (see `PdfPipeline::
+    /// create_texture`), recreated whenever the rendered page's pixel
+    /// size changes.
+    texture: Option<PdfTexture>,
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -991,6 +1039,13 @@ pub enum FenixUserEvent {
     /// thread. Carries the VM's name explicitly, same reasoning as
     /// `VncConnected`/`LogLine`.
     VncFrame(String, fenix_vnc::VncFrame),
+    /// One reply from the shared PDF worker thread (`App::pdf_worker`) --
+    /// see `fenix_pdf::PdfResponse`'s own doc comment for what each
+    /// variant means. Unlike `VncFrame`, this carries the *whole*
+    /// response rather than routing through a separate per-session key
+    /// field: `fenix_pdf::PdfDocKey` already rides along inside every
+    /// `PdfResponse` variant, so there's nothing to add out here.
+    PdfResponse(fenix_pdf::PdfResponse),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -2903,7 +2958,7 @@ struct JiraEditSession {
 /// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
 /// dispatch that actually mutates the buffer text is ever reverted.
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
-    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc)
+    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf)
 }
 
 pub struct App {
@@ -2924,6 +2979,10 @@ pub struct App {
     /// `None` until a real GPU exists, same posture as `text`/`bg_rect`/
     /// `caret_rect`.
     vnc_pipeline: Option<VncPipeline>,
+    /// The textured-quad pipeline every open PDF session's current page
+    /// render is drawn through -- mirrors `vnc_pipeline` exactly, just
+    /// for `PdfTexture` instead of `VncTexture`.
+    pdf_pipeline: Option<PdfPipeline>,
 
     /// Every open buffer, keyed by `BufferId` -- syntax state lives on
     /// each buffer's own `OpenBuffer`. Live cursor/scroll position is
@@ -3190,6 +3249,23 @@ pub struct App {
     /// placeholder and refuse a redundant second connect attempt if the
     /// picker is used again on the same name before the first finishes.
     vnc_connecting: HashSet<String>,
+    /// Every open PDF document (`SPC r o`), keyed by canonicalized path --
+    /// see `PdfSession`'s own doc comment on why path rather than
+    /// `fenix_pdf::PdfDocKey`.
+    pdf_sessions: HashMap<PathBuf, PdfSession>,
+    /// The one shared background worker for every open PDF document --
+    /// see `fenix_pdf`'s own top-level doc comment for why there's only
+    /// ever one, not one per document. Spawned lazily by `open_pdf_path`
+    /// on the first PDF this session ever opens, then kept for the rest
+    /// of the process's lifetime.
+    pdf_worker: Option<fenix_pdf::PdfWorker>,
+    /// The real on-disk filename for each open `BufferKind::Pdf` buffer,
+    /// keyed by `BufferId` -- consulted by `buffer_display_name`. A side
+    /// table rather than the buffer's own path because a PDF buffer is
+    /// deliberately kept pathless (see `BufferList::open_pdf`'s own doc
+    /// comment on why: a real path there would let a stray `:w` truncate
+    /// the actual PDF file on disk).
+    pdf_display_names: HashMap<BufferId, String>,
     /// The active `c`/`e` comment/description edit session, if any -- see
     /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
     /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
@@ -3534,7 +3610,24 @@ impl App {
         // whatever machine happens to run the tests. Real launches
         // always go through `new`, so this still fires for actual use.
         if let Some(path) = &file_arg {
-            app.record_recent_file(Path::new(path));
+            let path = Path::new(path);
+            if Self::looks_like_pdf(path) {
+                // `with_file` couldn't route this to `open_pdf_path`
+                // itself (its own doc comment explains why: it runs
+                // before `self` exists, and opening a PDF needs `self`'s
+                // `event_proxy`/`pdf_worker`) -- it fell back to opening
+                // the dashboard instead, exactly as if no file argument
+                // had been given at all. That placeholder buffer is
+                // still the focused one right here, so it's grabbed and
+                // closed once the real PDF pane replaces it -- otherwise
+                // it would sit around forever as a phantom "*dashboard*"
+                // entry in the buffer switcher nobody asked for.
+                let placeholder = app.focused_buffer_id();
+                app.open_pdf_path(path);
+                app.buffers.close(placeholder);
+            } else {
+                app.record_recent_file(path);
+            }
         }
         app
     }
@@ -3551,11 +3644,17 @@ impl App {
 
         let mut buffers = BufferList::new();
         let mut dashboard_lines = HashMap::new();
-        let initial_id = match file_arg {
+        let initial_id = match &file_arg {
             // Recording this path into `recent_files` happens in `new`,
-            // not here -- see `new`'s own doc comment for why.
-            Some(path) => buffers.open_path(Path::new(&path)),
-            None => {
+            // not here -- see `new`'s own doc comment for why. A PDF arg
+            // falls through to the same dashboard-placeholder branch a
+            // missing arg does: opening it for real needs `self` (the
+            // shared PDF worker lives on `App`, spawned via its own
+            // `event_proxy`), which doesn't exist yet at this point --
+            // `new` recognizes this same placeholder right after
+            // construction and swaps it for the real PDF pane.
+            Some(path) if !Self::looks_like_pdf(Path::new(path)) => buffers.open_path(Path::new(path)),
+            _ => {
                 let dashboard = dashboard::render(known_projects.roots(), recent_files.paths());
                 let id = buffers.open_dashboard(&dashboard.text);
                 dashboard_lines.insert(id, dashboard.lines);
@@ -3607,6 +3706,7 @@ impl App {
             bg_rect: None,
             caret_rect: None,
             vnc_pipeline: None,
+            pdf_pipeline: None,
             buffers,
             workspaces,
             line_number_mode: LineNumberMode::Absolute,
@@ -3654,6 +3754,9 @@ impl App {
             vnc_sessions: HashMap::new(),
             vnc_focused: None,
             vnc_connecting: HashSet::new(),
+            pdf_sessions: HashMap::new(),
+            pdf_worker: None,
+            pdf_display_names: HashMap::new(),
             jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -5063,6 +5166,225 @@ impl App {
             Ok(()) => self.set_message(format!("saved {}", path.display())),
             Err(err) => self.set_error(format!("couldn't save screenshot: {err}")),
         }
+    }
+
+    /// Whether `path` should open as a rendered PDF pane instead of an
+    /// ordinary text buffer -- checked by every real "open this path"
+    /// call site (`open_file_from_picker`, `explorer_open_selected`,
+    /// startup) before it ever reaches `BufferList::open_path`, which has
+    /// no notion of PDFs and would otherwise load the raw bytes as
+    /// (garbage) text. Same case-insensitive extension-check idiom as
+    /// `fenix_syntax::detect_language_from_path`.
+    fn looks_like_pdf(path: &Path) -> bool {
+        path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    }
+
+    /// Points the focused pane at `path` as a PDF (`SPC r o` and every
+    /// path-opening call site once `looks_like_pdf` says so) -- the PDF
+    /// equivalent of `open_file_from_picker`. Reuses an already-open
+    /// session for the same canonicalized path instead of duplicating it
+    /// (mirrors `open_vnc_session`'s "already open -> switch" branch);
+    /// otherwise spawns the shared worker if this is the first PDF
+    /// opened this run, creates the pane/buffer, and dispatches the
+    /// `Open` request -- the actual page count/render arrive later, async,
+    /// via `apply_pdf_response`.
+    pub(crate) fn open_pdf_path(&mut self, path: &Path) {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(session) = self.pdf_sessions.get(&canonical) {
+            let (workspace_index, pane) = (session.workspace_index, session.pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.main_view = MainView::Editor;
+            self.wake_caret();
+            return;
+        }
+
+        if self.pdf_worker.is_none() {
+            let worker = match self.event_proxy.clone() {
+                Some(proxy) => fenix_pdf::PdfWorker::spawn(move |response| {
+                    let _ = proxy.send_event(FenixUserEvent::PdfResponse(response));
+                }),
+                // No event loop to report back through (every test) --
+                // the worker still runs (pdfium calls stay serialized
+                // through it, same as real use), its replies just have
+                // nowhere to go, mirroring `start_vnc_connect`'s own
+                // reasoning for why a synchronous fallback isn't used
+                // here: unlike a plain `VncClient::connect` call, calling
+                // pdfium directly on this thread would reintroduce the
+                // exact concurrent-access hazard the shared worker exists
+                // to prevent (see `fenix_pdf`'s own top-level doc comment).
+                None => fenix_pdf::PdfWorker::spawn(|_| {}),
+            };
+            self.pdf_worker = Some(worker);
+        }
+
+        let buffer = self.buffers.open_pdf();
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let pane = self.focused_pane_id();
+        let name = canonical.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| canonical.display().to_string());
+        self.pane_titles.insert(pane, format!("PDF: {name}"));
+        self.pdf_display_names.insert(buffer, name);
+
+        let doc_key = fenix_pdf::PdfDocKey::new();
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Open { key: doc_key, path: canonical.clone() });
+        }
+        self.pdf_sessions.insert(
+            canonical.clone(),
+            PdfSession {
+                doc_key,
+                workspace_index,
+                pane,
+                buffer,
+                page_count: 0,
+                current_page: 0,
+                rendered_page: None,
+                last_requested_size: (0, 0),
+                pending_request_id: 0,
+                pending_bgra: None,
+                texture: None,
+            },
+        );
+        self.refresh_project_root();
+        self.record_recent_file(&canonical);
+        self.main_view = MainView::Editor;
+        self.wake_caret();
+    }
+
+    /// Finds whichever PDF session (if any) owns `pane` -- same "keyed by
+    /// something other than buffer/pane, so a linear scan" shape as
+    /// `vnc_session_key_for_pane`.
+    fn pdf_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<PathBuf> {
+        self.pdf_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
+    }
+
+    /// Same as `pdf_session_key_for_pane`, keyed by buffer instead -- what
+    /// `kill_buffer_now` needs to recognize "the buffer about to be
+    /// killed belongs to a PDF session" the same way it already does for
+    /// VNC (`vnc_session_key_for_buffer`).
+    fn pdf_session_key_for_buffer(&self, id: BufferId) -> Option<PathBuf> {
+        self.pdf_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
+    }
+
+    /// Tears down one PDF session: tells the shared worker to drop the
+    /// document (freeing pdfium's own handle for it), closes its buffer,
+    /// clears its pane title/display name, and removes its workspace --
+    /// mirrors `vnc_session_close` exactly.
+    fn pdf_session_close(&mut self, key: &Path) {
+        let Some(session) = self.pdf_sessions.remove(key) else { return };
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Close { key: session.doc_key });
+        }
+        self.buffers.close(session.buffer);
+        self.pane_titles.remove(&session.pane);
+        self.pdf_display_names.remove(&session.buffer);
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Dispatches a fresh `RenderPage` request for `key` at `target_w` x
+    /// `target_h` pixels, bumping `pending_request_id` first so a reply to
+    /// an earlier, now-superseded request gets dropped by `apply_pdf_
+    /// response` instead of clobbering a newer one. A no-op if the
+    /// session or worker doesn't exist, or the document hasn't reported
+    /// its page count back yet (nothing to render before then).
+    fn dispatch_pdf_render(&mut self, key: &Path, target_w: u32, target_h: u32) {
+        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        session.pending_request_id += 1;
+        session.last_requested_size = (target_w, target_h);
+        let (doc_key, request_id, page_index) = (session.doc_key, session.pending_request_id, session.current_page);
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, request_id, page_index, target_w, target_h });
+        }
+    }
+
+    /// `FenixUserEvent::PdfResponse` handling. Every variant carries its
+    /// own `fenix_pdf::PdfDocKey`, not the path `pdf_sessions` is keyed
+    /// by, so each arm scans for the session whose `doc_key` matches
+    /// first -- a no-op (like `apply_vnc_frame`'s per-name lookup) if
+    /// that session's since been closed.
+    fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
+        match response {
+            fenix_pdf::PdfResponse::Opened { key, page_count } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
+                session.page_count = page_count;
+                // No render dispatched here -- `last_requested_size`
+                // stays `(0, 0)`, which `redraw`'s pane-classification
+                // loop (the only place that actually knows this pane's
+                // real current pixel size) treats as "never rendered
+                // yet" and requests the first render itself on the very
+                // next frame, the same way it reacts to any later resize.
+            }
+            fenix_pdf::PdfResponse::OpenFailed { key, message } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                self.set_error(format!("couldn't open {}: {message}", path.display()));
+            }
+            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
+                if request_id != session.pending_request_id || page_index != session.current_page {
+                    return; // superseded by a later request/page turn since this one was dispatched
+                }
+                session.rendered_page = Some(page_index);
+                // Staged for `redraw` to actually upload -- a fresh page
+                // render is always a different pixel size than whatever
+                // `texture` currently holds often enough (page turn,
+                // resize, zoom) that it's simplest to always recreate
+                // rather than try to detect "same size, upload in place"
+                // here; `redraw`'s own texture-creation step is what
+                // VNC's `Resolution` arm defers to as well.
+                session.pending_bgra = Some((width, height, bgra));
+                session.texture = None;
+            }
+            fenix_pdf::PdfResponse::RenderFailed { key, request_id, message } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get(&path) else { return };
+                if request_id != session.pending_request_id {
+                    return;
+                }
+                self.set_error(format!("couldn't render page: {message}"));
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC r n` / `SPC r p`: turns the focused PDF session to the next/
+    /// previous page (clamped to `0..page_count`), dispatching a fresh
+    /// render at whatever pixel size the pane last asked for -- a no-op
+    /// at either end of the document, and a no-op if the focused pane
+    /// isn't a PDF session at all.
+    fn pdf_turn_page(&mut self, delta: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        let new_page = (session.current_page as i32 + delta).clamp(0, session.page_count as i32 - 1) as u32;
+        if new_page == session.current_page {
+            return;
+        }
+        session.current_page = new_page;
+        let (w, h) = session.last_requested_size;
+        if w > 0 && h > 0 {
+            self.dispatch_pdf_render(&key, w, h);
+        }
+        self.wake_caret();
+    }
+
+    pub(crate) fn pdf_next_page(&mut self) {
+        self.pdf_turn_page(1);
+    }
+
+    pub(crate) fn pdf_prev_page(&mut self) {
+        self.pdf_turn_page(-1);
     }
 
     /// Encodes `keypress` and writes it to the live terminal session, if
@@ -6478,6 +6800,10 @@ impl App {
         }
         if let Some(key) = self.vnc_session_key_for_buffer(id) {
             self.vnc_session_close(&key);
+            return;
+        }
+        if let Some(key) = self.pdf_session_key_for_buffer(id) {
+            self.pdf_session_close(&key);
             return;
         }
         self.buffers.close(id);
@@ -8967,6 +9293,10 @@ impl App {
     /// here, so confirming always means "this is current now, back to
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
+        if Self::looks_like_pdf(path) {
+            self.open_pdf_path(path);
+            return;
+        }
         let id = self.buffers.open_path(path);
         let focused = self.focused_pane_id();
         self.set_pane_content(focused, id);
@@ -9579,6 +9909,17 @@ impl App {
             return;
         }
 
+        if Self::looks_like_pdf(&path) {
+            let was_full_buffer = self.main_view == MainView::Explorer;
+            self.open_pdf_path(&path);
+            if was_full_buffer {
+                self.explorer = None;
+            } else {
+                self.sidebar_focused = false;
+            }
+            return;
+        }
+
         let id = self.buffers.open_path(&path);
         let focused = self.focused_pane_id();
         self.set_pane_content(focused, id);
@@ -9993,6 +10334,7 @@ impl App {
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
             FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
+            FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -11220,6 +11562,8 @@ impl App {
                 "*jira*".to_string()
             } else if ob.kind == BufferKind::Vnc {
                 "*vnc*".to_string()
+            } else if ob.kind == BufferKind::Pdf {
+                self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
             } else {
                 "[No Name]".to_string()
             }
@@ -11625,6 +11969,7 @@ impl App {
             || ob.kind == BufferKind::Table
             || ob.kind == BufferKind::SearchReplace
             || ob.kind == BufferKind::Vnc
+            || ob.kind == BufferKind::Pdf
         {
             return 0;
         }
@@ -12998,6 +13343,12 @@ impl App {
         // prep loop (see this function's own later `vnc_pipeline.draw`
         // call site).
         let mut vnc_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        // Same shape as `vnc_panes`, for `BufferKind::Pdf` panes -- also
+        // where a resize gets noticed and turned into a fresh `RenderPage`
+        // request (see the loop body below), since this is the only place
+        // that actually knows each pane's real current on-screen pixel
+        // size.
+        let mut pdf_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -13048,6 +13399,44 @@ impl App {
             // loop needs a special case for it.
             if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Vnc) {
                 vnc_panes.push((pane, rect));
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    title: pane_title,
+                    spans: Vec::new(),
+                    hl_row: None,
+                    hl_row_strong: false,
+                    marked_rows: Vec::new(),
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
+                    caret: None,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
+
+            // A PDF pane's content is a rendered page bitmap, not text --
+            // same "separate textured-quad layer, still gets an ordinary
+            // empty `PaneRender` for its title bar" shape as `BufferKind::
+            // Vnc` above. This is also where fit-to-page actually tracks
+            // a live resize: `rect`'s pixel size is only known here, so a
+            // mismatch against the session's `last_requested_size` (set
+            // the last time a render was dispatched) is what triggers the
+            // next one -- covers the pane's first-ever render too, since
+            // `last_requested_size` starts at `(0, 0)`.
+            if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Pdf) {
+                pdf_panes.push((pane, rect));
+                if let Some(key) = self.pdf_session_key_for_pane(pane) {
+                    let target = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
+                    let needs_render =
+                        self.pdf_sessions.get(&key).is_some_and(|session| session.page_count > 0 && session.last_requested_size != target);
+                    if needs_render {
+                        self.dispatch_pdf_render(&key, target.0, target.1);
+                    }
+                }
                 panes_render.push(PaneRender {
                     pane,
                     rect,
@@ -13319,9 +13708,15 @@ impl App {
         let prompt_popup = self.prompt_popup(window_width, modeline_top);
         let caret_alpha = self.caret_alpha();
 
-        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect), Some(vnc_pipeline)) =
-            (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect, &self.vnc_pipeline)
-        else {
+        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect), Some(vnc_pipeline), Some(pdf_pipeline)) = (
+            &self.window,
+            &mut self.gpu,
+            &mut self.text,
+            &mut self.bg_rect,
+            &mut self.caret_rect,
+            &self.vnc_pipeline,
+            &self.pdf_pipeline,
+        ) else {
             return;
         };
 
@@ -13631,6 +14026,22 @@ impl App {
             }
         }
 
+        // Same shape as the VNC loop just above, but the "what to upload"
+        // question is answered by `pending_bgra` instead of a persistent
+        // CPU-side framebuffer -- a freshly rendered PDF page always
+        // arrives whole (no dirty-rects), so there's nothing to keep
+        // around once it's been uploaded and the bytes are taken here.
+        for (pane, _) in &pdf_panes {
+            let Some(session) = self.pdf_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
+            if session.texture.is_none() {
+                if let Some((width, height, bgra)) = session.pending_bgra.take() {
+                    let texture = pdf_pipeline.create_texture(gpu, width, height);
+                    pdf_pipeline.upload_rect(gpu, &texture, 0, 0, width, height, &bgra);
+                    session.texture = Some(texture);
+                }
+            }
+        }
+
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -13681,6 +14092,14 @@ impl App {
                 let Some(session) = self.vnc_sessions.values().find(|s| s.pane == *pane) else { continue };
                 if let Some(texture) = &session.texture {
                     vnc_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
+                }
+            }
+            // Same "before text, so title bars stay legible" reasoning as
+            // the VNC loop just above.
+            for (pane, rect) in &pdf_panes {
+                let Some(session) = self.pdf_sessions.values().find(|s| s.pane == *pane) else { continue };
+                if let Some(texture) = &session.texture {
+                    pdf_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
                 }
             }
             text.render(&mut pass);
@@ -13785,6 +14204,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let bg_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
         let vnc_pipeline = VncPipeline::new(&gpu);
+        let pdf_pipeline = PdfPipeline::new(&gpu);
 
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -13792,6 +14212,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.bg_rect = Some(bg_rect);
         self.caret_rect = Some(caret_rect);
         self.vnc_pipeline = Some(vnc_pipeline);
+        self.pdf_pipeline = Some(pdf_pipeline);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

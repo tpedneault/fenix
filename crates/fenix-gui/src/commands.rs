@@ -86,6 +86,8 @@ impl CommandRegistry {
         registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
         registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
+        registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
+        registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
@@ -313,6 +315,14 @@ fn cmd_vnc_close(ctx: &mut CommandCtx) {
 
 fn cmd_vnc_screenshot(ctx: &mut CommandCtx) {
     ctx.app.vnc_screenshot();
+}
+
+fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_next_page();
+}
+
+fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_prev_page();
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {

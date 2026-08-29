@@ -58,6 +58,14 @@ pub enum BufferKind {
     /// buffer's pane, never stored in `buffer` itself (see
     /// `BufferList::open_vnc`).
     Vnc,
+    /// An open PDF document, rendered one page at a time (`SPC r ...`) --
+    /// same "real pane slot, no meaningful text content" shape as `Vnc`:
+    /// the rasterized page bitmap is a separate GPU-side texture layer
+    /// keyed by this buffer's pane, never stored in `buffer` itself (see
+    /// `BufferList::open_pdf`). Deliberately never carries the PDF's real
+    /// file path on the `Buffer` itself either -- see `open_pdf`'s own
+    /// doc comment for why.
+    Pdf,
 }
 
 impl BufferKind {
@@ -194,6 +202,20 @@ impl BufferList {
     /// window tree; its own (always-empty) text is never shown.
     pub fn open_vnc(&mut self) -> BufferId {
         self.insert(Buffer::empty(), None, BufferKind::Vnc)
+    }
+
+    /// An empty, pathless buffer tagged `Pdf` -- `SPC r o`. Same reasoning
+    /// as `open_vnc`: the rendered page bitmap is a GPU-side texture, not
+    /// text, so there is nothing to seed. Deliberately `Buffer::empty()`
+    /// with no path attached even though a PDF *does* have a real path on
+    /// disk (unlike a VNC session) -- `Buffer::save_as` unconditionally
+    /// overwrites whatever path it's given with the buffer's own (always
+    /// empty) rope content, so attaching the real PDF path here would
+    /// make a stray `:w` silently truncate the user's actual PDF file.
+    /// The host (`fenix-gui`) keeps the real path in its own side table
+    /// instead.
+    pub fn open_pdf(&mut self) -> BufferId {
+        self.insert(Buffer::empty(), None, BufferKind::Pdf)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
@@ -355,6 +377,7 @@ mod tests {
         assert!(!BufferKind::Jira.tracks_unsaved_changes());
         assert!(!BufferKind::SearchReplace.tracks_unsaved_changes());
         assert!(!BufferKind::Vnc.tracks_unsaved_changes());
+        assert!(!BufferKind::Pdf.tracks_unsaved_changes());
     }
 
     #[test]
@@ -405,6 +428,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Vnc);
+    }
+
+    #[test]
+    fn open_pdf_creates_an_empty_pathless_buffer_tagged_pdf() {
+        let mut list = BufferList::new();
+        let id = list.open_pdf();
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Pdf);
     }
 
     #[test]

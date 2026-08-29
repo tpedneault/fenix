@@ -210,6 +210,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('v'), KeyPress::char('q')], "close vnc session", "vnc.close");
         t.insert(&[spc, KeyPress::char('v'), KeyPress::char('s')], "save vnc screenshot", "vnc.screenshot");
 
+        t.label_group(&[spc, KeyPress::char('r')], "reader (pdf)");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('n')], "next page", "pdf.next_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('p')], "previous page", "pdf.prev_page");
+
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('r')],
