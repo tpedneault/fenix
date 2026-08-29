@@ -25,6 +25,7 @@ mod render;
 pub mod coords;
 pub mod crop;
 pub mod outline;
+pub mod search;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,6 +70,16 @@ pub enum PdfRequest {
     /// restriction applies to every call into a document, not just
     /// rendering ones.
     FetchOutline { key: PdfDocKey },
+    /// Searches every page of the document, in page order, for `query`.
+    /// Carries its own `request_id` for the same reason `RenderPage`
+    /// does: a caller that fires a second search before the first reply
+    /// lands (e.g. editing the query again quickly) can tell which
+    /// `SearchResults` reply is the one it actually still wants.
+    /// Deliberately *not* coalesced the way same-key `RenderPage`
+    /// requests are (see `coalesce_render_requests`) -- a search is one
+    /// explicit `Enter` press, not a high-frequency event like a window
+    /// resize, so there's no flood of these to thin out.
+    Search { key: PdfDocKey, request_id: u64, query: String },
     Close { key: PdfDocKey },
 }
 
@@ -110,6 +121,12 @@ pub enum PdfResponse {
     /// PDF with no bookmarks at all -- a document simply having none is
     /// normal and common, not a failure.
     Outline { key: PdfDocKey, entries: Vec<outline::OutlineEntry> },
+    /// Reply to `PdfRequest::Search`, carrying the same `request_id` back
+    /// so the caller can drop a stale reply the same way it does for
+    /// `PageRendered`. Empty `matches` (not an error) for a query with no
+    /// hits anywhere in the document -- that's a completely normal search
+    /// outcome, not a failure.
+    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch> },
 }
 
 /// One shared background worker for every open PDF document in the
@@ -169,9 +186,9 @@ impl Drop for PdfWorker {
 /// survives -- everything before it is dropped silently (no
 /// `RenderFailed` reply; the caller never sees these as having been
 /// dispatched at all, since from its perspective a newer request for the
-/// same session already supersedes them). `Open`/`FetchOutline`/`Close`
-/// requests, and `RenderPage` requests for a *different* key, are never
-/// touched or reordered -- only same-key `RenderPage` entries are thinned out,
+/// same session already supersedes them). `Open`/`FetchOutline`/`Search`/
+/// `Close` requests, and `RenderPage` requests for a *different* key, are
+/// never touched or reordered -- only same-key `RenderPage` entries are thinned out,
 /// preserving every other request's original position. This is what
 /// keeps a live window resize (which can queue many `RenderPage`
 /// requests for the same session faster than pdfium can render them)

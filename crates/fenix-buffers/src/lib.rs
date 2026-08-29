@@ -72,6 +72,11 @@ pub enum BufferKind {
     /// text (same "real buffer, just tagged" shape as `Dashboard`), since
     /// an outline is naturally just a list of lines, not pixel content.
     PdfOutline,
+    /// A PDF text search's flat match list (`SPC r /`), shown as one row
+    /// per hit in its own companion pane next to the `Pdf` pane it was
+    /// searched from -- same "real buffer, just tagged" shape as
+    /// `PdfOutline`, just a list of matches instead of bookmarks.
+    PdfSearchResults,
 }
 
 impl BufferKind {
@@ -232,6 +237,13 @@ impl BufferList {
     /// (`j`/`k`/`/`/`n`), not a stand-in pane slot for pixel content.
     pub fn open_pdf_outline(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::PdfOutline)
+    }
+
+    /// A real buffer seeded with `text` (one formatted row per text-
+    /// search match) and tagged `PdfSearchResults` -- `SPC r /`. Same
+    /// "real buffer, just tagged" shape as `open_pdf_outline`.
+    pub fn open_pdf_search_results(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::PdfSearchResults)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
@@ -454,6 +466,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Pdf);
+    }
+
+    #[test]
+    fn open_pdf_search_results_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_pdf_search_results("p.  1  the quick brown fox\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "p.  1  the quick brown fox\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::PdfSearchResults);
     }
 
     #[test]

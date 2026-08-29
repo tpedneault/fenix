@@ -10,6 +10,7 @@ mod ipc;
 mod jira_panel;
 mod keymap;
 mod pdf_outline;
+mod pdf_search;
 mod pdf_texture;
 mod popup;
 mod rect;

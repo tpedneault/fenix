@@ -11,6 +11,7 @@ use std::sync::mpsc::Receiver;
 use pdfium_render::prelude::*;
 
 use crate::outline::OutlineEntry;
+use crate::search::PdfSearchMatch;
 use crate::{PdfDocKey, PdfRequest, PdfResponse};
 
 /// Everything that can go wrong opening/using pdfium itself, as opposed
@@ -168,6 +169,19 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 sink(PdfResponse::Outline { key, entries });
             }
         }
+        PdfRequest::Search { key, request_id, query } => {
+            // Same "no document open under this key is a caller bug, not
+            // a search failure" posture as `FetchOutline` -- but `Search`
+            // does carry a `request_id`, and dropping the reply entirely
+            // here (rather than replying with empty results) keeps that
+            // symmetric with every other "document not open" case instead
+            // of a caller having to distinguish "found nothing" from
+            // "document already closed".
+            if let Some(doc) = docs.get(&key) {
+                let matches = search_document(doc, &query);
+                sink(PdfResponse::SearchResults { key, request_id, matches });
+            }
+        }
         PdfRequest::Close { key } => {
             docs.remove(&key);
         }
@@ -217,6 +231,64 @@ fn flatten_bookmark<'a>(bookmark: PdfBookmark<'a>, depth: u32, out: &mut Vec<Out
     }
 }
 
+/// Searches every page of `doc`, in page order, for `query`, using
+/// pdfium's own per-page text search (`PdfPageText::search`) rather than
+/// hand-rolled substring matching over extracted text -- pdfium's search
+/// already accounts for how its own text extraction represents ligatures
+/// and inter-character spacing, which a naive `str::find` over `PdfPage
+/// Text::all()` could get subtly wrong for the exact same query a human
+/// typed. Case-insensitive substring matching (`PdfSearchOptions`'s
+/// defaults) -- the same forgiving posture as most simple search UIs.
+///
+/// Deliberately extracts and holds each page's full text (`PdfPageText::
+/// all()`) only for as long as that one page's search takes, not across
+/// the whole document or between separate `Search` requests -- see this
+/// crate's plan/README reasoning: a large PDF's full extracted text is a
+/// real memory cost for a feature used occasionally, so nothing here is
+/// cached beyond a single page during a single search call.
+///
+/// A page whose text collection or search can't be created (`Result::
+/// Err`, e.g. a malformed page) is skipped rather than aborting the
+/// whole-document search -- one bad page shouldn't hide matches on every
+/// other page.
+fn search_document(doc: &PdfDocument, query: &str) -> Vec<PdfSearchMatch> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for (page_index, page) in doc.pages().iter().enumerate() {
+        let Ok(text_page) = page.text() else { continue };
+        let Ok(search) = text_page.search(query, &PdfSearchOptions::new()) else { continue };
+        let page_chars: Vec<char> = text_page.all().chars().collect();
+        while let Some(segments) = search.find_next() {
+            let char_index = segments.first().ok().and_then(|segment| segment.chars().ok()).and_then(|chars| chars.first_char_index());
+            if let Some(char_index) = char_index {
+                let context = build_context(&page_chars, char_index, query.chars().count());
+                matches.push(PdfSearchMatch { page_index: page_index as u32, char_index, context });
+            }
+        }
+    }
+    matches
+}
+
+/// Builds a short, single-line context snippet around one match, from a
+/// page's full character sequence (already collected by the caller, so
+/// this stays a pure, panic-free, unit-testable function with no pdfium
+/// dependency of its own -- same "pull the pure math out" split `coords.
+/// rs`/`crop.rs` already use). Collapses every run of whitespace
+/// (including the newlines `PdfPageText::all()` inserts between visual
+/// lines) down to a single space, since a raw multi-line snippet would
+/// otherwise be unreadable as one row in the results-list buffer.
+fn build_context(chars: &[char], char_index: usize, match_len: usize) -> String {
+    const PAD: usize = 30;
+    let start = char_index.saturating_sub(PAD);
+    let end = (char_index.saturating_add(match_len).saturating_add(PAD)).min(chars.len());
+    if start >= end {
+        return String::new();
+    }
+    chars[start..end].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Renders one page to a BGRA pixel buffer at exactly `target_w` x
 /// `target_h` -- `PdfBitmapFormat::default()` (what `PdfPage::render`
 /// uses when not told otherwise) is already `BGRA`, matching
@@ -236,4 +308,30 @@ fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32)
     let width = bitmap.width().max(0) as u32;
     let height = bitmap.height().max(0) as u32;
     Ok((width, height, bitmap.as_raw_bytes(), page_width_pts, page_height_pts))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_context_pads_around_the_match_and_collapses_a_line_break_to_one_space() {
+        let text = "the quick brown fox\njumps over the lazy dog";
+        let chars: Vec<char> = text.chars().collect();
+        let char_index = text.find("fox").unwrap();
+        assert_eq!(build_context(&chars, char_index, 3), "the quick brown fox jumps over the lazy dog");
+    }
+
+    #[test]
+    fn build_context_clamps_to_the_start_and_end_of_a_short_text_without_panicking() {
+        let chars: Vec<char> = "hi".chars().collect();
+        assert_eq!(build_context(&chars, 0, 2), "hi");
+    }
+
+    #[test]
+    fn build_context_on_an_out_of_range_index_returns_empty_rather_than_panicking() {
+        let chars: Vec<char> = "short".chars().collect();
+        assert_eq!(build_context(&chars, 100, 5), "");
+    }
+
 }

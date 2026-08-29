@@ -32,6 +32,7 @@ use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
 use crate::pdf_outline;
+use crate::pdf_search;
 use crate::popup;
 use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
@@ -716,6 +717,19 @@ struct PdfSession {
     /// turns out to have no bookmarks, this stays `Some(vec![])`, not
     /// `None` -- see `apply_pdf_response`'s `Outline` arm).
     outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
+    /// Bumped on every dispatched `Search` request; a `SearchResults`
+    /// reply whose own `request_id` doesn't match this is stale
+    /// (superseded by a newer search fired before the first one came
+    /// back) and silently dropped -- same guard `pending_request_id`
+    /// gives page renders.
+    pending_search_request_id: u64,
+    /// The query text of the most recently *dispatched* search, kept
+    /// here rather than threaded through `PdfResponse::SearchResults`
+    /// (which reports only matches, not the query that produced them) --
+    /// what `apply_pdf_response`'s `SearchResults` arm needs to render a
+    /// "(no matches for ...)" placeholder with the right text once the
+    /// reply lands. Empty until the first search.
+    last_search_query: String,
 }
 
 /// Which of a `DockerSession`'s six panes is currently focused, if
@@ -3043,7 +3057,10 @@ struct JiraEditSession {
 /// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
 /// dispatch that actually mutates the buffer text is ever reverted.
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
-    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf | BufferKind::PdfOutline)
+    matches!(
+        kind,
+        BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf | BufferKind::PdfOutline | BufferKind::PdfSearchResults
+    )
 }
 
 pub struct App {
@@ -3210,6 +3227,10 @@ pub struct App {
     /// self-contained capturing-prompt shape as `find_file_prompt`, just
     /// digits-only (see `pdf_goto_page_prompt_key`).
     pdf_goto_page_prompt: Option<String>,
+    /// `SPC r /`'s type-a-query prompt, when in progress -- same self-
+    /// contained capturing-prompt shape as `pdf_goto_page_prompt`, free
+    /// text instead of digits-only (see `pdf_search_prompt_key`).
+    pdf_search_prompt: Option<String>,
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
@@ -3369,6 +3390,22 @@ pub struct App {
     /// outline` (when the outline pane itself is focused) use to find
     /// the companion PDF pane/session.
     pdf_outline_source: HashMap<BufferId, PathBuf>,
+    /// The search-results pane currently open for a PDF session, if any --
+    /// same "one at a time per session, keyed by canonicalized path" shape
+    /// as `pdf_outline_panes`. A fresh `SPC r /` search replaces whatever
+    /// results pane is already open for that session rather than stacking
+    /// a second one.
+    pdf_search_panes: HashMap<PathBuf, fenix_window::WindowId>,
+    /// Per-line metadata for each open `BufferKind::PdfSearchResults`
+    /// buffer's generated text, keyed by that buffer's own `BufferId` --
+    /// same per-buffer-keyed shape as `pdf_outline_lines`.
+    pdf_search_result_lines: HashMap<BufferId, Vec<Option<pdf_search::PdfSearchResultLine>>>,
+    /// Which `pdf_sessions` key (PDF path) a search-results buffer was
+    /// opened from -- what `pdf_search_activate_selected` and `pdf_
+    /// close_search_pane` (when the results pane itself is focused) use
+    /// to find the companion PDF pane/session. Mirrors `pdf_outline_
+    /// source` exactly.
+    pdf_search_source: HashMap<BufferId, PathBuf>,
     /// The active `c`/`e` comment/description edit session, if any -- see
     /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
     /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
@@ -3863,6 +3900,9 @@ impl App {
             pdf_outline_panes: HashMap::new(),
             pdf_outline_lines: HashMap::new(),
             pdf_outline_source: HashMap::new(),
+            pdf_search_panes: HashMap::new(),
+            pdf_search_result_lines: HashMap::new(),
+            pdf_search_source: HashMap::new(),
             jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -3882,6 +3922,7 @@ impl App {
             pending_grep_query: None,
             find_file_prompt: None,
             pdf_goto_page_prompt: None,
+            pdf_search_prompt: None,
             rename_file_prompt: None,
             delete_file_confirm: false,
             vim,
@@ -5358,6 +5399,8 @@ impl App {
                 last_uploaded: None,
                 texture: None,
                 outline: None,
+                pending_search_request_id: 0,
+                last_search_query: String::new(),
             },
         );
         self.refresh_project_root();
@@ -5409,6 +5452,16 @@ impl App {
             for buffer in stale_outline_buffers {
                 self.pdf_outline_lines.remove(&buffer);
                 self.pdf_outline_source.remove(&buffer);
+            }
+        }
+        // Same leak/stale-answer reasoning as the outline cleanup just
+        // above, for a still-open search-results companion pane.
+        if self.pdf_search_panes.remove(key).is_some() {
+            let stale_search_buffers: Vec<BufferId> =
+                self.pdf_search_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
+            for buffer in stale_search_buffers {
+                self.pdf_search_result_lines.remove(&buffer);
+                self.pdf_search_source.remove(&buffer);
             }
         }
         self.workspaces.switch_to_index(session.workspace_index);
@@ -5533,6 +5586,16 @@ impl App {
                 // own workspace/pane first, so this is correct even if the
                 // user navigated elsewhere while the fetch was in flight.
                 self.pdf_open_outline_pane(&path, &entries);
+            }
+            fenix_pdf::PdfResponse::SearchResults { key, request_id, matches } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get(&path) else { return };
+                if request_id != session.pending_search_request_id {
+                    return; // superseded by a later search since this one was dispatched
+                }
+                let query = session.last_search_query.clone();
+                self.set_message(format!("{} match{} for \"{query}\"", matches.len(), if matches.len() == 1 { "" } else { "es" }));
+                self.pdf_open_or_update_search_pane(&path, &query, &matches);
             }
         }
         self.wake_caret();
@@ -5826,6 +5889,160 @@ impl App {
             .map(|meta| meta.page_index);
         let Some(page_index) = page_index else { return };
         let Some(key) = self.pdf_outline_source.get(&buffer_id).cloned() else { return };
+        self.pdf_jump_session_to_page(&key, page_index);
+    }
+
+    /// `SPC r /`: starts the "type a search query" prompt -- a no-op if
+    /// the focused pane isn't a PDF session (nothing to search within),
+    /// same guard `start_pdf_goto_page_prompt` uses.
+    pub(crate) fn start_pdf_search_prompt(&mut self) {
+        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
+            return;
+        }
+        self.pdf_search_prompt = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `pdf_search_prompt` -- free
+    /// text (unlike `pdf_goto_page_prompt_key`'s digits-only), same
+    /// capturing shape as `find_file_prompt_key`.
+    fn pdf_search_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.pdf_search_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_search_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let query = self.pdf_search_prompt.take().unwrap_or_default();
+                self.pdf_dispatch_search(query);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `pdf_search_prompt` is
+    /// active -- mirrors `pdf_goto_page_prompt_text`.
+    fn pdf_search_prompt_text(&self) -> Option<String> {
+        self.pdf_search_prompt.as_ref().map(|input| format!("search pdf: {input}"))
+    }
+
+    /// Dispatches a `Search` request for the focused PDF session with
+    /// `query`, bumping `pending_search_request_id` first so a reply to
+    /// an earlier, now-superseded search gets dropped by `apply_pdf_
+    /// response` instead of clobbering a newer one -- same staleness
+    /// guard `pdf_dispatch_render` gives page renders. A no-op (blank
+    /// query, no focused PDF session, or no worker) leaves whatever
+    /// search-results pane already exists untouched.
+    fn pdf_dispatch_search(&mut self, query: String) {
+        if query.trim().is_empty() {
+            return;
+        }
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        session.pending_search_request_id += 1;
+        session.last_search_query = query.clone();
+        let request_id = session.pending_search_request_id;
+        let doc_key = session.doc_key;
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Search { key: doc_key, request_id, query });
+        }
+        self.set_message("searching...");
+    }
+
+    /// Closes the search-results pane for the PDF session at `key`, if
+    /// one is currently open -- mirrors `pdf_close_outline_pane` exactly,
+    /// used by `kill_buffer_now`'s "the buffer being killed is a
+    /// `PdfSearchResults` buffer" branch (there's no dedicated toggle key
+    /// for search the way `SPC r o` doubles as open/close for the
+    /// outline -- a fresh `SPC r /` search just replaces this pane's
+    /// content in place instead, see `pdf_open_or_update_search_pane`).
+    fn pdf_close_search_pane(&mut self, key: &Path) {
+        let Some(pane) = self.pdf_search_panes.remove(key) else { return };
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let buffer = self.windows().content(pane).copied();
+        self.windows_mut().focus(pane);
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&pane);
+            self.workspaces.active_scroll_anims_mut().remove(&pane);
+        }
+        if let Some(buffer) = buffer {
+            self.buffers.close(buffer);
+            self.pdf_search_result_lines.remove(&buffer);
+            self.pdf_search_source.remove(&buffer);
+        }
+        self.windows_mut().focus(session_pane);
+        self.wake_caret();
+    }
+
+    /// Opens a search-results pane for the PDF session at `key` showing
+    /// `matches` (a plain vertical split off the session's own PDF pane,
+    /// same as `pdf_open_outline_pane`), or, if one's already open from
+    /// an earlier search on this same session, rewrites its buffer text
+    /// in place instead of stacking a second pane -- same "rewrite the
+    /// whole affected span as one step" tool (`Buffer::replace_range`)
+    /// `set_docker_buffer`'s refresh already uses, and the same
+    /// "a refreshed listing can reorder/add/remove rows, so an old cursor
+    /// position is meaningless against it" reasoning for resetting the
+    /// cursor to the top on every update.
+    fn pdf_open_or_update_search_pane(&mut self, key: &Path, query: &str, matches: &[fenix_pdf::search::PdfSearchMatch]) {
+        let (text, lines) = pdf_search::render(query, matches);
+
+        if let Some(&pane) = self.pdf_search_panes.get(key) {
+            if let Some(buffer) = self.windows().content(pane).copied() {
+                if let Some(ob) = self.buffers.get_mut(buffer) {
+                    let end = ob.buffer.len_chars();
+                    let mut scratch_cursor = Cursor::at_start();
+                    ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
+                }
+                self.pdf_search_result_lines.insert(buffer, lines);
+                for p in self.windows().windows() {
+                    if self.windows().content(p) == Some(&buffer) {
+                        let ps = self.pane_state_mut(p);
+                        *ps = PaneState::seeded_at(Cursor::at_start());
+                    }
+                }
+                self.wake_caret();
+                return;
+            }
+        }
+
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        self.workspaces.switch_to_index(workspace_index);
+        self.windows_mut().focus(session_pane);
+
+        let buffer = self.buffers.open_pdf_search_results(&text);
+        let search_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
+        self.workspaces.active_pane_states_mut().insert(search_pane, PaneState::seeded_at(Cursor::at_start()));
+        self.pane_titles.insert(search_pane, "Search results".to_string());
+        self.pdf_search_result_lines.insert(buffer, lines);
+        self.pdf_search_source.insert(buffer, key.to_path_buf());
+        self.pdf_search_panes.insert(key.to_path_buf(), search_pane);
+        self.wake_caret();
+    }
+
+    /// `Enter` on a `BufferKind::PdfSearchResults` line (see
+    /// `route_keypress`'s own `PdfSearchResults` block): looks up what
+    /// the cursor's current line means via `pdf_search_result_lines`, a
+    /// no-op for a blank/unstyled line (e.g. the "(no matches for ...)"
+    /// placeholder), and otherwise jumps the companion PDF pane straight
+    /// to that match's page -- mirrors `pdf_outline_activate_selected`
+    /// exactly.
+    fn pdf_search_activate_selected(&mut self) {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        let buffer_id = self.focused_buffer_id();
+        let page_index = self
+            .pdf_search_result_lines
+            .get(&buffer_id)
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .map(|meta| meta.page_index);
+        let Some(page_index) = page_index else { return };
+        let Some(key) = self.pdf_search_source.get(&buffer_id).cloned() else { return };
         self.pdf_jump_session_to_page(&key, page_index);
     }
 
@@ -7251,6 +7468,12 @@ impl App {
         if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
             if let Some(key) = self.pdf_outline_source.get(&id).cloned() {
                 self.pdf_close_outline_pane(&key);
+                return;
+            }
+        }
+        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfSearchResults) {
+            if let Some(key) = self.pdf_search_source.get(&id).cloned() {
+                self.pdf_close_search_pane(&key);
                 return;
             }
         }
@@ -10990,6 +11213,11 @@ impl App {
             self.pdf_goto_page_prompt_key(keypress);
             return;
         }
+        // `SPC r /` -- same capturing-prompt tier.
+        if self.pdf_search_prompt.is_some() {
+            self.pdf_search_prompt_key(keypress);
+            return;
+        }
         if self.rename_file_prompt.is_some() {
             self.rename_file_prompt_key(keypress);
             return;
@@ -11334,6 +11562,15 @@ impl App {
         // shape as the Dashboard interception above.
         if self.open().kind == BufferKind::PdfOutline && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
             self.pdf_outline_activate_selected();
+            self.wake_caret();
+            return;
+        }
+
+        // A PDF search-results pane -- same shape as the outline
+        // interception just above, just jumping to a match's page
+        // instead of a bookmark's.
+        if self.open().kind == BufferKind::PdfSearchResults && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
+            self.pdf_search_activate_selected();
             self.wake_caret();
             return;
         }
@@ -12059,6 +12296,8 @@ impl App {
                 self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
             } else if ob.kind == BufferKind::PdfOutline {
                 "*pdf outline*".to_string()
+            } else if ob.kind == BufferKind::PdfSearchResults {
+                "*pdf search*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -12233,6 +12472,7 @@ impl App {
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())
             .or_else(|| self.pdf_goto_page_prompt_text())
+            .or_else(|| self.pdf_search_prompt_text())
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
@@ -12467,6 +12707,7 @@ impl App {
             || ob.kind == BufferKind::Vnc
             || ob.kind == BufferKind::Pdf
             || ob.kind == BufferKind::PdfOutline
+            || ob.kind == BufferKind::PdfSearchResults
         {
             return 0;
         }
@@ -23249,4 +23490,180 @@ mod tests {
         assert!(app.pdf_outline_source.is_empty());
     }
 
+    fn sample_matches() -> Vec<fenix_pdf::search::PdfSearchMatch> {
+        vec![
+            fenix_pdf::search::PdfSearchMatch { page_index: 0, char_index: 5, context: "the quick brown fox".to_string() },
+            fenix_pdf::search::PdfSearchMatch { page_index: 6, char_index: 0, context: "jumps over the lazy dog".to_string() },
+        ]
+    }
+
+    #[test]
+    fn start_pdf_search_prompt_is_a_no_op_without_a_focused_pdf_pane() {
+        let mut app = App::with_file(None);
+        app.start_pdf_search_prompt();
+        assert!(app.pdf_search_prompt.is_none());
+    }
+
+    #[test]
+    fn pdf_search_prompt_round_trip_via_key_events_dispatches_a_search() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt.pdf");
+
+        app.start_pdf_search_prompt();
+        assert_eq!(app.pdf_search_prompt.as_deref(), Some(""));
+        for ch in "fox".chars() {
+            app.pdf_search_prompt_key(KeyPress::char(ch));
+        }
+        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fox".to_string()));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.pdf_search_prompt.is_none());
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.pending_search_request_id, 1);
+        assert_eq!(session.last_search_query, "fox");
+    }
+
+    #[test]
+    fn pdf_search_prompt_escape_cancels_without_dispatching_a_search() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt_escape.pdf");
+
+        app.start_pdf_search_prompt();
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.pdf_search_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().pending_search_request_id, 0);
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_opens_a_split_pane_with_one_line_per_match() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        session.last_search_query = "dog".to_string();
+        let doc_key = session.doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_search_panes.contains_key(&key));
+        let results_buffer = app.focused_buffer_id();
+        assert_eq!(app.buffers.get(results_buffer).unwrap().kind, BufferKind::PdfSearchResults);
+        assert_eq!(app.pdf_search_source.get(&results_buffer), Some(&key));
+        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 2);
+        assert!(app.open().buffer.text().contains("p.  1  the quick brown fox"));
+        assert!(app.open().buffer.text().contains("p.  7  jumps over the lazy dog"));
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_with_a_stale_request_id_is_dropped() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_stale.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 2; // a newer search has since been dispatched
+        let doc_key = session.doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        assert_eq!(app.windows().window_count(), panes_before);
+        assert!(!app.pdf_search_panes.contains_key(&key));
+    }
+
+    #[test]
+    fn a_second_search_rewrites_the_existing_results_pane_instead_of_stacking_a_new_one() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_second_search.pdf");
+        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
+        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 1;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+        let panes_with_results = app.windows().window_count();
+        let results_pane = *app.pdf_search_panes.get(&key).unwrap();
+
+        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 2;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults {
+            key: doc_key,
+            request_id: 2,
+            matches: vec![fenix_pdf::search::PdfSearchMatch { page_index: 2, char_index: 0, context: "banana".to_string() }],
+        });
+
+        assert_eq!(app.windows().window_count(), panes_with_results); // no new pane
+        assert_eq!(*app.pdf_search_panes.get(&key).unwrap(), results_pane); // same pane
+        let results_buffer = *app.windows().content(results_pane).unwrap();
+        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 1);
+        assert!(app.buffers.get(results_buffer).unwrap().buffer.text().contains("banana"));
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_with_no_matches_shows_the_explanatory_placeholder() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_empty.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        session.last_search_query = "xylophone".to_string();
+        let doc_key = session.doc_key;
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
+
+        assert_eq!(app.open().buffer.text(), "(no matches for \"xylophone\")");
+    }
+
+    #[test]
+    fn pdf_search_activate_selected_jumps_the_companion_pdf_pane_to_that_matchs_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        // Move the cursor to the second line (page_index 6).
+        let start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
+
+        app.pdf_search_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
+    }
+
+    #[test]
+    fn pdf_search_activate_selected_on_the_no_matches_placeholder_line_does_nothing() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate_empty.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
+
+        app.pdf_search_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn killing_the_search_results_buffer_directly_cleans_up_the_same_as_closing_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_kill_buffer.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_results = app.windows().window_count();
+
+        app.kill_buffer_now();
+
+        assert_eq!(app.windows().window_count(), panes_with_results - 1);
+        assert!(!app.pdf_search_panes.contains_key(&key));
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_session_close_cleans_up_a_still_open_search_panes_side_tables() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_search.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        app.pdf_session_close(&key);
+
+        assert!(app.pdf_search_panes.is_empty());
+        assert!(app.pdf_search_result_lines.is_empty());
+        assert!(app.pdf_search_source.is_empty());
+    }
 }
