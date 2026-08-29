@@ -23,6 +23,7 @@
 
 mod render;
 pub mod coords;
+pub mod crop;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,7 +68,12 @@ pub enum PdfRequest {
 /// `response_sink` (see `PdfWorker::spawn`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfResponse {
-    Opened { key: PdfDocKey, page_count: u32 },
+    /// `page_width_pts`/`page_height_pts` are page 0's native size, in PDF
+    /// points (1/72 inch) -- the caller needs these *before* it can even
+    /// compute a fit-to-page/fit-width/percent render target (see
+    /// `coords::fit_page_size`/`fit_width_size`/`percent_size`), and
+    /// there's no render to piggyback them on yet at this point.
+    Opened { key: PdfDocKey, page_count: u32, page_width_pts: f32, page_height_pts: f32 },
     OpenFailed { key: PdfDocKey, message: String },
     /// A page finished rendering, as a tightly-packed BGRA buffer of
     /// exactly `width` x `height` pixels (matches the `target_w`/
@@ -81,7 +87,16 @@ pub enum PdfResponse {
     /// request already being rendered when a newer one arrives can't be
     /// un-dispatched, so this is the caller's own last line of defense
     /// against briefly showing a stale page/size.
-    PageRendered { key: PdfDocKey, request_id: u64, page_index: u32, width: u32, height: u32, bgra: Vec<u8> },
+    ///
+    /// `page_width_pts`/`page_height_pts` are *this* page's own native
+    /// size -- refreshes the caller's cached value from `Opened` (or an
+    /// earlier `PageRendered`), which matters for the rare PDF whose pages
+    /// aren't all the same size: the caller computes a page-turn's render
+    /// target from whatever size it last knew about (there's no size to
+    /// ask for ahead of the page actually being opened), so a mismatch
+    /// here is the caller's cue to immediately dispatch a corrected
+    /// re-render at the right target for the page it actually landed on.
+    PageRendered { key: PdfDocKey, request_id: u64, page_index: u32, width: u32, height: u32, bgra: Vec<u8>, page_width_pts: f32, page_height_pts: f32 },
     RenderFailed { key: PdfDocKey, request_id: u64, message: String },
 }
 

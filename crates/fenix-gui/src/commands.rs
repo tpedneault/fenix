@@ -88,6 +88,11 @@ impl CommandRegistry {
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
         registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
+        registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
+        registry.register("pdf.zoom_in", "Zoom the focused PDF session in", cmd_pdf_zoom_in);
+        registry.register("pdf.zoom_out", "Zoom the focused PDF session out", cmd_pdf_zoom_out);
+        registry.register("pdf.fit_page", "Fit the focused PDF session's page to the pane", cmd_pdf_fit_page);
+        registry.register("pdf.fit_width", "Fit the focused PDF session's page to the pane's width", cmd_pdf_fit_width);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
@@ -323,6 +328,26 @@ fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
 
 fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
     ctx.app.pdf_prev_page();
+}
+
+fn cmd_pdf_goto_page(ctx: &mut CommandCtx) {
+    ctx.app.start_pdf_goto_page_prompt();
+}
+
+fn cmd_pdf_zoom_in(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_in();
+}
+
+fn cmd_pdf_zoom_out(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_out();
+}
+
+fn cmd_pdf_fit_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_fit_page();
+}
+
+fn cmd_pdf_fit_width(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_fit_width();
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {

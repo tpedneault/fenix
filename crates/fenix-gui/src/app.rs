@@ -586,6 +586,55 @@ struct VncSession {
     reconnect_attempts: u32,
 }
 
+/// How a `PdfSession`'s current page is scaled onto its pane -- what
+/// `pdf_target_size` turns into an actual pixel render target. `FitPage`/
+/// `FitWidth` consult the pane's own current pixel size (so a resize
+/// re-renders at a new target); `Percent` deliberately doesn't (so a
+/// resize just re-crops/re-pans the existing render instead of asking
+/// pdfium to render again) -- see `pdf_target_size`'s own doc comment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PdfZoom {
+    FitPage,
+    FitWidth,
+    /// Percent of "native" size, where 100 means one render pixel per PDF
+    /// point (see `fenix_pdf::coords::percent_size`). Clamped to
+    /// `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_PERCENT` by every call site
+    /// that changes it (`pdf_zoom_in`/`pdf_zoom_out`), not by this type.
+    Percent(u32),
+}
+
+/// `Percent` zoom bounds -- generous enough to be useful (25% to read a
+/// dense multi-column page's overall layout, 400% to make fine print
+/// legible) while keeping the largest possible render (and its GPU
+/// texture) bounded: a 400%-zoomed US Letter page is already ~2448x3168
+/// px, comfortably inside any real GPU's texture size limit.
+const PDF_ZOOM_MIN_PERCENT: u32 = 25;
+const PDF_ZOOM_MAX_PERCENT: u32 = 400;
+/// How much `pdf_zoom_in`/`pdf_zoom_out` moves the effective percentage
+/// per press -- coarse on purpose (see the PDF viewing plan's own
+/// reasoning: a typed-percentage prompt is more precision than this
+/// feature needs).
+const PDF_ZOOM_STEP_PERCENT: u32 = 10;
+/// How far `pdf_pan` moves `PdfSession::scroll_offset` per keypress, in
+/// rendered pixels.
+const PDF_PAN_STEP_PX: u32 = 60;
+
+/// Turns a zoom mode into an actual pixel render target, given the
+/// page's native point size and the pane's current pixel size.
+/// Degenerate inputs (no known page size yet, or a zero-sized pane)
+/// return `(0, 0)`, which every call site treats as "nothing to render
+/// yet" rather than dispatching a bogus request.
+fn pdf_target_size(zoom: PdfZoom, page_pts: (f32, f32), pane_px: (u32, u32)) -> (u32, u32) {
+    if page_pts.0 <= 0.0 || page_pts.1 <= 0.0 || pane_px.0 == 0 || pane_px.1 == 0 {
+        return (0, 0);
+    }
+    match zoom {
+        PdfZoom::FitPage => fenix_pdf::coords::fit_page_size(page_pts.0, page_pts.1, pane_px.0, pane_px.1),
+        PdfZoom::FitWidth => fenix_pdf::coords::fit_width_size(page_pts.0, page_pts.1, pane_px.0),
+        PdfZoom::Percent(percent) => fenix_pdf::coords::percent_size(page_pts.0, page_pts.1, percent),
+    }
+}
+
 /// One open PDF document (`SPC r o`) -- one pane/buffer per document,
 /// same shape as `VncSession`. Keyed in `App::pdf_sessions` by the
 /// document's canonicalized path (not `fenix_pdf::PdfDocKey`, which is
@@ -608,10 +657,10 @@ struct PdfSession {
     /// comment for the actual staleness guard).
     rendered_page: Option<u32>,
     /// The pixel size last asked for in a dispatched `RenderPage` request
-    /// -- compared against the pane's current on-screen content size
+    /// -- compared against `pdf_target_size`'s own current computation
     /// every frame (see `redraw`'s pane-classification loop) to decide
-    /// whether a resize needs a fresh render. `(0, 0)` until the first
-    /// request goes out.
+    /// whether a resize/zoom change needs a fresh render. `(0, 0)` until
+    /// the first request goes out.
     last_requested_size: (u32, u32),
     /// Bumped on every dispatched `RenderPage` request; a `PageRendered`/
     /// `RenderFailed` reply whose own `request_id` doesn't match this is
@@ -619,17 +668,45 @@ struct PdfSession {
     /// in a row) and silently dropped -- see `fenix_pdf::PdfResponse::
     /// PageRendered`'s own doc comment.
     pending_request_id: u64,
-    /// The most recently rendered page's pixels, waiting to be uploaded
-    /// to `texture` on the next `redraw` -- set by `apply_pdf_response`'s
-    /// `PageRendered` arm, taken (cleared) once `redraw` uploads it.
-    /// Unlike `VncSession::framebuffer`, this is never partially updated
-    /// (a rendered PDF page always arrives whole, no dirty-rects), so
-    /// there's no need to keep it around after it's been applied.
-    pending_bgra: Option<(u32, u32, Vec<u8>)>,
+    /// This document's current page's native size, in PDF points (1/72
+    /// inch) -- `(0.0, 0.0)` until the first `Opened`/`PageRendered`
+    /// reply reports it. `pdf_target_size` can't compute anything
+    /// meaningful before this is known.
+    page_point_size: (f32, f32),
+    /// How this session is currently zoomed. Defaults to `FitPage`.
+    zoom: PdfZoom,
+    /// The pane's own current on-screen pixel size, refreshed
+    /// unconditionally every frame in `redraw`'s pane-classification loop
+    /// -- what `pdf_zoom_in`/`pdf_zoom_out`/`pdf_zoom_fit_page`/
+    /// `pdf_zoom_fit_width`/`pdf_goto_page` (all run from a keypress, not
+    /// from that loop) read to compute and dispatch a render immediately,
+    /// rather than changing `zoom`/`current_page` and waiting a frame for
+    /// the classification loop's own resize-detection to notice.
+    last_pane_size: (u32, u32),
+    /// Top-left pixel offset into `full_bgra` currently shown -- reset to
+    /// `(0, 0)` (top-left) by every fresh render (see `apply_pdf_
+    /// response`'s `PageRendered` arm). Only matters once a render is
+    /// larger than the pane in some dimension (`FitWidth`'s tall-page
+    /// case, or any `Percent` zoom bigger than what the pane can show
+    /// whole) -- clamped against `full_bgra`'s actual size and the pane's
+    /// current size every frame in `redraw`, not here.
+    scroll_offset: (u32, u32),
+    /// The full, uncropped BGRA bitmap from the most recent `PageRendered`
+    /// reply that wasn't superseded -- unlike Phase 0's `pending_bgra`,
+    /// kept around rather than taken/cleared once uploaded, because
+    /// panning needs to re-crop this *same* render at a new `scroll_
+    /// offset` without asking pdfium to render again.
+    full_bgra: Option<(u32, u32, Vec<u8>)>,
+    /// `(visible_w, visible_h, scroll_x, scroll_y)` of whatever's
+    /// currently uploaded to `texture` -- compared each frame against
+    /// what the current pane size/`scroll_offset` actually calls for, so
+    /// `redraw` only touches the GPU when something real changed (a new
+    /// render, a resize, or a pan), not on every single frame regardless.
+    last_uploaded: Option<(u32, u32, u32, u32)>,
     /// `None` until the GPU exists *and* a page has actually been
     /// rendered -- created lazily in `redraw` (see `PdfPipeline::
-    /// create_texture`), recreated whenever the rendered page's pixel
-    /// size changes.
+    /// create_texture`), recreated whenever the visible crop's pixel size
+    /// changes.
     texture: Option<PdfTexture>,
 }
 
@@ -3121,6 +3198,10 @@ pub struct App {
     /// `SPC f f`'s typed-path prompt, when in progress -- a plain
     /// capturing prompt, same shape as `pending_grep_query`.
     find_file_prompt: Option<String>,
+    /// `SPC r g`'s type-a-page-number prompt, when in progress -- same
+    /// self-contained capturing-prompt shape as `find_file_prompt`, just
+    /// digits-only (see `pdf_goto_page_prompt_key`).
+    pdf_goto_page_prompt: Option<String>,
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
@@ -3775,6 +3856,7 @@ impl App {
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
+            pdf_goto_page_prompt: None,
             rename_file_prompt: None,
             delete_file_confirm: false,
             vim,
@@ -5243,7 +5325,12 @@ impl App {
                 rendered_page: None,
                 last_requested_size: (0, 0),
                 pending_request_id: 0,
-                pending_bgra: None,
+                page_point_size: (0.0, 0.0),
+                zoom: PdfZoom::FitPage,
+                last_pane_size: (0, 0),
+                scroll_offset: (0, 0),
+                full_bgra: None,
+                last_uploaded: None,
                 texture: None,
             },
         );
@@ -5290,9 +5377,13 @@ impl App {
     /// `target_h` pixels, bumping `pending_request_id` first so a reply to
     /// an earlier, now-superseded request gets dropped by `apply_pdf_
     /// response` instead of clobbering a newer one. A no-op if the
-    /// session or worker doesn't exist, or the document hasn't reported
-    /// its page count back yet (nothing to render before then).
+    /// session or worker doesn't exist, the document hasn't reported its
+    /// page count back yet, or `target_w`/`target_h` is degenerate
+    /// (nothing meaningful to render before either is known).
     fn dispatch_pdf_render(&mut self, key: &Path, target_w: u32, target_h: u32) {
+        if target_w == 0 || target_h == 0 {
+            return;
+        }
         let Some(session) = self.pdf_sessions.get_mut(key) else { return };
         if session.page_count == 0 {
             return;
@@ -5305,6 +5396,22 @@ impl App {
         }
     }
 
+    /// Recomputes this session's render target from its current `zoom` +
+    /// `page_point_size` + `last_pane_size` and dispatches it -- the
+    /// shared "something changed that isn't a plain resize" path every
+    /// keypress-driven mutator (`pdf_turn_page`, `pdf_goto_page`, the
+    /// `pdf_zoom_*` family) uses instead of duplicating this computation.
+    /// `redraw`'s own pane-classification loop does the equivalent
+    /// computation for the *resize* case specifically, since it's the
+    /// only place that learns about a resize in the first place -- this
+    /// is what everything else reaches for once `last_pane_size` is
+    /// already known from that loop's last pass.
+    fn pdf_dispatch_render_for_zoom(&mut self, key: &Path) {
+        let Some(session) = self.pdf_sessions.get(key) else { return };
+        let (target_w, target_h) = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
+        self.dispatch_pdf_render(key, target_w, target_h);
+    }
+
     /// `FenixUserEvent::PdfResponse` handling. Every variant carries its
     /// own `fenix_pdf::PdfDocKey`, not the path `pdf_sessions` is keyed
     /// by, so each arm scans for the session whose `doc_key` matches
@@ -5312,10 +5419,11 @@ impl App {
     /// that session's since been closed.
     fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
         match response {
-            fenix_pdf::PdfResponse::Opened { key, page_count } => {
+            fenix_pdf::PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts } => {
                 let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
                 let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
                 session.page_count = page_count;
+                session.page_point_size = (page_width_pts, page_height_pts);
                 // No render dispatched here -- `last_requested_size`
                 // stays `(0, 0)`, which `redraw`'s pane-classification
                 // loop (the only place that actually knows this pane's
@@ -5327,22 +5435,39 @@ impl App {
                 let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
                 self.set_error(format!("couldn't open {}: {message}", path.display()));
             }
-            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra } => {
+            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts } => {
                 let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
                 let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
                 if request_id != session.pending_request_id || page_index != session.current_page {
                     return; // superseded by a later request/page turn since this one was dispatched
                 }
                 session.rendered_page = Some(page_index);
-                // Staged for `redraw` to actually upload -- a fresh page
-                // render is always a different pixel size than whatever
-                // `texture` currently holds often enough (page turn,
-                // resize, zoom) that it's simplest to always recreate
-                // rather than try to detect "same size, upload in place"
-                // here; `redraw`'s own texture-creation step is what
-                // VNC's `Resolution` arm defers to as well.
-                session.pending_bgra = Some((width, height, bgra));
-                session.texture = None;
+                session.page_point_size = (page_width_pts, page_height_pts);
+                // A fresh render always starts scrolled to the top-left,
+                // and always invalidates whatever's currently uploaded
+                // (see `last_uploaded`'s own doc comment) -- `redraw`
+                // recreates the texture from `full_bgra` as needed, same
+                // "defer the actual GPU work to redraw" shape VNC's own
+                // `Resolution` arm uses.
+                session.scroll_offset = (0, 0);
+                session.full_bgra = Some((width, height, bgra));
+                session.last_uploaded = None;
+                // Self-correction for a PDF whose pages aren't all the
+                // same point-size: `page_width_pts`/`page_height_pts` is
+                // *this* page's real size, which may differ from whatever
+                // was assumed when this request was dispatched (there was
+                // no way to know ahead of a page actually being open) --
+                // if the target this page's real size calls for doesn't
+                // match what was actually rendered, the render just
+                // applied is wrong-sized and immediately superseded by a
+                // corrected one. The mutable `session` borrow must end
+                // before this call (`dispatch_pdf_render` needs its own
+                // `&mut self`), hence computing `corrected` here but
+                // calling after the match arm's borrow is out of scope.
+                let corrected = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
+                if corrected != (0, 0) && corrected != (width, height) {
+                    self.dispatch_pdf_render(&path, corrected.0, corrected.1);
+                }
             }
             fenix_pdf::PdfResponse::RenderFailed { key, request_id, message } => {
                 let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
@@ -5358,9 +5483,9 @@ impl App {
 
     /// `SPC r n` / `SPC r p`: turns the focused PDF session to the next/
     /// previous page (clamped to `0..page_count`), dispatching a fresh
-    /// render at whatever pixel size the pane last asked for -- a no-op
-    /// at either end of the document, and a no-op if the focused pane
-    /// isn't a PDF session at all.
+    /// render at the pane's last-known size and this session's current
+    /// zoom -- a no-op at either end of the document, and a no-op if the
+    /// focused pane isn't a PDF session at all.
     fn pdf_turn_page(&mut self, delta: i32) {
         let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
         let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
@@ -5372,10 +5497,7 @@ impl App {
             return;
         }
         session.current_page = new_page;
-        let (w, h) = session.last_requested_size;
-        if w > 0 && h > 0 {
-            self.dispatch_pdf_render(&key, w, h);
-        }
+        self.pdf_dispatch_render_for_zoom(&key);
         self.wake_caret();
     }
 
@@ -5385,6 +5507,142 @@ impl App {
 
     pub(crate) fn pdf_prev_page(&mut self) {
         self.pdf_turn_page(-1);
+    }
+
+    /// `SPC r g`: starts the "type a page number" prompt -- a no-op if
+    /// the focused pane isn't a PDF session (nothing to jump within).
+    pub(crate) fn start_pdf_goto_page_prompt(&mut self) {
+        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
+            return;
+        }
+        self.pdf_goto_page_prompt = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `pdf_goto_page_prompt` --
+    /// digits only (this is a 1-indexed page number, not free text), same
+    /// capturing shape as `find_file_prompt_key`.
+    fn pdf_goto_page_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.pdf_goto_page_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_goto_page_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.pdf_goto_page_prompt.take().unwrap_or_default();
+                if let Ok(page_number) = input.parse::<u32>() {
+                    self.pdf_goto_page(page_number);
+                }
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() && c.is_ascii_digit() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `pdf_goto_page_prompt`
+    /// is active -- mirrors `find_file_prompt_text`.
+    fn pdf_goto_page_prompt_text(&self) -> Option<String> {
+        self.pdf_goto_page_prompt.as_ref().map(|input| format!("go to page: {input}"))
+    }
+
+    /// Jumps the focused PDF session directly to `page_number` (1-indexed,
+    /// as shown to the user -- clamped into `1..=page_count`, so an
+    /// out-of-range number lands on the nearest real page rather than
+    /// being rejected outright, same forgiving posture as most page-jump
+    /// UIs). A no-op if the focused pane isn't a PDF session, or its page
+    /// count isn't known yet.
+    fn pdf_goto_page(&mut self, page_number: u32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        let new_page = page_number.saturating_sub(1).min(session.page_count - 1);
+        if new_page == session.current_page {
+            return;
+        }
+        session.current_page = new_page;
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    /// The effective zoom percentage a session's *current* render sits
+    /// at, used to seed `pdf_zoom_in`/`pdf_zoom_out`'s step regardless of
+    /// which zoom mode got it there (`FitPage`/`FitWidth` have no
+    /// percentage of their own -- this derives one from the actual
+    /// rendered size against the page's native point width). Falls back
+    /// to `100` if nothing's been rendered yet or the page size isn't
+    /// known (nothing to derive a ratio from).
+    fn pdf_effective_percent(session: &PdfSession) -> u32 {
+        let (rendered_w, _) = session.last_requested_size;
+        let (page_w_pts, _) = session.page_point_size;
+        if rendered_w == 0 || page_w_pts <= 0.0 {
+            return 100;
+        }
+        ((rendered_w as f32 / page_w_pts) * 100.0).round().max(1.0) as u32
+    }
+
+    /// Shared body for `pdf_zoom_in`/`pdf_zoom_out`: steps the focused
+    /// session's effective zoom percentage by `delta_percent` (positive
+    /// or negative), clamped to `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_
+    /// PERCENT`, switching it into `PdfZoom::Percent` regardless of
+    /// whatever mode it was in before -- a no-op if the focused pane
+    /// isn't a PDF session.
+    fn pdf_zoom_step(&mut self, delta_percent: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        let current = Self::pdf_effective_percent(session);
+        let stepped = (current as i32 + delta_percent).clamp(PDF_ZOOM_MIN_PERCENT as i32, PDF_ZOOM_MAX_PERCENT as i32) as u32;
+        session.zoom = PdfZoom::Percent(stepped);
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    pub(crate) fn pdf_zoom_in(&mut self) {
+        self.pdf_zoom_step(PDF_ZOOM_STEP_PERCENT as i32);
+    }
+
+    pub(crate) fn pdf_zoom_out(&mut self) {
+        self.pdf_zoom_step(-(PDF_ZOOM_STEP_PERCENT as i32));
+    }
+
+    /// Shared body for `pdf_zoom_fit_page`/`pdf_zoom_fit_width`: sets the
+    /// focused session's zoom mode outright and dispatches a render for
+    /// it -- a no-op if the focused pane isn't a PDF session.
+    fn pdf_set_zoom(&mut self, zoom: PdfZoom) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        session.zoom = zoom;
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    pub(crate) fn pdf_zoom_fit_page(&mut self) {
+        self.pdf_set_zoom(PdfZoom::FitPage);
+    }
+
+    pub(crate) fn pdf_zoom_fit_width(&mut self) {
+        self.pdf_set_zoom(PdfZoom::FitWidth);
+    }
+
+    /// `h`/`j`/`k`/`l` while a PDF pane is focused (see `route_keypress`'s
+    /// own `BufferKind::Pdf` block): nudges `scroll_offset` by
+    /// `PDF_PAN_STEP_PX` in the given direction. Never clamped here --
+    /// `redraw`'s own crop computation clamps against `full_bgra`'s
+    /// actual size and the pane's current size every frame regardless of
+    /// how `scroll_offset` got to wherever it is, so an over-eager pan
+    /// past either edge just settles at that edge next frame rather than
+    /// needing its own bounds check here. A no-op if the focused pane
+    /// isn't a PDF session.
+    fn pdf_pan(&mut self, dx: i32, dy: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        let step = PDF_PAN_STEP_PX as i32;
+        session.scroll_offset =
+            ((session.scroll_offset.0 as i32 + dx * step).max(0) as u32, (session.scroll_offset.1 as i32 + dy * step).max(0) as u32);
+        self.wake_caret();
     }
 
     /// Encodes `keypress` and writes it to the live terminal session, if
@@ -10537,6 +10795,11 @@ impl App {
             self.find_file_prompt_key(keypress);
             return;
         }
+        // `SPC r g` -- same capturing-prompt tier.
+        if self.pdf_goto_page_prompt.is_some() {
+            self.pdf_goto_page_prompt_key(keypress);
+            return;
+        }
         if self.rename_file_prompt.is_some() {
             self.rename_file_prompt_key(keypress);
             return;
@@ -10839,6 +11102,35 @@ impl App {
                 }
                 KeyCode::Char('c') if keypress.mods == Mods::default() => {
                     self.open_table_column_picker();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // A PDF pane's buffer is deliberately empty (see `BufferKind`'s
+        // own doc comment on `Pdf`) -- there's no real text underneath
+        // for `hjkl` to move a cursor through, so they're claimed here
+        // first to pan the rendered page instead of falling through to
+        // Vim as harmless no-ops on nothing. Page navigation (`SPC r n`/
+        // `SPC r p`) and zoom/goto-page are leader commands, not raw keys,
+        // so they don't need a claim here.
+        if self.open().kind == BufferKind::Pdf {
+            match keypress.code {
+                KeyCode::Char('h') if keypress.mods == Mods::default() => {
+                    self.pdf_pan(-1, 0);
+                    return;
+                }
+                KeyCode::Char('l') if keypress.mods == Mods::default() => {
+                    self.pdf_pan(1, 0);
+                    return;
+                }
+                KeyCode::Char('j') if keypress.mods == Mods::default() => {
+                    self.pdf_pan(0, 1);
+                    return;
+                }
+                KeyCode::Char('k') if keypress.mods == Mods::default() => {
+                    self.pdf_pan(0, -1);
                     return;
                 }
                 _ => {}
@@ -11737,6 +12029,7 @@ impl App {
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())
+            .or_else(|| self.pdf_goto_page_prompt_text())
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
@@ -13421,20 +13714,34 @@ impl App {
             // A PDF pane's content is a rendered page bitmap, not text --
             // same "separate textured-quad layer, still gets an ordinary
             // empty `PaneRender` for its title bar" shape as `BufferKind::
-            // Vnc` above. This is also where fit-to-page actually tracks
-            // a live resize: `rect`'s pixel size is only known here, so a
-            // mismatch against the session's `last_requested_size` (set
-            // the last time a render was dispatched) is what triggers the
-            // next one -- covers the pane's first-ever render too, since
-            // `last_requested_size` starts at `(0, 0)`.
+            // Vnc` above. This is also where fit-to-page/fit-width
+            // actually track a live resize: `rect`'s pixel size is only
+            // known here, so `last_pane_size` is refreshed unconditionally
+            // every frame (zoom/goto-page/pan, which run from a keypress
+            // outside this loop, read it) and `pdf_target_size`'s result
+            // for the session's current zoom is compared against `last_
+            // requested_size` (set the last time a render was dispatched)
+            // to decide whether a fresh render is actually needed --
+            // covers the pane's first-ever render too, since `last_
+            // requested_size` starts at `(0, 0)` and `pdf_target_size`
+            // only returns `(0, 0)` back before the page's point-size is
+            // known. `Percent` zoom's own target doesn't depend on `rect`
+            // at all (see `pdf_target_size`'s own doc comment), so a
+            // resize alone never re-triggers a render under that mode --
+            // only the crop/pan computation in the texture-upload step
+            // below reacts to it.
             if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Pdf) {
                 pdf_panes.push((pane, rect));
                 if let Some(key) = self.pdf_session_key_for_pane(pane) {
-                    let target = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
-                    let needs_render =
-                        self.pdf_sessions.get(&key).is_some_and(|session| session.page_count > 0 && session.last_requested_size != target);
+                    let pane_px = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
+                    if let Some(session) = self.pdf_sessions.get_mut(&key) {
+                        session.last_pane_size = pane_px;
+                    }
+                    let needs_render = self.pdf_sessions.get(&key).is_some_and(|session| {
+                        session.page_count > 0 && pdf_target_size(session.zoom, session.page_point_size, pane_px) != session.last_requested_size
+                    });
                     if needs_render {
-                        self.dispatch_pdf_render(&key, target.0, target.1);
+                        self.pdf_dispatch_render_for_zoom(&key);
                     }
                 }
                 panes_render.push(PaneRender {
@@ -14026,20 +14333,40 @@ impl App {
             }
         }
 
-        // Same shape as the VNC loop just above, but the "what to upload"
-        // question is answered by `pending_bgra` instead of a persistent
-        // CPU-side framebuffer -- a freshly rendered PDF page always
-        // arrives whole (no dirty-rects), so there's nothing to keep
-        // around once it's been uploaded and the bytes are taken here.
-        for (pane, _) in &pdf_panes {
+        // Unlike the VNC loop just above (whole framebuffer always maps
+        // onto the whole pane), a PDF render can be smaller than the pane
+        // (fit-to-page/fit-width letterboxing) or larger (zoomed in) --
+        // so what actually gets uploaded is a crop of `full_bgra`, sized
+        // and positioned by `scroll_offset`, clamped against both the
+        // render's real size and the pane's current size (the only place
+        // both are known at once). `last_uploaded` records exactly what
+        // was last cropped/uploaded so a frame where nothing about the
+        // crop changed skips touching the GPU at all; `apply_pdf_
+        // response` resets it to `None` on every fresh render so a new
+        // bitmap always gets uploaded even if its crop key happens to
+        // coincide with the previous one.
+        for (pane, rect) in &pdf_panes {
             let Some(session) = self.pdf_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
-            if session.texture.is_none() {
-                if let Some((width, height, bgra)) = session.pending_bgra.take() {
-                    let texture = pdf_pipeline.create_texture(gpu, width, height);
-                    pdf_pipeline.upload_rect(gpu, &texture, 0, 0, width, height, &bgra);
-                    session.texture = Some(texture);
-                }
+            let Some((full_w, full_h, full_bytes)) = &session.full_bgra else { continue };
+            let (full_w, full_h) = (*full_w, *full_h);
+            let pane_w = rect.w.max(1.0) as u32;
+            let pane_h = rect.h.max(1.0) as u32;
+            let visible_w = full_w.min(pane_w).max(1);
+            let visible_h = full_h.min(pane_h).max(1);
+            let max_scroll_x = full_w.saturating_sub(visible_w);
+            let max_scroll_y = full_h.saturating_sub(visible_h);
+            let scroll_x = session.scroll_offset.0.min(max_scroll_x);
+            let scroll_y = session.scroll_offset.1.min(max_scroll_y);
+            session.scroll_offset = (scroll_x, scroll_y);
+            let upload_key = (visible_w, visible_h, scroll_x, scroll_y);
+            if session.last_uploaded == Some(upload_key) && session.texture.is_some() {
+                continue;
             }
+            let cropped = fenix_pdf::crop::crop_bgra(full_bytes, full_w, full_h, scroll_x, scroll_y, visible_w, visible_h);
+            let texture = pdf_pipeline.create_texture(gpu, visible_w, visible_h);
+            pdf_pipeline.upload_rect(gpu, &texture, 0, 0, visible_w, visible_h, &cropped);
+            session.texture = Some(texture);
+            session.last_uploaded = Some(upload_key);
         }
 
         let frame = match gpu.surface.get_current_texture() {
@@ -14098,9 +14425,23 @@ impl App {
             // the VNC loop just above.
             for (pane, rect) in &pdf_panes {
                 let Some(session) = self.pdf_sessions.values().find(|s| s.pane == *pane) else { continue };
-                if let Some(texture) = &session.texture {
-                    pdf_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
-                }
+                let (Some(texture), Some((visible_w, visible_h, _, _))) = (&session.texture, session.last_uploaded) else { continue };
+                // Centered within the pane, never stretched to fill it --
+                // unlike VNC's own draw call just above (whole framebuffer
+                // always maps onto the whole pane), a PDF render's pixel
+                // size is already the intended on-screen size (computed by
+                // `pdf_target_size`), so drawing it any larger/smaller
+                // than that would silently re-distort the very aspect
+                // ratio `fit_page_size`/`fit_width_size` exist to
+                // preserve. Smaller than `rect` in an axis (fit-to-page
+                // letterboxing) shows as blank pane background around it;
+                // this loop runs before `text.render` so a fully centered
+                // small page still leaves the title bar legible on top.
+                let dest_w = (visible_w as f32).min(rect.w);
+                let dest_h = (visible_h as f32).min(rect.h);
+                let dest_x = rect.x + (rect.w - dest_w) / 2.0;
+                let dest_y = rect.y + (rect.h - dest_h) / 2.0;
+                pdf_pipeline.draw(gpu, &mut pass, texture, dest_x, dest_y, dest_w, dest_h);
             }
             text.render(&mut pass);
         }
@@ -22359,4 +22700,224 @@ mod tests {
         }
         assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("PROJ-1")));
     }
+
+    #[test]
+    fn pdf_target_size_fit_page_delegates_to_fit_page_size() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (100.0, 200.0), (800, 800)), fenix_pdf::coords::fit_page_size(100.0, 200.0, 800, 800));
+    }
+
+    #[test]
+    fn pdf_target_size_fit_width_delegates_to_fit_width_size() {
+        assert_eq!(pdf_target_size(PdfZoom::FitWidth, (100.0, 200.0), (400, 800)), fenix_pdf::coords::fit_width_size(100.0, 200.0, 400));
+    }
+
+    #[test]
+    fn pdf_target_size_percent_delegates_to_percent_size_and_ignores_pane_size() {
+        let a = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (400, 400));
+        let b = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (4000, 4000));
+        assert_eq!(a, fenix_pdf::coords::percent_size(612.0, 792.0, 150));
+        assert_eq!(a, b, "percent zoom must not depend on pane size");
+    }
+
+    #[test]
+    fn pdf_target_size_is_zero_before_the_page_size_is_known() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (0.0, 0.0), (800, 800)), (0, 0));
+    }
+
+    #[test]
+    fn pdf_target_size_is_zero_for_a_zero_sized_pane() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (612.0, 792.0), (0, 800)), (0, 0));
+    }
+
+    #[test]
+    fn pdf_effective_percent_derives_100_from_a_one_pixel_per_point_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_100.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792);
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
+    }
+
+    #[test]
+    fn pdf_effective_percent_derives_200_from_a_double_size_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_200.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (1224, 1584);
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 200);
+    }
+
+    #[test]
+    fn pdf_effective_percent_falls_back_to_100_before_anything_has_rendered() {
+        let (_guard, key, app) = test_open_pdf("pdf_effective_percent_fallback.pdf");
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
+    }
+
+    /// `open_pdf_path` spawns a real `fenix_pdf::PdfWorker` thread, which
+    /// binds and initializes the real pdfium native library -- a process-
+    /// wide resource the same way the OS clipboard is (see `CLIPBOARD_
+    /// TEST_LOCK`'s own doc comment), and just as unsafe to touch from
+    /// several threads at once. Production code never hits this (exactly
+    /// one `App`, hence exactly one `PdfWorker`, for the process's whole
+    /// lifetime), but the test harness runs every `#[test]` fn in
+    /// parallel by default, and each one below builds its own `App` (so
+    /// its own from-scratch `PdfWorker`) -- without this lock, several
+    /// tests' worker threads raced to initialize pdfium concurrently and
+    /// reliably crashed the whole test binary (`STATUS_ACCESS_VIOLATION`).
+    static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Opens a PDF-kind pane the same way `open_pdf_path` does (real
+    /// worker/session/pane wiring, no real pdfium/GPU needed since the
+    /// worker's replies never arrive synchronously in a test) and then
+    /// seeds it with a known page count/size, as if `Opened` had already
+    /// landed -- what every `pdf_goto_page`/`pdf_zoom_*`/`pdf_pan` test
+    /// below needs before those methods do anything.
+    ///
+    /// Builds the `App` itself (rather than taking `&mut App`) so it can
+    /// return `(guard, path, app)` with `guard` named *first* in the
+    /// tuple pattern -- Rust drops a multi-binding `let` in reverse of
+    /// the pattern's left-to-right order, so naming `app` *last* means it
+    /// (and the `PdfWorker`/pdfium instance it owns) is fully dropped and
+    /// joined before `PDF_WORKER_TEST_LOCK` is released at the end of the
+    /// caller's test function. Returning just the guard alongside an
+    /// already-constructed `App` (the first version of this helper) was
+    /// provably not enough: `app` still outlived and dropped *after* that
+    /// guard at the end of each test (reverse-declaration-order, `app`
+    /// having been declared first), so two tests' `PdfWorker` threads
+    /// could still tear down pdfium concurrently on the way out --
+    /// intermittently crashing the test binary (`STATUS_BREAKPOINT`) even
+    /// with the lock in place, until the lock was made to cover the
+    /// worker's *entire* lifetime, spawn through join, not just the spawn
+    /// moment.
+    fn test_open_pdf(path: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf, App) {
+        let guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut app = App::with_file(None);
+        app.open_pdf_path(Path::new(path));
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let session = app.pdf_sessions.get_mut(&canonical).expect("session just opened");
+        session.page_count = 10;
+        session.page_point_size = (612.0, 792.0);
+        session.last_pane_size = (612, 792);
+        (guard, canonical, app)
+    }
+
+    #[test]
+    fn pdf_goto_page_jumps_to_the_1_indexed_page_and_dispatches_a_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_jumps.pdf");
+
+        app.pdf_goto_page(5);
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.current_page, 4);
+        assert_eq!(session.last_requested_size, fenix_pdf::coords::fit_page_size(612.0, 792.0, 612, 792));
+    }
+
+    #[test]
+    fn pdf_goto_page_clamps_past_the_last_page_to_the_last_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_clamps.pdf");
+
+        app.pdf_goto_page(9999);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
+    }
+
+    #[test]
+    fn pdf_goto_page_prompt_round_trip_via_key_events() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt.pdf");
+
+        app.start_pdf_goto_page_prompt();
+        assert_eq!(app.pdf_goto_page_prompt.as_deref(), Some(""));
+        for ch in "3".chars() {
+            app.pdf_goto_page_prompt_key(KeyPress::char(ch));
+        }
+        assert_eq!(app.pdf_goto_page_prompt_text(), Some("go to page: 3".to_string()));
+        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.pdf_goto_page_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 2);
+    }
+
+    #[test]
+    fn pdf_goto_page_prompt_escape_cancels_without_moving_the_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt_escape.pdf");
+
+        app.start_pdf_goto_page_prompt();
+        app.pdf_goto_page_prompt_key(KeyPress::char('3'));
+        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.pdf_goto_page_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn start_pdf_goto_page_prompt_is_a_no_op_without_a_focused_pdf_pane() {
+        let mut app = App::with_file(None);
+        app.start_pdf_goto_page_prompt();
+        assert!(app.pdf_goto_page_prompt.is_none());
+    }
+
+    #[test]
+    fn pdf_zoom_in_steps_up_from_the_effective_percent_and_switches_to_percent_zoom() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792); // 100%
+
+        app.pdf_zoom_in();
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.zoom, PdfZoom::Percent(110));
+    }
+
+    #[test]
+    fn pdf_zoom_out_steps_down_and_clamps_at_the_minimum() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_out_clamp.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT);
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
+            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MIN_PERCENT);
+
+        app.pdf_zoom_out();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT));
+    }
+
+    #[test]
+    fn pdf_zoom_in_clamps_at_the_maximum() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in_clamp.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT);
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
+            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MAX_PERCENT);
+
+        app.pdf_zoom_in();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT));
+    }
+
+    #[test]
+    fn pdf_zoom_fit_page_and_fit_width_switch_modes_and_dispatch() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_fit.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(200);
+
+        app.pdf_zoom_fit_width();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitWidth);
+
+        app.pdf_zoom_fit_page();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitPage);
+    }
+
+    #[test]
+    fn pdf_pan_moves_scroll_offset_in_the_given_direction() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_pan.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().scroll_offset = (100, 100);
+
+        app.pdf_pan(1, 0);
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100));
+
+        app.pdf_pan(0, -1);
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100 - PDF_PAN_STEP_PX));
+    }
+
+    #[test]
+    fn pdf_pan_never_underflows_past_zero() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_pan_underflow.pdf");
+
+        app.pdf_pan(-1, -1);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (0, 0));
+    }
+
 }

@@ -213,6 +213,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('r')], "reader (pdf)");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('n')], "next page", "pdf.next_page");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('p')], "previous page", "pdf.prev_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('g')], "go to page", "pdf.goto_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('=')], "zoom in", "pdf.zoom_in");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('-')], "zoom out", "pdf.zoom_out");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "fit page", "pdf.fit_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(

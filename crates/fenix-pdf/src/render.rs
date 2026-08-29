@@ -128,8 +128,19 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         PdfRequest::Open { key, path } => match pdfium.load_pdf_from_file(&path, None) {
             Ok(doc) => {
                 let page_count = doc.pages().len().max(0) as u32;
+                // Page 0's native size, if there's a page 0 at all -- a
+                // 0-page PDF is technically possible (malformed/empty) and
+                // shouldn't crash the worker, just report a degenerate
+                // size the caller's fit math already treats as "nothing
+                // to fit" (see `coords::fit_page_size`'s own degenerate-
+                // input handling).
+                let (page_width_pts, page_height_pts) = doc
+                    .pages()
+                    .get(0)
+                    .map(|page| (page.width().value, page.height().value))
+                    .unwrap_or((0.0, 0.0));
                 docs.insert(key, doc);
-                sink(PdfResponse::Opened { key, page_count });
+                sink(PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts });
             }
             Err(err) => sink(PdfResponse::OpenFailed { key, message: format!("{err:?}") }),
         },
@@ -139,7 +150,9 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 return;
             };
             match render_page(doc, page_index, target_w, target_h) {
-                Ok((width, height, bgra)) => sink(PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra }),
+                Ok((width, height, bgra, page_width_pts, page_height_pts)) => {
+                    sink(PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts })
+                }
                 Err(message) => sink(PdfResponse::RenderFailed { key, request_id, message }),
             }
         }
@@ -154,11 +167,18 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
 /// uses when not told otherwise) is already `BGRA`, matching
 /// `wgpu::TextureFormat::Bgra8Unorm` with no channel-swizzle needed,
 /// same reasoning `fenix_vnc::do_handshake`'s `PixelFormat::bgra()`
-/// already established for the VNC pipeline this mirrors.
-fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32) -> Result<(u32, u32, Vec<u8>), String> {
+/// already established for the VNC pipeline this mirrors. `target_w`/
+/// `target_h` is *not* necessarily aspect-correct for the page on its
+/// own -- pdfium stretches the page content to fill exactly the pixel
+/// box it's asked for, so getting an undistorted fit/zoom depends on the
+/// *caller* computing an aspect-correct `target_w`/`target_h` in the
+/// first place (see `coords::fit_page_size`/`fit_width_size`/
+/// `percent_size`), not on anything this function does.
+fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32) -> Result<(u32, u32, Vec<u8>, f32, f32), String> {
     let page = doc.pages().get(page_index as i32).map_err(|err| format!("{err:?}"))?;
+    let (page_width_pts, page_height_pts) = (page.width().value, page.height().value);
     let bitmap = page.render(target_w.max(1) as i32, target_h.max(1) as i32, None).map_err(|err| format!("{err:?}"))?;
     let width = bitmap.width().max(0) as u32;
     let height = bitmap.height().max(0) as u32;
-    Ok((width, height, bitmap.as_raw_bytes()))
+    Ok((width, height, bitmap.as_raw_bytes(), page_width_pts, page_height_pts))
 }
