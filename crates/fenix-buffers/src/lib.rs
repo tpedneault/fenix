@@ -66,6 +66,12 @@ pub enum BufferKind {
     /// file path on the `Buffer` itself either -- see `open_pdf`'s own
     /// doc comment for why.
     Pdf,
+    /// A PDF's flattened bookmark tree (`SPC r o`), shown as an indented
+    /// listing in its own companion pane next to the `Pdf` pane it was
+    /// opened from -- unlike `Pdf` itself, this *is* real Vim-navigable
+    /// text (same "real buffer, just tagged" shape as `Dashboard`), since
+    /// an outline is naturally just a list of lines, not pixel content.
+    PdfOutline,
 }
 
 impl BufferKind {
@@ -216,6 +222,16 @@ impl BufferList {
     /// instead.
     pub fn open_pdf(&mut self) -> BufferId {
         self.insert(Buffer::empty(), None, BufferKind::Pdf)
+    }
+
+    /// A real buffer seeded with `text` (an indented, flattened rendering
+    /// of a PDF's bookmark tree) and tagged `PdfOutline` -- `SPC r o`.
+    /// Same "real buffer, just tagged" shape as `open_dashboard`/
+    /// `open_docker`, unlike `open_pdf`/`open_vnc`'s empty-buffer shape:
+    /// an outline's content genuinely is text worth Vim-navigating
+    /// (`j`/`k`/`/`/`n`), not a stand-in pane slot for pixel content.
+    pub fn open_pdf_outline(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::PdfOutline)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --

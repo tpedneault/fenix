@@ -218,6 +218,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('-')], "zoom out", "pdf.zoom_out");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "fit page", "pdf.fit_page");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "toggle outline", "pdf.toggle_outline");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(

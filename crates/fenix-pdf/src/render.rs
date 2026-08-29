@@ -4,12 +4,13 @@
 //! outside `PdfWorker`'s one dedicated thread (see `lib.rs`'s own doc
 //! comment for why there's exactly one).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
 use pdfium_render::prelude::*;
 
+use crate::outline::OutlineEntry;
 use crate::{PdfDocKey, PdfRequest, PdfResponse};
 
 /// Everything that can go wrong opening/using pdfium itself, as opposed
@@ -156,9 +157,63 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 Err(message) => sink(PdfResponse::RenderFailed { key, request_id, message }),
             }
         }
+        PdfRequest::FetchOutline { key } => {
+            // No document open under this key is a no-op rather than an
+            // error reply -- there's no `PdfResponse` variant for "outline
+            // fetch failed" since this can only happen from a caller bug
+            // (asking before `Open`/after `Close`), never from anything a
+            // real PDF file's content could trigger.
+            if let Some(doc) = docs.get(&key) {
+                let entries = flatten_bookmarks(doc.bookmarks());
+                sink(PdfResponse::Outline { key, entries });
+            }
+        }
         PdfRequest::Close { key } => {
             docs.remove(&key);
         }
+    }
+}
+
+/// Walks a document's bookmark tree depth-first, prefix-order (a parent
+/// is always emitted immediately before its first child), producing the
+/// flat `Vec<OutlineEntry>` `fenix-gui` renders as indented lines. Written
+/// as an explicit recursive walk over `first_child`/`next_sibling` rather
+/// than `PdfBookmarks::iter()` because the built-in iterator doesn't
+/// expose each bookmark's tree depth, which is exactly what indentation
+/// needs -- this walk tracks it directly as it descends/moves sideways.
+///
+/// A bookmark whose destination can't be resolved to a page (e.g. an
+/// external URL action instead of an in-document jump) is omitted from
+/// the result -- there's nothing for `Enter` to jump to, so showing it
+/// would be a dead entry. Its children, if any, are still walked and can
+/// still appear (just one level deeper than a visible parent, in the
+/// rare case the parent itself had to be dropped).
+///
+/// Guards against a cyclic bookmark graph (malformed PDFs can have one)
+/// the same way `pdfium-render`'s own `PdfBookmarksIterator` does: a
+/// `HashSet` of already-visited bookmarks (`PdfBookmark` is `Hash`/`Eq`
+/// by its underlying handle) stops the walk from recursing forever.
+fn flatten_bookmarks(bookmarks: &PdfBookmarks) -> Vec<OutlineEntry> {
+    let mut out = Vec::new();
+    if let Some(root) = bookmarks.root() {
+        let mut visited = HashSet::new();
+        flatten_bookmark(root, 0, &mut out, &mut visited);
+    }
+    out
+}
+
+fn flatten_bookmark<'a>(bookmark: PdfBookmark<'a>, depth: u32, out: &mut Vec<OutlineEntry>, visited: &mut HashSet<PdfBookmark<'a>>) {
+    if !visited.insert(bookmark.clone()) {
+        return;
+    }
+    if let Some(page_index) = bookmark.destination().and_then(|dest| dest.page_index().ok()) {
+        out.push(OutlineEntry { title: bookmark.title().unwrap_or_default(), page_index: page_index.max(0) as u32, depth });
+    }
+    if let Some(child) = bookmark.first_child() {
+        flatten_bookmark(child, depth + 1, out, visited);
+    }
+    if let Some(sibling) = bookmark.next_sibling() {
+        flatten_bookmark(sibling, depth, out, visited);
     }
 }
 

@@ -93,6 +93,7 @@ impl CommandRegistry {
         registry.register("pdf.zoom_out", "Zoom the focused PDF session out", cmd_pdf_zoom_out);
         registry.register("pdf.fit_page", "Fit the focused PDF session's page to the pane", cmd_pdf_fit_page);
         registry.register("pdf.fit_width", "Fit the focused PDF session's page to the pane's width", cmd_pdf_fit_width);
+        registry.register("pdf.toggle_outline", "Toggle the focused PDF session's outline/bookmarks panel", cmd_pdf_toggle_outline);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
@@ -348,6 +349,10 @@ fn cmd_pdf_fit_page(ctx: &mut CommandCtx) {
 
 fn cmd_pdf_fit_width(ctx: &mut CommandCtx) {
     ctx.app.pdf_zoom_fit_width();
+}
+
+fn cmd_pdf_toggle_outline(ctx: &mut CommandCtx) {
+    ctx.app.pdf_toggle_outline();
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {

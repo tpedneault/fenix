@@ -24,6 +24,7 @@
 mod render;
 pub mod coords;
 pub mod crop;
+pub mod outline;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,6 +62,13 @@ impl Default for PdfDocKey {
 pub enum PdfRequest {
     Open { key: PdfDocKey, path: PathBuf },
     RenderPage { key: PdfDocKey, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
+    /// Fetches and flattens the document's bookmark tree (see the
+    /// `outline` module). Cheap relative to `RenderPage` (no
+    /// rasterization involved), but still routed through the same
+    /// single worker thread as everything else -- pdfium's concurrency
+    /// restriction applies to every call into a document, not just
+    /// rendering ones.
+    FetchOutline { key: PdfDocKey },
     Close { key: PdfDocKey },
 }
 
@@ -98,6 +106,10 @@ pub enum PdfResponse {
     /// re-render at the right target for the page it actually landed on.
     PageRendered { key: PdfDocKey, request_id: u64, page_index: u32, width: u32, height: u32, bgra: Vec<u8>, page_width_pts: f32, page_height_pts: f32 },
     RenderFailed { key: PdfDocKey, request_id: u64, message: String },
+    /// Reply to `PdfRequest::FetchOutline`. Empty (not an error) for a
+    /// PDF with no bookmarks at all -- a document simply having none is
+    /// normal and common, not a failure.
+    Outline { key: PdfDocKey, entries: Vec<outline::OutlineEntry> },
 }
 
 /// One shared background worker for every open PDF document in the
@@ -157,9 +169,9 @@ impl Drop for PdfWorker {
 /// survives -- everything before it is dropped silently (no
 /// `RenderFailed` reply; the caller never sees these as having been
 /// dispatched at all, since from its perspective a newer request for the
-/// same session already supersedes them). `Open`/`Close` requests, and
-/// `RenderPage` requests for a *different* key, are never touched or
-/// reordered -- only same-key `RenderPage` entries are thinned out,
+/// same session already supersedes them). `Open`/`FetchOutline`/`Close`
+/// requests, and `RenderPage` requests for a *different* key, are never
+/// touched or reordered -- only same-key `RenderPage` entries are thinned out,
 /// preserving every other request's original position. This is what
 /// keeps a live window resize (which can queue many `RenderPage`
 /// requests for the same session faster than pdfium can render them)

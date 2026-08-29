@@ -31,6 +31,7 @@ use crate::gpu::GpuState;
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
+use crate::pdf_outline;
 use crate::popup;
 use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
@@ -708,6 +709,13 @@ struct PdfSession {
     /// create_texture`), recreated whenever the visible crop's pixel size
     /// changes.
     texture: Option<PdfTexture>,
+    /// This document's flattened bookmark tree, fetched lazily on the
+    /// first `SPC r o` and cached forever after -- a PDF's bookmark tree
+    /// can't change while it's open, so a later toggle-open never needs
+    /// to ask the worker again. `None` until fetched (or if the document
+    /// turns out to have no bookmarks, this stays `Some(vec![])`, not
+    /// `None` -- see `apply_pdf_response`'s `Outline` arm).
+    outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
 }
 
 /// Which of a `DockerSession`'s six panes is currently focused, if
@@ -3035,7 +3043,7 @@ struct JiraEditSession {
 /// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
 /// dispatch that actually mutates the buffer text is ever reverted.
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
-    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf)
+    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf | BufferKind::PdfOutline)
 }
 
 pub struct App {
@@ -3347,6 +3355,20 @@ pub struct App {
     /// comment on why: a real path there would let a stray `:w` truncate
     /// the actual PDF file on disk).
     pdf_display_names: HashMap<BufferId, String>,
+    /// The outline pane currently open for a PDF session, if any --
+    /// keyed the same way `pdf_sessions` is (canonicalized PDF path).
+    /// `pdf_toggle_outline` consults this both to know whether to open a
+    /// new one or close the existing one, and to find the pane to close.
+    pdf_outline_panes: HashMap<PathBuf, fenix_window::WindowId>,
+    /// Per-line metadata for each open `BufferKind::PdfOutline` buffer's
+    /// generated text, keyed by that buffer's own `BufferId` -- same
+    /// per-buffer-keyed shape as `dashboard_lines`.
+    pdf_outline_lines: HashMap<BufferId, Vec<Option<pdf_outline::PdfOutlineLine>>>,
+    /// Which `pdf_sessions` key (PDF path) an outline buffer was opened
+    /// from -- what `pdf_outline_activate_selected` and `pdf_toggle_
+    /// outline` (when the outline pane itself is focused) use to find
+    /// the companion PDF pane/session.
+    pdf_outline_source: HashMap<BufferId, PathBuf>,
     /// The active `c`/`e` comment/description edit session, if any -- see
     /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
     /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
@@ -3838,6 +3860,9 @@ impl App {
             pdf_sessions: HashMap::new(),
             pdf_worker: None,
             pdf_display_names: HashMap::new(),
+            pdf_outline_panes: HashMap::new(),
+            pdf_outline_lines: HashMap::new(),
+            pdf_outline_source: HashMap::new(),
             jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -5332,6 +5357,7 @@ impl App {
                 full_bgra: None,
                 last_uploaded: None,
                 texture: None,
+                outline: None,
             },
         );
         self.refresh_project_root();
@@ -5358,7 +5384,17 @@ impl App {
     /// Tears down one PDF session: tells the shared worker to drop the
     /// document (freeing pdfium's own handle for it), closes its buffer,
     /// clears its pane title/display name, and removes its workspace --
-    /// mirrors `vnc_session_close` exactly.
+    /// mirrors `vnc_session_close` exactly. Also cleans up an open
+    /// outline companion pane's side-table entries, if it has one: the
+    /// pane/buffer itself is torn down for free by `remove_active()`
+    /// (the outline pane lives in the same workspace, since `pdf_toggle_
+    /// outline` opens it via a plain split), but `pdf_outline_panes`/
+    /// `pdf_outline_lines`/`pdf_outline_source` don't know that on their
+    /// own and would otherwise keep stale entries forever -- a real leak
+    /// over a long session's worth of opening/closing PDFs, and (worse)
+    /// a wrong answer if this same path is ever reopened: `pdf_outline_
+    /// panes` would still claim an outline pane exists for it when it
+    /// doesn't.
     fn pdf_session_close(&mut self, key: &Path) {
         let Some(session) = self.pdf_sessions.remove(key) else { return };
         if let Some(worker) = &self.pdf_worker {
@@ -5367,6 +5403,14 @@ impl App {
         self.buffers.close(session.buffer);
         self.pane_titles.remove(&session.pane);
         self.pdf_display_names.remove(&session.buffer);
+        if self.pdf_outline_panes.remove(key).is_some() {
+            let stale_outline_buffers: Vec<BufferId> =
+                self.pdf_outline_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
+            for buffer in stale_outline_buffers {
+                self.pdf_outline_lines.remove(&buffer);
+                self.pdf_outline_source.remove(&buffer);
+            }
+        }
         self.workspaces.switch_to_index(session.workspace_index);
         self.workspaces.remove_active();
         self.refresh_project_root();
@@ -5476,6 +5520,19 @@ impl App {
                     return;
                 }
                 self.set_error(format!("couldn't render page: {message}"));
+            }
+            fenix_pdf::PdfResponse::Outline { key, entries } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                if let Some(session) = self.pdf_sessions.get_mut(&path) {
+                    session.outline = Some(entries.clone());
+                }
+                // Always opens the pane once fetched -- `FetchOutline` is
+                // only ever dispatched by `pdf_toggle_outline` wanting to
+                // show it, so there's no other reason a reply would be in
+                // flight. `pdf_open_outline_pane` re-focuses the session's
+                // own workspace/pane first, so this is correct even if the
+                // user navigated elsewhere while the fetch was in flight.
+                self.pdf_open_outline_pane(&path, &entries);
             }
         }
         self.wake_caret();
@@ -5643,6 +5700,133 @@ impl App {
         session.scroll_offset =
             ((session.scroll_offset.0 as i32 + dx * step).max(0) as u32, (session.scroll_offset.1 as i32 + dy * step).max(0) as u32);
         self.wake_caret();
+    }
+
+    /// Jumps the PDF session at `key` directly to `page_index`
+    /// (0-indexed, already clamped by the caller if needed) and
+    /// dispatches a fresh render for it. Unlike `pdf_goto_page`/`pdf_
+    /// turn_page` (which act on whichever pane is *focused*), this takes
+    /// an explicit session key -- what `pdf_outline_activate_selected`
+    /// needs, since the *focused* pane when `Enter` is pressed there is
+    /// the outline pane, not the PDF pane it should jump.
+    fn pdf_jump_session_to_page(&mut self, key: &Path, page_index: u32) {
+        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        let new_page = page_index.min(session.page_count - 1);
+        if new_page != session.current_page {
+            session.current_page = new_page;
+            self.pdf_dispatch_render_for_zoom(key);
+        }
+        self.wake_caret();
+    }
+
+    /// Closes the outline pane for the PDF session at `key`, if one is
+    /// currently open -- shared by `pdf_toggle_outline`'s toggle-off path
+    /// and `kill_buffer_now`'s "the buffer being killed is a `PdfOutline`
+    /// buffer" branch. Refocuses the companion PDF pane afterward so
+    /// toggling feels like a real toggle rather than a jump elsewhere.
+    fn pdf_close_outline_pane(&mut self, key: &Path) {
+        let Some(pane) = self.pdf_outline_panes.remove(key) else { return };
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let buffer = self.windows().content(pane).copied();
+        self.windows_mut().focus(pane);
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&pane);
+            self.workspaces.active_scroll_anims_mut().remove(&pane);
+        }
+        if let Some(buffer) = buffer {
+            self.buffers.close(buffer);
+            self.pdf_outline_lines.remove(&buffer);
+            self.pdf_outline_source.remove(&buffer);
+        }
+        self.windows_mut().focus(session_pane);
+        self.wake_caret();
+    }
+
+    /// Opens (or, if the worker's reply arrived after the user navigated
+    /// elsewhere, re-opens) an outline pane for the PDF session at `key`,
+    /// showing `entries` -- a plain vertical split off the session's own
+    /// PDF pane, so it always ends up right next to it regardless of
+    /// whatever else might currently be focused. Called both from `pdf_
+    /// toggle_outline`'s "already cached" synchronous path and from
+    /// `apply_pdf_response`'s `Outline` arm (the first-fetch path).
+    fn pdf_open_outline_pane(&mut self, key: &Path, entries: &[fenix_pdf::outline::OutlineEntry]) {
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        self.workspaces.switch_to_index(workspace_index);
+        self.windows_mut().focus(session_pane);
+
+        let (text, lines) = pdf_outline::render(entries);
+        let buffer = self.buffers.open_pdf_outline(&text);
+        let outline_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
+        self.workspaces.active_pane_states_mut().insert(outline_pane, PaneState::seeded_at(Cursor::at_start()));
+        self.pane_titles.insert(outline_pane, "Outline".to_string());
+        self.pdf_outline_lines.insert(buffer, lines);
+        self.pdf_outline_source.insert(buffer, key.to_path_buf());
+        self.pdf_outline_panes.insert(key.to_path_buf(), outline_pane);
+        self.wake_caret();
+    }
+
+    /// `SPC r o`: toggles the focused PDF session's outline/bookmarks
+    /// panel. Three cases: (1) the outline pane itself is focused --
+    /// close it and return to the PDF pane; (2) a PDF pane is focused and
+    /// its outline is already open -- close it (a real toggle, not
+    /// "always open"); (3) a PDF pane is focused and its outline isn't
+    /// open yet -- open it immediately from `PdfSession::outline` if
+    /// already cached from an earlier toggle, or dispatch `FetchOutline`
+    /// and let `apply_pdf_response`'s `Outline` arm open it once the
+    /// reply lands (the bookmark tree can't change while a document's
+    /// open, so this only ever happens once per session). A no-op if
+    /// neither a PDF pane nor its outline pane is focused.
+    pub(crate) fn pdf_toggle_outline(&mut self) {
+        let focused_buffer = self.focused_buffer_id();
+        if self.buffers.get(focused_buffer).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
+            if let Some(key) = self.pdf_outline_source.get(&focused_buffer).cloned() {
+                self.pdf_close_outline_pane(&key);
+            }
+            return;
+        }
+
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+
+        if self.pdf_outline_panes.contains_key(&key) {
+            self.pdf_close_outline_pane(&key);
+            return;
+        }
+
+        if let Some(entries) = self.pdf_sessions.get(&key).and_then(|session| session.outline.clone()) {
+            self.pdf_open_outline_pane(&key, &entries);
+            return;
+        }
+
+        let Some(session) = self.pdf_sessions.get(&key) else { return };
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::FetchOutline { key: session.doc_key });
+        }
+    }
+
+    /// `Enter` on a `BufferKind::PdfOutline` line (see `route_keypress`'s
+    /// own `PdfOutline` block): looks up what the cursor's current line
+    /// means via `pdf_outline_lines`, a no-op for a blank/unstyled line
+    /// (e.g. the "(this PDF has no bookmarks)" placeholder), and
+    /// otherwise jumps the companion PDF pane straight to that entry's
+    /// page -- mirrors `dashboard_activate_selected`'s own cursor-line ->
+    /// side-table -> action shape.
+    fn pdf_outline_activate_selected(&mut self) {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        let buffer_id = self.focused_buffer_id();
+        let page_index = self
+            .pdf_outline_lines
+            .get(&buffer_id)
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .map(|meta| meta.page_index);
+        let Some(page_index) = page_index else { return };
+        let Some(key) = self.pdf_outline_source.get(&buffer_id).cloned() else { return };
+        self.pdf_jump_session_to_page(&key, page_index);
     }
 
     /// Encodes `keypress` and writes it to the live terminal session, if
@@ -7063,6 +7247,12 @@ impl App {
         if let Some(key) = self.pdf_session_key_for_buffer(id) {
             self.pdf_session_close(&key);
             return;
+        }
+        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
+            if let Some(key) = self.pdf_outline_source.get(&id).cloned() {
+                self.pdf_close_outline_pane(&key);
+                return;
+            }
         }
         self.buffers.close(id);
         self.table_views.remove(&id);
@@ -11137,6 +11327,17 @@ impl App {
             }
         }
 
+        // A PDF outline pane is a real Vim-navigable buffer (see
+        // `BufferKind`'s own doc comment on `PdfOutline`) -- every other
+        // key still reaches Vim below unchanged (movement, `/` search,
+        // `gg`/`G`...); only `Enter` means something special on it, same
+        // shape as the Dashboard interception above.
+        if self.open().kind == BufferKind::PdfOutline && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
+            self.pdf_outline_activate_selected();
+            self.wake_caret();
+            return;
+        }
+
         // The `SPC s p` project-replace review buffer -- ordinary
         // motions (`j k gg G / n N`) navigate it like any real buffer
         // (it's genuinely one), but its own action keys are claimed
@@ -11856,6 +12057,8 @@ impl App {
                 "*vnc*".to_string()
             } else if ob.kind == BufferKind::Pdf {
                 self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
+            } else if ob.kind == BufferKind::PdfOutline {
+                "*pdf outline*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -12263,6 +12466,7 @@ impl App {
             || ob.kind == BufferKind::SearchReplace
             || ob.kind == BufferKind::Vnc
             || ob.kind == BufferKind::Pdf
+            || ob.kind == BufferKind::PdfOutline
         {
             return 0;
         }
@@ -22367,11 +22571,13 @@ mod tests {
     }
 
     #[test]
-    fn is_readonly_buffer_kind_covers_docker_git_jira_and_vnc_only() {
+    fn is_readonly_buffer_kind_covers_docker_git_jira_vnc_pdf_and_pdf_outline_only() {
         assert!(is_readonly_buffer_kind(BufferKind::Docker));
         assert!(is_readonly_buffer_kind(BufferKind::Git));
         assert!(is_readonly_buffer_kind(BufferKind::Jira));
         assert!(is_readonly_buffer_kind(BufferKind::Vnc));
+        assert!(is_readonly_buffer_kind(BufferKind::Pdf));
+        assert!(is_readonly_buffer_kind(BufferKind::PdfOutline));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
         assert!(!is_readonly_buffer_kind(BufferKind::Explorer));
@@ -22918,6 +23124,129 @@ mod tests {
         app.pdf_pan(-1, -1);
 
         assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (0, 0));
+    }
+
+    fn sample_outline() -> Vec<fenix_pdf::outline::OutlineEntry> {
+        vec![
+            fenix_pdf::outline::OutlineEntry { title: "Chapter 1".to_string(), page_index: 0, depth: 0 },
+            fenix_pdf::outline::OutlineEntry { title: "Chapter 2".to_string(), page_index: 6, depth: 0 },
+        ]
+    }
+
+    #[test]
+    fn pdf_toggle_outline_opens_a_split_pane_from_already_cached_entries() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_open.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        let panes_before = app.windows().window_count();
+
+        app.pdf_toggle_outline();
+
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_outline_panes.contains_key(&key));
+        let outline_buffer = app.focused_buffer_id();
+        assert_eq!(app.buffers.get(outline_buffer).unwrap().kind, BufferKind::PdfOutline);
+        assert_eq!(app.pdf_outline_source.get(&outline_buffer), Some(&key));
+        assert_eq!(app.pdf_outline_lines.get(&outline_buffer).unwrap().len(), 2);
+        assert_eq!(app.open().buffer.text(), "Chapter 1\nChapter 2\n");
+    }
+
+    #[test]
+    fn pdf_toggle_outline_a_second_time_closes_it_and_refocuses_the_pdf_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_close.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // opens the outline pane and focuses it
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_outline = app.windows().window_count();
+
+        app.pdf_toggle_outline(); // outline pane is currently focused -- this closes it
+
+        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert!(app.pdf_outline_lines.is_empty());
+        assert!(app.pdf_outline_source.is_empty());
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_toggle_outline_with_no_cached_outline_dispatches_a_fetch_without_opening_a_pane_yet() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_fetch.pdf");
+        let panes_before = app.windows().window_count();
+
+        app.pdf_toggle_outline();
+
+        // Nothing to show yet -- no reply has landed (the worker's real
+        // reply, if any, has nowhere to go in a test with no event proxy;
+        // see `test_open_pdf`'s own doc comment).
+        assert_eq!(app.windows().window_count(), panes_before);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert!(app.pdf_sessions.get(&key).unwrap().outline.is_none());
+    }
+
+    #[test]
+    fn apply_pdf_response_outline_caches_it_and_opens_the_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_outline_response.pdf");
+        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Outline { key: doc_key, entries: sample_outline() });
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().outline, Some(sample_outline()));
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_outline_panes.contains_key(&key));
+    }
+
+    #[test]
+    fn pdf_outline_activate_selected_jumps_the_companion_pdf_pane_to_that_entrys_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // opens and focuses the outline pane
+
+        // Move the cursor to the second line ("Chapter 2", page_index 6).
+        let start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
+
+        app.pdf_outline_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
+    }
+
+    #[test]
+    fn pdf_outline_activate_selected_on_the_no_bookmarks_placeholder_line_does_nothing() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate_empty.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(Vec::new());
+        app.pdf_toggle_outline();
+
+        app.pdf_outline_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn killing_the_outline_buffer_directly_cleans_up_the_same_as_toggling_it_off() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_kill_buffer.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // outline pane is now focused
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_outline = app.windows().window_count();
+
+        app.kill_buffer_now();
+
+        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_session_close_cleans_up_a_still_open_outline_panes_side_tables() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_outline.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline();
+
+        app.pdf_session_close(&key);
+
+        assert!(app.pdf_outline_panes.is_empty());
+        assert!(app.pdf_outline_lines.is_empty());
+        assert!(app.pdf_outline_source.is_empty());
     }
 
 }
