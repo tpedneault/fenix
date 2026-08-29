@@ -233,9 +233,13 @@ for anyone curious to poke around or build on it.
   re-fits automatically on window resize (except at a fixed percentage
   zoom, which stays put across a resize on purpose). `SPC r o` toggles a
   split-pane outline/bookmarks panel -- a real, Vim-navigable listing
-  where `Enter` on an entry jumps the PDF straight to its page. Requires
-  `pdfium.dll` (see [Optional external tools](#optional-external-tools))
-  -- without it, opening a PDF shows an error instead of a blank pane.
+  where `Enter` on an entry jumps the PDF straight to its page. `SPC r /`
+  searches the whole document for a word or phrase and lists every match
+  (page number plus surrounding context) in its own split pane, `Enter`
+  jumping straight to that match's page the same way the outline does.
+  Requires `pdfium.dll` (see
+  [Optional external tools](#optional-external-tools)) -- without it,
+  opening a PDF shows an error instead of a blank pane.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -432,6 +436,7 @@ popup shows what keys continue it.
 | `SPC r f` | Fit the page to the pane |
 | `SPC r w` | Fit the page's width to the pane |
 | `SPC r o` | Toggle the focused PDF session's outline/bookmarks panel |
+| `SPC r /` | Search the focused PDF session's text for a word or phrase |
 | `h` / `j` / `k` / `l` | Pan around the rendered page while it's larger than the pane (PDF panes only) |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
@@ -683,6 +688,7 @@ can be open at once.
 | `SPC r w` | Fit the page's width to the pane -- a tall page then scrolls vertically instead of shrinking further |
 | `h` / `j` / `k` / `l` | Pan around the page once it's larger than the pane in some direction |
 | `SPC r o` | Toggle the outline/bookmarks panel |
+| `SPC r /` | Search the document's text |
 
 The outline panel (`SPC r o`) opens as a split next to the PDF pane,
 listing the document's bookmark tree flattened into indented lines (a
@@ -695,6 +701,18 @@ pane -- closes it. The outline is fetched once per document (a PDF's
 bookmarks can't change while it's open) and cached, so reopening it is
 instant after the first time; a PDF with no bookmarks at all shows a
 single explanatory line instead of an empty pane.
+
+`SPC r /` prompts for a search query and, once it comes back, opens (or
+reuses, if one's already showing for this document) a results pane
+listing every match in page order as `p.NNN  <context>` -- one line per
+occurrence, anywhere in the document, not just the current page. It's
+the same kind of real, Vim-navigable buffer the outline panel is;
+`Enter` on a result jumps the PDF pane straight to that match's page. A
+query with no hits shows an explanatory placeholder line rather than an
+empty pane, same as the outline's no-bookmarks case. Search runs fresh
+against the document each time rather than keeping the whole document's
+text extracted in memory between searches -- there's no results cache to
+go stale, just a brief "searching..." status message while it works.
 
 The page re-renders to fit whenever its pane is resized, *except* at a
 fixed zoom percentage (`SPC r =`/`SPC r -`), which stays exactly where
