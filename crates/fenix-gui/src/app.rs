@@ -18543,6 +18543,31 @@ mod tests {
     }
 
     #[test]
+    fn markdown_inline_emphasis_flows_through_to_a_distinctly_colored_rendered_span() {
+        // End-to-end: a real Markdown file's inline injection
+        // (`fenix_syntax::SyntaxState`) through the theme's capture-name
+        // resolution (`syntax_color`) to an actual rendered span color
+        // -- not just the two halves separately.
+        let dir = TempDir::new("markdown_inline_rendered");
+        let file = dir.write("doc.md", "Some **bold** word.");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        let id = app.focused_buffer_id();
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 1);
+        let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
+
+        let bold_span = spans.iter().find(|(s, _)| s == "bold");
+        assert_eq!(
+            bold_span.map(|(_, c)| *c),
+            Some(app.theme.syntax_color("text.strong")),
+            "expected \"bold\" colored as text.strong, got {spans:?}"
+        );
+        // And distinctly from plain surrounding text, not just
+        // matching `fg` by coincidence.
+        assert_ne!(app.theme.syntax_color("text.strong"), app.theme.fg);
+    }
+
+    #[test]
     fn tcl_command_highlighting_only_colors_known_commands() {
         let dir = TempDir::new("tcl_command_highlight_known");
         let file = dir.write("main.tcl", "puts hello\nmyUnknownCmd123 foo\n");

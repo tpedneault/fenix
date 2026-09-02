@@ -64,7 +64,19 @@ for anyone curious to poke around or build on it.
   ctags-scanned project definition, or a symbols-file entry (the same
   three sources autocompletion draws from), matched against its
   fully-qualified path with an optional leading `::` -- not just any
-  word that happens to be first on a line.
+  word that happens to be first on a line. Markdown gets a real second
+  pass beyond its own block structure (headings, lists, code fences):
+  tree-sitter-md ships two grammars, and the block one only ever marks
+  a span of prose with a bare `(inline)` node rather than parsing
+  what's actually inside it -- bold, italic, inline code spans, and
+  links are that second, inline grammar's own job, run as a genuine
+  (if lightweight) language injection over each such span. Each reads
+  as a distinctly colored token -- via color alone, not also a
+  different font weight: making `**bold**` render in an actual bold
+  typeface would mean threading a style flag through every function
+  between a syntax capture and the glyph it becomes, several of them
+  shared by every other language's own highlighting, for a purely
+  cosmetic gain on one language -- more risk than the result was worth.
 - **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`
   bullet or a `1.`/`1)` ordered item continues it onto the next line at
   the same indent -- an ordered marker increments by one (not renumbered

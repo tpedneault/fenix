@@ -1,16 +1,66 @@
+use std::cell::RefCell;
 use std::ops::Range;
 
-use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::edit::{to_input_edit, RawEdit};
 use crate::highlight::{resolve_overlaps, RawCapture};
 use crate::language::LanguageId;
+
+/// Markdown's own second grammar, for prose text a block-structure
+/// parse alone can't see inside of -- see `SyntaxState::inline`'s own
+/// doc comment for why this exists at all.
+struct InlineGrammar {
+    /// Finds every `(inline)` node in the *block* tree -- run against
+    /// the block grammar/tree, not this grammar's own one; what tells
+    /// `highlights_in_range` where to run the inline parse at all.
+    span_query: Query,
+    /// Parses each of those spans' own text with the inline grammar.
+    /// `RefCell`, not a plain field: `Parser::parse` needs `&mut self`,
+    /// but `highlights_in_range` only ever borrows `&self` (matching
+    /// every other read-only accessor `SyntaxState` has) -- and a
+    /// fresh, from-scratch parse per span, not a persisted tree with
+    /// its own incremental-edit tracking, is genuinely all this needs:
+    /// a single paragraph's, heading's, or list item's worth of inline
+    /// content is cheap to reparse from nothing every call, and
+    /// `highlights_in_range` is already windowed to whatever's on
+    /// screen, the same reason the per-frame cost of the outer block
+    /// parse alone was never a concern either.
+    parser: RefCell<Parser>,
+    query: Query,
+}
+
+impl InlineGrammar {
+    fn new(block_language: &Language) -> Self {
+        let span_query =
+            Query::new(block_language, "(inline) @inline").expect("hand-written query is valid for tree-sitter-md's own block grammar");
+        let inline_language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser
+            .set_language(&inline_language)
+            .expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
+        let query = Query::new(&inline_language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE)
+            .expect("bundled highlights.scm for this language failed to compile");
+        Self { span_query, parser: RefCell::new(parser), query }
+    }
+}
 
 /// Per-buffer incremental parse + highlight state for one language.
 pub struct SyntaxState {
     parser: Parser,
     tree: Option<Tree>,
     query: Query,
+    /// Markdown only: tree-sitter-md ships *two* grammars, one for
+    /// block structure (headings, lists, code fences -- everything
+    /// `query` above already covers) and a separate one for the prose
+    /// *inside* a block, which the block grammar itself only ever marks
+    /// with a bare `(inline)` node rather than parsing any further --
+    /// bold, italic, inline code spans, and links are the inline
+    /// grammar's own job, run as a second parse over each such span's
+    /// text (a real, if lightweight, language injection, not a
+    /// workaround). `None` for every other language, which has no such
+    /// split to begin with.
+    inline: Option<InlineGrammar>,
 }
 
 impl SyntaxState {
@@ -25,7 +75,8 @@ impl SyntaxState {
         let tree = parser.parse(source, None);
         let query = Query::new(&language, lang.highlights_query())
             .expect("bundled highlights.scm for this language failed to compile");
-        Self { parser, tree, query }
+        let inline = (lang == LanguageId::Markdown).then(|| InlineGrammar::new(&language));
+        Self { parser, tree, query, inline }
     }
 
     /// Applies queued low-level edits (in the order they happened) to the
@@ -51,7 +102,7 @@ impl SyntaxState {
         let names = self.query.capture_names();
 
         let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(byte_range);
+        cursor.set_byte_range(byte_range.clone());
         let mut captures = cursor.captures(&self.query, tree.root_node(), source.as_bytes());
 
         let mut raw = Vec::new();
@@ -63,7 +114,51 @@ impl SyntaxState {
                 name: names[capture.index as usize],
             });
         }
+
+        if let Some(inline) = &self.inline {
+            self.push_inline_captures(inline, tree, source, byte_range, &mut raw);
+        }
+
         resolve_overlaps(raw)
+    }
+
+    /// Finds every `(inline)` span the block tree marks within
+    /// `byte_range`, reparses each one's own text with the inline
+    /// grammar, and appends its captures (byte-offset back into
+    /// `source`'s own coordinate space) onto `raw` -- the actual
+    /// injection `highlights_in_range` layers on top of the plain
+    /// block-only pass every other language stops at.
+    fn push_inline_captures<'a>(
+        &'a self,
+        inline: &'a InlineGrammar,
+        tree: &Tree,
+        source: &str,
+        byte_range: Range<usize>,
+        raw: &mut Vec<RawCapture<'a>>,
+    ) {
+        let inline_names = inline.query.capture_names();
+        let mut span_cursor = QueryCursor::new();
+        span_cursor.set_byte_range(byte_range);
+        let mut spans = span_cursor.captures(&inline.span_query, tree.root_node(), source.as_bytes());
+
+        let mut parser = inline.parser.borrow_mut();
+        while let Some((query_match, capture_ix)) = spans.next() {
+            let node = query_match.captures[*capture_ix].node;
+            let (start, end) = (node.start_byte(), node.end_byte());
+            let Some(span_text) = source.get(start..end) else { continue };
+            let Some(span_tree) = parser.parse(span_text, None) else { continue };
+
+            let mut inline_cursor = QueryCursor::new();
+            let mut inline_captures = inline_cursor.captures(&inline.query, span_tree.root_node(), span_text.as_bytes());
+            while let Some((inline_match, inline_ix)) = inline_captures.next() {
+                let capture = &inline_match.captures[*inline_ix];
+                raw.push(RawCapture {
+                    range: (start + capture.node.start_byte())..(start + capture.node.end_byte()),
+                    pattern_index: inline_match.pattern_index,
+                    name: inline_names[capture.index as usize],
+                });
+            }
+        }
     }
 }
 
@@ -145,6 +240,118 @@ mod tests {
     #[test]
     fn markdown_highlights_something() {
         smoke_test(LanguageId::Markdown, "# Heading\n\nSome *text* and a ```code``` fence.\n");
+    }
+
+    #[test]
+    fn markdown_strong_emphasis_is_captured_by_the_inline_grammar() {
+        let source = "Some **bold** text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let bold_start = source.find("bold").unwrap();
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        assert!(has_strong, "expected \"bold\" captured as text.strong, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_plain_emphasis_is_captured_distinctly_from_strong() {
+        let source = "Some *italic* text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let italic_start = source.find("italic").unwrap();
+        let has_emphasis =
+            highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.emphasis");
+        assert!(has_emphasis, "expected \"italic\" captured as text.emphasis, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_inline_code_span_is_captured() {
+        let source = "Some `code` here.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let code_start = source.find("code").unwrap();
+        let has_literal = highlights.iter().any(|(r, n)| r.start <= code_start && r.end >= code_start + 4 && *n == "text.literal");
+        assert!(has_literal, "expected \"code\" captured as text.literal, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_link_destination_is_captured() {
+        let source = "See [here](https://example.com) for more.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let url_start = source.find("https").unwrap();
+        let has_uri = highlights.iter().any(|(r, n)| r.start <= url_start && *n == "text.uri");
+        assert!(has_uri, "expected the URL captured as text.uri, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_heading_text_and_its_own_inline_emphasis_are_both_captured() {
+        // The nesting case this whole injection exists for: the block
+        // grammar captures the heading's full text as `text.title`,
+        // the inline grammar separately captures just the `**bold**`
+        // portion within it as `text.strong` -- `resolve_overlaps`
+        // has to pick the narrower one there, not let the broader
+        // heading capture swallow it.
+        let source = "# A **bold** heading";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let bold_start = source.find("bold").unwrap();
+        let narrow_wins = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        assert!(narrow_wins, "expected the narrower text.strong capture to win inside the heading, got {highlights:?}");
+
+        let has_title = highlights.iter().any(|(_, n)| *n == "text.title");
+        assert!(has_title, "expected the rest of the heading still captured as text.title, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_inline_highlighting_is_windowed_to_the_requested_byte_range() {
+        // Same windowing contract the block-only pass already has
+        // (`highlights_in_range_is_windowed_to_the_requested_bytes`) --
+        // an inline span entirely before the requested range shouldn't
+        // contribute anything either.
+        let source = "**early bold**\n\nSome *late italic* text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let second_line_start = source.find("Some").unwrap();
+        let highlights = state.highlights_in_range(source, second_line_start..source.len());
+        assert!(highlights.iter().all(|(r, _)| r.start >= second_line_start));
+    }
+
+    #[test]
+    fn markdown_inline_grammar_is_reflected_after_apply_edits() {
+        let mut source = "Some *italic* text.".to_string();
+        let mut state = SyntaxState::new(LanguageId::Markdown, &source);
+
+        // Turn the emphasis into strong emphasis by doubling the
+        // asterisks on both sides.
+        let star = source.find('*').unwrap();
+        source.replace_range(star..star + 1, "**");
+        let end_star = source.rfind('*').unwrap();
+        source.replace_range(end_star..end_star + 1, "**");
+        let edits = [
+            RawEdit { start_char: star, new_end_char: star + 2, removed: "*".to_string() },
+            RawEdit { start_char: end_star + 1, new_end_char: end_star + 3, removed: "*".to_string() },
+        ];
+        state.apply_edits(&source, &edits);
+
+        let highlights = state.highlights_in_range(&source, 0..source.len());
+        let italic_start = source.find("italic").unwrap();
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.strong");
+        assert!(has_strong, "expected the edited text now captured as text.strong, got {highlights:?}");
+    }
+
+    #[test]
+    fn non_markdown_languages_have_no_inline_grammar_and_are_unaffected() {
+        // The injection is Markdown-only -- confirms it doesn't
+        // somehow fire (or panic) for a language with no `(inline)`
+        // node kind at all.
+        let source = "let x = 1;";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let _ = state.highlights_in_range(source, 0..source.len());
+        assert!(state.inline.is_none());
     }
 
     #[test]

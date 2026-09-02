@@ -134,6 +134,25 @@ impl Theme {
     /// so an unfamiliar capture name reads as ordinary text instead of
     /// vanishing or breaking.
     pub fn syntax_color(&self, capture_name: &str) -> glyphon::Color {
+        // Markdown's inline/heading captures share one top-level "text"
+        // segment (`text.title`/`text.strong`/`text.emphasis`/`text.
+        // literal`/`text.uri`/`text.reference`) but need to read as
+        // visibly different things -- checked by exact name before the
+        // generic top-segment fallback below, which stays untouched for
+        // every capture that doesn't need this. No new `syntax_*`
+        // fields for them: reusing the closest existing slot's own
+        // per-theme color keeps every theme's Markdown rendering
+        // consistent with its own palette for free, matching this
+        // function's whole existing "map onto a representative slot,
+        // not an entry per exact capture" design.
+        match capture_name {
+            "text.title" => return self.syntax_function, // headings: the same prominent accent a function name gets
+            "text.strong" => return self.syntax_keyword,  // **bold**: keywords are usually the strongest, most saturated accent
+            "text.emphasis" => return self.syntax_type,   // *italic*: a secondary accent, less emphatic than strong
+            "text.literal" => return self.syntax_string,  // `code spans`: read as a literal value, same as a real string
+            "text.uri" | "text.reference" => return self.syntax_constant, // links
+            _ => {}
+        }
         let top = capture_name.split('.').next().unwrap_or(capture_name);
         match top {
             // "repeat"/"conditional" are Tcl's own bare (non-dotted) names
@@ -687,6 +706,35 @@ mod tests {
     }
 
     #[test]
+    fn markdown_text_captures_resolve_by_their_full_name_not_the_shared_text_prefix() {
+        // All six share the same "text" top-level segment -- proves
+        // they're actually distinguished by their exact name, not all
+        // silently landing on one fallback color together.
+        assert_eq!(ORBIT_DARK.syntax_color("text.title"), ORBIT_DARK.syntax_function);
+        assert_eq!(ORBIT_DARK.syntax_color("text.strong"), ORBIT_DARK.syntax_keyword);
+        assert_eq!(ORBIT_DARK.syntax_color("text.emphasis"), ORBIT_DARK.syntax_type);
+        assert_eq!(ORBIT_DARK.syntax_color("text.literal"), ORBIT_DARK.syntax_string);
+        assert_eq!(ORBIT_DARK.syntax_color("text.uri"), ORBIT_DARK.syntax_constant);
+        assert_eq!(ORBIT_DARK.syntax_color("text.reference"), ORBIT_DARK.syntax_constant);
+
+        let distinct: std::collections::HashSet<_> = ["text.title", "text.strong", "text.emphasis", "text.literal", "text.uri"]
+            .map(|name| format!("{:?}", ORBIT_DARK.syntax_color(name)))
+            .into_iter()
+            .collect();
+        assert_eq!(distinct.len(), 5, "each of these should read as visibly different from the others");
+    }
+
+    #[test]
+    fn an_unrelated_dotted_text_capture_still_falls_back_to_the_generic_top_segment_rule() {
+        // "text" itself isn't one of the generic top-level slots
+        // `syntax_color` knows about -- a capture named "text.*" that
+        // isn't one of the five specific ones above should fall all
+        // the way through to plain `fg`, not silently match one of
+        // them by accident.
+        assert_eq!(ORBIT_DARK.syntax_color("text.something_else"), ORBIT_DARK.fg);
+    }
+
+    #[test]
     fn tcls_bare_control_flow_and_spell_captures_resolve() {
         assert_eq!(ORBIT_DARK.syntax_color("repeat"), ORBIT_DARK.syntax_keyword);
         assert_eq!(ORBIT_DARK.syntax_color("conditional"), ORBIT_DARK.syntax_keyword);
@@ -735,6 +783,8 @@ mod tests {
             assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
             assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
+            assert_eq!(theme.syntax_color("text.title"), theme.syntax_function, "{}", theme.name);
+            assert_eq!(theme.syntax_color("text.strong"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.git_status_color(GitStatus::Staged), theme.git_staged, "{}", theme.name);
         }
     }
