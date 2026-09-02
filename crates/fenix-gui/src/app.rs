@@ -3289,6 +3289,16 @@ struct FramePlacement {
     maximized: bool,
 }
 
+impl From<fenix_config::WindowLayout> for FramePlacement {
+    fn from(layout: fenix_config::WindowLayout) -> Self {
+        Self {
+            position: Some(PhysicalPosition::new(layout.x, layout.y)),
+            size: Some(PhysicalSize::new(layout.width, layout.height)),
+            maximized: layout.maximized,
+        }
+    }
+}
+
 /// Whether a desktop-coordinate point falls on `monitor`. A thin
 /// `MonitorHandle`-reading wrapper around `desktop_rect_contains`,
 /// which is where the actual rule lives -- a `MonitorHandle` can only
@@ -4449,9 +4459,16 @@ impl App {
     /// off. That can't happen from a real keystroke (the window has to
     /// exist for one to arrive) and headless tests use `test_add_frame`.
     pub(crate) fn new_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let placement = self.next_frame_placement(event_loop);
+        self.open_frame(event_loop, placement);
+    }
+
+    /// The half of `new_frame` that takes where to put the window as an
+    /// argument, so restoring a saved layout can reuse it (see
+    /// `restore_saved_windows`) instead of asking for a free monitor.
+    fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
         let Some(context) = &self.gpu_context else { return };
 
-        let placement = self.next_frame_placement(event_loop);
         let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
         if let Some(position) = placement.position {
             attrs = attrs.with_position(position);
@@ -4541,6 +4558,69 @@ impl App {
             .and_then(|window| window.inner_position().ok())
             .map(|at| PhysicalPosition::new(at.x + CASCADE, at.y + CASCADE));
         FramePlacement { position, size: self.window.as_ref().map(|window| window.inner_size()), maximized: false }
+    }
+
+    /// Reopens the windows recorded in `config.windows`, called once
+    /// from `resumed` after the first window exists. The first saved
+    /// entry is applied to that window; each remaining one opens a
+    /// frame of its own. Focus ends on the first, wherever it sits.
+    ///
+    /// A saved rectangle is handed to the OS as-is. If a monitor has
+    /// been unplugged since, Windows clamps the window back onto a
+    /// visible screen rather than leaving it stranded off the edge --
+    /// which is the whole reason this records rectangles instead of
+    /// monitor names (see `fenix_config::WindowLayout`).
+    fn restore_saved_windows(&mut self, event_loop: &ActiveEventLoop) {
+        if self.config.restore_windows == Some(false) {
+            return;
+        }
+        let layouts = self.config.windows.clone();
+        let Some((first, rest)) = layouts.split_first() else { return };
+
+        if let Some(window) = &self.window {
+            window.set_outer_position(PhysicalPosition::new(first.x, first.y));
+            let _ = window.request_inner_size(PhysicalSize::new(first.width, first.height));
+            window.set_maximized(first.maximized);
+        }
+        self.refresh_frame_origin();
+
+        for layout in rest {
+            self.open_frame(event_loop, FramePlacement::from(*layout));
+        }
+        self.focus_frame(0);
+        self.focus_active_frame_window();
+    }
+
+    /// Records every open window's geometry into `config`, then writes
+    /// it -- called from `exiting`, the one place every quit path
+    /// (`SPC q q`, `:q`, the last window's X button, `SPC q Q`) is
+    /// guaranteed to pass through.
+    ///
+    /// A failure to write is reported to stderr and otherwise ignored,
+    /// the same posture `save` already has everywhere else it's called:
+    /// losing a window arrangement is not worth refusing to exit over.
+    fn save_window_layout(&mut self) {
+        let layouts: Vec<fenix_config::WindowLayout> = (0..self.frames.len())
+            .filter_map(|frame| {
+                let window = self.frame_window(frame)?;
+                let at = window.outer_position().ok()?;
+                let size = window.inner_size();
+                Some(fenix_config::WindowLayout {
+                    x: at.x,
+                    y: at.y,
+                    width: size.width,
+                    height: size.height,
+                    maximized: window.is_maximized(),
+                })
+            })
+            .collect();
+        if layouts.is_empty() {
+            return;
+        }
+        self.config.windows = layouts;
+        if let Err(err) = self.config.save() {
+            eprintln!("fenix: couldn't save the window layout ({err})");
+        }
     }
 
     /// The centre of `frame`'s window in desktop coordinates -- how
@@ -16316,6 +16396,15 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.caret_rect = Some(caret_rect);
         self.vnc_pipeline = Some(vnc_pipeline);
         self.pdf_pipeline = Some(pdf_pipeline);
+        self.refresh_frame_origin();
+        self.restore_saved_windows(event_loop);
+    }
+
+    /// The one place every quit path is guaranteed to pass through --
+    /// `SPC q q`, `:q`, `SPC q Q`, and the last window's X button all
+    /// end in `event_loop.exit()`, which lands here.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_window_layout();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -17171,6 +17260,31 @@ mod tests {
         app.navigate_window(NavDirection::Left);
         assert_eq!(app.active_frame, 0);
         assert!(!app.sidebar_focused, "focusing a pane clears the sidebar override");
+    }
+
+    #[test]
+    fn a_saved_window_layout_becomes_the_placement_it_is_restored_at() {
+        let layout = fenix_config::WindowLayout { x: -1920, y: 40, width: 1600, height: 900, maximized: true };
+
+        let placement = FramePlacement::from(layout);
+
+        assert_eq!(placement.position, Some(PhysicalPosition::new(-1920, 40)));
+        assert_eq!(placement.size, Some(PhysicalSize::new(1600, 900)));
+        assert!(placement.maximized);
+    }
+
+    #[test]
+    fn saving_the_window_layout_with_no_real_windows_leaves_the_saved_one_alone() {
+        let mut app = App::with_file(None);
+        let saved = vec![fenix_config::WindowLayout { x: 10, y: 20, width: 800, height: 600, maximized: false }];
+        app.config.windows = saved.clone();
+
+        // A headless run has no windows to measure. Recording an empty
+        // layout here would wipe a real arrangement off disk the next
+        // time the app happened to exit before its window came up.
+        app.save_window_layout();
+
+        assert_eq!(app.config.windows, saved);
     }
 
     #[test]

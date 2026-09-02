@@ -86,6 +86,45 @@ pub struct Config {
     /// since `parse_pair_list` only splits one `|`). Hand-typed by the
     /// user (`SPC v v`), e.g. `("build-vm", "10.0.0.5", 5900)`.
     pub vnc_hosts: Vec<(String, String, u16)>,
+    /// Where each OS window sat when Fenix last exited, in the order
+    /// they were open -- restored on the next launch when
+    /// `restore_windows` is on. Unlike every other list here this one
+    /// is written by the app, not hand-authored, so a two-monitor
+    /// setup comes back the way it was left without arranging it
+    /// again each morning.
+    pub windows: Vec<WindowLayout>,
+    /// Whether to reopen the windows recorded in `windows` at startup.
+    /// `None` means on -- restoring what you had is the behaviour
+    /// worth defaulting to; `restore_windows = false` opts out and
+    /// always starts with a single window.
+    pub restore_windows: Option<bool>,
+}
+
+/// One OS window's remembered geometry: where its *outer* frame sat on
+/// the desktop, how big its *inner* (client) area was, and whether it
+/// was maximized.
+///
+/// That pairing isn't arbitrary -- it's the pair a window can actually
+/// be restored from. `set_outer_position` and `with_inner_size` are
+/// what winit offers, so recording anything else would mean converting
+/// by the border and title-bar thickness on the way back, and getting
+/// that wrong makes a window creep across the screen a little further
+/// on every save-and-restore cycle.
+///
+/// Deliberately a plain rectangle rather than a monitor name plus an
+/// offset into it. Monitor identifiers are long, platform-specific and
+/// not stable across driver or dock changes, whereas a rectangle
+/// degrades gracefully all by itself: a window whose saved position no
+/// longer lands on any connected monitor just gets placed by the
+/// window manager instead of opening off-screen (see
+/// `App::restore_windows`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowLayout {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
 }
 
 impl Config {
@@ -112,6 +151,7 @@ impl Config {
         let jira = sections.get("jira");
         let vnc = sections.get("vnc");
         let documents = sections.get("documents");
+        let windows = sections.get("windows");
 
         Ok(Self {
             path,
@@ -132,6 +172,8 @@ impl Config {
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
+            windows: windows.map(parse_windows).unwrap_or_default(),
+            restore_windows: windows.and_then(|s| s.get("restore_windows")).and_then(|v| v.parse().ok()),
         })
     }
 
@@ -159,6 +201,8 @@ impl Config {
             jira_users: Vec::new(),
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
+            windows: Vec::new(),
+            restore_windows: None,
         })
     }
 
@@ -235,6 +279,22 @@ impl Config {
         for (i, (name, doc_path)) in self.documents.iter().enumerate() {
             out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
         }
+        out.push('\n');
+        out.push_str("[windows]\n");
+        if let Some(restore) = self.restore_windows {
+            out.push_str(&format!("restore_windows = {restore}\n"));
+        }
+        for (i, window) in self.windows.iter().enumerate() {
+            out.push_str(&format!(
+                "window{} = {},{},{},{}|{}\n",
+                i + 1,
+                window.x,
+                window.y,
+                window.width,
+                window.height,
+                window.maximized
+            ));
+        }
         std::fs::write(&self.path, out)
     }
 
@@ -302,6 +362,29 @@ fn parse_vnc_hosts(section: &std::collections::BTreeMap<String, String>) -> Vec<
         .collect();
     hosts.sort_by_key(|(n, ..)| *n);
     hosts.into_iter().map(|(_, name, host, port)| (name, host, port)).collect()
+}
+
+/// `windowN = X,Y,WIDTH,HEIGHT|MAXIMIZED`, ordinal-ordered the same
+/// way every other numbered-key list here is. An entry that doesn't
+/// parse is skipped rather than failing the whole load -- one
+/// hand-mangled line shouldn't cost you the rest of your layout.
+fn parse_windows(section: &std::collections::BTreeMap<String, String>) -> Vec<WindowLayout> {
+    let mut windows: Vec<(usize, WindowLayout)> = section
+        .iter()
+        .filter_map(|(key, value)| {
+            let n = key.strip_prefix("window")?.parse::<usize>().ok()?;
+            let (rect, maximized) = value.split_once('|')?;
+            let mut parts = rect.split(',');
+            let x = parts.next()?.trim().parse().ok()?;
+            let y = parts.next()?.trim().parse().ok()?;
+            let width = parts.next()?.trim().parse().ok()?;
+            let height = parts.next()?.trim().parse().ok()?;
+            let maximized = maximized.trim().parse().ok()?;
+            Some((n, WindowLayout { x, y, width, height, maximized }))
+        })
+        .collect();
+    windows.sort_by_key(|(n, _)| *n);
+    windows.into_iter().map(|(_, window)| window).collect()
 }
 
 fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<(String, String)> {
@@ -373,6 +456,72 @@ mod tests {
 
         assert_eq!(reloaded.documents, config.documents);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_round_trip_through_save_and_load() {
+        let path = temp_path("windows_round_trip");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.windows = vec![
+            WindowLayout { x: 0, y: 0, width: 2560, height: 1440, maximized: true },
+            // A monitor to the left of the primary one sits at a
+            // negative x on Windows.
+            WindowLayout { x: -1920, y: -120, width: 1920, height: 1080, maximized: false },
+        ];
+        config.restore_windows = Some(false);
+
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+
+        assert_eq!(reloaded.windows, config.windows);
+        assert_eq!(reloaded.restore_windows, Some(false));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn windows_are_ordered_by_their_key_ordinal_not_alphabetically() {
+        let path = temp_path("windows_ordinal");
+        // `window10` sorts before `window2` as text -- the ordinal has
+        // to be parsed, not compared as a string.
+        std::fs::write(
+            &path,
+            "[windows]\nwindow10 = 100,0,800,600|false\nwindow2 = 200,0,800,600|false\nwindow1 = 300,0,800,600|false\n",
+        )
+        .unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let xs: Vec<i32> = config.windows.iter().map(|w| w.x).collect();
+        assert_eq!(xs, vec![300, 200, 100]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_mangled_window_entry_is_skipped_without_losing_the_rest_of_the_layout() {
+        let path = temp_path("windows_mangled");
+        std::fs::write(
+            &path,
+            "[windows]\nwindow1 = 0,0,800,600|true\nwindow2 = not-a-rectangle\nwindow3 = 10,20,30|false\nwindow4 = 5,5,640,480|false\n",
+        )
+        .unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(
+            config.windows,
+            vec![
+                WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: true },
+                WindowLayout { x: 5, y: 5, width: 640, height: 480, maximized: false },
+            ]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn no_windows_section_means_nothing_recorded_and_no_opt_out() {
+        let config = Config::load(temp_path("windows_absent")).unwrap();
+        assert!(config.windows.is_empty());
+        assert_eq!(config.restore_windows, None, "unset means restore, which is the default the app applies");
     }
 
     #[test]
