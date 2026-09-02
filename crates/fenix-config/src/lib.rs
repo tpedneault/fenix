@@ -42,6 +42,24 @@ pub struct Config {
     /// complaint, or who just prefers snappier motion.
     pub animations: Option<bool>,
     pub completion_symbols_file: Option<PathBuf>,
+    /// Configured language server commands, `(language, command_line)`
+    /// -- `[lsp]`'s `serverN = LANGUAGE|COMMAND_LINE`, same numbered-key
+    /// list convention `mib_roots`/`jira_projects` already established.
+    /// `LANGUAGE` matches `fenix_syntax::LanguageId`'s own name (e.g.
+    /// `python`, `rust`); `COMMAND_LINE` is a plain space-separated
+    /// program-plus-arguments string (e.g. `pyright-langserver
+    /// --stdio`), split on whitespace at the point of use -- no shell
+    /// quoting support, since every server this actually needs to
+    /// launch takes simple flag-only arguments. A language with no
+    /// entry here falls back to `fenix_lsp`'s own built-in default
+    /// command for it, so the common case (the obvious server already
+    /// on `PATH`) needs no configuration at all; this section exists
+    /// for anyone who wants a different server, extra flags, or a
+    /// language `fenix-lsp` has no built-in default for yet. Hand-
+    /// authored by the user -- same re-read-fresh-before-writing
+    /// protection as `vnc_hosts`/`documents`/`workspaces` (see `save`'s
+    /// own doc comment), since nothing in this app writes to it itself.
+    pub lsp_servers: Vec<(String, String)>,
     /// Configured SCOS-2000 MIB directories, `(label, path)`, in the
     /// order they appear in `config.ini`'s `[mib]` section -- an actual
     /// list, not an `Option<T>` like every other field here, since
@@ -166,6 +184,7 @@ impl Config {
 
         let editor = sections.get("editor");
         let completion = sections.get("completion");
+        let lsp = sections.get("lsp");
         let mib = sections.get("mib");
         let jira = sections.get("jira");
         let vnc = sections.get("vnc");
@@ -182,6 +201,7 @@ impl Config {
             tab_width: editor.and_then(|s| s.get("tab_width")).and_then(|v| v.parse().ok()),
             animations: editor.and_then(|s| s.get("animations")).and_then(|v| v.parse().ok()),
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
+            lsp_servers: lsp.map(|s| parse_pair_list(s, "server")).unwrap_or_default(),
             mib_roots: mib.map(parse_mib_roots).unwrap_or_default(),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
@@ -212,6 +232,7 @@ impl Config {
             tab_width: None,
             animations: None,
             completion_symbols_file: None,
+            lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
@@ -238,31 +259,32 @@ impl Config {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // `[vnc]`/`[documents]`/`[workspaces]` are hand-edit-only --
-        // nothing in this app ever assigns to `vnc_hosts`/`documents`/
-        // `workspaces` itself (unlike `mib_roots`/`jira_projects`/
-        // `jira_users`, which really do have an in-app add/delete flow
-        // and so stay driven by `self` below). `self`'s own copy of
-        // these three is only ever as fresh as whenever it was loaded,
-        // which could be an entire session ago -- writing it back
-        // verbatim would silently erase a host/document/launcher entry
-        // added by hand-editing the file *after* that, the moment
-        // anything else triggers a save (previously only a deliberate
-        // settings change; now also every quit, once window-layout
-        // persistence started saving automatically). Re-reading them
-        // fresh from whatever's on disk right now, and falling back to
-        // `self`'s own copy only if the file can't be read at all (the
-        // very first save, nothing on disk yet), means a hand-edit
+        // `[vnc]`/`[documents]`/`[workspaces]`/`[lsp]` are hand-edit-only
+        // -- nothing in this app ever assigns to `vnc_hosts`/`documents`/
+        // `workspaces`/`lsp_servers` itself (unlike `mib_roots`/
+        // `jira_projects`/`jira_users`, which really do have an in-app
+        // add/delete flow and so stay driven by `self` below). `self`'s
+        // own copy of these four is only ever as fresh as whenever it
+        // was loaded, which could be an entire session ago -- writing it
+        // back verbatim would silently erase a host/document/launcher/
+        // server entry added by hand-editing the file *after* that, the
+        // moment anything else triggers a save (previously only a
+        // deliberate settings change; now also every quit, once window-
+        // layout persistence started saving automatically). Re-reading
+        // them fresh from whatever's on disk right now, and falling back
+        // to `self`'s own copy only if the file can't be read at all
+        // (the very first save, nothing on disk yet), means a hand-edit
         // always wins instead of racing a stale in-memory copy.
-        let (vnc_hosts, documents, workspaces) = match std::fs::read_to_string(&self.path) {
+        let (vnc_hosts, documents, workspaces, lsp_servers) = match std::fs::read_to_string(&self.path) {
             Ok(contents) => {
                 let sections = ini::parse(&contents);
                 let vnc_hosts = sections.get("vnc").map(parse_vnc_hosts).unwrap_or_default();
                 let documents = sections.get("documents").map(parse_documents).unwrap_or_default();
                 let workspaces = sections.get("workspaces").map(|s| parse_pair_list(s, "ws")).unwrap_or_default();
-                (vnc_hosts, documents, workspaces)
+                let lsp_servers = sections.get("lsp").map(|s| parse_pair_list(s, "server")).unwrap_or_default();
+                (vnc_hosts, documents, workspaces, lsp_servers)
             }
-            Err(_) => (self.vnc_hosts.clone(), self.documents.clone(), self.workspaces.clone()),
+            Err(_) => (self.vnc_hosts.clone(), self.documents.clone(), self.workspaces.clone(), self.lsp_servers.clone()),
         };
         let mut out = String::new();
         out.push_str("[editor]\n");
@@ -288,6 +310,11 @@ impl Config {
         out.push_str("[completion]\n");
         if let Some(symbols_file) = &self.completion_symbols_file {
             out.push_str(&format!("symbols_file = {}\n", symbols_file.display()));
+        }
+        out.push('\n');
+        out.push_str("[lsp]\n");
+        for (i, (language, command_line)) in lsp_servers.iter().enumerate() {
+            out.push_str(&format!("server{} = {language}|{command_line}\n", i + 1));
         }
         out.push('\n');
         out.push_str("[mib]\n");
@@ -577,6 +604,51 @@ mod tests {
         assert_eq!(reloaded.workspaces, vec![("Editor".to_string(), String::new())]);
         assert_eq!(reloaded.theme, Some("Nord".to_string()));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saving_does_not_erase_an_lsp_server_hand_added_to_the_file_after_load() {
+        let path = temp_path("lsp_servers_survive_stale_save");
+        let mut config = Config::load(path.clone()).unwrap();
+
+        std::fs::write(&path, "[lsp]\nserver1 = python|pyright-langserver --stdio\n").unwrap();
+
+        config.theme = Some("Nord".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.lsp_servers, vec![("python".to_string(), "pyright-langserver --stdio".to_string())]);
+        assert_eq!(reloaded.theme, Some("Nord".to_string()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lsp_servers_round_trip_through_save_and_load() {
+        let path = temp_path("lsp_servers_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.lsp_servers = vec![("python".to_string(), "pyright-langserver --stdio".to_string()), ("rust".to_string(), "rust-analyzer".to_string())];
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(
+            reloaded.lsp_servers,
+            vec![("python".to_string(), "pyright-langserver --stdio".to_string()), ("rust".to_string(), "rust-analyzer".to_string())]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn lsp_servers_are_ordered_by_numeric_ordinal_not_key_string() {
+        let path = temp_path("lsp_servers_ordinal_order");
+        std::fs::write(&path, "[lsp]\nserver2 = second|cmd-two\nserver10 = tenth|cmd-ten\nserver1 = first|cmd-one\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(
+            config.lsp_servers,
+            vec![("first".to_string(), "cmd-one".to_string()), ("second".to_string(), "cmd-two".to_string()), ("tenth".to_string(), "cmd-ten".to_string())]
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
