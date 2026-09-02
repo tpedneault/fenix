@@ -98,6 +98,18 @@ pub struct Config {
     /// worth defaulting to; `restore_windows = false` opts out and
     /// always starts with a single window.
     pub restore_windows: Option<bool>,
+    /// Named workspace launchers, `(display name, action)`, in the
+    /// order they appear in `config.ini`'s `[workspaces]` section --
+    /// what `SPC TAB f` picks from. `action` is one of `git`, `jira`,
+    /// `docker` (opens the matching built-in panel; `docker` also
+    /// covers Podman, since that panel autodetects the engine),
+    /// `vnc:HOST` (a name from `[vnc]`), or anything else (including
+    /// empty) for a plain workspace with no live session behind it --
+    /// what "editor" would be. The actual parsing
+    /// (`App::parse_workspace_action`) lives in `fenix-gui`, not here,
+    /// since it dispatches to session state this crate has no business
+    /// knowing about. Hand-authored by the user, same as `documents`.
+    pub workspaces: Vec<(String, String)>,
 }
 
 /// One OS window's remembered geometry: where its *outer* frame sat on
@@ -152,6 +164,7 @@ impl Config {
         let vnc = sections.get("vnc");
         let documents = sections.get("documents");
         let windows = sections.get("windows");
+        let workspaces = sections.get("workspaces");
 
         Ok(Self {
             path,
@@ -174,6 +187,7 @@ impl Config {
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
             restore_windows: windows.and_then(|s| s.get("restore_windows")).and_then(|v| v.parse().ok()),
+            workspaces: workspaces.map(|s| parse_pair_list(s, "ws")).unwrap_or_default(),
         })
     }
 
@@ -203,6 +217,7 @@ impl Config {
             documents: Vec::new(),
             windows: Vec::new(),
             restore_windows: None,
+            workspaces: Vec::new(),
         })
     }
 
@@ -278,6 +293,11 @@ impl Config {
         out.push_str("[documents]\n");
         for (i, (name, doc_path)) in self.documents.iter().enumerate() {
             out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
+        }
+        out.push('\n');
+        out.push_str("[workspaces]\n");
+        for (i, (name, action)) in self.workspaces.iter().enumerate() {
+            out.push_str(&format!("ws{} = {name}|{action}\n", i + 1));
         }
         out.push('\n');
         out.push_str("[windows]\n");
@@ -522,6 +542,41 @@ mod tests {
         let config = Config::load(temp_path("windows_absent")).unwrap();
         assert!(config.windows.is_empty());
         assert_eq!(config.restore_windows, None, "unset means restore, which is the default the app applies");
+    }
+
+    #[test]
+    fn workspaces_round_trip_through_save_and_load() {
+        let path = temp_path("workspaces_round_trip");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.workspaces = vec![
+            ("Git".to_string(), "git".to_string()),
+            ("VNC Build".to_string(), "vnc:build-vm".to_string()),
+            ("Editor".to_string(), String::new()),
+        ];
+
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+
+        assert_eq!(reloaded.workspaces, config.workspaces);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn workspaces_are_ordered_by_their_key_ordinal_not_alphabetically() {
+        let path = temp_path("workspaces_ordinal");
+        std::fs::write(&path, "[workspaces]\nws10 = Tenth|docker\nws2 = Second|git\nws1 = First|jira\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let names: Vec<&str> = config.workspaces.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["First", "Second", "Tenth"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn no_workspaces_section_means_an_empty_launcher_list() {
+        let config = Config::load(temp_path("workspaces_absent")).unwrap();
+        assert!(config.workspaces.is_empty());
     }
 
     #[test]

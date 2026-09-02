@@ -115,7 +115,10 @@ for anyone curious to poke around or build on it.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
-  workspaces (`SPC TAB`). Every pane shows a small title bar naming its
+  workspaces (`SPC TAB`) -- name one (`SPC TAB r`), jump straight to it
+  by name instead of only cycling (`SPC TAB TAB`), or define a shelf of
+  them in `config.ini` and open-or-switch-to one on demand (`SPC TAB f`,
+  see `[workspaces]` below). Every pane shows a small title bar naming its
   buffer (the filename, or a placeholder like `*dashboard*`/`*docker*`/
   a dired buffer's own directory for one with no path) -- with a split
   open, two different files are labeled at a glance, not just whichever
@@ -503,6 +506,9 @@ popup shows what keys continue it.
 | `SPC TAB n` | New workspace |
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
 | `SPC TAB d` | Remove the active workspace |
+| `SPC TAB TAB` | Switch to an open workspace by name |
+| `SPC TAB f` | Open a workspace from `config.ini`'s `[workspaces]` shelf -- switches to it if already open, otherwise creates it |
+| `SPC TAB r` | Rename the active workspace |
 
 ### File explorer sidebar (`SPC e t`)
 
@@ -879,6 +885,14 @@ doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
 doc2 = Time Code Formats|C:\refs\301x0b4.pdf
 doc3 = Team Onboarding Notes|C:\refs\onboarding.md
 
+[workspaces]
+ws1 = Editor|
+ws2 = Git|git
+ws3 = Podman|docker
+ws4 = Jira|jira
+ws5 = VNC Build|vnc:build-vm
+ws6 = VNC Test|vnc:test-vm
+
 [windows]
 restore_windows = true
 window1 = 1920,0,2560,1400|true
@@ -899,6 +913,7 @@ window2 = 4480,0,1920,1040|true
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
 | `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
 | `documents` | `doc1`, `doc2`, ... | One entry in the `SPC r f` document index, as `NAME\|PATH` (numbered, same reason as `mib`'s roots). `NAME` is what the picker lists and fuzzy-matches; `PATH` can be any file Fenix opens, PDF or not |
+| `workspaces` | `ws1`, `ws2`, ... | One entry in the `SPC TAB f` workspace shelf, as `NAME\|ACTION` (numbered, same convention as `documents`). `ACTION` is `git`/`jira`/`docker` (opens that built-in panel -- `docker` covers Podman too, since the panel autodetects the engine), `vnc:HOST` (a name from `[vnc]`), or anything else (including empty, as for a plain "Editor" entry) for a workspace with no live session behind it. Picking an already-open entry switches to it instead of creating a duplicate; picking a fresh one creates it and renames it to match, so it shows up correctly next time |
 | `jira` | `base_url` | The self-hosted Jira Server/Data Center instance's REST API root (e.g. `https://jira.example.com`) — see the JIRA dashboard feature above |
 | `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |

@@ -1658,6 +1658,21 @@ enum ActivePicker {
     /// text}"`, payload that line's start char offset), confirming
     /// jumps the cursor there.
     BufferSearch(fenix_picker::PickerState<usize>),
+    /// `SPC TAB TAB`: a fuzzy picker over every currently open
+    /// workspace, by name -- picking one directly rather than relative
+    /// `]`/`[` cycling. Payload is the workspace's index, exactly what
+    /// `WorkspaceList::switch_to_index` takes; the active one's label
+    /// is marked so re-opening the picker shows at a glance which
+    /// workspace you're already on.
+    SwitchWorkspace(fenix_picker::PickerState<usize>),
+    /// `SPC TAB f`: `config.workspaces`' configured launcher list, one
+    /// candidate per `[workspaces]` entry -- same "hand-configured
+    /// shelf, one candidate list" shape `Document`/`VncHost` already
+    /// established. Payload is the entry's own name; confirming
+    /// switches to an already-open workspace of that name or else runs
+    /// the configured action to create one (`open_configured_
+    /// workspace`).
+    WorkspaceLauncher(fenix_picker::PickerState<String>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -1691,6 +1706,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
         ActivePicker::BufferSearch(s) => s.push_char(c),
+        ActivePicker::SwitchWorkspace(s) => s.push_char(c),
+        ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
     }
 }
 
@@ -1721,6 +1738,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
         ActivePicker::BufferSearch(s) => s.backspace(),
+        ActivePicker::SwitchWorkspace(s) => s.backspace(),
+        ActivePicker::WorkspaceLauncher(s) => s.backspace(),
     }
 }
 
@@ -1751,6 +1770,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
+        ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
+        ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
     }
 }
 
@@ -1784,6 +1805,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
+        ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
+        ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
     }
 }
 
@@ -1814,6 +1837,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
         ActivePicker::BufferSearch(s) => s.query(),
+        ActivePicker::SwitchWorkspace(s) => s.query(),
+        ActivePicker::WorkspaceLauncher(s) => s.query(),
     }
 }
 
@@ -1844,6 +1869,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
         ActivePicker::BufferSearch(s) => s.len(),
+        ActivePicker::SwitchWorkspace(s) => s.len(),
+        ActivePicker::WorkspaceLauncher(s) => s.len(),
     }
 }
 
@@ -1874,6 +1901,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
         ActivePicker::BufferSearch(s) => s.selected_row(),
+        ActivePicker::SwitchWorkspace(s) => s.selected_row(),
+        ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
     }
 }
 
@@ -1920,6 +1949,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -3103,6 +3134,29 @@ impl WorkspaceList {
         &self.workspaces[self.active].name
     }
 
+    /// Every workspace's index and name, in order -- what `SPC TAB TAB`
+    /// lists. The index is what `switch_to_index` takes, so a picker
+    /// built from this needs no separate name-to-index lookup on
+    /// confirm.
+    fn summaries(&self) -> Vec<(usize, &str)> {
+        self.workspaces.iter().enumerate().map(|(i, w)| (i, w.name.as_str())).collect()
+    }
+
+    /// The index of the workspace named exactly `name`, if any --
+    /// `open_configured_workspace`'s way of recognizing "this launcher
+    /// entry already has a workspace open" rather than creating a
+    /// duplicate every time the same entry is picked again.
+    fn index_of_name(&self, name: &str) -> Option<usize> {
+        self.workspaces.iter().position(|w| w.name == name)
+    }
+
+    /// `SPC TAB r`: renames the active workspace. The default
+    /// `workspace-N` name and a `[workspaces]` launcher entry's own
+    /// name are otherwise indistinguishable in `SPC TAB TAB`'s list and
+    /// the modeline's workspace indicator.
+    fn rename_active(&mut self, name: String) {
+        self.workspaces[self.active].name = name;
+    }
     /// Every pane in *every* workspace here, not just the active one --
     /// what tearing down a whole frame needs (`App::close_sessions_in_
     /// active_frame`). A PDF or VNC session opens in a workspace of its
@@ -3163,6 +3217,38 @@ impl WorkspaceList {
             self.active = self.workspaces.len() - 1;
         }
         true
+    }
+}
+
+/// What a `[workspaces]` launcher entry's action string means, once
+/// parsed -- see `parse_workspace_action`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceAction {
+    Git,
+    Jira,
+    Docker,
+    /// The host name to connect to, one of `config.vnc_hosts`.
+    Vnc(String),
+    /// No live session behind it -- what "editor" would be.
+    Plain,
+}
+
+/// Parses one `[workspaces]` entry's action field. `git`/`jira`/
+/// `docker` open the matching built-in panel (`docker` covers Podman
+/// too, since `open_docker_panel` autodetects the engine); `vnc:HOST`
+/// connects to that `[vnc]` entry by name; anything else -- including
+/// an empty string, and any typo -- is a plain workspace with no live
+/// session, rather than an error: a launcher entry with a bad action is
+/// still a usable named workspace, just not a self-populating one.
+fn parse_workspace_action(action: &str) -> WorkspaceAction {
+    match action.trim() {
+        "git" => WorkspaceAction::Git,
+        "jira" => WorkspaceAction::Jira,
+        "docker" => WorkspaceAction::Docker,
+        other => match other.strip_prefix("vnc:") {
+            Some(host) if !host.trim().is_empty() => WorkspaceAction::Vnc(host.trim().to_string()),
+            _ => WorkspaceAction::Plain,
+        },
     }
 }
 
@@ -3626,6 +3712,13 @@ pub struct App {
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
+    /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
+    /// with the active workspace's current name, same capturing-prompt
+    /// shape as `rename_file_prompt`. Lives on `App` rather than per
+    /// frame like `workspaces` itself: only one frame can be actively
+    /// typing at a time, and it always acts on `self.workspaces`, which
+    /// is always whichever frame is currently active.
+    workspace_rename_prompt: Option<String>,
     /// `SPC f D`'s y/n gate, armed until the next keypress confirms
     /// (`y`) or cancels (anything else) -- same shape as `docker_
     /// confirm_remove`.
@@ -4346,6 +4439,7 @@ impl App {
             pdf_goto_page_prompt: None,
             pdf_search_prompt: None,
             rename_file_prompt: None,
+            workspace_rename_prompt: None,
             delete_file_confirm: false,
             vim,
             clipboard: arboard::Clipboard::new().ok(),
@@ -11065,6 +11159,18 @@ impl App {
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
+            Some(ActivePicker::SwitchWorkspace(state)) => {
+                let Some(idx) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.workspaces.switch_to_index(idx);
+            }
+            Some(ActivePicker::WorkspaceLauncher(state)) => {
+                let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_configured_workspace(&name);
+            }
             None => {}
         }
         self.wake_caret();
@@ -12010,6 +12116,148 @@ impl App {
         self.wake_caret();
     }
 
+    /// `SPC TAB TAB`: a fuzzy picker over every currently open
+    /// workspace, by name -- picking one directly rather than the
+    /// relative `]`/`[` cycling `next_workspace`/`prev_workspace`
+    /// already cover. The active workspace is marked with a leading
+    /// `*` so re-opening the picker shows at a glance which one you're
+    /// already on.
+    pub(crate) fn picker_switch_workspace(&mut self) {
+        let active = self.workspaces.active_index();
+        let candidates = self
+            .workspaces
+            .summaries()
+            .into_iter()
+            .map(|(idx, name)| {
+                let marker = if idx == active { "* " } else { "  " };
+                fenix_picker::Candidate::new(format!("{marker}{name}"), idx)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::SwitchWorkspace(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC TAB r`: starts the rename prompt, pre-seeded with the
+    /// active workspace's current name.
+    pub(crate) fn start_rename_workspace_prompt(&mut self) {
+        self.workspace_rename_prompt = Some(self.workspaces.active_name().to_string());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `workspace_rename_prompt`
+    /// -- same shape as `rename_file_prompt_key`.
+    fn workspace_rename_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(input), Some(text)) = (&mut self.workspace_rename_prompt, pasted) {
+                input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some(input) = &mut self.workspace_rename_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.workspace_rename_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.workspace_rename_prompt.take().unwrap_or_default();
+                let trimmed = input.trim();
+                if !trimmed.is_empty() {
+                    self.workspaces.rename_active(trimmed.to_string());
+                }
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `workspace_rename_
+    /// prompt` is active.
+    fn workspace_rename_prompt_text(&self) -> Option<String> {
+        self.workspace_rename_prompt.as_ref().map(|input| format!("rename workspace to: {input}"))
+    }
+
+    /// `SPC TAB f`: a fuzzy picker over `config.ini`'s `[workspaces]`
+    /// launcher list -- same "hand-configured shelf, one candidate
+    /// list" shape `start_document_picker`/`start_vnc_picker` already
+    /// established.
+    ///
+    /// An empty index says so rather than opening a picker over
+    /// nothing, same reasoning as `start_document_picker`'s own check:
+    /// this list can only be populated by hand-editing `config.ini`, so
+    /// "no matches" would otherwise be indistinguishable from "you
+    /// haven't set this up yet".
+    pub(crate) fn start_workspace_launcher_picker(&mut self) {
+        if self.config.workspaces.is_empty() {
+            self.set_error(
+                "no workspaces configured -- add a [workspaces] section to config.ini (ws1 = Name|action)".to_string(),
+            );
+            return;
+        }
+        let candidates =
+            self.config.workspaces.iter().map(|(name, _)| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
+        self.enter_picker(ActivePicker::WorkspaceLauncher(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Switches to the currently-open workspace named `name`, or else
+    /// runs its configured `[workspaces]` action to create one --
+    /// `picker_confirm`'s `WorkspaceLauncher` arm.
+    ///
+    /// Every action already knows how to avoid duplicating itself:
+    /// `open_git_panel`/`open_jira_panel`/`open_docker_panel` refocus
+    /// their existing session instead of opening a second one, and
+    /// `open_vnc_session` does the same by host name -- all independent
+    /// of what the *workspace* happens to be named. Only the plain
+    /// "no live session" action has nothing else to check against, so
+    /// `open_named_workspace` does that matching itself.
+    ///
+    /// Whichever action ran, the workspace it leaves active gets
+    /// renamed to `name` if it isn't already -- a freshly created
+    /// session's workspace starts out "workspace-N," and without this
+    /// it would show as that instead of the name you picked, both in
+    /// `SPC TAB TAB`'s list and the modeline's own indicator.
+    fn open_configured_workspace(&mut self, name: &str) {
+        let Some((_, action)) = self.config.workspaces.iter().find(|(n, _)| n == name) else { return };
+        // `Vnc`'s fresh-connect path is asynchronous: `open_vnc_session`
+        // starts a background dial and returns immediately, having
+        // touched no workspace at all (the real one is only created
+        // later, from `apply_vnc_connected`, once the connection
+        // actually succeeds) -- same for an outright connect failure
+        // (an unconfigured host), which also leaves the active
+        // workspace untouched. Comparing the active *index* before and
+        // after, rather than assuming the dispatch always lands
+        // somewhere new, is what keeps either of those from renaming
+        // whatever workspace merely happened to be active at the time.
+        let before = self.workspaces.active_index();
+        match parse_workspace_action(action) {
+            WorkspaceAction::Git => self.open_git_panel(),
+            WorkspaceAction::Jira => self.open_jira_panel(),
+            WorkspaceAction::Docker => self.open_docker_panel(),
+            WorkspaceAction::Vnc(host) => self.open_vnc_session(&host),
+            WorkspaceAction::Plain => self.open_named_workspace(name),
+        }
+        if self.workspaces.active_index() != before && self.workspaces.active_name() != name {
+            self.workspaces.rename_active(name.to_string());
+        }
+        self.wake_caret();
+    }
+
+    /// Switches to an already-open plain workspace named `name`, or
+    /// else creates one (seeded with the focused buffer, via the same
+    /// `new_workspace` `SPC TAB n` itself uses). The "no live session
+    /// to check instead" counterpart of `open_vnc_session`/`open_
+    /// docker_panel`'s own idempotence -- see `open_configured_
+    /// workspace`'s own doc comment.
+    fn open_named_workspace(&mut self, name: &str) {
+        if let Some(idx) = self.workspaces.index_of_name(name) {
+            self.workspaces.switch_to_index(idx);
+            return;
+        }
+        self.new_workspace();
+    }
+
     pub(crate) fn undo(&mut self) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         buffer.undo(cursor);
@@ -12436,6 +12684,11 @@ impl App {
         }
         if self.rename_file_prompt.is_some() {
             self.rename_file_prompt_key(keypress);
+            return;
+        }
+        // `SPC TAB r` -- same capturing-prompt tier.
+        if self.workspace_rename_prompt.is_some() {
+            self.workspace_rename_prompt_key(keypress);
             return;
         }
         // `SPC m a`'s label step -- same capturing-prompt tier.
@@ -13675,6 +13928,8 @@ impl App {
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
+                Some(picker @ ActivePicker::SwitchWorkspace(_)) => ("SWWS", picker_len(picker)),
+                Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return (label, format!("│ {count} matches "));
@@ -13755,6 +14010,7 @@ impl App {
             .or_else(|| self.pdf_goto_page_prompt_text())
             .or_else(|| self.pdf_search_prompt_text())
             .or_else(|| self.rename_file_prompt_text())
+            .or_else(|| self.workspace_rename_prompt_text())
             .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
     }
@@ -20340,6 +20596,190 @@ mod tests {
 
         assert_eq!(app.workspaces.len(), 1);
         assert_eq!(app.workspaces.active_name(), "workspace-1");
+    }
+
+    #[test]
+    fn picker_switch_workspace_lists_every_open_workspace_marking_the_active_one() {
+        let mut app = App::with_file(None);
+        app.new_workspace(); // active: workspace-2
+
+        app.picker_switch_workspace();
+
+        match &app.active_picker {
+            Some(ActivePicker::SwitchWorkspace(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["  workspace-1", "* workspace-2"]);
+            }
+            other => panic!("expected an open SwitchWorkspace picker, got is_some={}", other.is_some()),
+        }
+        assert_eq!(app.main_view, MainView::Picker);
+    }
+
+    #[test]
+    fn picker_confirm_on_switch_workspace_jumps_straight_to_the_chosen_one() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.new_workspace(); // 3 workspaces, active = 2
+
+        app.picker_switch_workspace();
+        match &mut app.active_picker {
+            Some(ActivePicker::SwitchWorkspace(state)) => state.move_selection(-2), // select workspace-1
+            _ => panic!("expected an open SwitchWorkspace picker"),
+        }
+        app.picker_confirm();
+
+        assert_eq!(app.workspaces.active_index(), 0);
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn rename_workspace_prompt_round_trips_through_enter() {
+        let mut app = App::with_file(None);
+
+        app.start_rename_workspace_prompt();
+        assert_eq!(app.workspace_rename_prompt.as_deref(), Some("workspace-1"));
+
+        for c in "Editor".chars() {
+            app.workspace_rename_prompt_key(KeyPress::char(c));
+        }
+        // start_rename_workspace_prompt pre-seeds the prompt with the
+        // existing name rather than clearing it -- typing appends,
+        // matching start_rename_file_prompt's own seeded-not-blank
+        // behaviour.
+        assert_eq!(app.workspace_rename_prompt.as_deref(), Some("workspace-1Editor"));
+
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.workspace_rename_prompt.is_none());
+        assert_eq!(app.workspaces.active_name(), "workspace-1Editor");
+    }
+
+    #[test]
+    fn rename_workspace_prompt_escape_cancels_without_renaming() {
+        let mut app = App::with_file(None);
+        app.start_rename_workspace_prompt();
+
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.workspace_rename_prompt.is_none());
+        assert_eq!(app.workspaces.active_name(), "workspace-1");
+    }
+
+    #[test]
+    fn rename_workspace_to_a_blank_name_is_a_no_op() {
+        let mut app = App::with_file(None);
+        app.start_rename_workspace_prompt();
+        // Clear the pre-seeded name entirely.
+        for _ in 0.."workspace-1".len() {
+            app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
+        }
+
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert_eq!(app.workspaces.active_name(), "workspace-1", "an empty name must not replace the real one");
+    }
+
+    #[test]
+    fn parse_workspace_action_recognizes_every_built_in_kind() {
+        assert_eq!(parse_workspace_action("git"), WorkspaceAction::Git);
+        assert_eq!(parse_workspace_action("jira"), WorkspaceAction::Jira);
+        assert_eq!(parse_workspace_action("docker"), WorkspaceAction::Docker);
+        assert_eq!(parse_workspace_action("vnc:build-vm"), WorkspaceAction::Vnc("build-vm".to_string()));
+        assert_eq!(parse_workspace_action(""), WorkspaceAction::Plain);
+        assert_eq!(parse_workspace_action("editor"), WorkspaceAction::Plain, "an unrecognized action is still a usable plain workspace");
+        assert_eq!(parse_workspace_action("vnc:"), WorkspaceAction::Plain, "a host-less vnc: falls back to plain rather than connecting nowhere");
+    }
+
+    #[test]
+    fn start_workspace_launcher_picker_reports_an_empty_list_instead_of_opening_over_nothing() {
+        let mut app = App::with_file(None);
+        app.start_workspace_launcher_picker();
+        assert!(app.active_picker.is_none());
+        assert!(app.modeline_pieces().1.contains("no workspaces configured"));
+    }
+
+    #[test]
+    fn start_workspace_launcher_picker_lists_every_configured_entry_by_name() {
+        let mut app = App::with_file(None);
+        app.config.workspaces = vec![("Git".to_string(), "git".to_string()), ("Editor".to_string(), String::new())];
+
+        app.start_workspace_launcher_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::WorkspaceLauncher(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["Git", "Editor"]);
+            }
+            other => panic!("expected an open WorkspaceLauncher picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn opening_a_plain_configured_workspace_creates_it_named_after_the_config_entry() {
+        let mut app = App::with_file(None);
+        app.config.workspaces = vec![("Editor".to_string(), String::new())];
+
+        app.open_configured_workspace("Editor");
+
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!(app.workspaces.active_name(), "Editor");
+    }
+
+    #[test]
+    fn opening_an_already_open_plain_workspace_a_second_time_switches_instead_of_duplicating() {
+        let mut app = App::with_file(None);
+        app.config.workspaces = vec![("Editor".to_string(), String::new())];
+        app.open_configured_workspace("Editor");
+        app.new_workspace(); // some other workspace becomes active
+
+        app.open_configured_workspace("Editor");
+
+        assert_eq!(app.workspaces.len(), 3, "must not have created a second Editor workspace");
+        assert_eq!(app.workspaces.active_name(), "Editor");
+    }
+
+    #[test]
+    fn opening_a_configured_vnc_workspace_with_an_unconfigured_host_errors_without_creating_a_workspace() {
+        let mut app = App::with_file(None);
+        app.config.workspaces = vec![("VNC Build".to_string(), "vnc:no-such-vm".to_string())];
+        let workspaces_before = app.workspaces.len();
+
+        app.open_configured_workspace("VNC Build");
+
+        assert_eq!(app.workspaces.len(), workspaces_before, "open_vnc_session's own error path must not fabricate a workspace");
+        assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+        // The regression this guards against: `open_vnc_session`'s
+        // error path touches no workspace at all, so a blanket rename
+        // (rather than one gated on the active index actually having
+        // moved) would have renamed whatever workspace was active --
+        // here, the original "workspace-1" -- to "VNC Build" even
+        // though nothing about it changed.
+        assert_eq!(app.workspaces.active_name(), "workspace-1");
+    }
+
+    #[test]
+    fn picker_confirm_on_workspace_launcher_dispatches_the_configured_action() {
+        let mut app = App::with_file(None);
+        app.config.workspaces = vec![("Editor".to_string(), String::new())];
+
+        app.start_workspace_launcher_picker();
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.workspaces.active_name(), "Editor");
+    }
+
+    #[test]
+    fn workspace_list_index_of_name_finds_an_exact_match_only() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.workspaces.rename_active("Podman".to_string());
+
+        assert_eq!(app.workspaces.index_of_name("Podman"), Some(1));
+        assert_eq!(app.workspaces.index_of_name("podman"), None, "not case-insensitive");
+        assert_eq!(app.workspaces.index_of_name("nonexistent"), None);
     }
 
     #[test]

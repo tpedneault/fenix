@@ -317,6 +317,9 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, tab, KeyPress::char(']')], "next workspace", "workspace.next");
         t.insert(&[spc, tab, KeyPress::char('[')], "prev workspace", "workspace.prev");
         t.insert(&[spc, tab, KeyPress::char('d')], "remove workspace", "workspace.remove");
+        t.insert(&[spc, tab, tab], "switch workspace", "workspace.switch");
+        t.insert(&[spc, tab, KeyPress::char('f')], "find workspace", "workspace.find");
+        t.insert(&[spc, tab, KeyPress::char('r')], "rename workspace", "workspace.rename");
 
         t
     })
@@ -818,5 +821,8 @@ mod tests {
         assert!(matches!(resolve(KeyPress::char(']')), fenix_keymap::Step::Matched(&"workspace.next")));
         assert!(matches!(resolve(KeyPress::char('[')), fenix_keymap::Step::Matched(&"workspace.prev")));
         assert!(matches!(resolve(KeyPress::char('d')), fenix_keymap::Step::Matched(&"workspace.remove")));
+        assert!(matches!(resolve(tab), fenix_keymap::Step::Matched(&"workspace.switch")));
+        assert!(matches!(resolve(KeyPress::char('f')), fenix_keymap::Step::Matched(&"workspace.find")));
+        assert!(matches!(resolve(KeyPress::char('r')), fenix_keymap::Step::Matched(&"workspace.rename")));
     }
 }
