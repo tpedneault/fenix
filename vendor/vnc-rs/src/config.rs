@@ -16,6 +16,11 @@ pub enum VncEncoding {
     CursorPseudo = -239,
     DesktopSizePseudo = -223,
     LastRectPseudo = -224,
+    /// Local patch (see `vendor/vnc-rs/PATCH.md`): the extended form of
+    /// `DesktopSizePseudo` that also lets the *client* request a resize
+    /// (RFB's `SetDesktopSize` client message) rather than only ever
+    /// being told about one the server decided on its own.
+    ExtendedDesktopSizePseudo = -308,
 }
 
 impl From<u32> for VncEncoding {
@@ -32,6 +37,7 @@ impl From<u32> for VncEncoding {
             -239 => VncEncoding::CursorPseudo,
             -223 => VncEncoding::DesktopSizePseudo,
             -224 => VncEncoding::LastRectPseudo,
+            -308 => VncEncoding::ExtendedDesktopSizePseudo,
             _ => VncEncoding::Raw,
         }
     }

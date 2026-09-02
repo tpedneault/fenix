@@ -284,8 +284,10 @@ for anyone curious to poke around or build on it.
   forward straight to the VM while the pane is focused (`Ctrl-\` to
   release, same convention as the terminal panel); clipboard is
   mirrored both ways. `SPC v s` saves the current frame as a PNG.
-  Client-side scaling only, and no encryption/authentication at all --
-  trusted-network hosts only.
+  Remote resizing: resizing the pane asks the VM to match its own
+  resolution, falling back to client-side scaling when the server
+  doesn't support that or declines a particular size. No encryption or
+  authentication at all -- trusted-network hosts only.
 - **PDF viewer** (`SPC r ...`): open a `.pdf` file the same way you'd
   open any other file (typed path, the explorer, a CLI argument) and it
   renders as a scaled-to-fit page in an ordinary, splittable pane instead
@@ -744,13 +746,22 @@ instead of Vim, exactly like the terminal panel. Clipboard content is
 mirrored in both directions: the VM's clipboard always flows to yours
 as it changes, and yours flows to the VM whenever you focus a session.
 
-Resizing is client-side only (the video scales to fit the pane; the
-VM's own resolution is never changed), and the connection is always
-made in the clear -- there's no encryption or authentication support at
-all, matching the assumption that every configured host is on a
-trusted local network. Don't point this at anything reachable over an
-untrusted network without your own tunnel (SSH port-forwarding, a VPN)
-in front of it.
+Resizing a VNC pane asks the VM to match its own resolution to the
+pane's, the same "remote resizing" real VNC clients offer, so the
+picture renders at native size instead of a stretched/letterboxed
+scale. Whether that request actually lands depends on the server: it
+has to advertise support for it in the first place (confirmed
+automatically per-connection, nothing to configure), and even then can
+still decline a specific size (administrative policy, an unsupported
+resolution, ...). Either way, the video keeps scaling to fit the pane
+as a fallback -- a pane and a VM sitting at different resolutions is
+never broken, just not pixel-native.
+
+The connection is always made in the clear -- there's no encryption or
+authentication support at all, matching the assumption that every
+configured host is on a trusted local network. Don't point this at
+anything reachable over an untrusted network without your own tunnel
+(SSH port-forwarding, a VPN) in front of it.
 
 ### PDF viewer (`SPC r ...`)
 

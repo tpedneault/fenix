@@ -700,6 +700,35 @@ struct VncSession {
     /// `MAX_VNC_RECONNECT_ATTEMPTS` caps it so a permanently-unreachable
     /// VM eventually stops retrying instead of retrying forever.
     reconnect_attempts: u32,
+    /// This pane's on-screen pixel size as of the *last* redraw --
+    /// compared against the current frame's size every redraw to detect
+    /// a resize and, together with `pane_size_stable_since`, decide when
+    /// it's settled enough to actually request. `(0, 0)` (the initial
+    /// value) never equals a real rendered size, so the very first
+    /// redraw always counts as "just changed," which is what makes
+    /// remote resizing also cover "fit the guest to the pane the moment
+    /// you connect," not just later resizes.
+    last_pane_size: (u16, u16),
+    /// When `last_pane_size` last *changed* -- `redraw` only calls
+    /// `client.request_resize` once this has held for `VNC_RESIZE_
+    /// DEBOUNCE`, so a window drag-resize (many intermediate sizes per
+    /// redraw) doesn't flood the server with `SetDesktopSize` requests
+    /// it would each have to reallocate a framebuffer for, visibly
+    /// thrashing the guest's own screen mid-drag. Unlike `PdfSession::
+    /// last_pane_size`'s equivalent tracking (no debounce at all --
+    /// re-rendering a page is cheap and invisible to anything but this
+    /// client), a VNC resize is a real, guest-visible event, so the
+    /// cost profile is different enough to warrant one here.
+    pane_size_stable_since: Instant,
+    /// The size last actually sent via `client.request_resize` -- so a
+    /// pane sitting still doesn't get the identical request resent
+    /// every redraw once the debounce window has passed. Reset to
+    /// `(0, 0)` on a successful reconnect (see `apply_vnc_connected`):
+    /// the fresh connection starts back at the server's own default
+    /// resolution, having forgotten this client's previous request
+    /// entirely, so the next stable frame needs to re-request even if
+    /// the pane's own size never changed across the gap.
+    resize_requested_for: (u16, u16),
 }
 
 /// How a `PdfSession`'s current page is scaled onto its pane -- what
@@ -4217,6 +4246,109 @@ fn vnc_reconnect_delay(attempts: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// How long a VNC pane's on-screen size has to hold steady before
+/// `redraw` actually calls `client.request_resize` for it -- long enough
+/// that a window drag-resize (many intermediate sizes, one redraw per
+/// frame) settles on its final size and sends exactly one request for
+/// it, short enough that the guest visibly catching up to a deliberate
+/// resize still feels immediate rather than sluggish.
+const VNC_RESIZE_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// `vnc_resize_tick`'s result: the `VncSession` fields to write back,
+/// plus `request` when this frame should actually call `client.
+/// request_resize`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VncResizeTick {
+    last_pane_size: (u16, u16),
+    pane_size_stable_since: Instant,
+    request: Option<(u16, u16)>,
+}
+
+/// One frame's decision for `redraw`'s VNC remote-resizing bookkeeping,
+/// given `pane_px` (the pane's current on-screen pixel size) and the
+/// session's existing resize state. Pulled out of `redraw` as a pure
+/// function purely so this decision has an automated test -- `redraw`
+/// itself needs a real GPU context and is otherwise exercised only by
+/// live use (see `pdf_target_size` for the same reasoning applied to
+/// the equivalent "what should this frame's render decision be"
+/// computation for PDF panes).
+///
+/// Three cases:
+/// * `pane_px` differs from `last_pane_size` (the pane just resized, or
+///   this is its first-ever frame, since `last_pane_size` starts at
+///   `(0, 0)`): record the new size and reset the stability clock to
+///   `now`. Never requests anything yet -- a resize needs to *settle*
+///   first, see `VNC_RESIZE_DEBOUNCE`'s own doc comment.
+/// * `pane_px` matches `last_pane_size` (unchanged since last frame)
+///   but not `resize_requested_for`, and has held for at least `VNC_
+///   RESIZE_DEBOUNCE`: request it.
+/// * Otherwise (already requested, or not stable long enough yet):
+///   nothing to do.
+fn vnc_resize_tick(pane_px: (u16, u16), last_pane_size: (u16, u16), pane_size_stable_since: Instant, resize_requested_for: (u16, u16), now: Instant) -> VncResizeTick {
+    if pane_px != last_pane_size {
+        VncResizeTick { last_pane_size: pane_px, pane_size_stable_since: now, request: None }
+    } else if pane_px != resize_requested_for && now.duration_since(pane_size_stable_since) >= VNC_RESIZE_DEBOUNCE {
+        VncResizeTick { last_pane_size, pane_size_stable_since, request: Some(pane_px) }
+    } else {
+        VncResizeTick { last_pane_size, pane_size_stable_since, request: None }
+    }
+}
+
+#[cfg(test)]
+mod vnc_resize_tick_tests {
+    use super::*;
+
+    #[test]
+    fn a_changed_pane_size_is_recorded_but_not_yet_requested() {
+        let now = Instant::now();
+        let stale_stable_since = now - Duration::from_secs(10); // long past the debounce
+        let tick = vnc_resize_tick((900, 700), (800, 600), stale_stable_since, (800, 600), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (900, 700), pane_size_stable_since: now, request: None });
+    }
+
+    #[test]
+    fn the_very_first_frame_counts_as_a_change_since_last_pane_size_starts_at_zero() {
+        let now = Instant::now();
+        let tick = vnc_resize_tick((800, 600), (0, 0), now, (0, 0), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (800, 600), pane_size_stable_since: now, request: None });
+    }
+
+    #[test]
+    fn an_unchanged_size_still_within_the_debounce_window_requests_nothing() {
+        let now = Instant::now();
+        let stable_since = now - (VNC_RESIZE_DEBOUNCE - Duration::from_millis(1));
+        let tick = vnc_resize_tick((800, 600), (800, 600), stable_since, (640, 480), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (800, 600), pane_size_stable_since: stable_since, request: None });
+    }
+
+    #[test]
+    fn an_unchanged_size_stable_past_the_debounce_window_requests_it() {
+        let now = Instant::now();
+        let stable_since = now - VNC_RESIZE_DEBOUNCE;
+        let tick = vnc_resize_tick((800, 600), (800, 600), stable_since, (640, 480), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (800, 600), pane_size_stable_since: stable_since, request: Some((800, 600)) });
+    }
+
+    #[test]
+    fn a_size_already_matching_what_was_requested_is_never_re_requested() {
+        let now = Instant::now();
+        let stable_since = now - Duration::from_secs(10);
+        let tick = vnc_resize_tick((800, 600), (800, 600), stable_since, (800, 600), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (800, 600), pane_size_stable_since: stable_since, request: None });
+    }
+
+    #[test]
+    fn a_reconnect_resetting_resize_requested_for_to_zero_re_requests_an_otherwise_unchanged_pane() {
+        // Mirrors `apply_vnc_connected`'s reconnect-success arm: the
+        // pane never moved, but the fresh connection forgot the
+        // previous request, so this should fire again.
+        let now = Instant::now();
+        let stable_since = now - Duration::from_secs(10);
+        let tick = vnc_resize_tick((800, 600), (800, 600), stable_since, (0, 0), now);
+        assert_eq!(tick, VncResizeTick { last_pane_size: (800, 600), pane_size_stable_since: stable_since, request: Some((800, 600)) });
+    }
+}
+
 /// The ordered `(keysym, down)` pairs `App::send_vnc_key` should
 /// actually send for one logical key event, bracketed with `Control_L`/
 /// `Alt_L`/`Super_L` down/up for whichever of `mods` are held --
@@ -6131,6 +6263,14 @@ impl App {
                         session.client = client;
                         session.reader = reader;
                         session.reconnect_attempts = 0;
+                        // The fresh connection starts back at the
+                        // server's own default resolution -- it has no
+                        // memory of any resize this client previously
+                        // requested on the dropped connection. Forget
+                        // ours too, so the next stable frame in `redraw`
+                        // re-sends the request even if the pane's own
+                        // size never changed across the reconnect gap.
+                        session.resize_requested_for = (0, 0);
                     }
                     self.set_message(format!("VNC {name} reconnected"));
                 }
@@ -6180,6 +6320,9 @@ impl App {
                         pointer_pos: None,
                         pointer_buttons: 0,
                         reconnect_attempts: 0,
+                        last_pane_size: (0, 0),
+                        pane_size_stable_since: Instant::now(),
+                        resize_requested_for: (0, 0),
                     },
                 );
                 self.sync_vnc_focus();
@@ -15905,25 +16048,63 @@ impl App {
             // (empty) `PaneRender` so its title bar renders normally and
             // no other pane-bookkeeping in this loop needs a special
             // case for it.
-            if !overlay_covers_pane && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Vnc) {
-                vnc_panes.push((pane, rect));
-                panes_render.push(PaneRender {
-                    pane,
-                    rect,
-                    title: pane_title,
-                    spans: Vec::new(),
-                    hl_row: None,
-                    hl_row_strong: false,
-                    marked_rows: Vec::new(),
-                    selection_segments: Segments::new(),
-                    pulse_overlay: None,
-                    bracket_match_segments: Segments::new(),
-                    hlsearch_segments: Segments::new(),
-                    caret: None,
-                    content_frac: 0.0,
-                    gutter_px: 0.0,
-                });
-                continue;
+            if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Vnc) {
+                // Remote-resizing bookkeeping runs even while an overlay
+                // covers this pane, same reasoning as the PDF block
+                // below: the guest is already the right size the moment
+                // the overlay closes, rather than catching up a frame
+                // later. `rect`'s pixel size is only known here, which
+                // is also why this can't live in `handle_resize` or
+                // similar -- a split's own share of the window changes
+                // with every other pane's size too, not just the
+                // window's.
+                if let Some(key) = self.vnc_session_key_for_pane(pane) {
+                    let pane_px = (rect.w.round().max(1.0) as u16, rect.h.round().max(1.0) as u16);
+                    if let Some(session) = self.vnc_sessions.get_mut(&key) {
+                        let now = Instant::now();
+                        let decision = vnc_resize_tick(pane_px, session.last_pane_size, session.pane_size_stable_since, session.resize_requested_for, now);
+                        session.last_pane_size = decision.last_pane_size;
+                        session.pane_size_stable_since = decision.pane_size_stable_since;
+                        // Only remembered as "requested" when the server
+                        // has actually confirmed it supports this by the
+                        // time we ask -- `request_resize` returns `false`
+                        // (and sends nothing) otherwise, most often right
+                        // after connecting, when that confirmation just
+                        // hasn't arrived yet. Recording it as requested
+                        // regardless would have this frame's size never
+                        // asked for again even after support does show
+                        // up a moment later (nothing else would ever
+                        // change `pane_px` to re-trigger the debounce).
+                        if let Some((w, h)) = decision.request {
+                            if session.client.request_resize(w, h) {
+                                session.resize_requested_for = (w, h);
+                            }
+                        }
+                    }
+                }
+                if overlay_covers_pane {
+                    // Falls through to the Explorer/Picker rendering
+                    // further down, exactly as before this block existed.
+                } else {
+                    vnc_panes.push((pane, rect));
+                    panes_render.push(PaneRender {
+                        pane,
+                        rect,
+                        title: pane_title,
+                        spans: Vec::new(),
+                        hl_row: None,
+                        hl_row_strong: false,
+                        marked_rows: Vec::new(),
+                        selection_segments: Segments::new(),
+                        pulse_overlay: None,
+                        bracket_match_segments: Segments::new(),
+                        hlsearch_segments: Segments::new(),
+                        caret: None,
+                        content_frac: 0.0,
+                        gutter_px: 0.0,
+                    });
+                    continue;
+                }
             }
 
             // A PDF pane's content is a rendered page bitmap, not text --

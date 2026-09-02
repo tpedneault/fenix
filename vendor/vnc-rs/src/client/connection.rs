@@ -62,7 +62,15 @@ impl ImageRect {
 
 struct VncInner {
     name: String,
-    screen: (u16, u16),
+    /// Local patch (see `vendor/vnc-rs/PATCH.md`): shared with the
+    /// decoding task (`VncInner::new`'s spawned closure), which updates
+    /// it on every `VncEvent::SetResolution`/`ExtendedDesktopSize` --
+    /// upstream left this a plain `(u16, u16)` set once at connect and
+    /// never touched again, so `input()`'s `Refresh`/`FullRefresh`
+    /// (which size their `FramebufferUpdateRequest` from this) kept
+    /// asking for the *original* resolution forever after any later
+    /// resize, server-initiated or (with this patch) client-requested.
+    screen: Arc<std::sync::Mutex<(u16, u16)>>,
     input_ch: Sender<ClientMsg>,
     output_ch: Receiver<VncEvent>,
     decoding_stop: Option<oneshot::Sender<()>>,
@@ -115,6 +123,12 @@ impl VncInner {
             ))
             .await?;
 
+        // Local patch (see `vendor/vnc-rs/PATCH.md` and `screen`'s own
+        // doc comment): shared with the decoding task below, which
+        // keeps it current on every resize.
+        let screen = Arc::new(std::sync::Mutex::new((width, height)));
+        let screen_for_decode = screen.clone();
+
         // start the decoding thread
         spawn(async move {
             trace!("Decoding thread starts");
@@ -123,9 +137,26 @@ impl VncInner {
                 FuturesAsyncReadCompatExt::compat(conn_ch_rx)
             };
 
-            let output_func = |e| async {
-                output_ch_tx.send(e).await?;
-                Ok(())
+            let output_func = |e: VncEvent| {
+                // Local patch: keep `screen` current -- see its own doc
+                // comment for why `input()` needs this. Matched by
+                // reference first, deliberately not `async move` below
+                // (disjoint closure capture moves just `e` into it,
+                // same as upstream's original `async {}` body -- `move`
+                // would also try to move `output_ch_tx` out of this
+                // `Fn` closure's environment on its first call, which
+                // doesn't compile since it's called once per event).
+                match &e {
+                    VncEvent::SetResolution(s) => *screen_for_decode.lock().unwrap() = (s.width, s.height),
+                    VncEvent::ExtendedDesktopSize { width, height, .. } => {
+                        *screen_for_decode.lock().unwrap() = (*width, *height)
+                    }
+                    _ => {}
+                }
+                async {
+                    output_ch_tx.send(e).await?;
+                    Ok(())
+                }
             };
 
             let pf = pixel_format.as_ref().unwrap();
@@ -161,7 +192,7 @@ impl VncInner {
         info!("VNC Client {name} starts");
         Ok(Self {
             name,
-            screen: (width, height),
+            screen,
             input_ch: input_ch_tx,
             output_ch: output_ch_rx,
             decoding_stop: Some(decoding_stop_tx),
@@ -175,29 +206,29 @@ impl VncInner {
             Err(VncError::ClientNotRunning)
         } else {
             let msg = match event {
-                X11Event::Refresh => ClientMsg::FramebufferUpdateRequest(
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width: self.screen.0,
-                        height: self.screen.1,
-                    },
-                    1,
-                ),
-                X11Event::FullRefresh => ClientMsg::FramebufferUpdateRequest(
-                    Rect {
-                        x: 0,
-                        y: 0,
-                        width: self.screen.0,
-                        height: self.screen.1,
-                    },
-                    0, // non-incremental: server sends entire framebuffer
-                ),
+                X11Event::Refresh => {
+                    // Local patch: read through the shared cell (see
+                    // `screen`'s own doc comment) instead of a value
+                    // fixed at connect time, so this stays correctly
+                    // sized after any later resize.
+                    let (width, height) = *self.screen.lock().unwrap();
+                    ClientMsg::FramebufferUpdateRequest(Rect { x: 0, y: 0, width, height }, 1)
+                }
+                X11Event::FullRefresh => {
+                    let (width, height) = *self.screen.lock().unwrap();
+                    ClientMsg::FramebufferUpdateRequest(
+                        Rect { x: 0, y: 0, width, height },
+                        0, // non-incremental: server sends entire framebuffer
+                    )
+                }
                 X11Event::KeyEvent(key) => ClientMsg::KeyEvent(key.keycode, key.down),
                 X11Event::PointerEvent(mouse) => {
                     ClientMsg::PointerEvent(mouse.position_x, mouse.position_y, mouse.bottons)
                 }
                 X11Event::CopyText(text) => ClientMsg::ClientCutText(text),
+                // Local patch (see `vendor/vnc-rs/PATCH.md`): RFB's
+                // `SetDesktopSize` client message.
+                X11Event::SetDesktopSize { width, height } => ClientMsg::SetDesktopSize { width, height },
             };
             self.input_ch.send(msg).await?;
             Ok(())
@@ -446,6 +477,34 @@ where
                             output_func(VncEvent::SetResolution(
                                 (rect.rect.width, rect.rect.height).into(),
                             ))
+                            .await?;
+                        }
+                        // Local patch (see `vendor/vnc-rs/PATCH.md`):
+                        // the extended form -- `rect.rect.x`/`y` carry
+                        // `reason`/`result` rather than a position (see
+                        // `VncEvent::ExtendedDesktopSize`'s own doc
+                        // comment), and the rectangle body is a
+                        // screen-layout structure: number-of-screens
+                        // (U8) + 3 bytes padding, then that many 16-byte
+                        // Screen entries. Always read in full to keep
+                        // the stream in sync, even though nothing here
+                        // needs the individual screens -- the
+                        // framebuffer's own new size is already in
+                        // `rect.rect.width`/`height`.
+                        VncEncoding::ExtendedDesktopSizePseudo => {
+                            let screen_count = stream.read_u8().await?;
+                            let mut padding = [0_u8; 3];
+                            stream.read_exact(&mut padding).await?;
+                            for _ in 0..screen_count {
+                                let mut screen_buf = [0_u8; 16];
+                                stream.read_exact(&mut screen_buf).await?;
+                            }
+                            output_func(VncEvent::ExtendedDesktopSize {
+                                reason: rect.rect.x,
+                                result: rect.rect.y,
+                                width: rect.rect.width,
+                                height: rect.rect.height,
+                            })
                             .await?;
                         }
                         VncEncoding::LastRectPseudo => {

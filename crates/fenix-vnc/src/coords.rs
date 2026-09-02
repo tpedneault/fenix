@@ -1,12 +1,18 @@
-//! Pane-pixel <-> VM-framebuffer-pixel coordinate scaling for client-side
-//! scaling (decision: no server-side `SetDesktopSize` request for v1) --
-//! used both to send correctly-scaled pointer events to the server
+//! Pane-pixel <-> VM-framebuffer-pixel coordinate scaling -- used both to
+//! send correctly-scaled pointer events to the server
 //! (`pane_to_framebuffer`) and, on the rendering side, to size the
 //! textured quad's destination rect (the inverse direction is just the
 //! same ratio applied the other way, exposed here as
 //! `framebuffer_to_pane` mainly so both directions have one obviously-
 //! correct, tested implementation rather than each caller re-deriving
 //! the ratio independently).
+//!
+//! Stays load-bearing even with `VncClient::request_resize` ("remote
+//! resizing," matching the framebuffer to the pane instead of scaling
+//! it): a server that doesn't support the extension, or hasn't answered
+//! yet, still leaves pane and framebuffer sizes mismatched, and this is
+//! what keeps that case rendering (scaled, not distorted-aspect or
+//! cropped) instead of assuming they're always equal.
 
 /// Maps a point in pane-local pixels to the corresponding pixel in the
 /// VM's actual framebuffer, clamped to `0..fb_size` on each axis. Returns

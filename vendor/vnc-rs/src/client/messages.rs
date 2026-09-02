@@ -9,6 +9,10 @@ pub(super) enum ClientMsg {
     KeyEvent(u32, bool),
     PointerEvent(u16, u16, u8),
     ClientCutText(String),
+    /// Local patch (see `vendor/vnc-rs/PATCH.md`): RFB's `SetDesktopSize`
+    /// client message (type 251), part of the `ExtendedDesktopSizePseudo`
+    /// extension.
+    SetDesktopSize { width: u16, height: u16 },
 }
 
 impl ClientMsg {
@@ -113,6 +117,36 @@ impl ClientMsg {
                 let mut payload = vec![6_u8, 0, 0, 0];
                 payload.write_u32(s.len() as u32).await?;
                 payload.write_all(s.as_bytes()).await?;
+                writer.write_all(&payload).await?;
+                Ok(())
+            }
+            ClientMsg::SetDesktopSize { width, height } => {
+                // +--------------+--------------+---------------------+
+                // | No. of bytes | Type [Value] | Description         |
+                // +--------------+--------------+---------------------+
+                // | 1            | U8 [251]     | message-type        |
+                // | 1            |              | padding             |
+                // | 2            | U16          | width               |
+                // | 2            | U16          | height              |
+                // | 1            | U8           | number-of-screens   |
+                // | 1            |              | padding             |
+                // +--------------+--------------+---------------------+
+                // Followed by number-of-screens repetitions of a 16-byte
+                // Screen structure (id: U32, x/y/width/height: U16 each,
+                // flags: U32). Always exactly one screen, covering the
+                // whole framebuffer at (0, 0) -- this crate has no
+                // multi-monitor guest layout to describe.
+                let mut payload = vec![251_u8, 0];
+                payload.extend_from_slice(&width.to_be_bytes());
+                payload.extend_from_slice(&height.to_be_bytes());
+                payload.push(1); // number-of-screens
+                payload.push(0); // padding
+                payload.extend_from_slice(&0_u32.to_be_bytes()); // screen id
+                payload.extend_from_slice(&0_u16.to_be_bytes()); // x-position
+                payload.extend_from_slice(&0_u16.to_be_bytes()); // y-position
+                payload.extend_from_slice(&width.to_be_bytes());
+                payload.extend_from_slice(&height.to_be_bytes());
+                payload.extend_from_slice(&0_u32.to_be_bytes()); // flags
                 writer.write_all(&payload).await?;
                 Ok(())
             }

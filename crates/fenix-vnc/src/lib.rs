@@ -22,7 +22,7 @@ pub mod framebuffer;
 pub mod keysym;
 
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -109,6 +109,15 @@ pub struct VncClient {
     /// background `refresh_loop` task -- `set_active` is the only way
     /// this changes.
     refresh_millis: Arc<AtomicU64>,
+    /// Whether the server has confirmed it understands `SetDesktopSize`
+    /// -- set the first time `pump_events` sees a `VncEvent::
+    /// ExtendedDesktopSize` (which a supporting server sends
+    /// spontaneously, once, right after the handshake). `request_resize`
+    /// refuses to send anything until this is `true`: RFB gives a client
+    /// no other way to know the request is safe, and sending it blind to
+    /// a server that doesn't understand it risks desyncing the whole
+    /// connection (see the vendored `vnc-rs` patch notes).
+    resize_supported: Arc<AtomicBool>,
 }
 
 impl VncClient {
@@ -132,6 +141,8 @@ impl VncClient {
         let host = host.to_string();
         let refresh_millis = Arc::new(AtomicU64::new(ACTIVE_REFRESH_MILLIS));
         let refresh_millis_for_thread = refresh_millis.clone();
+        let resize_supported = Arc::new(AtomicBool::new(false));
+        let resize_supported_for_thread = resize_supported.clone();
 
         let thread = thread::spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -173,12 +184,14 @@ impl VncClient {
                 // its pane is currently visible -- the caller (`fenix-
                 // gui`) calls `set_active(false)` once it knows better,
                 // via `refresh_millis_for_thread`.
-                pump_events(client, frame_tx, refresh_millis_for_thread).await;
+                pump_events(client, frame_tx, refresh_millis_for_thread, resize_supported_for_thread).await;
             });
         });
 
         match setup_rx.recv() {
-            Ok(Ok((inner, handle))) => Ok((VncClient { handle, inner, thread: Some(thread), refresh_millis }, frame_rx)),
+            Ok(Ok((inner, handle))) => {
+                Ok((VncClient { handle, inner, thread: Some(thread), refresh_millis, resize_supported }, frame_rx))
+            }
             Ok(Err(err)) => {
                 let _ = thread.join();
                 Err(err)
@@ -228,6 +241,53 @@ impl VncClient {
         });
     }
 
+    /// Asks the server to resize its desktop to `width`x`height` --
+    /// "remote resizing," matching what a real VNC client (TigerVNC,
+    /// RealVNC) offers when its window doesn't match the guest's
+    /// current resolution, so the picture renders at native size
+    /// instead of always being scaled to fit the pane.
+    ///
+    /// A safe no-op until the server has actually confirmed it
+    /// understands the request (`resize_supported`, set the first time
+    /// a `VncEvent::ExtendedDesktopSize` arrives -- see that event's own
+    /// doc comment in the vendored `vnc-rs` patch notes for why this
+    /// can't just be sent speculatively): RFB gives a client no
+    /// capability-negotiation ack, and its message framing has no
+    /// length prefix a server could use to skip past a message type it
+    /// doesn't recognize, so sending this blind risks desyncing the
+    /// whole connection rather than just being ignored. Callers don't
+    /// need to check anything themselves -- exactly like `send_key`/
+    /// `send_pointer`, this is always safe to call, including against a
+    /// server that will never support it.
+    ///
+    /// Not deduplicated against the last-requested size -- same
+    /// posture as `send_pointer` not deduplicating position, callers
+    /// that care (redraw's per-frame pane-resize tracking) already
+    /// track what they last asked for.
+    ///
+    /// Returns whether a request was actually sent (`true`) or silently
+    /// skipped because support isn't confirmed yet (`false`) --
+    /// deliberately not fire-and-forget like `send_key`/`send_pointer`:
+    /// a caller tracking "what size did I last ask for" (`redraw`'s own
+    /// debounce state) needs to know a skipped call didn't actually ask
+    /// for anything, or it would never retry once support *does* get
+    /// confirmed a moment later. This is the difference between "the
+    /// server rejected it" (a real answer, nothing to retry) and "we
+    /// never actually asked" (must retry) -- collapsing them into one
+    /// `()` return silently lost that distinction and left a pane's
+    /// resize permanently stuck at whatever size raced the server's own
+    /// support announcement.
+    pub fn request_resize(&self, width: u16, height: u16) -> bool {
+        if !self.resize_supported.load(Ordering::Relaxed) {
+            return false;
+        }
+        let client = self.inner.clone();
+        self.handle.spawn(async move {
+            let _ = client.input(X11Event::SetDesktopSize { width, height }).await;
+        });
+        true
+    }
+
     /// Pushes local clipboard text to the VM's clipboard (RFB `CutText`).
     /// Latin-1 only, per RFB's own spec -- non-Latin-1 text is the
     /// caller's problem to decide how to handle (drop, transliterate,
@@ -268,7 +328,7 @@ impl Drop for VncClient {
 /// already a good fit for a LAN-local VM console and `vnc-rs` decodes all
 /// three down to plain `VncEvent::RawImage`/`Copy` events regardless.
 ///
-/// The three pseudo-encodings are each load-bearing, not nice-to-haves:
+/// The pseudo-encodings are each load-bearing, not nice-to-haves:
 ///
 /// * `CursorPseudo` moves the mouse cursor out of the framebuffer and
 ///   into a `VncFrame::Cursor` the caller draws itself. Without it the
@@ -282,6 +342,13 @@ impl Drop for VncClient {
 ///   once, from the initial handshake, and a guest that changes
 ///   resolution mid-session would keep being decoded against a
 ///   stale-sized framebuffer.
+/// * `ExtendedDesktopSizePseudo` is the other direction: it's what lets
+///   `VncClient::request_resize` ask the server to change resolution,
+///   not just be told about one -- "remote resizing." Advertising it is
+///   also how the server learns it may reply/announce over it at all;
+///   without it, a resize request has nowhere to go (see
+///   `VncClient::request_resize`'s own doc comment on why one is never
+///   sent before that announcement has actually been seen).
 /// * `LastRectPseudo` lets the server end an update without knowing its
 ///   rectangle count up front; `vnc-rs` closes the update either way, so
 ///   this only widens what `VncFrame::UpdateEnd` works against.
@@ -294,6 +361,7 @@ async fn do_handshake(host: &str, port: u16) -> io::Result<vnc::VncClient> {
         .add_encoding(VncEncoding::Raw)
         .add_encoding(VncEncoding::CursorPseudo)
         .add_encoding(VncEncoding::DesktopSizePseudo)
+        .add_encoding(VncEncoding::ExtendedDesktopSizePseudo)
         .add_encoding(VncEncoding::LastRectPseudo)
         .allow_shared(true)
         .set_pixel_format(PixelFormat::bgra())
@@ -354,7 +422,42 @@ fn vnc_err_to_io(err: VncError) -> io::Error {
 /// only thing that can un-stick this loop is the server, so there is no
 /// timeout here to "retry" with. A genuinely dead connection surfaces as
 /// a read error from `poll_event` instead.
-async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame>, refresh_millis: Arc<AtomicU64>) {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ResolutionFrameAction {
+    /// Forward the frame. `force_full_refresh` is set for a genuine
+    /// change (make sure real pixel content actually arrives for it,
+    /// see `pump_events`'s own `pending_full_refresh` doc comment) but
+    /// not for the very first resolution (the initial handshake's own
+    /// request was already non-incremental, see `VncInner::new`'s
+    /// "Require the first frame").
+    Forward { force_full_refresh: bool },
+    /// Drop the frame -- not a real resize, just a same-size
+    /// `ExtendedDesktopSize` occurrence (a spontaneous announcement or a
+    /// rejected request's reply, see `pump_events`'s own `known_
+    /// resolution` doc comment for why those need catching here).
+    Suppress,
+}
+
+/// What `pump_events` should do with a `VncFrame::Resolution` it just
+/// decoded, given `previous` (the resolution last actually forwarded,
+/// `None` before the very first one) and `new` (this one). Pulled out
+/// as a pure function purely so this decision has an automated test --
+/// `pump_events` itself needs a real connection and is otherwise
+/// exercised only by live use.
+fn resolution_frame_action(previous: Option<(u16, u16)>, new: (u16, u16)) -> ResolutionFrameAction {
+    match previous {
+        None => ResolutionFrameAction::Forward { force_full_refresh: false },
+        Some(prev) if prev != new => ResolutionFrameAction::Forward { force_full_refresh: true },
+        Some(_) => ResolutionFrameAction::Suppress,
+    }
+}
+
+async fn pump_events(
+    client: vnc::VncClient,
+    frame_tx: std_mpsc::Sender<VncFrame>,
+    refresh_millis: Arc<AtomicU64>,
+    resize_supported: Arc<AtomicBool>,
+) {
     /// Poll granularity: fine enough to keep decode latency well under a
     /// frame, coarse enough not to spin the thread.
     const POLL_MILLIS: u64 = 5;
@@ -364,10 +467,60 @@ async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame
     // request on top of it.
     let mut awaiting_response = true;
     let mut last_update_end = Instant::now();
+    // The resolution last *forwarded* as a `VncFrame::Resolution` --
+    // `None` until the very first one (the initial handshake). Doubles
+    // as the guard that keeps `VncFrame::Resolution`'s own documented
+    // contract ("sent once up front and again on any later resize")
+    // actually true: `ExtendedDesktopSizePseudo` (unlike the older
+    // `DesktopSizePseudo`, the only way this ever fired before) can
+    // report the framebuffer's *current, unchanged* size just as
+    // easily as a real one -- the server's own spontaneous "here's the
+    // current layout" announcement right after the handshake, and a
+    // rejected `SetDesktopSize` request's reply, both do exactly that.
+    // Forwarding either as if it were a real resize would make the
+    // caller's `VncFramebuffer::resize` zero out a perfectly good,
+    // already-painted framebuffer for nothing -- `resize` has no way to
+    // tell "same size" apart from "new size" on its own, since it never
+    // used to be asked to.
+    let mut known_resolution: Option<(u16, u16)> = None;
+    // Set when a resize (this client's own, another client's, or the
+    // server's own) actually changed the framebuffer's dimensions --
+    // makes the *next* periodic request a non-incremental `FullRefresh`
+    // instead of the usual incremental `Refresh`. Needed because a
+    // genuine resize leaves the buffer freshly zeroed (see above), and
+    // RFB doesn't guarantee the server includes real pixel content in
+    // the very update that carries the resize itself -- some servers
+    // do, some send the resize rectangle alone and wait for the client
+    // to actually ask for content at the new size. Without this, an
+    // accepted resize could leave the pane showing black indefinitely
+    // (until *something* on the guest happened to change on its own).
+    let mut pending_full_refresh = false;
     loop {
         match client.poll_event().await {
             Ok(Some(event)) => {
+                // A supporting server sends this spontaneously, once,
+                // right after the handshake (before this client has
+                // ever requested a resize) -- its mere presence is the
+                // only confirmation `VncClient::request_resize` has that
+                // `SetDesktopSize` is safe to send at all. Checked
+                // against every occurrence (not just the first), which
+                // costs nothing once `true` (`Ordering::Relaxed` store).
+                if matches!(event, VncEvent::ExtendedDesktopSize { .. }) {
+                    resize_supported.store(true, Ordering::Relaxed);
+                }
                 let Some(frame) = map_event(event) else { continue };
+                if let VncFrame::Resolution { width, height } = frame {
+                    let action = resolution_frame_action(known_resolution, (width, height));
+                    known_resolution = Some((width, height));
+                    match action {
+                        ResolutionFrameAction::Suppress => continue,
+                        ResolutionFrameAction::Forward { force_full_refresh } => {
+                            if force_full_refresh {
+                                pending_full_refresh = true;
+                            }
+                        }
+                    }
+                }
                 if matches!(frame, VncFrame::UpdateEnd) {
                     awaiting_response = false;
                     last_update_end = Instant::now();
@@ -388,10 +541,18 @@ async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame
             }
         }
 
-        if !awaiting_response && last_update_end.elapsed() >= Duration::from_millis(refresh_millis.load(Ordering::Relaxed)) {
-            if client.input(X11Event::Refresh).await.is_err() {
+        if !awaiting_response && (pending_full_refresh || last_update_end.elapsed() >= Duration::from_millis(refresh_millis.load(Ordering::Relaxed))) {
+            // A pending full refresh fires immediately (not waiting for
+            // the usual idle cadence) and skips straight to the front of
+            // the queue -- respects the same "exactly one outstanding
+            // `FramebufferUpdateRequest`" discipline as the ordinary
+            // path (`!awaiting_response` already gates both), just with
+            // `FullRefresh` in place of `Refresh` this one time.
+            let event = if pending_full_refresh { X11Event::FullRefresh } else { X11Event::Refresh };
+            if client.input(event).await.is_err() {
                 return;
             }
+            pending_full_refresh = false;
             awaiting_response = true;
         }
 
@@ -410,6 +571,24 @@ async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame
 fn map_event(event: VncEvent) -> Option<VncFrame> {
     match event {
         VncEvent::SetResolution(screen) => Some(VncFrame::Resolution { width: screen.width, height: screen.height }),
+        // `width`/`height` are the framebuffer's real current size
+        // regardless of `reason`/`result` (see the event's own doc
+        // comment) -- a spontaneous server announcement, a successful
+        // resize, and a rejected/clamped one all report whatever's
+        // actually in effect, so every case maps onto the same
+        // `VncFrame::Resolution` a caller already knows how to react
+        // to; this mapping itself doesn't need to tell them apart.
+        // `pump_events` does still care, in two narrower ways this
+        // function has no state to do itself: it uses this event's mere
+        // presence (any `reason`/`result`) to flip `resize_supported`,
+        // and it *drops* the `VncFrame::Resolution` this produces
+        // rather than forwarding it when the size hasn't actually
+        // changed from what was last forwarded -- both the spontaneous
+        // announcement and a rejected request otherwise report the
+        // *unchanged* current size, and forwarding either as if it were
+        // a real resize would make the caller zero out a perfectly good
+        // framebuffer for nothing.
+        VncEvent::ExtendedDesktopSize { width, height, .. } => Some(VncFrame::Resolution { width, height }),
         VncEvent::RawImage(rect, data) => Some(VncFrame::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height, bgra: data }),
         VncEvent::Copy(dst, src) => Some(VncFrame::Copy { dst: (dst.x, dst.y, dst.width, dst.height), src: (src.x, src.y, src.width, src.height) }),
         VncEvent::FramebufferUpdateEnd => Some(VncFrame::UpdateEnd),
@@ -426,6 +605,51 @@ fn map_event(event: VncEvent) -> Option<VncFrame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_frame_action_forwards_the_very_first_resolution_without_forcing_a_refresh() {
+        // The initial handshake's own request was already non-incremental
+        // -- nothing to force.
+        assert_eq!(resolution_frame_action(None, (1024, 768)), ResolutionFrameAction::Forward { force_full_refresh: false });
+    }
+
+    #[test]
+    fn resolution_frame_action_forwards_a_genuine_change_and_forces_a_refresh() {
+        assert_eq!(
+            resolution_frame_action(Some((1024, 768)), (1280, 800)),
+            ResolutionFrameAction::Forward { force_full_refresh: true }
+        );
+    }
+
+    #[test]
+    fn resolution_frame_action_suppresses_a_same_size_spontaneous_announcement() {
+        // The server's own "here's the current layout" announcement,
+        // sent right after the handshake, reports the same size the
+        // handshake already established.
+        assert_eq!(resolution_frame_action(Some((1024, 768)), (1024, 768)), ResolutionFrameAction::Suppress);
+    }
+
+    #[test]
+    fn resolution_frame_action_suppresses_a_rejected_resize_replys_unchanged_size() {
+        // A rejected `SetDesktopSize` reply reports the framebuffer's
+        // real (unchanged) size -- not a resize that actually happened.
+        assert_eq!(resolution_frame_action(Some((1280, 800)), (1280, 800)), ResolutionFrameAction::Suppress);
+    }
+
+    #[test]
+    fn map_event_translates_an_extended_desktop_size_reply_to_a_resolution_regardless_of_reason_or_result() {
+        // `width`/`height` are the framebuffer's real current size no
+        // matter how the resize was decided (server-initiated, this
+        // client's own successful request, or a rejected one) -- see
+        // `map_event`'s own doc comment.
+        for (reason, result) in [(0, 0), (1, 0), (1, 1), (1, 2), (1, 3), (2, 0)] {
+            assert_eq!(
+                map_event(VncEvent::ExtendedDesktopSize { reason, result, width: 1024, height: 768 }),
+                Some(VncFrame::Resolution { width: 1024, height: 768 }),
+                "reason={reason}, result={result}"
+            );
+        }
+    }
 
     #[test]
     fn map_event_translates_resolution_rect_copy_bell_and_text() {

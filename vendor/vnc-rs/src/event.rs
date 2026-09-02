@@ -102,6 +102,32 @@ pub enum VncEvent {
     /// According to [RFC6143](https://www.rfc-editor.org/rfc/rfc6143.html#section-7.6.4)
     ///
     Text(String),
+    /// Local patch (see `vendor/vnc-rs/PATCH.md`): the server's reply to
+    /// a client [X11Event::SetDesktopSize] request, or its own
+    /// spontaneous announcement of the current screen layout (sent
+    /// once, unprompted, as part of the very first `FramebufferUpdate`,
+    /// if and only if the server supports
+    /// [crate::VncEncoding::ExtendedDesktopSizePseudo] -- RFB has no
+    /// explicit capability-negotiation ack, so this is the only way a
+    /// client can tell whether `SetDesktopSize` is safe to send at all).
+    ///
+    /// `width`/`height` are the framebuffer's real current size
+    /// regardless of `result` -- a rejected or server-clamped resize
+    /// still reports whatever size is actually in effect, so a consumer
+    /// should treat this the same way as [VncEvent::SetResolution] for
+    /// display purposes.
+    ///
+    /// `reason`: `0` = server-initiated, `1` = this client's own
+    /// request, `2` = a different client's request. `result` is only
+    /// meaningful when `reason` is `1`: `0` = success, `1` = resize
+    /// administratively prohibited, `2` = out of resources, `3` =
+    /// invalid screen layout.
+    ExtendedDesktopSize {
+        reason: u16,
+        result: u16,
+        width: u16,
+        height: u16,
+    },
     /// If any unexpected error happens in the async process routines
     /// This event will propagate the error to the current context
     Error(String),
@@ -170,4 +196,14 @@ pub enum X11Event {
     /// Only Latin-1 character set is allowed
     ///
     CopyText(String),
+    /// Local patch (see `vendor/vnc-rs/PATCH.md`): ask the server to
+    /// resize its desktop to `width`x`height` (RFB's `SetDesktopSize`
+    /// client message) -- the "remote resizing" a real VNC client
+    /// offers when its window doesn't match the guest's current
+    /// resolution. Only takes effect if the server supports
+    /// [crate::VncEncoding::ExtendedDesktopSizePseudo]; see
+    /// [VncEvent::ExtendedDesktopSize] for how that's confirmed. Always
+    /// requests a single full-size screen (id 0 at (0, 0)) -- this
+    /// crate has no notion of a multi-monitor guest layout to preserve.
+    SetDesktopSize { width: u16, height: u16 },
 }
