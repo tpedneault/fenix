@@ -134,6 +134,10 @@ for anyone curious to poke around or build on it.
   one rule over one list of rectangles in desktop coordinates, so panes in
   the current window win simply by being nearer, and an open sidebar is
   reached before the next monitor for the same reason.
+  The windows share one font database and one glyph atlas, so opening a
+  second one doesn't re-scan your system fonts, and each scales text by
+  its own monitor's DPI factor -- `font_size` is a logical size, so the
+  same setting looks the same on a 100% screen and a 150% one.
   The focused pane's title is colored with an accent so it's obvious at
   a glance which one has focus, whether you're editing, or inside the
   Docker or Git panel. On the Docker and Git panels specifically, every

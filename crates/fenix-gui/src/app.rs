@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -3434,6 +3436,12 @@ pub struct App {
     /// rather than one per window. `None` until the first `resumed`,
     /// same posture as `gpu`/`text`/`bg_rect`.
     gpu_context: Option<GpuContext>,
+    /// The font database, glyph caches and GPU atlas every frame's
+    /// `TextPipeline` shares -- see `text::FontContext`. Built once
+    /// alongside `gpu_context`, because building it scans the system
+    /// font database and is the single most expensive thing opening a
+    /// window would otherwise repeat.
+    fonts: Option<Rc<RefCell<text::FontContext>>>,
     gpu: Option<GpuState>,
     text: Option<TextPipeline>,
     /// Opaque panel backgrounds (modeline bar, which-key popup) and the
@@ -4251,6 +4259,7 @@ impl App {
             pending_frames: Vec::new(),
             window: None,
             gpu_context: None,
+            fonts: None,
             gpu: None,
             text: None,
             bg_rect: None,
@@ -4453,6 +4462,38 @@ impl App {
         }
     }
 
+    /// The configured body text size *before* any DPI scaling -- what
+    /// `config.ini` holds and what `SPC t =`/`SPC t -` step. Each
+    /// frame's pipeline gets this multiplied by its own monitor's
+    /// scale factor.
+    fn logical_font_size(&self) -> f32 {
+        self.config.font_size.unwrap_or(text::FONT_SIZE)
+    }
+
+    /// The active frame's DPI scale factor -- 1.0 before its window
+    /// exists, which is also the right answer for a headless test.
+    fn frame_scale(&self) -> f32 {
+        self.window.as_ref().map(|window| window.scale_factor() as f32).unwrap_or(1.0)
+    }
+
+    /// Re-applies the configured font size to every frame, each at its
+    /// own monitor's scale factor. Every frame, not just the active
+    /// one, because `SPC t =` is an editor-wide preference: two windows
+    /// on differently-scaled monitors should end up the same apparent
+    /// size as each other, not the same pixel size.
+    fn apply_font_size(&mut self) {
+        let logical = self.logical_font_size();
+        let previous = self.active_frame;
+        for frame in 0..self.frames.len() {
+            self.activate_frame(frame);
+            let scale = self.frame_scale();
+            if let Some(text) = &mut self.text {
+                text.set_font_size(logical, scale);
+            }
+        }
+        self.activate_frame(previous);
+    }
+
     /// Raises the active frame's OS window and asks it to repaint --
     /// what every command that moves editor focus between frames has to
     /// end with, or the keystrokes would keep going to whichever window
@@ -4483,7 +4524,7 @@ impl App {
     /// argument, so restoring a saved layout can reuse it (see
     /// `restore_saved_windows`) instead of asking for a free monitor.
     fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
-        let Some(context) = &self.gpu_context else { return };
+        let (Some(context), Some(fonts)) = (&self.gpu_context, &self.fonts) else { return };
 
         let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
         if let Some(position) = placement.position {
@@ -4501,8 +4542,8 @@ impl App {
         };
 
         let gpu = context.attach(Arc::clone(&window));
-        let mut text = TextPipeline::new(&gpu);
-        text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
+        let mut text = TextPipeline::new(&gpu, Rc::clone(fonts));
+        text.set_font_size(self.logical_font_size(), window.scale_factor() as f32);
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
@@ -12041,9 +12082,16 @@ impl App {
     /// can't happen for a keybinding a running window is dispatching,
     /// but `App::new`/headless tests can call these before `resumed()`.
     fn adjust_font_size(&mut self, size: f32) {
-        let Some(text) = &mut self.text else { return };
-        text.set_font_size(size);
-        self.config.font_size = Some(text.font_size());
+        if self.text.is_none() {
+            return;
+        }
+        // The *logical* size is what's persisted and what the steps
+        // move: each frame's pipeline multiplies it by its own
+        // monitor's scale factor (see `apply_font_size`), so storing
+        // the already-scaled result would bake one monitor's DPI into
+        // the config file.
+        self.config.font_size = Some(size.clamp(text::MIN_FONT_SIZE, text::MAX_FONT_SIZE));
+        self.apply_font_size();
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save font size: {err}");
         }
@@ -12074,13 +12122,17 @@ impl App {
     }
 
     pub(crate) fn increase_font_size(&mut self) {
-        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
-        self.adjust_font_size(current + FONT_SIZE_STEP);
+        if self.text.is_none() {
+            return;
+        }
+        self.adjust_font_size(self.logical_font_size() + FONT_SIZE_STEP);
     }
 
     pub(crate) fn decrease_font_size(&mut self) {
-        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
-        self.adjust_font_size(current - FONT_SIZE_STEP);
+        if self.text.is_none() {
+            return;
+        }
+        self.adjust_font_size(self.logical_font_size() - FONT_SIZE_STEP);
     }
 
     pub(crate) fn reset_font_size(&mut self) {
@@ -16391,12 +16443,13 @@ impl ApplicationHandler<FenixUserEvent> for App {
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
         let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+        let fonts = Rc::new(RefCell::new(text::FontContext::new(&gpu)));
         // No priming call needed for pane content -- `redraw()` populates
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
         // immediately after this.
-        let mut text = TextPipeline::new(&gpu);
-        text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
+        let mut text = TextPipeline::new(&gpu, Rc::clone(&fonts));
+        text.set_font_size(self.logical_font_size(), window.scale_factor() as f32);
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
@@ -16405,6 +16458,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
 
         self.window = Some(window);
         self.gpu_context = Some(gpu_context);
+        self.fonts = Some(fonts);
         self.gpu = Some(gpu);
         self.text = Some(text);
         self.bg_rect = Some(bg_rect);
@@ -16459,6 +16513,17 @@ impl ApplicationHandler<FenixUserEvent> for App {
             // to the other frames -- which is what `SPC w h`/`l`
             // crossing a window boundary is decided from.
             WindowEvent::Moved(_) => self.refresh_frame_origin(),
+            // Dragged onto a monitor with different scaling: the same
+            // configured size now needs a different number of physical
+            // pixels to look the same. Uses the event's factor rather
+            // than the window's, which may not have caught up yet.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let logical = self.logical_font_size();
+                if let Some(text) = &mut self.text {
+                    text.set_font_size(logical, scale_factor as f32);
+                }
+                self.resync_terminal_cols();
+            }
             WindowEvent::Resized(size) => {
                 // Maximizing (and being snapped, and un-maximizing)
                 // moves the client area's corner as well as its size.
@@ -17970,6 +18035,20 @@ mod tests {
     // `App::with_file` *can* verify is that these are safe no-ops before
     // `resumed()` has run (`self.text` is `None` at that point) rather
     // than panicking.
+    #[test]
+    fn the_logical_font_size_is_the_configured_one_not_a_dpi_scaled_one() {
+        let mut app = App::with_file(None);
+        app.config.font_size = None;
+        assert_eq!(app.logical_font_size(), text::FONT_SIZE, "unset falls back to the default");
+
+        app.config.font_size = Some(20.0);
+        assert_eq!(app.logical_font_size(), 20.0);
+        // Whatever a monitor's scale factor is, it is applied on the way
+        // out to a pipeline -- never folded back into the stored value,
+        // which would bake one monitor's DPI into config.ini.
+        assert_eq!(app.frame_scale(), 1.0, "no window yet, so no scaling");
+    }
+
     #[test]
     fn font_size_adjustments_are_safe_no_ops_before_the_gpu_exists() {
         let mut app = App::with_file(None);

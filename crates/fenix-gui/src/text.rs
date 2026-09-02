@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -79,11 +81,53 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 /// one atlas/renderer/font system -- glyphon's `TextRenderer::prepare`
 /// already takes an arbitrary-length `Vec<TextArea>`, so N panes or
 /// popups is just N more entries, not a different rendering pipeline.
-pub struct TextPipeline {
+/// The font machinery every frame shares: the font database and its
+/// shaping caches, the rasterized-glyph cache, the GPU glyph atlas, and
+/// glyphon's own pipeline cache.
+///
+/// Shared rather than built per frame because cosmic-text's own docs are
+/// blunt about the cost -- building a `FontSystem` scans the system font
+/// database and "can take up to a second" in a release build, ten times
+/// that in debug, and it "should only be called once" -- and because a
+/// second window's glyph atlas would be a duplicate GPU texture holding
+/// the same glyphs as the first.
+///
+/// Reached through `Rc<RefCell<..>>` rather than passed as an argument
+/// to each of `TextPipeline`'s sixteen text-setting methods. Every
+/// borrow here begins and ends inside a single method call -- including
+/// in `render`, because glyphon takes the atlas by a reference
+/// independent of the render pass's lifetime rather than one tied to it
+/// -- and nothing inside re-enters `TextPipeline`, so there is no path
+/// to a borrow panic. Threading a `&mut` down through every signature
+/// instead would have churned all of `redraw`'s call sites for no
+/// behavioural difference.
+pub struct FontContext {
     font_system: FontSystem,
     swash_cache: SwashCache,
-    viewport: Viewport,
     atlas: TextAtlas,
+    cache: Cache,
+    /// See `TextPipeline::default_family` -- resolved here now, once
+    /// for the whole process rather than once per window.
+    default_family: &'static str,
+}
+
+impl FontContext {
+    pub fn new(gpu: &GpuState) -> Self {
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        let default_family: &'static str =
+            Box::leak(font_system.db().family_name(&Family::Monospace).to_string().into_boxed_str());
+        let cache = Cache::new(&gpu.device);
+        let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
+        Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
+    }
+}
+
+pub struct TextPipeline {
+    /// The font database, glyph caches and atlas -- shared with every
+    /// other frame's pipeline. See `FontContext`.
+    fonts: Rc<RefCell<FontContext>>,
+    viewport: Viewport,
     renderer: TextRenderer,
     /// A second, independent renderer for the popup overlay pass, sharing
     /// `atlas`/`viewport` but owning its own vertex buffer. Necessary
@@ -189,47 +233,44 @@ pub struct TextPipeline {
 }
 
 impl TextPipeline {
-    pub fn new(gpu: &GpuState) -> Self {
-        let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        // See `default_family`'s own doc comment -- resolved once here,
-        // leaked to `'static` (bounded, one-time cost) so every later
-        // shape uses the fast concrete-name path instead of re-resolving
-        // (and paying `cosmic-text`'s generic-family tax) every frame.
-        let default_family: &'static str =
-            Box::leak(font_system.db().family_name(&Family::Monospace).to_string().into_boxed_str());
-        let swash_cache = SwashCache::new();
-        let cache = Cache::new(&gpu.device);
-        let viewport = Viewport::new(&gpu.device, &cache);
-        let mut atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
+    /// `fonts` is shared with every other frame -- see `FontContext`.
+    pub fn new(gpu: &GpuState, fonts: Rc<RefCell<FontContext>>) -> Self {
+        // Bound to a named guard rather than `&mut *fonts.borrow_mut()`:
+        // that temporary would be dropped at the end of its own `let`,
+        // leaving `ctx` borrowing nothing.
+        let mut guard = fonts.borrow_mut();
+        let ctx = &mut *guard;
+        let default_family = ctx.default_family;
+        let viewport = Viewport::new(&gpu.device, &ctx.cache);
         let renderer =
-            TextRenderer::new(&mut atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+            TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
         let popup_renderer =
-            TextRenderer::new(&mut atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+            TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+        let font_system = &mut ctx.font_system;
 
-        let mut modeline = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut modeline = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
-        let mut clock = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut clock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         clock.set_wrap(Wrap::None);
         clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
-        let mut sidebar = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut sidebar = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
         sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
 
-        let mut terminal = GlyphBuffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut terminal = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         terminal.set_wrap(Wrap::None);
         terminal.set_size(Some(gpu.size.width as f32), Some(terminal_height(LINE_HEIGHT)));
 
-        let char_width = Self::measure_char_width(&mut font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
+        let char_width = Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
+        // The borrow has to end before `fonts` is moved into `Self`.
+        drop(guard);
 
         Self {
-            font_system,
-            swash_cache,
+            fonts,
             viewport,
-            atlas,
             renderer,
             popup_renderer,
             content_buffers: HashMap::new(),
@@ -269,7 +310,7 @@ impl TextPipeline {
         }
         self.content_family = family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
         let family = self.content_family();
-        self.char_width = Self::measure_char_width(&mut self.font_system, family, self.font_size, self.line_height);
+        self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
     }
 
     /// The active font's real monospace advance width in pixels --
@@ -277,10 +318,6 @@ impl TextPipeline {
     /// sizing) should use this instead of the `CHAR_WIDTH` constant.
     pub fn char_width(&self) -> f32 {
         self.char_width
-    }
-
-    pub fn font_size(&self) -> f32 {
-        self.font_size
     }
 
     pub fn line_height(&self) -> f32 {
@@ -307,8 +344,18 @@ impl TextPipeline {
     /// re-rendered while actually visible, so without this a
     /// currently-hidden one could stay stale until its next content
     /// change.
-    pub fn set_font_size(&mut self, size: f32) {
-        let (font_size, line_height) = resolve_font_size(size);
+    /// `scale` is the window's DPI scale factor, applied on top of the
+    /// requested size, so the same configured size comes out the same
+    /// *physical* size on a 100% monitor and a 150% one instead of
+    /// shrinking on the denser screen. Each frame passes its own
+    /// window's factor, which is what makes a two-monitor setup with
+    /// mismatched scaling look right in both windows.
+    ///
+    /// The clamp is on the requested size, not on the scaled result:
+    /// 24pt on a 200% monitor is a legitimate 48 physical pixels, not
+    /// something to pull back to `MAX_FONT_SIZE`.
+    pub fn set_font_size(&mut self, size: f32, scale: f32) {
+        let (font_size, line_height) = scaled_font_metrics(size, scale);
         if font_size == self.font_size {
             return;
         }
@@ -317,22 +364,22 @@ impl TextPipeline {
         let metrics = Metrics::new(self.font_size, self.line_height);
 
         self.modeline.set_metrics(metrics);
-        self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.clock.set_metrics(metrics);
-        self.clock.shape_until_scroll(&mut self.font_system, false);
+        self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.sidebar.set_metrics(metrics);
-        self.sidebar.shape_until_scroll(&mut self.font_system, false);
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         for buf in self.content_buffers.values_mut() {
             buf.set_metrics(metrics);
-            buf.shape_until_scroll(&mut self.font_system, false);
+            buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         }
         for buf in self.popups.values_mut() {
             buf.set_metrics(metrics);
-            buf.shape_until_scroll(&mut self.font_system, false);
+            buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         }
 
         let family = self.content_family();
-        self.char_width = Self::measure_char_width(&mut self.font_system, family, self.font_size, self.line_height);
+        self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
     }
 
     /// Measures `family`'s real advance width at `font_size`/`line_height`
@@ -383,7 +430,7 @@ impl TextPipeline {
     /// (that pane's current layout rect) in one call -- creating the
     /// pane's `GlyphBuffer` lazily the first time it's rendered. Doesn't
     /// use `HashMap::entry`/`or_insert_with`: that would need a closure
-    /// capturing `&mut self.font_system` to construct a fresh buffer,
+    /// capturing `&mut self.fonts.borrow_mut().font_system` to construct a fresh buffer,
     /// which can't then *also* be reborrowed for `shape_until_scroll`
     /// afterward (the closure would move it) -- a plain contains-key
     /// check plus a fresh `get_mut` avoids the conflict.
@@ -392,14 +439,14 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.content_buffers.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.content_buffers.insert(pane, buf);
         }
         let buf = self.content_buffers.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(h));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        buf.shape_until_scroll(&mut self.font_system, false);
+        buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Drops every pane `GlyphBuffer` not in `keep` -- splits/closes churn
@@ -418,14 +465,14 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.titles.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.titles.insert(pane, buf);
         }
         let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(self.line_height));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        buf.shape_until_scroll(&mut self.font_system, false);
+        buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Drops every title `GlyphBuffer` not in `keep` -- same reasoning as
@@ -444,7 +491,7 @@ impl TextPipeline {
         let spans: Vec<(&str, Attrs)> =
             segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
         self.modeline.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets the modeline clock's text, right-aligned within a `box_width`-
@@ -465,7 +512,7 @@ impl TextPipeline {
         let spans: Vec<(&str, Attrs)> =
             segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
         self.clock.set_rich_text(spans, &default_attrs, Shaping::Advanced, Some(glyphon::cosmic_text::Align::Right));
-        self.clock.shape_until_scroll(&mut self.font_system, false);
+        self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets one popup's content (rich, icon-aware spans, same shape as
@@ -481,14 +528,14 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.popups.contains_key(&id) {
-            let mut buf = GlyphBuffer::new(&mut self.font_system, Metrics::new(self.font_size, self.line_height));
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.popups.insert(id, buf);
         }
         let buf = self.popups.get_mut(&id).expect("just inserted if missing");
         buf.set_size(Some(width), None);
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        buf.shape_until_scroll(&mut self.font_system, false);
+        buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Drops every popup `GlyphBuffer` not in `keep` -- popups come and
@@ -507,7 +554,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.rich_spans(segments);
         self.sidebar.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.sidebar.shape_until_scroll(&mut self.font_system, false);
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets the terminal panel's rows -- same mechanism as `set_sidebar_
@@ -516,7 +563,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.rich_spans(segments);
         self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.terminal.shape_until_scroll(&mut self.font_system, false);
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -529,14 +576,14 @@ impl TextPipeline {
         // left side is occupied) -- so only the two remaining fixed
         // panels need handling here.
         self.modeline.set_size(Some(width), Some(self.modeline_height()));
-        self.modeline.shape_until_scroll(&mut self.font_system, false);
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(height, self.modeline_height())));
-        self.sidebar.shape_until_scroll(&mut self.font_system, false);
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         // The width-vs-height mirror of the sidebar's own resize just
         // above: fixed height (`TERMINAL_ROWS`), full width instead of
         // fixed width/remaining height.
         self.terminal.set_size(Some(width), Some(terminal_height(self.line_height)));
-        self.terminal.shape_until_scroll(&mut self.font_system, false);
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// One pane's render info for `prepare`: its id (to look up the right
@@ -665,15 +712,19 @@ impl TextPipeline {
             });
         }
 
+        // One guard, not three `borrow_mut()` calls in one
+        // expression -- that would be a double mutable borrow and
+        // panic at runtime.
+        let ctx = &mut *self.fonts.borrow_mut();
         self.renderer
             .prepare(
                 &gpu.device,
                 &gpu.queue,
-                &mut self.font_system,
-                &mut self.atlas,
+                &mut ctx.font_system,
+                &mut ctx.atlas,
                 &self.viewport,
                 areas,
-                &mut self.swash_cache,
+                &mut ctx.swash_cache,
             )
             .expect("glyphon prepare failed");
     }
@@ -706,21 +757,25 @@ impl TextPipeline {
             });
         }
 
+        // One guard, not three `borrow_mut()` calls in one
+        // expression -- that would be a double mutable borrow and
+        // panic at runtime.
+        let ctx = &mut *self.fonts.borrow_mut();
         self.popup_renderer
             .prepare(
                 &gpu.device,
                 &gpu.queue,
-                &mut self.font_system,
-                &mut self.atlas,
+                &mut ctx.font_system,
+                &mut ctx.atlas,
                 &self.viewport,
                 areas,
-                &mut self.swash_cache,
+                &mut ctx.swash_cache,
             )
             .expect("glyphon prepare failed");
     }
 
     pub fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.renderer.render(&self.atlas, &self.viewport, pass).expect("glyphon render failed");
+        self.renderer.render(&self.fonts.borrow().atlas, &self.viewport, pass).expect("glyphon render failed");
     }
 
     /// Draws whatever `prepare_popups` most recently prepared -- the
@@ -728,12 +783,24 @@ impl TextPipeline {
     /// `popup_renderer` (see its field doc comment for why this can't
     /// just be another call to `render`).
     pub fn render_popups<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.popup_renderer.render(&self.atlas, &self.viewport, pass).expect("glyphon render failed");
+        self.popup_renderer.render(&self.fonts.borrow().atlas, &self.viewport, pass).expect("glyphon render failed");
     }
 
     pub fn trim(&mut self) {
-        self.atlas.trim();
+        self.fonts.borrow_mut().atlas.trim();
     }
+}
+
+/// The physical font size and line height for a requested size on a
+/// window with DPI scale factor `scale`.
+///
+/// The clamp applies to what was *requested*, before scaling -- 24pt on
+/// a 200% monitor is a legitimate 48 physical pixels, and pulling that
+/// back to `MAX_FONT_SIZE` would make the same setting render smaller
+/// on the denser screen, which is the whole thing this exists to stop.
+fn scaled_font_metrics(requested: f32, scale: f32) -> (f32, f32) {
+    let (font_size, line_height) = resolve_font_size(requested);
+    (font_size * scale, line_height * scale)
 }
 
 /// Clamps a requested font size to `[MIN_FONT_SIZE, MAX_FONT_SIZE]` and
@@ -932,6 +999,31 @@ mod tests {
     fn resolve_font_size_clamps_to_the_allowed_range() {
         assert_eq!(resolve_font_size(1000.0).0, MAX_FONT_SIZE);
         assert_eq!(resolve_font_size(0.0).0, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn a_scale_factor_of_one_leaves_the_resolved_metrics_alone() {
+        assert_eq!(scaled_font_metrics(16.0, 1.0), resolve_font_size(16.0));
+    }
+
+    #[test]
+    fn a_denser_monitor_gets_proportionally_more_physical_pixels() {
+        let (base_size, base_height) = resolve_font_size(16.0);
+        let (size, height) = scaled_font_metrics(16.0, 1.5);
+        assert_eq!(size, base_size * 1.5);
+        assert_eq!(height, base_height * 1.5);
+        // The ratio the whole layout depends on has to survive scaling.
+        assert!((height / size - base_height / base_size).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scaling_happens_after_the_clamp_not_before_it() {
+        // The largest size you can ask for, on a 200% monitor, is 2x
+        // MAX_FONT_SIZE of real pixels -- not MAX_FONT_SIZE, which
+        // would render smaller on the denser screen than on a normal
+        // one and defeat the point.
+        assert_eq!(scaled_font_metrics(1000.0, 2.0).0, MAX_FONT_SIZE * 2.0);
+        assert_eq!(scaled_font_metrics(1.0, 2.0).0, MIN_FONT_SIZE * 2.0);
     }
 
     #[test]
