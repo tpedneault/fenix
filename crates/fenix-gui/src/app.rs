@@ -3235,7 +3235,56 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     )
 }
 
+/// Everything that belongs to one OS window rather than to the editor
+/// as a whole: its winit window and swapchain, its own text and rect
+/// renderers, its own split layout and workspaces, and its own last-
+/// known cursor position.
+///
+/// "Frame" is Emacs's word for an OS window, borrowed here because this
+/// codebase already calls a *split* a window (`fenix_window::WindowId`,
+/// `SPC w`, `WindowTree`) and so needs a different word for the thing
+/// the window manager draws.
+///
+/// This type only ever holds a frame that is *parked* -- see
+/// `App::frames` for the whole arrangement.
+struct FrameState {
+    window: Option<Arc<Window>>,
+    gpu: Option<GpuState>,
+    text: Option<TextPipeline>,
+    bg_rect: Option<RectRenderer>,
+    popup_rect: Option<RectRenderer>,
+    caret_rect: Option<RectRenderer>,
+    workspaces: WorkspaceList,
+    cursor_pos: Option<(f32, f32)>,
+}
+
 pub struct App {
+    /// Every open frame, in a stable order -- `frames[0]` is the one
+    /// the app started with. Each entry holds that frame's state *while
+    /// it is parked*, and is `None` for exactly one index --
+    /// `active_frame` -- whose state is instead the live set of fields
+    /// on `App` itself: `window`, `gpu`, `text`, the three
+    /// `RectRenderer`s, `workspaces` and `cursor_pos`.
+    ///
+    /// That split is deliberate. Keeping the active frame's state
+    /// directly on `App`, rather than reaching through
+    /// `frames[active_frame]` at every use, is what lets the whole
+    /// editor keep being written against one implicit "the window" the
+    /// way it always has been -- every `self.windows()`,
+    /// `self.pane_state(..)`, `self.gpu`, `self.text` reads the frame
+    /// that currently has focus, with no call site changed and no
+    /// second way to spell it.
+    ///
+    /// Code that needs to act on a *different* frame calls
+    /// `activate_frame` first, which swaps that frame's parked state
+    /// into the live fields and parks the outgoing one. `window_event`
+    /// is the main caller: it activates whichever frame an event
+    /// arrived from before dispatching it, which is also what makes a
+    /// background frame's `RedrawRequested` paint its own layout
+    /// through its own swapchain.
+    frames: Vec<Option<FrameState>>,
+    /// Index into `frames` of the frame whose state is live on `App`.
+    active_frame: usize,
     window: Option<Arc<Window>>,
     /// The wgpu instance/adapter/device/queue every frame shares -- see
     /// `GpuContext`'s own doc comment for why there's one of these
@@ -4046,6 +4095,11 @@ impl App {
             .collect();
 
         Self {
+            // One frame, and it's the active one -- so its state is the
+            // live set of fields right here rather than a parked
+            // `FrameState`. See the field's own doc comment.
+            frames: vec![None],
+            active_frame: 0,
             window: None,
             gpu_context: None,
             gpu: None,
@@ -4163,6 +4217,62 @@ impl App {
     /// pair of accessors goes through here (or `windows_mut`) rather than
     /// touching `self.workspaces` directly, mirroring the `open`/
     /// `open_mut` discipline already used for buffers.
+    /// `frame`'s winit window, whether that frame is the active one
+    /// (its state is live on `App`) or parked. `None` before the frame
+    /// has been through `resumed`, and for an out-of-range index.
+    fn frame_window(&self, frame: usize) -> Option<&Arc<Window>> {
+        match self.frames.get(frame)? {
+            Some(parked) => parked.window.as_ref(),
+            None => self.window.as_ref(),
+        }
+    }
+
+    /// `frame`'s split layout and workspaces, parked or live -- the
+    /// read-only counterpart to `activate_frame` for the handful of
+    /// places (`about_to_wait`'s animation check, cross-frame
+    /// navigation) that need to look at a frame without making it the
+    /// active one.
+    fn frame_workspaces(&self, frame: usize) -> Option<&WorkspaceList> {
+        match self.frames.get(frame)? {
+            Some(parked) => Some(&parked.workspaces),
+            None => Some(&self.workspaces),
+        }
+    }
+
+    /// Which frame owns the winit window `id` belongs to.
+    fn frame_index_of(&self, id: WindowId) -> Option<usize> {
+        (0..self.frames.len()).find(|&frame| self.frame_window(frame).map(|w| w.id()) == Some(id))
+    }
+
+    /// Makes `frame` the active one: its parked state moves into the
+    /// live fields on `App`, and the outgoing frame's live state is
+    /// parked in its place. A no-op when `frame` is already active or
+    /// out of range.
+    ///
+    /// Every field is swapped through `mem::replace` against the
+    /// incoming frame's own value, so nothing ever needs a placeholder
+    /// to stand in for a moved-out `WorkspaceList` -- and the "exactly
+    /// one `None` in `frames`, at `active_frame`" invariant holds at
+    /// every point this function returns.
+    fn activate_frame(&mut self, frame: usize) {
+        if frame == self.active_frame {
+            return;
+        }
+        let Some(Some(incoming)) = self.frames.get_mut(frame).map(Option::take) else { return };
+        let outgoing = FrameState {
+            window: std::mem::replace(&mut self.window, incoming.window),
+            gpu: std::mem::replace(&mut self.gpu, incoming.gpu),
+            text: std::mem::replace(&mut self.text, incoming.text),
+            bg_rect: std::mem::replace(&mut self.bg_rect, incoming.bg_rect),
+            popup_rect: std::mem::replace(&mut self.popup_rect, incoming.popup_rect),
+            caret_rect: std::mem::replace(&mut self.caret_rect, incoming.caret_rect),
+            workspaces: std::mem::replace(&mut self.workspaces, incoming.workspaces),
+            cursor_pos: std::mem::replace(&mut self.cursor_pos, incoming.cursor_pos),
+        };
+        self.frames[self.active_frame] = Some(outgoing);
+        self.active_frame = frame;
+    }
+
     fn windows(&self) -> &WindowTree<BufferId> {
         self.workspaces.active()
     }
@@ -15717,7 +15827,26 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.pdf_pipeline = Some(pdf_pipeline);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(frame) = self.frame_index_of(id) else { return };
+        // Every event is handled with the frame it arrived from active,
+        // so the handlers below -- all written against one implicit
+        // window -- resolve to the right frame's layout, renderers and
+        // swapchain without any of them knowing frames exist.
+        //
+        // Whether that frame then *keeps* editor focus depends on what
+        // the event was. Real input moves focus with it: a keystroke, a
+        // click, or the OS telling us this window was focused. Anything
+        // else -- a resize, a plain hover (Windows delivers mouse moves
+        // to whatever window is under the pointer, focused or not), a
+        // background frame asking to repaint -- is handled in that
+        // frame's context and then hands focus straight back.
+        let keeps_focus = matches!(
+            &event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Focused(true)
+        );
+        let previous = self.active_frame;
+        self.activate_frame(frame);
         match event {
             // Same unsaved-changes check as `:q`/`SPC q q` -- the window's
             // own X button shouldn't be able to silently discard work
@@ -15780,6 +15909,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             _ => {}
         }
+        if !keeps_focus {
+            self.activate_frame(previous);
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -15819,17 +15951,22 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // ordinary blink-driven redraw below is more than enough to
         // eventually show its (much less frequent) updates.
         let vnc_focused = self.vnc_focused.is_some();
-        let animating = blink_transitioning
-            || pulse_active
-            || self.workspaces.active_scroll_anims().contains_key(&self.focused_pane_id())
-            || vnc_focused;
+        // Any frame's focused pane mid-scroll keeps the clock running,
+        // not just the active frame's -- a smooth scroll started on one
+        // monitor has to keep easing after focus moves to another.
+        let scroll_animating = (0..self.frames.len())
+            .filter_map(|frame| self.frame_workspaces(frame))
+            .any(|workspaces| workspaces.active_scroll_anims().contains_key(&workspaces.active().focused_id()));
+        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused;
         if animating {
             needs_redraw = true;
         }
 
         if needs_redraw {
-            if let Some(window) = &self.window {
-                window.request_redraw();
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
             }
         }
 
@@ -15993,6 +16130,28 @@ impl App {
         self.set_pane_content(focused, id);
     }
 
+    /// Adds a parked second (third, ...) frame showing `buffer` in a
+    /// single pane, and returns its index. The headless equivalent of
+    /// what the `frame.new` command does for real -- minus the winit
+    /// window and GPU resources, which a test can't have and which
+    /// nothing about frame *bookkeeping* depends on (every render field
+    /// is already `Option` for exactly this reason).
+    #[cfg(test)]
+    fn test_add_frame(&mut self, buffer: BufferId) -> usize {
+        let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.frames.push(Some(FrameState {
+            window: None,
+            gpu: None,
+            text: None,
+            bg_rect: None,
+            popup_rect: None,
+            caret_rect: None,
+            workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
+            cursor_pos: None,
+        }));
+        self.frames.len() - 1
+    }
+
     /// The focused pane's live cursor -- test-only convenience wrapping
     /// `pane_state`, since tests can't borrow two fields at once the way
     /// production code inlines it (`focused_buffer_and_cursor_mut`, etc.).
@@ -16083,6 +16242,118 @@ mod tests {
         // enough room, so the clock is omitted rather than rendered with
         // visual overlap onto the existing text.
         assert!(!modeline_clock_fits(10, 47.0, 2.0, 5));
+    }
+
+    /// Every index in `frames` is parked except `active_frame`, which
+    /// is `None` because its state is live on `App` -- the invariant
+    /// `activate_frame` exists to uphold, asserted directly.
+    fn assert_one_live_frame(app: &App) {
+        for (frame, parked) in app.frames.iter().enumerate() {
+            assert_eq!(
+                parked.is_none(),
+                frame == app.active_frame,
+                "frame {frame} parked={} with active_frame={}",
+                parked.is_some(),
+                app.active_frame
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_app_has_exactly_one_frame_and_it_is_the_live_one() {
+        let app = App::with_file(None);
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_another_frame_swaps_in_its_layout_and_parks_the_outgoing_one() {
+        let mut app = App::with_file(None);
+        let original = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        app.activate_frame(second);
+        assert_eq!(app.active_frame, second);
+        // The live layout is now the second frame's, so the ordinary
+        // "what am I looking at" accessors report *its* buffer.
+        assert_eq!(app.focused_buffer_id(), other);
+        assert_one_live_frame(&app);
+
+        app.activate_frame(0);
+        assert_eq!(app.focused_buffer_id(), original);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_a_frame_preserves_the_split_layout_it_was_parked_with() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.split_horizontal();
+        assert_eq!(app.windows().window_count(), 3);
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        assert_eq!(app.windows().window_count(), 1, "a fresh frame starts with a single pane");
+
+        app.activate_frame(0);
+        assert_eq!(app.windows().window_count(), 3, "the first frame's splits survived being parked");
+    }
+
+    #[test]
+    fn activating_the_frame_that_is_already_active_changes_nothing() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        app.activate_frame(0);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_a_frame_that_does_not_exist_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        app.activate_frame(7);
+        assert_eq!(app.active_frame, 0, "a bogus index must not leave the app pointing at a frame it hasn't got");
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn frame_workspaces_reads_a_parked_frame_without_activating_it() {
+        let mut app = App::with_file(None);
+        let original = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        let parked = app.frame_workspaces(second).expect("the second frame exists");
+        assert_eq!(*parked.active().focused_content(), other);
+        // Reading it must not have moved focus.
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), original);
+        assert!(app.frame_workspaces(9).is_none());
+    }
+
+    #[test]
+    fn panes_in_different_frames_never_share_an_id() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        let first_frame_panes = app.windows().windows();
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        app.split_horizontal();
+
+        for pane in app.windows().windows() {
+            assert!(
+                !first_frame_panes.contains(&pane),
+                "{pane:?} is claimed by two frames -- every App-level map keyed by pane id would be ambiguous"
+            );
+        }
     }
 
     #[test]
