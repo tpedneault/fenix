@@ -3873,6 +3873,15 @@ pub struct App {
     /// focused at a time). `Ctrl-\` clears it, same chord/meaning as
     /// `terminal_focused`'s own.
     vnc_focused: Option<String>,
+    /// A fully transparent 1x1 cursor image, created once against the
+    /// first frame's `ActiveEventLoop` (`resumed`) and reused for every
+    /// window/session after that -- `set_vnc_focused`'s way of hiding
+    /// the host cursor while a VNC session has capture. See that
+    /// field's own doc comment for why this exists instead of the
+    /// obvious `Window::set_cursor_visible(false)`. `None` until the
+    /// first `resumed`, same posture as `gpu`/`text`/every other
+    /// GPU-loop-owned resource.
+    vnc_hidden_cursor: Option<winit::window::CustomCursor>,
     /// VM names with a connect currently in flight on a background
     /// thread -- lets `open_vnc_session` show a "Connecting..."
     /// placeholder and refuse a redundant second connect attempt if the
@@ -4434,6 +4443,7 @@ impl App {
             vnc_sessions: HashMap::new(),
             vnc_upload_scratch: Vec::new(),
             vnc_focused: None,
+            vnc_hidden_cursor: None,
             vnc_connecting: HashSet::new(),
             pdf_sessions: HashMap::new(),
             pdf_crop_scratch: Vec::new(),
@@ -6257,6 +6267,25 @@ impl App {
     /// always exists, so hiding the host's can't leave a captured session
     /// with no pointer at all.
     ///
+    /// Achieved by swapping in `vnc_hidden_cursor` (a transparent 1x1
+    /// image), not `Window::set_cursor_visible(false)` -- a real,
+    /// confirmed bug the obvious approach has on Windows: winit's own
+    /// Windows backend, whenever *both* its grabbed and hidden cursor
+    /// flags are set at once, clips the cursor to a single pixel at the
+    /// window's exact center instead of the whole client area (see
+    /// `refresh_os_cursor` in winit's `platform_impl/windows/window_
+    /// state.rs` -- deliberate on winit's part, to stop a hidden,
+    /// confined cursor near a window edge from activating the taskbar
+    /// underneath it, but incompatible with also wanting the cursor
+    /// free to move across the *whole* pane for pointer forwarding).
+    /// That combination is exactly what this function used to set --
+    /// `Confined` plus `set_cursor_visible(false)` -- which is why the
+    /// cursor would appear to freeze in place the instant a VNC session
+    /// captured it, moving again only once capture released. Swapping
+    /// the cursor's *image* for a transparent one instead leaves
+    /// winit's own hidden-flag unset, so the confine clips to the full
+    /// window as intended, while still rendering nothing on screen.
+    ///
     /// Both are best-effort: not every platform/backend supports
     /// grabbing (see `CursorGrabMode::Confined`'s own platform notes),
     /// and a failure isn't fatal to using the app, just to the
@@ -6270,7 +6299,20 @@ impl App {
             let captured = self.vnc_focused.is_some();
             let mode = if captured { CursorGrabMode::Confined } else { CursorGrabMode::None };
             let _ = window.set_cursor_grab(mode);
-            window.set_cursor_visible(!captured);
+            // Not `Window::set_cursor_visible(false)` -- see `vnc_
+            // hidden_cursor`'s own doc comment for why that specific
+            // combination (confined *and* hidden) freezes the cursor
+            // in place on Windows instead of merely hiding it. Swapping
+            // the cursor's own *image* for a transparent one achieves
+            // the same "just the guest's own pointer is visible" result
+            // without ever setting the flag that triggers it.
+            if captured {
+                if let Some(hidden) = &self.vnc_hidden_cursor {
+                    window.set_cursor(hidden.clone());
+                }
+            } else {
+                window.set_cursor(winit::window::CursorIcon::default());
+            }
         }
     }
 
@@ -16827,6 +16869,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.caret_rect = Some(caret_rect);
         self.vnc_pipeline = Some(vnc_pipeline);
         self.pdf_pipeline = Some(pdf_pipeline);
+        // A fully transparent (alpha 0) 1x1 image -- `from_rgba` fails
+        // only for a malformed buffer/dimension mismatch, never for a
+        // legitimately empty-looking one, so this is as safe as the
+        // `.expect()`s already used elsewhere in this function for a
+        // bundled resource that's known to be well-formed.
+        let hidden_cursor_source = winit::window::CustomCursor::from_rgba(vec![0, 0, 0, 0], 1, 1, 0, 0)
+            .expect("a 1x1 transparent RGBA buffer is always a valid cursor image");
+        self.vnc_hidden_cursor = Some(event_loop.create_custom_cursor(hidden_cursor_source));
         self.refresh_frame_origin();
         self.restore_saved_windows(event_loop);
     }
