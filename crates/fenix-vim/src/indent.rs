@@ -155,6 +155,46 @@ pub fn list_continuation_text(item: &ListItem) -> Option<String> {
     Some(s)
 }
 
+/// The buffer-absolute char index of `line`'s own task-checkbox state
+/// character (between `[` and `]`: a space when unchecked, `x`/`X`
+/// when checked), and whether it's currently checked -- `None` for a
+/// line that isn't a list item, or one with no checkbox at all.
+///
+/// Locates it by searching `line`'s own text for the first `[ ]`/
+/// `[x]`/`[X]` rather than re-deriving how far past the marker it must
+/// sit: `parse_list_item`'s own contract already guarantees the
+/// checkbox immediately follows the marker and its required space when
+/// `has_checkbox` is true, so the first match *is* the real one, not a
+/// look-alike appearing later in the line's own prose -- and it sidesteps
+/// having to reconstruct the marker's exact source length, which for an
+/// ordered item isn't simply "however many digits its parsed number
+/// has" if the source itself has leading zeros.
+pub fn checkbox_char_index(buffer: &Buffer, line: usize) -> Option<(usize, bool)> {
+    let item = parse_list_item(buffer, line)?;
+    if !item.has_checkbox {
+        return None;
+    }
+    let start = buffer.line_start_char(line);
+    let text = buffer.text_range(start, start + buffer.line_len(line));
+    let bracket_byte = ["[ ]", "[x]", "[X]"].iter().find_map(|pat| text.find(pat))?;
+    let state_byte = bracket_byte + 1; // one past the '[' -- still an ASCII (so char-boundary-safe) offset
+    let state_char = text[state_byte..].chars().next()?;
+    let char_offset = text[..state_byte].chars().count();
+    Some((start + char_offset, state_char == 'x' || state_char == 'X'))
+}
+
+/// `SPC c x`: flips `line`'s own GFM task checkbox between checked and
+/// unchecked in place. A no-op (returns `false`, buffer/cursor
+/// untouched) if the line has no checkbox to toggle -- no per-file-type
+/// gate, same "the text shape alone is the signal" posture every other
+/// list-item function in this module already has.
+pub fn toggle_checkbox(buffer: &mut Buffer, cursor: &mut Cursor, line: usize) -> bool {
+    let Some((at, checked)) = checkbox_char_index(buffer, line) else { return false };
+    let new_char = if checked { ' ' } else { 'x' };
+    buffer.replace_range(cursor, at, at + 1, &new_char.to_string());
+    true
+}
+
 /// `>>`: prepends `width` spaces at the start of `line`. Its own atomic
 /// undo step, same as `finish_operator`'s delete/yank calls -- `>>`/`<<`
 /// are stand-alone Normal-mode actions, not part of an active
@@ -308,6 +348,75 @@ mod tests {
     fn list_continuation_text_is_none_for_an_empty_item() {
         let item = parse_list_item_text("- ").unwrap();
         assert_eq!(list_continuation_text(&item), None);
+    }
+
+    #[test]
+    fn checkbox_char_index_finds_the_state_character_and_reports_unchecked() {
+        let b = buf("- [ ] todo");
+        let (at, checked) = checkbox_char_index(&b, 0).unwrap();
+        assert!(!checked);
+        assert_eq!(b.char_at(at), Some(' '));
+    }
+
+    #[test]
+    fn checkbox_char_index_reports_checked_for_either_case_of_x() {
+        let lower = buf("- [x] done");
+        let (_, checked) = checkbox_char_index(&lower, 0).unwrap();
+        assert!(checked);
+
+        let upper = buf("- [X] done");
+        let (_, checked) = checkbox_char_index(&upper, 0).unwrap();
+        assert!(checked);
+    }
+
+    #[test]
+    fn checkbox_char_index_honors_leading_indent_and_an_ordered_marker() {
+        let b = buf("   3. [ ] todo");
+        let (at, checked) = checkbox_char_index(&b, 0).unwrap();
+        assert!(!checked);
+        assert_eq!(b.char_at(at), Some(' '));
+    }
+
+    #[test]
+    fn checkbox_char_index_is_correct_even_with_a_leading_zero_in_the_ordered_number() {
+        // The parsed number ("7") is one digit shorter than what's
+        // actually in the source ("07") -- proves the position isn't
+        // reconstructed from the parsed number's own digit count.
+        let b = buf("07. [ ] todo");
+        let (at, _) = checkbox_char_index(&b, 0).unwrap();
+        assert_eq!(b.char_at(at), Some(' '));
+    }
+
+    #[test]
+    fn checkbox_char_index_is_none_without_a_checkbox_or_without_a_list_marker_at_all() {
+        assert!(checkbox_char_index(&buf("- plain item"), 0).is_none());
+        assert!(checkbox_char_index(&buf("just text with [ ] in it"), 0).is_none());
+    }
+
+    #[test]
+    fn toggle_checkbox_flips_unchecked_to_checked_and_back() {
+        let mut b = buf("- [ ] todo");
+        let mut c = Cursor::at_start();
+        assert!(toggle_checkbox(&mut b, &mut c, 0));
+        assert_eq!(b.text(), "- [x] todo");
+        assert!(toggle_checkbox(&mut b, &mut c, 0));
+        assert_eq!(b.text(), "- [ ] todo");
+    }
+
+    #[test]
+    fn toggle_checkbox_on_an_uppercase_checked_box_unchecks_it() {
+        let mut b = buf("- [X] todo");
+        let mut c = Cursor::at_start();
+        assert!(toggle_checkbox(&mut b, &mut c, 0));
+        assert_eq!(b.text(), "- [ ] todo");
+    }
+
+    #[test]
+    fn toggle_checkbox_on_a_line_with_no_checkbox_is_a_no_op() {
+        let mut b = buf("- plain item");
+        let mut c = Cursor::at_start();
+        assert!(!toggle_checkbox(&mut b, &mut c, 0));
+        assert_eq!(b.text(), "- plain item");
     }
 
     #[test]

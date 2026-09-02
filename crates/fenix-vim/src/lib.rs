@@ -15,7 +15,7 @@ mod textobject;
 mod test_util;
 
 pub use bracket::find_match as find_matching_bracket;
-pub use indent::DEFAULT_INDENT_WIDTH;
+pub use indent::{toggle_checkbox, DEFAULT_INDENT_WIDTH};
 pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
 pub use motion::Motion;

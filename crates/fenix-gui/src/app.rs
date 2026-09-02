@@ -5279,6 +5279,22 @@ impl App {
         self.open().buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
     }
 
+    /// `SPC c x`: flips the GFM task checkbox (`- [ ]`/`- [x]`/`- [X]`)
+    /// on the focused pane's current line, in place. No per-language
+    /// gate -- same "the text shape alone is the signal" posture list
+    /// continuation (`fenix_vim::indent::parse_list_item`) already has,
+    /// and this is an explicit, deliberate keypress rather than
+    /// something that fires on every Enter, so there's even less risk
+    /// in leaving it available everywhere. A no-op (with a message) if
+    /// the current line has no checkbox to toggle.
+    pub(crate) fn toggle_checkbox(&mut self) {
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        if !fenix_vim::toggle_checkbox(buffer, cursor, line) {
+            self.set_error("no checkbox on this line to toggle");
+        }
+    }
+
     /// `gcc`/`gc{motion}` (`VimEvent::ToggleComment`) -- toggles a
     /// line-comment prefix across `start_line..=end_line`. Blank lines
     /// (after trimming leading whitespace) are never touched either
@@ -18807,6 +18823,66 @@ mod tests {
         app.format_buffer();
 
         assert_eq!(app.open().buffer.edit_count(), edit_count_before, "an unchanged result must not create an undo step");
+    }
+
+    #[test]
+    fn toggle_checkbox_checks_an_unchecked_task_item() {
+        let dir = TempDir::new("toggle_checkbox_check");
+        let file = dir.write("todo.md", "- [ ] buy milk");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.toggle_checkbox();
+
+        assert_eq!(app.open().buffer.text(), "- [x] buy milk");
+    }
+
+    #[test]
+    fn toggle_checkbox_unchecks_a_checked_task_item() {
+        let dir = TempDir::new("toggle_checkbox_uncheck");
+        let file = dir.write("todo.md", "- [x] buy milk");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.toggle_checkbox();
+
+        assert_eq!(app.open().buffer.text(), "- [ ] buy milk");
+    }
+
+    #[test]
+    fn toggle_checkbox_acts_on_whichever_line_the_cursor_is_on() {
+        let dir = TempDir::new("toggle_checkbox_second_line");
+        let file = dir.write("todo.md", "- [ ] first\n- [ ] second");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let second_line_start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: second_line_start, sticky_col: 0 });
+
+        app.toggle_checkbox();
+
+        assert_eq!(app.open().buffer.text(), "- [ ] first\n- [x] second");
+    }
+
+    #[test]
+    fn toggle_checkbox_on_a_line_without_one_errors_without_changing_the_buffer() {
+        let dir = TempDir::new("toggle_checkbox_noop");
+        let file = dir.write("todo.md", "just a line");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.toggle_checkbox();
+
+        assert_eq!(app.open().buffer.text(), "just a line");
+        assert!(app.modeline_pieces().1.contains("no checkbox"));
+    }
+
+    #[test]
+    fn toggle_checkbox_works_regardless_of_detected_language() {
+        // Deliberately not a `.md` file -- checkbox toggling has no
+        // per-language gate, same posture list continuation has.
+        let dir = TempDir::new("toggle_checkbox_no_language_gate");
+        let file = dir.write("notes.txt", "- [ ] todo");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.toggle_checkbox();
+
+        assert_eq!(app.open().buffer.text(), "- [x] todo");
     }
 
     #[test]
