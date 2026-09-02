@@ -65,6 +65,21 @@ for anyone curious to poke around or build on it.
   three sources autocompletion draws from), matched against its
   fully-qualified path with an optional leading `::` -- not just any
   word that happens to be first on a line.
+- **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`
+  bullet or a `1.`/`1)` ordered item continues it onto the next line at
+  the same indent -- an ordered marker increments by one (not renumbered
+  through the rest of the list; CommonMark renderers only look at a
+  list's first number anyway, so a "wrong" one past that point is
+  cosmetic in the source and invisible once rendered), and a `- [ ]`/
+  `- [x]` task item continues *unchecked* regardless of whether the one
+  you just finished was checked. Enter on an empty item (nothing typed
+  after its marker yet) leaves the list instead of repeating the marker
+  forever. No per-file-type gate -- a list shaped like a list continues
+  wherever it appears, the same "the text shape alone is the signal"
+  posture bracket-depth reindenting (`SPC c f`/`SPC c F`) already has.
+  `O` (open line *above*) doesn't get this -- it would need renumbering
+  every ordered item from there down to stay correct, real complexity
+  for a much rarer motion than Enter/`o`.
 - **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
   buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
   `Enter` opens a file or navigates into a directory, `-` goes up, `R`

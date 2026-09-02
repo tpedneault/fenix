@@ -28,6 +28,133 @@ pub fn leading_whitespace(buffer: &Buffer, line: usize) -> String {
     buffer.text_range(start, first)
 }
 
+/// A Markdown-style list marker recognized at the start of a line, once
+/// its leading whitespace is stripped -- what `parse_list_item`
+/// classifies a line as, and what `list_continuation_text` continues
+/// onto the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMarker {
+    /// `-`, `*`, or `+` -- the literal marker character, carried
+    /// through unchanged (a `*`-bulleted list stays `*`-bulleted).
+    Bullet(char),
+    /// `N.` or `N)` -- the parsed number.
+    Ordered(u64),
+}
+
+/// One line's list-item shape, as `parse_list_item` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    /// The line's own leading whitespace, carried onto the continuation
+    /// line unchanged -- a nested list stays at the same nesting depth.
+    pub indent: String,
+    pub marker: ListMarker,
+    /// `true` for `)` (`1)`), `false` for `.` (`1.`) -- meaningless for
+    /// `Bullet`.
+    pub ordered_paren: bool,
+    /// Whether the marker is immediately followed by a GFM task
+    /// checkbox (`[ ]`/`[x]`/`[X]`) -- a continuation carries an
+    /// *unchecked* one regardless of whether this one was checked,
+    /// matching every real Markdown editor's own convention (finishing
+    /// one task doesn't pre-complete the next).
+    pub has_checkbox: bool,
+    /// Whether the line has nothing (or only whitespace) after the
+    /// marker/checkbox -- see `list_continuation_text`'s own doc
+    /// comment for what this changes.
+    pub content_is_empty: bool,
+}
+
+/// Parses `line`'s own list-marker shape, if it has one -- `None` for
+/// an ordinary line. No per-language gate: a line shaped like a list
+/// item is treated as one wherever it appears, the same "the text shape
+/// alone is the signal" posture this module's own bracket-depth logic
+/// already has (and the one `fenix_format::reindent` established at the
+/// crate level) -- a bulleted or numbered list inside a doc comment is
+/// just as reasonable to continue as one in a `.md` file.
+pub fn parse_list_item(buffer: &Buffer, line: usize) -> Option<ListItem> {
+    let start = buffer.line_start_char(line);
+    let text = buffer.text_range(start, start + buffer.line_len(line));
+    parse_list_item_text(&text)
+}
+
+/// The actual parsing, over plain text -- separated from `parse_list_
+/// item` so it's directly unit-testable without a real `Buffer`.
+fn parse_list_item_text(line_text: &str) -> Option<ListItem> {
+    let indent_len = line_text.len() - line_text.trim_start_matches(' ').len();
+    let (indent, rest) = line_text.split_at(indent_len);
+
+    let (marker, ordered_paren, after_marker) =
+        if let Some(c) = rest.chars().next().filter(|&c| c == '-' || c == '*' || c == '+') {
+            (ListMarker::Bullet(c), false, &rest[1..])
+        } else {
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            let after_digits = &rest[digits..];
+            let delim = after_digits.chars().next().filter(|&c| c == '.' || c == ')')?;
+            let n: u64 = rest[..digits].parse().ok()?;
+            (ListMarker::Ordered(n), delim == ')', &after_digits[1..])
+        };
+
+    // CommonMark requires a space (or nothing at all) right after the
+    // marker -- "-item"/"1.5" aren't list items, just text that starts
+    // with a similar-looking character.
+    let after_marker = if after_marker.is_empty() {
+        after_marker
+    } else {
+        after_marker.strip_prefix(' ')?
+    };
+    let content = after_marker.trim_start_matches(' ');
+
+    let (has_checkbox, content) = ["[ ] ", "[x] ", "[X] ", "[ ]", "[x]", "[X]"]
+        .iter()
+        .find_map(|prefix| content.strip_prefix(prefix))
+        .map(|rest| (true, rest))
+        .unwrap_or((false, content));
+
+    Some(ListItem { indent: indent.to_string(), marker, ordered_paren, has_checkbox, content_is_empty: content.trim().is_empty() })
+}
+
+/// What Enter/`o` should insert to continue `item`'s list onto the next
+/// line -- `None` for an empty item (nothing typed after its marker
+/// yet), which both callers already treat as "fall through to the
+/// plain carried-indent path" -- deliberately, since that path already
+/// does exactly the right thing here: it carries the bare `indent`
+/// alone, no marker, which *is* "leave the list." No separate cleanup
+/// of the current line is needed either way -- Enter/`o` only ever
+/// insert new text at/after the cursor, never rewrite what's already
+/// there, so there's nothing dangling to remove.
+///
+/// A bulleted item continues with the same marker character; an
+/// ordered one continues with its number plus one. Deliberately *not*
+/// cascaded through the rest of the list (a numbered item inserted in
+/// the middle doesn't renumber everything below it) -- CommonMark
+/// renderers only look at a list's first number to decide where it
+/// starts, so a "wrong" number past that point is cosmetic in the
+/// source and invisible in the rendered output, not worth the
+/// complexity of walking the rest of the list to fix up.
+pub fn list_continuation_text(item: &ListItem) -> Option<String> {
+    if item.content_is_empty {
+        return None;
+    }
+    let mut s = item.indent.clone();
+    match item.marker {
+        ListMarker::Bullet(c) => {
+            s.push(c);
+            s.push(' ');
+        }
+        ListMarker::Ordered(n) => {
+            s.push_str(&(n + 1).to_string());
+            s.push(if item.ordered_paren { ')' } else { '.' });
+            s.push(' ');
+        }
+    }
+    if item.has_checkbox {
+        s.push_str("[ ] ");
+    }
+    Some(s)
+}
+
 /// `>>`: prepends `width` spaces at the start of `line`. Its own atomic
 /// undo step, same as `finish_operator`'s delete/yank calls -- `>>`/`<<`
 /// are stand-alone Normal-mode actions, not part of an active
@@ -85,6 +212,103 @@ pub fn line_blank_before_cursor(buffer: &Buffer, cursor: &Cursor) -> bool {
 mod tests {
     use super::*;
     use crate::test_util::buf;
+
+    #[test]
+    fn parse_list_item_recognizes_every_bullet_character() {
+        for c in ['-', '*', '+'] {
+            let line = format!("{c} item");
+            let item = parse_list_item_text(&line).unwrap_or_else(|| panic!("{line:?} should parse"));
+            assert_eq!(item.marker, ListMarker::Bullet(c));
+            assert!(!item.content_is_empty);
+        }
+    }
+
+    #[test]
+    fn parse_list_item_reads_ordered_markers_with_either_delimiter() {
+        let dot = parse_list_item_text("1. item").unwrap();
+        assert_eq!(dot.marker, ListMarker::Ordered(1));
+        assert!(!dot.ordered_paren);
+
+        let paren = parse_list_item_text("42) item").unwrap();
+        assert_eq!(paren.marker, ListMarker::Ordered(42));
+        assert!(paren.ordered_paren);
+    }
+
+    #[test]
+    fn parse_list_item_captures_leading_whitespace_as_indent() {
+        let item = parse_list_item_text("    - item").unwrap();
+        assert_eq!(item.indent, "    ");
+    }
+
+    #[test]
+    fn parse_list_item_requires_a_space_right_after_the_marker() {
+        // A marker glued straight to text isn't a list item at all --
+        // just an ordinary line that happens to start with a similar
+        // character ("-5" a negative number, "1.5" a decimal).
+        assert!(parse_list_item_text("-item").is_none());
+        assert!(parse_list_item_text("1.5").is_none());
+    }
+
+    #[test]
+    fn parse_list_item_accepts_a_bare_marker_alone_on_the_line() {
+        // "-" with nothing after it at all (not even a space) is still
+        // a real, if empty, list item -- what you get right after
+        // typing just the marker.
+        let item = parse_list_item_text("-").unwrap();
+        assert!(item.content_is_empty);
+    }
+
+    #[test]
+    fn parse_list_item_detects_a_task_checkbox_and_excludes_it_from_content() {
+        let unchecked = parse_list_item_text("- [ ] buy milk").unwrap();
+        assert!(unchecked.has_checkbox);
+        assert!(!unchecked.content_is_empty);
+
+        let checked = parse_list_item_text("- [x] done").unwrap();
+        assert!(checked.has_checkbox);
+
+        let checked_upper = parse_list_item_text("- [X] done").unwrap();
+        assert!(checked_upper.has_checkbox);
+
+        // The checkbox alone, nothing typed after it yet, still counts
+        // as an empty item.
+        let empty = parse_list_item_text("- [ ]").unwrap();
+        assert!(empty.has_checkbox);
+        assert!(empty.content_is_empty);
+    }
+
+    #[test]
+    fn parse_list_item_is_none_for_an_ordinary_line() {
+        assert!(parse_list_item_text("just some text").is_none());
+        assert!(parse_list_item_text("").is_none());
+    }
+
+    #[test]
+    fn list_continuation_text_repeats_the_same_bullet_character() {
+        let item = parse_list_item_text("  * item").unwrap();
+        assert_eq!(list_continuation_text(&item), Some("  * ".to_string()));
+    }
+
+    #[test]
+    fn list_continuation_text_increments_an_ordered_marker() {
+        let dot = parse_list_item_text("3. item").unwrap();
+        assert_eq!(list_continuation_text(&dot), Some("4. ".to_string()));
+
+        let paren = parse_list_item_text("9) item").unwrap();
+        assert_eq!(list_continuation_text(&paren), Some("10) ".to_string()));
+    }
+
+    #[test]
+    fn list_continuation_text_carries_an_unchecked_checkbox_regardless_of_the_original_state() {
+        let checked = parse_list_item_text("- [x] done").unwrap();
+        assert_eq!(list_continuation_text(&checked), Some("- [ ] ".to_string()));
+    }
+
+    #[test]
+    fn list_continuation_text_is_none_for_an_empty_item() {
+        let item = parse_list_item_text("- ").unwrap();
+        assert_eq!(list_continuation_text(&item), None);
+    }
 
     #[test]
     fn spaces_to_next_stop_lands_on_the_next_multiple_of_indent_width() {

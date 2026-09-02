@@ -752,44 +752,70 @@ impl VimState {
                 let base_indent = indent::leading_whitespace(buffer, line);
                 let bumps = cursor.char_idx > 0
                     && buffer.char_at(cursor.char_idx - 1).is_some_and(indent::is_opening_bracket);
-                let mut new_indent = base_indent.clone();
-                if bumps {
-                    new_indent.push_str(&" ".repeat(self.indent_width));
-                }
-                // Enter right between an open/close bracket pair (`{|}`,
-                // almost always auto-paired a moment ago) splits across
-                // three lines, not two: without this, the close bracket
-                // was just left trailing on the cursor's own bumped-
-                // indent line (`        }` sitting a full extra level
-                // deep, wherever that bump happened to land -- not
-                // actually related to any other bracket on the line, it
-                // only looked that way) instead of dropping back onto its
-                // own line at the *open* bracket's own indent.
-                let splits_closing_bracket = bumps
-                    && buffer.char_at(cursor.char_idx).is_some_and(|c| {
-                        matches!(buffer.char_at(cursor.char_idx - 1), Some(open) if indent::matching_close_bracket(open) == Some(c))
-                    });
-                buffer.insert_char(cursor, '\n');
-                for ch in new_indent.chars() {
-                    buffer.insert_char(cursor, ch);
-                }
-                if splits_closing_bracket {
-                    // Insert the close bracket's own line past the
-                    // cursor's real resting spot, then step back --
-                    // same "insert past, then pull back" idiom the
-                    // auto-pair insert above this uses for the same
-                    // reason (`insert_char` always advances the cursor
-                    // it's given; stepping back with a manual `char_idx`
-                    // assignment instead of `move_left` keeps this whole
-                    // sequence one coalesced pending edit).
-                    let resting_at = cursor.char_idx;
+
+                // A Markdown-style list line continues its own marker
+                // onto the new line instead of the plain carried-over
+                // indent below -- see `indent::list_continuation_text`'s
+                // own doc comment for exactly what "continues" means and
+                // why an empty item (nothing typed after the marker yet)
+                // deliberately yields `None` here, falling through to
+                // the plain path: that path already carries just the
+                // bare indent with no marker, which *is* "leave the
+                // list," with no separate cleanup needed since Enter
+                // never touches text before the cursor to begin with.
+                // Skipped entirely when a bracket bump applies -- the
+                // two signals are essentially mutually exclusive in
+                // practice, and the bracket one is the more established
+                // of this file's own two.
+                let list_continuation =
+                    if bumps { None } else { indent::parse_list_item(buffer, line).and_then(|item| indent::list_continuation_text(&item)) };
+
+                if let Some(next_line) = list_continuation {
                     buffer.insert_char(cursor, '\n');
-                    for ch in base_indent.chars() {
+                    for ch in next_line.chars() {
                         buffer.insert_char(cursor, ch);
                     }
-                    cursor.char_idx = resting_at;
-                    let (_, col) = buffer.line_col(cursor);
-                    cursor.sticky_col = col;
+                } else {
+                    let mut new_indent = base_indent.clone();
+                    if bumps {
+                        new_indent.push_str(&" ".repeat(self.indent_width));
+                    }
+                    // Enter right between an open/close bracket pair
+                    // (`{|}`, almost always auto-paired a moment ago)
+                    // splits across three lines, not two: without this,
+                    // the close bracket was just left trailing on the
+                    // cursor's own bumped-indent line (`        }`
+                    // sitting a full extra level deep, wherever that
+                    // bump happened to land -- not actually related to
+                    // any other bracket on the line, it only looked
+                    // that way) instead of dropping back onto its own
+                    // line at the *open* bracket's own indent.
+                    let splits_closing_bracket = bumps
+                        && buffer.char_at(cursor.char_idx).is_some_and(|c| {
+                            matches!(buffer.char_at(cursor.char_idx - 1), Some(open) if indent::matching_close_bracket(open) == Some(c))
+                        });
+                    buffer.insert_char(cursor, '\n');
+                    for ch in new_indent.chars() {
+                        buffer.insert_char(cursor, ch);
+                    }
+                    if splits_closing_bracket {
+                        // Insert the close bracket's own line past the
+                        // cursor's real resting spot, then step back --
+                        // same "insert past, then pull back" idiom the
+                        // auto-pair insert above this uses for the same
+                        // reason (`insert_char` always advances the cursor
+                        // it's given; stepping back with a manual `char_idx`
+                        // assignment instead of `move_left` keeps this whole
+                        // sequence one coalesced pending edit).
+                        let resting_at = cursor.char_idx;
+                        buffer.insert_char(cursor, '\n');
+                        for ch in base_indent.chars() {
+                            buffer.insert_char(cursor, ch);
+                        }
+                        cursor.char_idx = resting_at;
+                        let (_, col) = buffer.line_col(cursor);
+                        cursor.sticky_col = col;
+                    }
                 }
             }
             KeyCode::Named(NamedKey::Tab) => {
@@ -1565,7 +1591,16 @@ impl VimState {
             }
             InsertEntry::NewlineBelow => {
                 let (line, _) = buffer.line_col(cursor);
-                let new_indent = indent::leading_whitespace(buffer, line);
+                // Same list-continuation behavior as Insert-mode Enter
+                // -- see its own doc comment. `O` (`NewlineAbove`, right
+                // below) deliberately doesn't get this: opening a new
+                // line *above* the current item would need renumbering
+                // every ordered item from there down to stay correct,
+                // real added complexity for a much rarer motion than
+                // `o`/Enter.
+                let new_indent = indent::parse_list_item(buffer, line)
+                    .and_then(|item| indent::list_continuation_text(&item))
+                    .unwrap_or_else(|| indent::leading_whitespace(buffer, line));
                 cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
                 buffer.insert_char(cursor, '\n');
                 for ch in new_indent.chars() {
@@ -2522,6 +2557,102 @@ mod tests {
         assert_eq!(b.text(), "    foo\n    ");
         keys(&mut vim, &mut b, &mut c, "bar");
         assert_eq!(b.text(), "    foo\n    bar");
+    }
+
+    #[test]
+    fn enter_continues_a_bulleted_list() {
+        let mut b = buf("- first");
+        let mut c = Cursor { char_idx: 7, sticky_col: 7 }; // end of "first"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "- first\n- ");
+        keys(&mut vim, &mut b, &mut c, "second");
+        assert_eq!(b.text(), "- first\n- second");
+    }
+
+    #[test]
+    fn enter_continues_an_ordered_list_incrementing_the_number() {
+        let mut b = buf("3. third");
+        let mut c = Cursor { char_idx: 8, sticky_col: 8 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "3. third\n4. ");
+    }
+
+    #[test]
+    fn enter_on_a_nested_bullet_preserves_its_indent() {
+        let mut b = buf("  - nested");
+        let mut c = Cursor { char_idx: 10, sticky_col: 10 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "  - nested\n  - ");
+    }
+
+    #[test]
+    fn enter_continues_a_checkbox_item_unchecked_regardless_of_the_original_state() {
+        let mut b = buf("- [x] done");
+        let mut c = Cursor { char_idx: 10, sticky_col: 10 }; // end of "done"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "- [x] done\n- [ ] ");
+    }
+
+    #[test]
+    fn enter_on_an_empty_list_item_leaves_the_list_instead_of_repeating_the_marker() {
+        let mut b = buf("- ");
+        let mut c = Cursor { char_idx: 2, sticky_col: 2 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "- \n");
+    }
+
+    #[test]
+    fn enter_in_the_middle_of_list_text_still_continues_the_marker() {
+        // Splitting mid-line (not necessarily at the end) should behave
+        // the same as a plain Enter split: the marker continues onto
+        // whatever's left after the cursor.
+        let mut b = buf("- hello world");
+        let mut c = Cursor { char_idx: 7, sticky_col: 7 }; // between "hello" and " world"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "- hello\n-  world");
+    }
+
+    #[test]
+    fn open_line_below_continues_a_list_the_same_way_enter_does() {
+        let mut b = buf("- first");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "o");
+        assert_eq!(b.text(), "- first\n- ");
+        assert_eq!(vim.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn open_line_above_does_not_continue_a_list() {
+        // A disclosed scope cut, not an oversight -- see `NewlineBelow`'s
+        // own doc comment on why `O` stays out of this.
+        let mut b = buf("- first");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "O");
+        assert_eq!(b.text(), "\n- first");
+    }
+
+    #[test]
+    fn enter_on_an_ordinary_line_is_unaffected_by_list_continuation() {
+        let mut b = buf("just text");
+        let mut c = Cursor { char_idx: 9, sticky_col: 9 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(b.text(), "just text\n");
     }
 
     #[test]
