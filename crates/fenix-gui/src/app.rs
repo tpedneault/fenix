@@ -3252,6 +3252,30 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     )
 }
 
+/// Somewhere `SPC w h/j/k/l` can move focus to, anywhere across every
+/// open frame -- see `App::nav_targets`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavTarget {
+    Pane { frame: usize, pane: fenix_window::WindowId },
+    /// A frame's sidebar. Not a leaf in any `WindowTree` -- it's a
+    /// panel drawn beside one -- but it is somewhere focus can land, so
+    /// it joins the candidate list as an ordinary rectangle. That
+    /// replaces the hand-written "Left from the leftmost pane focuses
+    /// the sidebar" rule with plain geometry, which also gets the
+    /// harder cases right for free: leftwards out of a sidebar
+    /// continues to the window on the monitor to its left, and a
+    /// sidebar is preferred over another monitor's pane only because
+    /// it is nearer.
+    Sidebar { frame: usize },
+}
+
+/// The client-area size assumed for a frame that hasn't got a real
+/// window yet (only a headless test). Navigation compares candidates
+/// against each other, so only *relative* geometry matters -- the same
+/// reason `fenix_window`'s own `navigate` has always laid its tree out
+/// against an arbitrary reference size.
+const NAV_REFERENCE_SIZE: (f32, f32) = (1600.0, 900.0);
+
 /// Where `new_frame` should put the window it's about to create --
 /// see `App::next_frame_placement`. Each part is optional because a
 /// platform that won't report monitors or window positions leaves the
@@ -11684,20 +11708,102 @@ impl App {
         self.split_window(SplitKind::Horizontal);
     }
 
-    /// `SPC w hjkl`: moves focus to the nearest window in that direction
-    /// by real layout geometry, not tree adjacency -- a no-op at the
-    /// grid's edge (`WindowTree::navigate`'s own contract).
+    /// `SPC w hjkl`: moves focus to the nearest pane in that direction
+    /// by real layout geometry, not tree adjacency -- and *across OS
+    /// windows*, not just within one. Walking off the left edge of the
+    /// window on one monitor continues into the window on the monitor
+    /// beside it, landing on whichever of its panes is actually nearest
+    /// (its rightmost, coming from the left edge -- not its first).
+    ///
+    /// One list of rectangles in desktop coordinates, one rule
+    /// (`fenix_window::pick`). Panes in the current window are
+    /// simply nearer than panes in the next window over, so ordinary
+    /// same-window navigation behaves exactly as it always has without
+    /// being a special case, and neither is the sidebar (see
+    /// `NavTarget::Sidebar`).
+    ///
+    /// A no-op at the outermost edge of the outermost window.
     pub(crate) fn navigate_window(&mut self, dir: NavDirection) {
-        let moved = self.windows_mut().navigate(dir);
-        // The sidebar isn't a leaf in `WindowTree` -- it's a separate panel
-        // drawn to the left of it -- so plain `navigate(Left)` has no way to
-        // reach it. Treat it as one more step further left: only when
-        // ordinary window navigation can't move any further (already at the
-        // leftmost pane) does `Left` hand focus to an open sidebar instead.
-        if dir == NavDirection::Left && !moved && self.sidebar_open && !self.sidebar_focused {
-            self.sidebar_focused = true;
+        let from = if self.sidebar_focused {
+            NavTarget::Sidebar { frame: self.active_frame }
+        } else {
+            NavTarget::Pane { frame: self.active_frame, pane: self.focused_pane_id() }
+        };
+        let targets = self.nav_targets();
+        let Some(target) = fenix_window::pick(&targets, from, dir) else { return };
+
+        let frame = match target {
+            NavTarget::Pane { frame, .. } | NavTarget::Sidebar { frame } => frame,
+        };
+        if frame != self.active_frame {
+            self.focus_frame(frame);
+            self.focus_active_frame_window();
+        }
+        match target {
+            NavTarget::Pane { pane, .. } => {
+                self.windows_mut().focus(pane);
+                // Mirrors `handle_click_at`'s own rule: focusing a pane
+                // always clears both panel-focus overrides, since they
+                // sit outside the tree and nothing else would.
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+            }
+            NavTarget::Sidebar { .. } => {
+                self.sidebar_focused = true;
+                self.terminal_focused = false;
+            }
         }
         self.wake_caret();
+    }
+
+    /// Every pane (and sidebar) of every open frame, as rectangles in
+    /// one desktop coordinate space -- each frame's own layout offset by
+    /// where its client area sits on the desktop.
+    ///
+    /// Computed by briefly activating each frame in turn, so the
+    /// existing `frame_metrics`/`frame_geometry` pair -- which read the
+    /// live sidebar and terminal state, and are what `redraw` and mouse
+    /// hit-testing already agree with -- can be reused verbatim rather
+    /// than reimplemented against a parked frame. Whichever frame was
+    /// active is active again on return.
+    fn nav_targets(&mut self) -> Vec<(NavTarget, fenix_window::Rect)> {
+        let previous = self.active_frame;
+        let mut targets = Vec::new();
+        for frame in 0..self.frames.len() {
+            self.activate_frame(frame);
+            targets.extend(self.active_frame_nav_targets(frame));
+        }
+        self.activate_frame(previous);
+        targets
+    }
+
+    /// The active frame's own navigation targets, in desktop
+    /// coordinates. `frame` is passed in rather than read from
+    /// `active_frame` only so the caller's loop index is what ends up
+    /// in the keys.
+    fn active_frame_nav_targets(&self, frame: usize) -> Vec<(NavTarget, fenix_window::Rect)> {
+        let (width, height) = self
+            .gpu
+            .as_ref()
+            .map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+            .unwrap_or(NAV_REFERENCE_SIZE);
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(height);
+        let geometry = self.frame_geometry(width, sidebar_px, terminal_h, modeline_top);
+
+        let (origin_x, origin_y) = (self.frame_origin.0 as f32, self.frame_origin.1 as f32);
+        let to_desktop = |rect: fenix_window::Rect| fenix_window::Rect {
+            x: rect.x + origin_x,
+            y: rect.y + origin_y,
+            w: rect.w,
+            h: rect.h,
+        };
+
+        let mut targets: Vec<(NavTarget, fenix_window::Rect)> =
+            geometry.panes.iter().map(|&(pane, rect)| (NavTarget::Pane { frame, pane }, to_desktop(rect))).collect();
+        if let Some(rect) = geometry.sidebar_rect {
+            targets.push((NavTarget::Sidebar { frame }, to_desktop(rect)));
+        }
+        targets
     }
 
     /// `SPC w w`: cycles focus to the next window in a stable pre-order
@@ -16567,6 +16673,20 @@ impl App {
         self.frames.len() - 1
     }
 
+    /// Puts `frame`'s client area at `origin` in desktop coordinates --
+    /// the headless stand-in for `refresh_frame_origin`, which needs a
+    /// real window to ask. Cross-window navigation is decided entirely
+    /// from these, so this is what lets it be tested without monitors.
+    #[cfg(test)]
+    fn test_place_frame(&mut self, frame: usize, origin: (i32, i32)) {
+        match self.frames.get_mut(frame) {
+            Some(Some(parked)) => parked.origin = origin,
+            // The active frame's state is the live set on `App`.
+            Some(None) => self.frame_origin = origin,
+            None => {}
+        }
+    }
+
     /// The focused pane's live cursor -- test-only convenience wrapping
     /// `pane_state`, since tests can't borrow two fields at once the way
     /// production code inlines it (`focused_buffer_and_cursor_mut`, etc.).
@@ -16955,6 +17075,102 @@ mod tests {
 
         assert_eq!(app.focused_frame, app.active_frame);
         assert!(app.focused_frame < app.frames.len());
+    }
+
+    /// Two frames side by side, each split into two panes -- the left
+    /// frame's client area at the desktop origin, the right frame's
+    /// immediately beside it (`NAV_REFERENCE_SIZE.0` is the width a
+    /// windowless frame is laid out at). Returns each frame's panes in
+    /// left-to-right order.
+    fn two_frames_side_by_side(app: &mut App) -> (Vec<fenix_window::WindowId>, usize, Vec<fenix_window::WindowId>) {
+        app.split_vertical();
+        app.test_place_frame(0, (0, 0));
+        let left_panes = app.windows().windows();
+
+        let elsewhere = app.buffers.open_scratch();
+        let right = app.test_add_frame(elsewhere);
+        app.focus_frame(right);
+        app.test_place_frame(right, (NAV_REFERENCE_SIZE.0 as i32, 0));
+        app.split_vertical();
+        let right_panes = app.windows().windows();
+
+        (left_panes, right, right_panes)
+    }
+
+    #[test]
+    fn navigating_left_out_of_a_window_lands_on_the_nearest_pane_of_the_window_beside_it() {
+        let mut app = App::with_file(None);
+        let (left_panes, _right, right_panes) = two_frames_side_by_side(&mut app);
+        app.windows_mut().focus(right_panes[0]); // leftmost pane of the right-hand window
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, 0, "focus crossed into the window on the left");
+        assert_eq!(app.focused_frame, 0, "and it is a real focus move, not a temporary activation");
+        assert_eq!(
+            app.focused_pane_id(),
+            left_panes[1],
+            "landed on that window's *rightmost* pane -- the one actually adjacent -- not its first"
+        );
+    }
+
+    #[test]
+    fn navigating_right_back_out_of_a_window_lands_on_the_next_windows_leftmost_pane() {
+        let mut app = App::with_file(None);
+        let (left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        app.focus_frame(0);
+        app.windows_mut().focus(left_panes[1]); // rightmost pane of the left-hand window
+
+        app.navigate_window(NavDirection::Right);
+
+        assert_eq!(app.active_frame, right);
+        assert_eq!(app.focused_pane_id(), right_panes[0]);
+    }
+
+    #[test]
+    fn navigation_stays_inside_a_window_while_it_has_somewhere_to_go() {
+        let mut app = App::with_file(None);
+        let (_left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        app.windows_mut().focus(right_panes[1]); // rightmost pane of the right-hand window
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, right, "the neighbouring pane is nearer than the other window");
+        assert_eq!(app.focused_pane_id(), right_panes[0]);
+    }
+
+    #[test]
+    fn navigating_off_the_outermost_edge_of_the_outermost_window_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let (left_panes, _right, _right_panes) = two_frames_side_by_side(&mut app);
+        app.focus_frame(0);
+        app.windows_mut().focus(left_panes[0]);
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_pane_id(), left_panes[0]);
+    }
+
+    #[test]
+    fn an_open_sidebar_is_reached_before_the_window_on_the_monitor_to_its_left() {
+        let dir = TempDir::new("nav_sidebar_before_other_frame");
+        let mut app = App::with_file(None);
+        let (_left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        // The right-hand window has its own sidebar open.
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.windows_mut().focus(right_panes[0]);
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, right, "the sidebar in this window is nearer than the next window over");
+        assert!(app.sidebar_focused);
+
+        // One more step left leaves the window entirely.
+        app.navigate_window(NavDirection::Left);
+        assert_eq!(app.active_frame, 0);
+        assert!(!app.sidebar_focused, "focusing a pane clears the sidebar override");
     }
 
     #[test]

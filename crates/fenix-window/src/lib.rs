@@ -2,7 +2,7 @@ mod nav;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub use nav::NavDirection;
+pub use nav::{pick, NavDirection};
 
 /// Identity of one leaf window in a `WindowTree`, stable across splits and
 /// closes of *other* windows (only closing a window invalidates its own id).

@@ -1,4 +1,4 @@
-use crate::{Rect, WindowId, WindowTree};
+use crate::{Rect, WindowTree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavDirection {
@@ -13,41 +13,53 @@ pub enum NavDirection {
 /// enough that float arithmetic on it stays comfortably precise.
 const REFERENCE_SIZE: f32 = 10_000.0;
 
+/// Picks the nearest of `candidates` lying in `dir` from the one keyed
+/// `from`, using real layout geometry rather than any structural
+/// adjacency (which wouldn't match what the user visually sees).
+/// Standard directional-navigation heuristic: among candidates strictly
+/// on that side, take whichever has the greatest edge overlap on the
+/// perpendicular axis, tie-broken by closest distance. `None` when
+/// nothing qualifies -- typically already at the edge.
+///
+/// Generic over the key, and over whatever coordinate space the rects
+/// are in, so one rule serves both callers: `WindowTree::navigate`
+/// passes one tree's panes in its own layout space, while the host app
+/// passes *every* pane of *every* OS window in desktop coordinates, so
+/// that walking off the left edge of one monitor's window continues
+/// into the window on the monitor next door. Panes in the same window
+/// are simply nearer than panes in the one beside it, so unifying the
+/// two needs no special case at all.
+pub fn pick<K: Copy + PartialEq>(candidates: &[(K, Rect)], from: K, dir: NavDirection) -> Option<K> {
+    let &(_, from_rect) = candidates.iter().find(|(key, _)| *key == from)?;
+
+    let mut best: Option<(K, f32, f32)> = None; // (key, overlap, distance): maximize overlap, then minimize distance
+    for &(key, rect) in candidates {
+        if key == from {
+            continue;
+        }
+        let Some((overlap, distance)) = candidate_score(from_rect, rect, dir) else { continue };
+        let better = match best {
+            None => true,
+            Some((_, best_overlap, best_distance)) => {
+                overlap > best_overlap || (overlap == best_overlap && distance < best_distance)
+            }
+        };
+        if better {
+            best = Some((key, overlap, distance));
+        }
+    }
+    best.map(|(key, ..)| key)
+}
+
 impl<T> WindowTree<T> {
-    /// Moves focus to the nearest window in `dir` from the focused one,
-    /// using real layout geometry rather than tree adjacency (which
-    /// wouldn't match what the user visually sees). Standard directional-
-    /// window-nav heuristic: among windows strictly on that side, picks
-    /// whichever has the greatest edge overlap on the perpendicular axis,
-    /// tie-broken by closest distance. Returns `false` (no-op, focus
-    /// unchanged) if nothing qualifies -- e.g. already at the grid's edge.
+    /// Moves focus to the nearest window in `dir` from the focused one.
+    /// Returns `false` (no-op, focus unchanged) if nothing qualifies --
+    /// e.g. already at the grid's edge. See `pick` for the rule.
     pub fn navigate(&mut self, dir: NavDirection) -> bool {
         let bounds = Rect { x: 0.0, y: 0.0, w: REFERENCE_SIZE, h: REFERENCE_SIZE };
         let rects = self.layout(bounds);
-        let focused_id = self.focused_id();
-        let Some(&(_, focused_rect)) = rects.iter().find(|(id, _)| *id == focused_id) else {
-            return false;
-        };
-
-        let mut best: Option<(WindowId, f32, f32)> = None; // (id, overlap, distance): maximize overlap, then minimize distance
-        for &(id, rect) in &rects {
-            if id == focused_id {
-                continue;
-            }
-            let Some((overlap, distance)) = candidate_score(focused_rect, rect, dir) else { continue };
-            let better = match best {
-                None => true,
-                Some((_, best_overlap, best_distance)) => {
-                    overlap > best_overlap || (overlap == best_overlap && distance < best_distance)
-                }
-            };
-            if better {
-                best = Some((id, overlap, distance));
-            }
-        }
-
-        match best {
-            Some((id, ..)) => {
+        match pick(&rects, self.focused_id(), dir) {
+            Some(id) => {
                 self.focus(id);
                 true
             }
@@ -108,7 +120,7 @@ fn horizontal_overlap(a: Rect, b: Rect) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SplitKind;
+    use crate::{SplitKind, WindowId};
 
     /// Builds a 2x2 grid: `Vertical(Horizontal(TL, BL), Horizontal(TR, BR))`.
     /// Returns the tree plus each quadrant's id.
@@ -120,6 +132,61 @@ mod tests {
         let tr = t.split(SplitKind::Vertical, "TR");
         let br = t.split(SplitKind::Horizontal, "BR");
         (t, tl, bl, tr, br)
+    }
+
+    /// Two side-by-side monitors' worth of rects in one desktop
+    /// coordinate space: a 1920-wide screen at x=0 split into two
+    /// panes, and a 1920-wide screen at x=1920 split into two panes.
+    /// Keyed `(window, pane)` the way the host app keys them.
+    fn two_screens() -> Vec<((u8, u8), Rect)> {
+        vec![
+            ((0, 0), Rect { x: 0.0, y: 0.0, w: 960.0, h: 1080.0 }),
+            ((0, 1), Rect { x: 960.0, y: 0.0, w: 960.0, h: 1080.0 }),
+            ((1, 0), Rect { x: 1920.0, y: 0.0, w: 960.0, h: 1080.0 }),
+            ((1, 1), Rect { x: 2880.0, y: 0.0, w: 960.0, h: 1080.0 }),
+        ]
+    }
+
+    #[test]
+    fn pick_crosses_from_one_screens_leftmost_pane_into_the_next_screens_rightmost() {
+        let screens = two_screens();
+        // The whole point: going left off the edge of the right-hand
+        // monitor lands on the *nearest* pane of the left-hand one --
+        // its rightmost -- not its leftmost.
+        assert_eq!(pick(&screens, (1, 0), NavDirection::Left), Some((0, 1)));
+        // And symmetrically going the other way.
+        assert_eq!(pick(&screens, (0, 1), NavDirection::Right), Some((1, 0)));
+    }
+
+    #[test]
+    fn pick_stays_inside_a_screen_while_there_is_somewhere_to_go() {
+        let screens = two_screens();
+        assert_eq!(pick(&screens, (1, 1), NavDirection::Left), Some((1, 0)), "the neighbouring pane is nearer than the next screen");
+        assert_eq!(pick(&screens, (0, 0), NavDirection::Right), Some((0, 1)));
+    }
+
+    #[test]
+    fn pick_off_the_far_edge_of_the_outermost_screen_is_a_no_op() {
+        let screens = two_screens();
+        assert_eq!(pick(&screens, (0, 0), NavDirection::Left), None);
+        assert_eq!(pick(&screens, (1, 1), NavDirection::Right), None);
+        assert_eq!(pick(&screens, (0, 0), NavDirection::Up), None);
+    }
+
+    #[test]
+    fn pick_skips_a_screen_that_does_not_overlap_vertically_at_all() {
+        // A window on a monitor stacked above the others shares no
+        // horizontal band with the one to its left, so a leftward move
+        // from it has no candidate rather than jumping diagonally.
+        let mut screens = two_screens();
+        screens.push(((2, 0), Rect { x: 1920.0, y: -1080.0, w: 1920.0, h: 1080.0 }));
+        assert_eq!(pick(&screens, (2, 0), NavDirection::Left), None);
+        assert_eq!(pick(&screens, (2, 0), NavDirection::Down), Some((1, 0)));
+    }
+
+    #[test]
+    fn pick_from_a_key_that_is_not_in_the_list_yields_nothing() {
+        assert_eq!(pick(&two_screens(), (9, 9), NavDirection::Left), None);
     }
 
     #[test]
