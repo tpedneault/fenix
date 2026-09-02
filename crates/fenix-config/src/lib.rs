@@ -77,14 +77,20 @@ pub struct Config {
     /// NAME|PATH` convention (and same `Vec`-not-`Option` reasoning) as
     /// `mib_roots`; the path can be any file Fenix can open, not just a
     /// PDF, though a reference shelf is mostly PDFs in practice.
-    /// Hand-authored by the user, never written by the app itself.
+    /// Hand-authored by the user, never written by the app itself --
+    /// `save` re-reads this section fresh from disk right before
+    /// writing rather than trusting this struct's own (possibly
+    /// session-old) copy, so a hand-edit made after this was loaded
+    /// survives the next save instead of being silently erased by it.
     pub documents: Vec<(String, PathBuf)>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
     /// is its own sibling to `parse_pair_list` rather than reusing it,
     /// since `parse_pair_list` only splits one `|`). Hand-typed by the
-    /// user (`SPC v v`), e.g. `("build-vm", "10.0.0.5", 5900)`.
+    /// user (`SPC v v`), e.g. `("build-vm", "10.0.0.5", 5900)`. Same
+    /// re-read-fresh-before-writing protection as `documents` -- see
+    /// its own doc comment.
     pub vnc_hosts: Vec<(String, String, u16)>,
     /// Where each OS window sat when Fenix last exited, in the order
     /// they were open -- restored on the next launch when
@@ -108,7 +114,8 @@ pub struct Config {
     /// what "editor" would be. The actual parsing
     /// (`App::parse_workspace_action`) lives in `fenix-gui`, not here,
     /// since it dispatches to session state this crate has no business
-    /// knowing about. Hand-authored by the user, same as `documents`.
+    /// knowing about. Hand-authored by the user, same as `documents`
+    /// -- including its own re-read-fresh-before-writing protection.
     pub workspaces: Vec<(String, String)>,
 }
 
@@ -231,6 +238,32 @@ impl Config {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // `[vnc]`/`[documents]`/`[workspaces]` are hand-edit-only --
+        // nothing in this app ever assigns to `vnc_hosts`/`documents`/
+        // `workspaces` itself (unlike `mib_roots`/`jira_projects`/
+        // `jira_users`, which really do have an in-app add/delete flow
+        // and so stay driven by `self` below). `self`'s own copy of
+        // these three is only ever as fresh as whenever it was loaded,
+        // which could be an entire session ago -- writing it back
+        // verbatim would silently erase a host/document/launcher entry
+        // added by hand-editing the file *after* that, the moment
+        // anything else triggers a save (previously only a deliberate
+        // settings change; now also every quit, once window-layout
+        // persistence started saving automatically). Re-reading them
+        // fresh from whatever's on disk right now, and falling back to
+        // `self`'s own copy only if the file can't be read at all (the
+        // very first save, nothing on disk yet), means a hand-edit
+        // always wins instead of racing a stale in-memory copy.
+        let (vnc_hosts, documents, workspaces) = match std::fs::read_to_string(&self.path) {
+            Ok(contents) => {
+                let sections = ini::parse(&contents);
+                let vnc_hosts = sections.get("vnc").map(parse_vnc_hosts).unwrap_or_default();
+                let documents = sections.get("documents").map(parse_documents).unwrap_or_default();
+                let workspaces = sections.get("workspaces").map(|s| parse_pair_list(s, "ws")).unwrap_or_default();
+                (vnc_hosts, documents, workspaces)
+            }
+            Err(_) => (self.vnc_hosts.clone(), self.documents.clone(), self.workspaces.clone()),
+        };
         let mut out = String::new();
         out.push_str("[editor]\n");
         if let Some(theme) = &self.theme {
@@ -286,17 +319,17 @@ impl Config {
         }
         out.push('\n');
         out.push_str("[vnc]\n");
-        for (i, (name, host, port)) in self.vnc_hosts.iter().enumerate() {
+        for (i, (name, host, port)) in vnc_hosts.iter().enumerate() {
             out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));
         }
         out.push('\n');
         out.push_str("[documents]\n");
-        for (i, (name, doc_path)) in self.documents.iter().enumerate() {
+        for (i, (name, doc_path)) in documents.iter().enumerate() {
             out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
         }
         out.push('\n');
         out.push_str("[workspaces]\n");
-        for (i, (name, action)) in self.workspaces.iter().enumerate() {
+        for (i, (name, action)) in workspaces.iter().enumerate() {
             out.push_str(&format!("ws{} = {name}|{action}\n", i + 1));
         }
         out.push('\n');
@@ -495,6 +528,74 @@ mod tests {
 
         assert_eq!(reloaded.windows, config.windows);
         assert_eq!(reloaded.restore_windows, Some(false));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saving_does_not_erase_a_vnc_host_hand_added_to_the_file_after_load() {
+        // The actual reported bug: something else in the app (window-
+        // layout persistence, a theme change, ...) triggers a save
+        // with an in-memory `Config` that's older than the file on
+        // disk -- a `[vnc]` entry added by hand-editing config.ini
+        // *after* this `Config` was loaded must not be wiped out by
+        // that save.
+        let path = temp_path("vnc_survives_stale_save");
+        let mut config = Config::load(path.clone()).unwrap();
+        assert!(config.vnc_hosts.is_empty(), "nothing configured yet at load time");
+
+        // Simulate a hand-edit landing on disk while this `Config` is
+        // still the old, vnc-hosts-empty one in memory.
+        std::fs::write(&path, "[vnc]\nhost1 = build-vm|10.0.0.5|5900\n").unwrap();
+
+        // An unrelated save -- window-layout persistence is exactly
+        // this shape: it only ever touches `windows`, never `vnc_hosts`.
+        config.windows = vec![WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: false }];
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.vnc_hosts, vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900)]);
+        assert_eq!(reloaded.windows, config.windows, "the actual save this call was for should still take effect");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saving_does_not_erase_a_hand_edited_document_or_workspace_entry_either() {
+        let path = temp_path("documents_and_workspaces_survive_stale_save");
+        let mut config = Config::load(path.clone()).unwrap();
+
+        std::fs::write(
+            &path,
+            "[documents]\ndoc1 = Notes|C:/refs/notes.md\n\n[workspaces]\nws1 = Editor|\n",
+        )
+        .unwrap();
+
+        config.theme = Some("Nord".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.documents, vec![("Notes".to_string(), PathBuf::from("C:/refs/notes.md"))]);
+        assert_eq!(reloaded.workspaces, vec![("Editor".to_string(), String::new())]);
+        assert_eq!(reloaded.theme, Some("Nord".to_string()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn saving_still_persists_an_in_app_change_to_mib_roots_or_jira_lists() {
+        // The re-read-from-disk protection is specifically scoped to
+        // `vnc_hosts`/`documents`/`workspaces` -- `mib_roots`/
+        // `jira_projects`/`jira_users` really do have an in-app add/
+        // delete flow (`SPC m a`/`SPC j p a`/...) and must keep coming
+        // from `self`, or that flow would stop working.
+        let path = temp_path("mib_and_jira_still_save_from_self");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.mib_roots = vec![("MIB-A".to_string(), PathBuf::from("C:/data/mib-a"))];
+        config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
+
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.mib_roots, config.mib_roots);
+        assert_eq!(reloaded.jira_projects, config.jira_projects);
         let _ = std::fs::remove_file(path);
     }
 
