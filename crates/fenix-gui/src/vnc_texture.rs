@@ -30,6 +30,13 @@ pub struct VncTexture {
 /// `VncTexture` (different resolutions, different pixel data).
 pub struct VncPipeline {
     pipeline: wgpu::RenderPipeline,
+    /// Same shader and bind group layout as `pipeline`, but alpha
+    /// blended -- for `draw_cursor`. The guest's cursor (the
+    /// `CursorPseudo` encoding) is a small BGRA image whose alpha comes
+    /// from RFB's own bitmask, so drawing it through the opaque pane
+    /// pipeline would paint its fully-transparent pixels as solid black
+    /// instead of letting the desktop show through.
+    cursor_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Exactly one quad's worth of vertices, rewritten via
@@ -38,6 +45,12 @@ pub struct VncPipeline {
     /// `RectRenderer` (many accumulated rects per frame) there's no
     /// separate per-frame accumulation step.
     vertex_buffer: wgpu::Buffer,
+    /// The cursor's own quad, kept separate from `vertex_buffer` rather
+    /// than reusing it: `queue.write_buffer` calls are all applied
+    /// before any of the pass's draws execute, so a pane and its cursor
+    /// sharing one buffer would both end up drawn with whichever
+    /// geometry was written last.
+    cursor_vertex_buffer: wgpu::Buffer,
 }
 
 impl VncPipeline {
@@ -75,41 +88,42 @@ impl VncPipeline {
             immediate_size: 0,
         });
 
-        let pipeline = gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vnc-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
-                    ],
-                })],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.config.format,
-                    // An opaque video frame -- no alpha blending, unlike
-                    // `RectRenderer`'s `ALPHA_BLENDING` (used for
-                    // translucent selection/highlight rects).
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // Identical but for the blend mode -- see `cursor_pipeline`.
+        let build_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+            gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                        ],
+                    })],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState { format: gpu.config.format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // An opaque video frame -- no alpha blending, unlike
+        // `RectRenderer`'s `ALPHA_BLENDING` (used for translucent
+        // selection/highlight rects).
+        let pipeline = build_pipeline("vnc-pipeline", None);
+        let cursor_pipeline = build_pipeline("vnc-cursor-pipeline", Some(wgpu::BlendState::ALPHA_BLENDING));
 
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vnc-sampler"),
@@ -122,14 +136,18 @@ impl VncPipeline {
             ..Default::default()
         });
 
-        let vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("vnc-vertex-buffer"),
-            size: (VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let quad_buffer = |label: &str| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let vertex_buffer = quad_buffer("vnc-vertex-buffer");
+        let cursor_vertex_buffer = quad_buffer("vnc-cursor-vertex-buffer");
 
-        Self { pipeline, bind_group_layout, sampler, vertex_buffer }
+        Self { pipeline, cursor_pipeline, bind_group_layout, sampler, vertex_buffer, cursor_vertex_buffer }
     }
 
     /// Creates (or recreates, on a resolution change) the GPU texture
@@ -189,23 +207,7 @@ impl VncPipeline {
     /// pane, whatever its current on-screen size is. Same NDC-space
     /// quad conversion `RectRenderer::push_rect` uses.
     pub fn draw<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass VncTexture, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) {
-        let sw = gpu.config.width as f32;
-        let sh = gpu.config.height as f32;
-        let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
-
-        let p00 = to_ndc(dest_x, dest_y);
-        let p10 = to_ndc(dest_x + dest_w, dest_y);
-        let p01 = to_ndc(dest_x, dest_y + dest_h);
-        let p11 = to_ndc(dest_x + dest_w, dest_y + dest_h);
-
-        let vertices = [
-            Vertex { position: p00, uv: [0.0, 0.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p11, uv: [1.0, 1.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
-        ];
+        let vertices = quad_vertices(gpu, dest_x, dest_y, dest_w, dest_h);
         gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
         pass.set_pipeline(&self.pipeline);
@@ -213,4 +215,51 @@ impl VncPipeline {
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..VERTICES_PER_QUAD as u32, 0..1);
     }
+
+    /// Draws the guest's mouse cursor on top of an already-drawn pane,
+    /// alpha blended (see `cursor_pipeline`) so its transparent pixels
+    /// let the desktop underneath show through.
+    ///
+    /// Separate from `draw` rather than a flag on it because the two
+    /// must be able to coexist within one render pass, which needs both
+    /// a different pipeline and its own vertex buffer.
+    pub fn draw_cursor<'pass>(
+        &'pass self,
+        gpu: &GpuState,
+        pass: &mut wgpu::RenderPass<'pass>,
+        tex: &'pass VncTexture,
+        dest_x: f32,
+        dest_y: f32,
+        dest_w: f32,
+        dest_h: f32,
+    ) {
+        let vertices = quad_vertices(gpu, dest_x, dest_y, dest_w, dest_h);
+        gpu.queue.write_buffer(&self.cursor_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+        pass.set_pipeline(&self.cursor_pipeline);
+        pass.set_bind_group(0, &tex.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.cursor_vertex_buffer.slice(..));
+        pass.draw(0..VERTICES_PER_QUAD as u32, 0..1);
+    }
+}
+
+/// One screen-space rectangle as two triangles in NDC, UV-mapped to the
+/// whole texture -- the same conversion `RectRenderer::push_rect` uses.
+fn quad_vertices(gpu: &GpuState, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) -> [Vertex; VERTICES_PER_QUAD] {
+    let sw = gpu.config.width as f32;
+    let sh = gpu.config.height as f32;
+    let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
+
+    let p00 = to_ndc(dest_x, dest_y);
+    let p10 = to_ndc(dest_x + dest_w, dest_y);
+    let p01 = to_ndc(dest_x, dest_y + dest_h);
+    let p11 = to_ndc(dest_x + dest_w, dest_y + dest_h);
+    [
+        Vertex { position: p00, uv: [0.0, 0.0] },
+        Vertex { position: p10, uv: [1.0, 0.0] },
+        Vertex { position: p01, uv: [0.0, 1.0] },
+        Vertex { position: p10, uv: [1.0, 0.0] },
+        Vertex { position: p11, uv: [1.0, 1.0] },
+        Vertex { position: p01, uv: [0.0, 1.0] },
+    ]
 }

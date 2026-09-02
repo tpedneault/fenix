@@ -1,0 +1,76 @@
+# Vendored copy of vnc-rs 0.5.3 (MIT OR Apache-2.0), patched in via the
+# workspace root's `[patch.crates-io]`. See `PATCH.md` in this directory
+# for exactly what was changed and why -- keep that file in sync with any
+# further local change, so a future version bump can be re-applied
+# deliberately rather than rediscovered.
+#
+# Trimmed relative to the published manifest: `[dev-dependencies]` (the
+# upstream examples pull `minifb`, which this workspace never builds) and
+# upstream's `[profile.release]` (ignored outside a workspace root anyway,
+# and this workspace sets its own).
+
+[package]
+edition = "2021"
+name = "vnc-rs"
+version = "0.5.3"
+authors = [
+    "Jovi Hsu <jv.hsu@outlook.com>",
+    "Petr Beneš <petr.benes@gendigital.com>",
+    "Djamel TORCHE <djamel.torche@gmail.com>",
+]
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "An async implementation of VNC client side protocol"
+homepage = "https://github.com/HsuJv/vnc-rs"
+documentation = "https://docs.rs/vnc-rs"
+readme = "README.md"
+keywords = ["vnc"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/HsuJv/vnc-rs"
+
+[lib]
+name = "vnc"
+path = "src/lib.rs"
+
+[dependencies.async_io_stream]
+version = "0.3"
+
+[dependencies.flate2]
+version = "^1"
+
+[dependencies.futures]
+version = "0.3"
+
+[dependencies.thiserror]
+version = "^1"
+
+[dependencies.tokio-stream]
+version = "0.1"
+
+[dependencies.tokio-util]
+version = "0.7"
+features = ["compat"]
+
+[dependencies.tracing]
+version = "^0.1"
+features = ["log"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tokio]
+version = "^1"
+features = ["full"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.tokio]
+version = "^1"
+features = [
+    "sync",
+    "macros",
+    "io-util",
+    "rt",
+    "time",
+]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen-futures]
+version = "0.4"

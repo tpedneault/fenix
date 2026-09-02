@@ -31,18 +31,20 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use vnc::{ClientKeyEvent, ClientMouseEvent, PixelFormat, VncConnector, VncEncoding, VncEvent, VncError, X11Event};
 
-/// How often a *visible/focused* session asks the server for an
-/// incremental framebuffer update. 30Hz is plenty for a console/desktop
-/// VM over a LAN (this isn't video-conferencing) while staying cheap on
-/// an idle screen, since "incremental" means the server only actually
-/// sends data for what changed since the last request.
-pub const ACTIVE_REFRESH_MILLIS: u64 = 33;
+/// Minimum gap between one framebuffer update finishing and a
+/// *visible/focused* session asking for the next -- a floor, not a
+/// timer. `pump_events` keeps one request outstanding at a time, so the
+/// real rate is whatever the server can actually produce; this only
+/// stops a server that answers instantly (some reply to an incremental
+/// request with an empty update rather than holding it) from turning
+/// that into a busy loop. ~60Hz, i.e. below the point where the extra
+/// wait is perceptible.
+pub const ACTIVE_REFRESH_MILLIS: u64 = 16;
 
-/// How often a session no one is currently looking at polls instead --
-/// still frequent enough that switching to it never starts from a
-/// visibly stale frame, but ~15x cheaper in request/response overhead
-/// than the active rate for however long it stays unfocused. Set via
-/// `VncClient::set_active(false)`.
+/// The same floor for a session no one is currently looking at -- still
+/// frequent enough that switching to it never starts from a visibly
+/// stale frame, but far cheaper for however long it stays unfocused.
+/// Set via `VncClient::set_active(false)`.
 pub const IDLE_REFRESH_MILLIS: u64 = 500;
 
 /// One decoded update from the VM, handed to the caller's own background
@@ -63,6 +65,31 @@ pub enum VncFrame {
     /// another (the `CopyRect` encoding) -- cheaper than the server
     /// resending pixels it knows the client already has.
     Copy { dst: (u16, u16, u16, u16), src: (u16, u16, u16, u16) },
+    /// Every `Rect`/`Copy` since the last `UpdateEnd` formed one server
+    /// `FramebufferUpdate` message, and the framebuffer is now
+    /// self-consistent again.
+    ///
+    /// This is the *only* point at which it's correct to show the
+    /// framebuffer. RFB defines `CopyRect` against the framebuffer as it
+    /// was at the start of the update, so a frame presented partway
+    /// through one legitimately shows content in two places at once, or
+    /// regions that should already have been erased -- which is exactly
+    /// what "the VNC pane renders in torn chunks" turned out to be.
+    /// Requires the vendored `vnc-rs` patch (`vendor/vnc-rs/PATCH.md`);
+    /// the published crate decodes the message's rectangle count but
+    /// never surfaces the boundary.
+    UpdateEnd,
+    /// A new mouse cursor shape (the `CursorPseudo` encoding), as
+    /// tightly-packed BGRA plus the hotspot offset within it. `bgra` is
+    /// empty for a hidden/empty cursor.
+    ///
+    /// Requesting `CursorPseudo` is what stops the server from drawing
+    /// the cursor *into* the framebuffer, where every pointer move would
+    /// otherwise damage two regions (old position and new) and so keep a
+    /// dragging session's update stream permanently busy. The caller
+    /// draws this itself, at whatever position it last sent via
+    /// `send_pointer`.
+    Cursor { width: u16, height: u16, hotspot_x: u16, hotspot_y: u16, bgra: Vec<u8> },
     Bell,
     /// The server's clipboard changed. Only Latin-1 per RFB's own spec.
     ClipboardText(String),
@@ -240,6 +267,24 @@ impl Drop for VncClient {
 /// crate doesn't otherwise need; `Zrle`/`CopyRect`/`Raw` alone are
 /// already a good fit for a LAN-local VM console and `vnc-rs` decodes all
 /// three down to plain `VncEvent::RawImage`/`Copy` events regardless.
+///
+/// The three pseudo-encodings are each load-bearing, not nice-to-haves:
+///
+/// * `CursorPseudo` moves the mouse cursor out of the framebuffer and
+///   into a `VncFrame::Cursor` the caller draws itself. Without it the
+///   server composites the cursor into the image, so *every* pointer
+///   move damages two regions (old position and new) -- which on a
+///   desktop being dragged around means the update stream never goes
+///   idle, and every one of those updates costs a full decode and
+///   re-upload for a few cursor pixels.
+/// * `DesktopSizePseudo` is how a server announces a resolution change
+///   after connect. Without it `VncEvent::SetResolution` only ever fires
+///   once, from the initial handshake, and a guest that changes
+///   resolution mid-session would keep being decoded against a
+///   stale-sized framebuffer.
+/// * `LastRectPseudo` lets the server end an update without knowing its
+///   rectangle count up front; `vnc-rs` closes the update either way, so
+///   this only widens what `VncFrame::UpdateEnd` works against.
 async fn do_handshake(host: &str, port: u16) -> io::Result<vnc::VncClient> {
     let stream = TcpStream::connect((host, port)).await?;
     let connector = VncConnector::new(stream)
@@ -247,6 +292,9 @@ async fn do_handshake(host: &str, port: u16) -> io::Result<vnc::VncClient> {
         .add_encoding(VncEncoding::Zrle)
         .add_encoding(VncEncoding::CopyRect)
         .add_encoding(VncEncoding::Raw)
+        .add_encoding(VncEncoding::CursorPseudo)
+        .add_encoding(VncEncoding::DesktopSizePseudo)
+        .add_encoding(VncEncoding::LastRectPseudo)
         .allow_shared(true)
         .set_pixel_format(PixelFormat::bgra())
         .build()
@@ -283,20 +331,55 @@ fn vnc_err_to_io(err: VncError) -> io::Error {
 /// is also exactly the shape `vnc-rs`'s own doc example uses: one loop,
 /// `poll_event` plus a periodic `input(Refresh)`, never `recv_event`
 /// racing another task's `input`.
+///
+/// Keeps exactly *one* `FramebufferUpdateRequest` outstanding at a time,
+/// the same request/response flow control every other RFB client uses:
+/// ask once, wait for that update to arrive in full (`VncFrame::
+/// UpdateEnd`), then ask again. `refresh_millis` is a floor on how often
+/// to ask -- a minimum gap between one update completing and the next
+/// request going out -- not a timer that fires regardless.
+///
+/// This is deliberately not a fixed-interval poll. Firing every
+/// `ACTIVE_REFRESH_MILLIS` no matter whether the last request had been
+/// answered lets several overlapping requests pile up against a server
+/// that takes longer than that to answer, and gives this loop no idea
+/// which arriving rectangles belong to which update. Both matter: the
+/// pile-up wastes the server's time re-scanning, and the missing
+/// boundary is what let `fenix-gui` present half-finished frames (see
+/// `VncFrame::UpdateEnd`).
+///
+/// The one thing to be careful about: an *incremental* request goes
+/// unanswered for as long as nothing on the guest changes, which is
+/// correct and is what keeps an idle session cheap -- but it means the
+/// only thing that can un-stick this loop is the server, so there is no
+/// timeout here to "retry" with. A genuinely dead connection surfaces as
+/// a read error from `poll_event` instead.
 async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame>, refresh_millis: Arc<AtomicU64>) {
-    /// Poll granularity: fine enough that the fastest configured refresh
-    /// rate (`ACTIVE_REFRESH_MILLIS`) is still timed accurately, coarse
-    /// enough not to spin the thread.
+    /// Poll granularity: fine enough to keep decode latency well under a
+    /// frame, coarse enough not to spin the thread.
     const POLL_MILLIS: u64 = 5;
-    let mut last_refresh = Instant::now();
+    // `vnc-rs` sends one `FramebufferUpdateRequest` of its own during the
+    // handshake, so an update is already in flight before this loop
+    // starts -- starting at `true` avoids immediately stacking a second
+    // request on top of it.
+    let mut awaiting_response = true;
+    let mut last_update_end = Instant::now();
     loop {
         match client.poll_event().await {
             Ok(Some(event)) => {
                 let Some(frame) = map_event(event) else { continue };
+                if matches!(frame, VncFrame::UpdateEnd) {
+                    awaiting_response = false;
+                    last_update_end = Instant::now();
+                }
                 let disconnected = matches!(frame, VncFrame::Disconnected(_));
                 if frame_tx.send(frame).is_err() || disconnected {
                     return;
                 }
+                // Keep draining: one `FramebufferUpdate` decodes into many
+                // events, and sleeping between each would stretch a single
+                // update across many poll intervals for no reason.
+                continue;
             }
             Ok(None) => {}
             Err(err) => {
@@ -305,11 +388,11 @@ async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame
             }
         }
 
-        if last_refresh.elapsed() >= Duration::from_millis(refresh_millis.load(Ordering::Relaxed)) {
+        if !awaiting_response && last_update_end.elapsed() >= Duration::from_millis(refresh_millis.load(Ordering::Relaxed)) {
             if client.input(X11Event::Refresh).await.is_err() {
                 return;
             }
-            last_refresh = Instant::now();
+            awaiting_response = true;
         }
 
         tokio::time::sleep(Duration::from_millis(POLL_MILLIS)).await;
@@ -318,15 +401,21 @@ async fn pump_events(client: vnc::VncClient, frame_tx: std_mpsc::Sender<VncFrame
 
 /// `None` for events this client never expects to receive, given the
 /// encodings/pixel format `do_handshake` requests: `SetPixelFormat` (we
-/// always set our own), `JpegImage` (we don't request `Tight`), and
-/// `SetCursor` (we don't request `CursorPseudo` -- the server draws its
-/// own cursor directly into the framebuffer image instead, which still
-/// shows up, just via ordinary `RawImage` updates).
+/// always set our own) and `JpegImage` (we don't request `Tight`).
+///
+/// `SetCursor`'s rect carries the hotspot in its `x`/`y` (not a position
+/// -- see `vnc-rs`'s own cursor decoder), and its image is already BGRA
+/// with the RFB bitmask folded into the alpha channel, so it maps
+/// straight onto `VncFrame::Cursor`.
 fn map_event(event: VncEvent) -> Option<VncFrame> {
     match event {
         VncEvent::SetResolution(screen) => Some(VncFrame::Resolution { width: screen.width, height: screen.height }),
         VncEvent::RawImage(rect, data) => Some(VncFrame::Rect { x: rect.x, y: rect.y, width: rect.width, height: rect.height, bgra: data }),
         VncEvent::Copy(dst, src) => Some(VncFrame::Copy { dst: (dst.x, dst.y, dst.width, dst.height), src: (src.x, src.y, src.width, src.height) }),
+        VncEvent::FramebufferUpdateEnd => Some(VncFrame::UpdateEnd),
+        VncEvent::SetCursor(rect, image) => {
+            Some(VncFrame::Cursor { width: rect.width, height: rect.height, hotspot_x: rect.x, hotspot_y: rect.y, bgra: image })
+        }
         VncEvent::Bell => Some(VncFrame::Bell),
         VncEvent::Text(text) => Some(VncFrame::ClipboardText(text)),
         VncEvent::Error(msg) => Some(VncFrame::Disconnected(msg)),
@@ -359,10 +448,28 @@ mod tests {
     }
 
     #[test]
-    fn map_event_ignores_pixel_format_jpeg_and_cursor_events() {
+    fn map_event_ignores_pixel_format_and_jpeg_events() {
         assert_eq!(map_event(VncEvent::SetPixelFormat(PixelFormat::bgra())), None);
         assert_eq!(map_event(VncEvent::JpegImage(vnc::Rect { x: 0, y: 0, width: 1, height: 1 }, vec![])), None);
-        assert_eq!(map_event(VncEvent::SetCursor(vnc::Rect { x: 0, y: 0, width: 1, height: 1 }, vec![])), None);
+    }
+
+    #[test]
+    fn map_event_translates_the_end_of_a_framebuffer_update() {
+        // The whole point of the vendored `vnc-rs` patch -- without this
+        // reaching the caller there's no way to know which rects formed
+        // one whole frame. See `VncFrame::UpdateEnd`.
+        assert_eq!(map_event(VncEvent::FramebufferUpdateEnd), Some(VncFrame::UpdateEnd));
+    }
+
+    #[test]
+    fn map_event_translates_a_cursor_taking_the_hotspot_from_the_rects_position() {
+        // `SetCursor`'s rect carries the hotspot in `x`/`y` rather than a
+        // screen position (see `vnc-rs`'s cursor decoder) -- getting this
+        // mapping backwards would offset every drawn cursor.
+        assert_eq!(
+            map_event(VncEvent::SetCursor(vnc::Rect { x: 3, y: 4, width: 16, height: 16 }, vec![7; 16 * 16 * 4])),
+            Some(VncFrame::Cursor { width: 16, height: 16, hotspot_x: 3, hotspot_y: 4, bgra: vec![7; 16 * 16 * 4] })
+        );
     }
 
     #[test]

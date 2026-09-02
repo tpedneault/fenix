@@ -62,6 +62,11 @@ impl CommandRegistry {
             cmd_search_replace_project,
         );
         registry.register("file.find", "Open a file by typing its path (bypasses .gitignore)", cmd_file_find);
+        registry.register(
+            "file.explore",
+            "Browse the filesystem from your home directory; open a file directly, or fuzzy-search recursively from wherever you navigate to",
+            cmd_file_explore,
+        );
         registry.register("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", cmd_file_find_all);
         registry.register("file.recent", "Fuzzy-find a recently-opened file", cmd_file_recent);
         registry.register("file.rename", "Rename the current file on disk", cmd_file_rename);
@@ -88,6 +93,9 @@ impl CommandRegistry {
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
         registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
+        registry.register("pdf.documents", "Open a document from the config.ini [documents] index", cmd_pdf_documents);
+        registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
+        registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
         registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
         registry.register("pdf.zoom_in", "Zoom the focused PDF session in", cmd_pdf_zoom_in);
         registry.register("pdf.zoom_out", "Zoom the focused PDF session out", cmd_pdf_zoom_out);
@@ -244,6 +252,10 @@ fn cmd_file_find(ctx: &mut CommandCtx) {
     ctx.app.start_find_file_prompt();
 }
 
+fn cmd_file_explore(ctx: &mut CommandCtx) {
+    ctx.app.start_explore_from_home();
+}
+
 fn cmd_file_find_all(ctx: &mut CommandCtx) {
     ctx.app.picker_find_file_all();
 }
@@ -330,6 +342,18 @@ fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
 
 fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
     ctx.app.pdf_prev_page();
+}
+
+fn cmd_pdf_documents(ctx: &mut CommandCtx) {
+    ctx.app.start_document_picker();
+}
+
+fn cmd_pdf_first_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_first_page();
+}
+
+fn cmd_pdf_last_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_last_page();
 }
 
 fn cmd_pdf_goto_page(ctx: &mut CommandCtx) {

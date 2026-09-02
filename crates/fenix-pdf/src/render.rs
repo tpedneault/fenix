@@ -290,21 +290,44 @@ fn build_context(chars: &[char], char_index: usize, match_len: usize) -> String 
 }
 
 /// Renders one page to a BGRA pixel buffer at exactly `target_w` x
-/// `target_h` -- `PdfBitmapFormat::default()` (what `PdfPage::render`
-/// uses when not told otherwise) is already `BGRA`, matching
-/// `wgpu::TextureFormat::Bgra8Unorm` with no channel-swizzle needed,
-/// same reasoning `fenix_vnc::do_handshake`'s `PixelFormat::bgra()`
-/// already established for the VNC pipeline this mirrors. `target_w`/
-/// `target_h` is *not* necessarily aspect-correct for the page on its
-/// own -- pdfium stretches the page content to fill exactly the pixel
-/// box it's asked for, so getting an undistorted fit/zoom depends on the
-/// *caller* computing an aspect-correct `target_w`/`target_h` in the
-/// first place (see `coords::fit_page_size`/`fit_width_size`/
-/// `percent_size`), not on anything this function does.
+/// `target_h`, matching `wgpu::TextureFormat::Bgra8Unorm` with no
+/// channel-swizzle needed, same reasoning `fenix_vnc::do_handshake`'s
+/// `PixelFormat::bgra()` already established for the VNC pipeline this
+/// mirrors.
+///
+/// The `set_reverse_byte_order(false)` is what actually makes that true,
+/// and is not optional: `PdfRenderConfig::new()` (which the convenience
+/// `PdfPage::render` uses internally, with no way to opt out) defaults
+/// that flag to *true*, i.e. it asks pdfium for `FPDF_REVERSE_BYTE_
+/// ORDER` so `pdfium-render`'s own `image` interop gets RGBA. The
+/// bitmap still *reports* `PdfBitmapFormat::BGRA` in that case --
+/// `FPDFBitmap_GetFormat` describes how the buffer was allocated, not
+/// the order pdfium ended up writing into it -- so the mismatch is
+/// completely silent, and `as_raw_bytes()` hands back RGBA bytes that
+/// look like a valid BGRA buffer. Uploaded to a `Bgra8Unorm` texture
+/// that swaps red and blue on every pixel: a blue cover page renders
+/// orange. Rendering through an explicit config with the flag off (into
+/// a bitmap sized exactly like `PdfPage::render` would have sized it) is
+/// what keeps this crate's documented "always BGRA" contract honest, at
+/// no cost -- pdfium writes the bytes we want directly, rather than this
+/// crate swizzling a multi-megabyte buffer after the fact.
+///
+/// `target_w`/`target_h` is *not* necessarily aspect-correct for the
+/// page on its own -- pdfium stretches the page content to fill exactly
+/// the pixel box it's asked for, so getting an undistorted fit/zoom
+/// depends on the *caller* computing an aspect-correct `target_w`/
+/// `target_h` in the first place (see `coords::fit_page_size`/`fit_width_
+/// size`/`percent_size`), not on anything this function does.
 fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32) -> Result<(u32, u32, Vec<u8>, f32, f32), String> {
     let page = doc.pages().get(page_index as i32).map_err(|err| format!("{err:?}"))?;
     let (page_width_pts, page_height_pts) = (page.width().value, page.height().value);
-    let bitmap = page.render(target_w.max(1) as i32, target_h.max(1) as i32, None).map_err(|err| format!("{err:?}"))?;
+    let (target_w, target_h) = (target_w.max(1) as i32, target_h.max(1) as i32);
+    let mut bitmap = PdfBitmap::empty(target_w, target_h, PdfBitmapFormat::BGRA).map_err(|err| format!("{err:?}"))?;
+    let config = PdfRenderConfig::new()
+        .set_target_width(target_w)
+        .set_target_height(target_h)
+        .set_reverse_byte_order(false);
+    page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|err| format!("{err:?}"))?;
     let width = bitmap.width().max(0) as u32;
     let height = bitmap.height().max(0) as u32;
     Ok((width, height, bitmap.as_raw_bytes(), page_width_pts, page_height_pts))

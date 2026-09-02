@@ -71,6 +71,14 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// Frequently-read documents, `(display name, path)`, in the order
+    /// they appear in `config.ini`'s `[documents]` section -- what the
+    /// reader's `SPC r f` index picks from. Same numbered-key `docN =
+    /// NAME|PATH` convention (and same `Vec`-not-`Option` reasoning) as
+    /// `mib_roots`; the path can be any file Fenix can open, not just a
+    /// PDF, though a reference shelf is mostly PDFs in practice.
+    /// Hand-authored by the user, never written by the app itself.
+    pub documents: Vec<(String, PathBuf)>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -103,6 +111,7 @@ impl Config {
         let mib = sections.get("mib");
         let jira = sections.get("jira");
         let vnc = sections.get("vnc");
+        let documents = sections.get("documents");
 
         Ok(Self {
             path,
@@ -122,6 +131,7 @@ impl Config {
             jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
+            documents: documents.map(parse_documents).unwrap_or_default(),
         })
     }
 
@@ -148,6 +158,7 @@ impl Config {
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
             vnc_hosts: Vec::new(),
+            documents: Vec::new(),
         })
     }
 
@@ -219,6 +230,11 @@ impl Config {
         for (i, (name, host, port)) in self.vnc_hosts.iter().enumerate() {
             out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));
         }
+        out.push('\n');
+        out.push_str("[documents]\n");
+        for (i, (name, doc_path)) in self.documents.iter().enumerate() {
+            out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
+        }
         std::fs::write(&self.path, out)
     }
 
@@ -262,6 +278,16 @@ fn parse_mib_roots(section: &std::collections::BTreeMap<String, String>) -> Vec<
 /// than 3 `|`-separated fields, or an unparsable port is silently
 /// skipped -- same "a bad entry loses only itself" posture every other
 /// field in this file already has.
+/// Parses the `[documents]` section's `doc1 = NAME|PATH`, `doc2 = ...`
+/// numbered keys into an ordered `(name, path)` list -- the same shape
+/// and reasoning as `parse_mib_roots`, just a different key prefix and a
+/// user-facing display name rather than an internal label. `|` splits
+/// name from path (not `:`, which Windows paths contain); a key that
+/// isn't `docN`, or a value with no `|`, is silently skipped.
+fn parse_documents(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
+    parse_pair_list(section, "doc").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect()
+}
+
 fn parse_vnc_hosts(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, String, u16)> {
     let mut hosts: Vec<(usize, String, String, u16)> = section
         .iter()
@@ -300,6 +326,53 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("fenix-config-test-{name}-{}-{n}.ini", std::process::id()))
+    }
+
+    #[test]
+    fn documents_are_parsed_in_ordinal_order_not_key_string_order() {
+        let path = temp_path("documents");
+        std::fs::write(
+            &path,
+            "[documents]\ndoc2 = Time Codes|/refs/301x0b4.pdf\ndoc10 = Tenth|/refs/tenth.pdf\ndoc1 = Space Packet Protocol|C:/refs/133x0b2e2.pdf\n",
+        )
+        .unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["Space Packet Protocol", "Time Codes", "Tenth"]);
+        // A Windows path keeps its drive-letter colon -- `|`, not `:`,
+        // is what splits the name from the path.
+        assert_eq!(config.documents[0].1, PathBuf::from("C:/refs/133x0b2e2.pdf"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_document_entry_with_no_pipe_is_skipped_without_losing_the_others() {
+        let path = temp_path("documents_bad");
+        std::fs::write(&path, "[documents]\ndoc1 = Good|/refs/a.pdf\ndoc2 = no-pipe-here\ndoc3 = Also Good|/refs/b.pdf\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["Good", "Also Good"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn documents_round_trip_through_save_and_load() {
+        let path = temp_path("documents_round_trip");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.documents = vec![
+            ("Space Packet Protocol".to_string(), PathBuf::from("C:/refs/133x0b2e2.pdf")),
+            ("Notes".to_string(), PathBuf::from("/refs/notes.md")),
+        ];
+
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+
+        assert_eq!(reloaded.documents, config.documents);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

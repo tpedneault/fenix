@@ -24,6 +24,19 @@ pub struct PdfTexture {
     bind_group: wgpu::BindGroup,
 }
 
+impl PdfTexture {
+    /// This texture's own pixel size, so a caller can tell whether the
+    /// crop it's about to upload still fits the texture it already has
+    /// (the common case -- a pan moves the crop's *origin*, never its
+    /// size) or genuinely needs a new one from `PdfPipeline::create_
+    /// texture`. Without this a pan recreated a multi-megabyte texture
+    /// and its bind group on every keypress just to upload the same
+    /// number of bytes into it.
+    pub fn size(&self) -> (u32, u32) {
+        (self.texture.width(), self.texture.height())
+    }
+}
+
 /// Draws a rendered PDF page as a textured quad -- a structural duplicate
 /// of `vnc_texture::VncPipeline` (same shader-embedding convention, same
 /// NDC-space quad math, same `wgpu::Queue`-driven upload-then-draw

@@ -6,6 +6,13 @@ members = ["crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-conf
 version = "0.0.1"
 edition = "2021"
 
+# `fenix-vnc` needs to know where one server `FramebufferUpdate` message
+# ends, which the published crate decodes but never surfaces -- without it
+# a client can't present whole frames or pace its update requests. The
+# vendored copy adds that one event; see `vendor/vnc-rs/PATCH.md`.
+[patch.crates-io]
+vnc-rs = { path = "vendor/vnc-rs" }
+
 [profile.release]
 lto = true
 codegen-units = 1
