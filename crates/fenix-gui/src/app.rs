@@ -3289,6 +3289,22 @@ struct FramePlacement {
     maximized: bool,
 }
 
+/// Whether a freshly measured window layout is worth writing to disk.
+///
+/// An empty measurement means there was nothing to measure -- a
+/// headless run, or an exit before the window ever came up -- and
+/// recording it would wipe a real arrangement off disk.
+///
+/// The unchanged check matters more than it looks. `Config::save`
+/// regenerates the whole file from struct state, so it drops any
+/// comments and hand-formatting in `config.ini`. That was already true
+/// of every other `save` call, but those only fire when you
+/// deliberately change a setting; this one would otherwise fire on
+/// every single exit.
+fn layout_worth_saving(measured: &[fenix_config::WindowLayout], saved: &[fenix_config::WindowLayout]) -> bool {
+    !measured.is_empty() && measured != saved
+}
+
 impl From<fenix_config::WindowLayout> for FramePlacement {
     fn from(layout: fenix_config::WindowLayout) -> Self {
         Self {
@@ -4614,7 +4630,7 @@ impl App {
                 })
             })
             .collect();
-        if layouts.is_empty() {
+        if !layout_worth_saving(&layouts, &self.config.windows) {
             return;
         }
         self.config.windows = layouts;
@@ -17285,6 +17301,18 @@ mod tests {
         app.save_window_layout();
 
         assert_eq!(app.config.windows, saved);
+    }
+
+    #[test]
+    fn a_window_layout_is_only_written_when_it_actually_changed() {
+        let one = fenix_config::WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: false };
+        let moved = fenix_config::WindowLayout { x: 40, y: 0, width: 800, height: 600, maximized: false };
+
+        assert!(layout_worth_saving(&[one], &[]), "first run, nothing recorded yet");
+        assert!(layout_worth_saving(&[moved], &[one]), "the window moved");
+        assert!(layout_worth_saving(&[one, moved], &[one]), "a second window was opened");
+        assert!(!layout_worth_saving(&[one], &[one]), "nothing moved -- don't reformat config.ini for nothing");
+        assert!(!layout_worth_saving(&[], &[one]), "nothing measured must never wipe a real arrangement");
     }
 
     #[test]
