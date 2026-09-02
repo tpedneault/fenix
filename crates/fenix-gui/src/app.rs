@@ -27,7 +27,7 @@ use crate::completion;
 use crate::dashboard;
 use crate::docker_panel;
 use crate::git_panel;
-use crate::gpu::GpuState;
+use crate::gpu::{GpuContext, GpuState};
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
@@ -3237,6 +3237,11 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
 
 pub struct App {
     window: Option<Arc<Window>>,
+    /// The wgpu instance/adapter/device/queue every frame shares -- see
+    /// `GpuContext`'s own doc comment for why there's one of these
+    /// rather than one per window. `None` until the first `resumed`,
+    /// same posture as `gpu`/`text`/`bg_rect`.
+    gpu_context: Option<GpuContext>,
     gpu: Option<GpuState>,
     text: Option<TextPipeline>,
     /// Opaque panel backgrounds (modeline bar, which-key popup) and the
@@ -4042,6 +4047,7 @@ impl App {
 
         Self {
             window: None,
+            gpu_context: None,
             gpu: None,
             text: None,
             bg_rect: None,
@@ -15687,7 +15693,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let window =
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
-        let gpu = pollster::block_on(GpuState::new(window.clone()));
+        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
         // No priming call needed for pane content -- `redraw()` populates
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
@@ -15701,6 +15707,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let pdf_pipeline = PdfPipeline::new(&gpu);
 
         self.window = Some(window);
+        self.gpu_context = Some(gpu_context);
         self.gpu = Some(gpu);
         self.text = Some(text);
         self.bg_rect = Some(bg_rect);
