@@ -5014,6 +5014,53 @@ impl App {
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
     }
 
+    /// Whether the *focused* pane currently belongs to one of the app's
+    /// long-lived side sessions (VNC/PDF/Docker/Git/Jira) rather than
+    /// just showing an ordinary file/scratch buffer -- checked the same
+    /// way each session already answers "is this my pane" for its own
+    /// purposes (`vnc_session_key_for_pane`/`pdf_session_key_for_pane`/
+    /// `docker_focused_role`/`git_focused_role`/`jira_focused_role`), so
+    /// this adds no new bookkeeping, just combines what already exists.
+    /// See `open_buffer_in_focused_pane`'s doc comment for why this
+    /// matters.
+    fn focused_pane_holds_a_tracked_session(&self) -> bool {
+        let focused = self.focused_pane_id();
+        self.vnc_session_key_for_pane(focused).is_some()
+            || self.pdf_session_key_for_pane(focused).is_some()
+            || self.docker_focused_role().is_some()
+            || self.git_focused_role().is_some()
+            || self.jira_focused_role().is_some()
+    }
+
+    /// Points the focused pane at `id` -- unless the focused pane
+    /// currently belongs to a tracked session (VNC/PDF/Docker/Git/
+    /// Jira), in which case `id` opens in a brand-new workspace instead
+    /// (mirroring `App::new_workspace`'s own "seed a new workspace with
+    /// this buffer" logic) and the session's own pane is left completely
+    /// untouched.
+    ///
+    /// Every "open this wherever I'm looking" action (`SPC SPC`, `SPC b
+    /// b`, `SPC b X`, opening a document/dashboard/dired listing, ...)
+    /// goes through this instead of calling `set_pane_content` on
+    /// `focused_pane_id()` directly. Before this existed, none of them
+    /// checked what the focused pane already held: reported bug was
+    /// "focus a VNC pane, open a file with `SPC SPC`, and the VNC pane
+    /// silently starts showing that file instead." The session itself
+    /// (socket, reader thread, framebuffer) kept running with no pane
+    /// left displaying it, so `SPC v v` on the same host found its own
+    /// `session.pane` unchanged and landed right back on that same pane
+    /// -- which was still showing the hijacked file, not VNC, making it
+    /// look like reopening the session had silently done nothing.
+    fn open_buffer_in_focused_pane(&mut self, id: BufferId) {
+        if self.focused_pane_holds_a_tracked_session() {
+            let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+            self.workspaces.new_workspace(id, cursor);
+        } else {
+            let focused = self.focused_pane_id();
+            self.set_pane_content(focused, id);
+        }
+    }
+
     /// Re-derives `project_root` for the focused buffer -- called every
     /// time a pane's buffer changes, not just at startup (`with_file`
     /// does the equivalent inline before `self` exists to call this on).
@@ -5704,8 +5751,7 @@ impl App {
         let id = self.buffers.open_explorer(&text);
         self.dired_states.insert(id, state);
         self.dired_lines.insert(id, lines);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.wake_caret();
     }
 
@@ -6020,8 +6066,7 @@ impl App {
             return;
         }
         let id = self.buffers.open_path(path);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(path);
         self.main_view = MainView::Editor;
@@ -6526,10 +6571,7 @@ impl App {
         let cursor = Cursor::at_start();
         match placement {
             PdfPlacement::NewWorkspace => self.workspaces.new_workspace(buffer, cursor),
-            PdfPlacement::FocusedPane => {
-                let focused = self.focused_pane_id();
-                self.set_pane_content(focused, buffer);
-            }
+            PdfPlacement::FocusedPane => self.open_buffer_in_focused_pane(buffer),
         }
         let workspace_index = self.workspaces.active_index();
         let pane = self.focused_pane_id();
@@ -7826,8 +7868,7 @@ impl App {
     /// view exactly as it was built for.
     fn mib_open_detail(&mut self, text: &str) {
         let id = self.buffers.open_text_view(text);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.main_view = MainView::Editor;
         self.wake_caret();
     }
@@ -8711,8 +8752,7 @@ impl App {
     /// picker`, there's no path to resolve/read; the buffer already
     /// exists in the registry).
     fn switch_focused_to_buffer(&mut self, id: BufferId) {
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.buffers.touch(id);
         self.refresh_project_root();
         self.main_view = MainView::Editor;
@@ -8888,8 +8928,7 @@ impl App {
     /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
     pub(crate) fn new_scratch_buffer(&mut self) {
         let id = self.buffers.open_scratch();
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -8904,8 +8943,7 @@ impl App {
         let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
         let id = self.buffers.open_dashboard(&dashboard.text);
         self.dashboard_lines.insert(id, dashboard.lines);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -11334,8 +11372,7 @@ impl App {
             return;
         }
         let id = self.buffers.open_path(path);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(path);
         self.main_view = MainView::Editor;
@@ -11688,9 +11725,8 @@ impl App {
     /// where you were," not "visit a file," so those side effects don't
     /// apply.
     fn goto_jump_entry(&mut self, entry: JumpEntry, linewise: bool) {
-        let focused = self.focused_pane_id();
         if entry.buffer != self.focused_buffer_id() {
-            self.set_pane_content(focused, entry.buffer);
+            self.open_buffer_in_focused_pane(entry.buffer);
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
@@ -11961,8 +11997,7 @@ impl App {
         }
 
         let id = self.buffers.open_path(&path);
-        let focused = self.focused_pane_id();
-        self.set_pane_content(focused, id);
+        self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(&path);
 
@@ -22929,6 +22964,63 @@ mod tests {
         // One more workspace than after the first open (the one created
         // by `new_workspace` above), not two more (no second session).
         assert_eq!(app.workspaces.len(), workspace_count_after_first + 1);
+    }
+
+    #[test]
+    fn open_file_from_picker_does_not_hijack_a_focused_tracked_session_pane() {
+        // Reproduces the reported bug ("switch away from a VNC pane
+        // with SPC SPC, then can't switch back to it, and SPC v v does
+        // nothing") using the Docker panel as the tracked session --
+        // far cheaper to construct in a test than a real VNC connection
+        // (see `open_vnc_session`'s own tests for why those stay
+        // live-verified instead), but it exercises the exact same guard
+        // (`open_buffer_in_focused_pane`/`focused_pane_holds_a_tracked_
+        // session`) VNC goes through, since neither cares which kind of
+        // session it is protecting.
+        let dir = TempDir::new("picker-vs-docker");
+        let file = dir.touch("notes.txt");
+
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_index;
+        let session_pane = app.docker_session.as_ref().unwrap().containers_pane;
+        let workspace_count_before = app.workspaces.len();
+
+        app.open_file_from_picker(&file);
+
+        // The file landed in a brand-new workspace, not on top of the
+        // Docker panel's own pane -- before the fix, this unconditionally
+        // called `set_pane_content` on the focused (Docker) pane instead.
+        assert_eq!(app.workspaces.len(), workspace_count_before + 1);
+        assert_ne!(app.workspaces.active_index(), session_workspace_index);
+        assert!(app.docker_session.is_some());
+
+        // Switching back to the session's own workspace/pane still
+        // shows Docker, not the file that was just opened -- this is
+        // the exact "SPC v v does nothing" symptom: before the fix, the
+        // session's pane would already be showing the hijacked buffer,
+        // so reopening it looked like it silently did nothing.
+        app.workspaces.switch_to_index(session_workspace_index);
+        app.windows_mut().focus(session_pane);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
+    }
+
+    #[test]
+    fn switch_focused_to_buffer_does_not_hijack_a_focused_tracked_session_pane() {
+        let mut app = App::with_file(None);
+        let scratch = app.buffers.open_scratch();
+        app.open_docker_panel();
+        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_index;
+        let session_pane = app.docker_session.as_ref().unwrap().containers_pane;
+        let workspace_count_before = app.workspaces.len();
+
+        app.switch_focused_to_buffer(scratch);
+
+        assert_eq!(app.workspaces.len(), workspace_count_before + 1);
+        assert_ne!(app.workspaces.active_index(), session_workspace_index);
+        app.workspaces.switch_to_index(session_workspace_index);
+        app.windows_mut().focus(session_pane);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
     }
 
     #[test]
