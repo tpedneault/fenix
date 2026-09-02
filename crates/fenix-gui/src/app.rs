@@ -3157,7 +3157,6 @@ impl WorkspaceList {
     fn rename_active(&mut self, name: String) {
         self.workspaces[self.active].name = name;
     }
-
     /// Every pane in *every* workspace here, not just the active one --
     /// what tearing down a whole frame needs (`App::close_sessions_in_
     /// active_frame`). A PDF or VNC session opens in a workspace of its
