@@ -125,6 +125,12 @@ impl CommandRegistry {
         registry.register("window.cycle", "Cycle focus to the next window", cmd_cycle_window);
         registry.register("window.close", "Close the focused window", cmd_close_window);
         registry.register("window.only", "Close every window except the focused one", cmd_only_window);
+        // "Frame" is an OS window; "window" above is a split inside one
+        // (see `app::FrameState`'s own doc comment on the naming).
+        registry.register("frame.new", "Open another OS window, on the next free monitor", cmd_new_frame);
+        registry.register("frame.close", "Close the focused OS window", cmd_close_frame);
+        registry.register("frame.cycle", "Cycle focus to the next OS window", cmd_cycle_frame);
+        registry.register("frame.only", "Close every OS window except the focused one", cmd_only_frame);
         registry.register("window.balance", "Reset every split ratio to 0.5", cmd_balance_windows);
         registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
@@ -470,6 +476,22 @@ fn cmd_close_window(ctx: &mut CommandCtx) {
 
 fn cmd_only_window(ctx: &mut CommandCtx) {
     ctx.app.only_window();
+}
+
+fn cmd_new_frame(ctx: &mut CommandCtx) {
+    ctx.app.new_frame(ctx.event_loop);
+}
+
+fn cmd_close_frame(ctx: &mut CommandCtx) {
+    ctx.app.close_frame(ctx.event_loop);
+}
+
+fn cmd_cycle_frame(ctx: &mut CommandCtx) {
+    ctx.app.cycle_frame();
+}
+
+fn cmd_only_frame(ctx: &mut CommandCtx) {
+    ctx.app.only_frame();
 }
 
 fn cmd_balance_windows(ctx: &mut CommandCtx) {

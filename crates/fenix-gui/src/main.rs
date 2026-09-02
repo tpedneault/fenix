@@ -42,13 +42,20 @@ fn main() -> anyhow::Result<()> {
         ipc::Role::Standalone => {}
     }
 
-    // `App::new` seeds its initial buffer from `args[0]` itself (via
-    // its own `env::args().nth(1)` read); anything beyond that (e.g.
-    // Explorer's "Open With" on multiple selected files) opens as
-    // extra buffers right after startup, same landing spot an IPC
-    // hand-off's files use (`App::apply_open_files`).
-    let mut app = App::new(proxy);
-    for extra in args.iter().skip(1) {
+    // This launch turned out to be the only one running, so there's
+    // nobody to hand `--new-window` to and no window to add one
+    // alongside -- the window this launch is about to open *is* the
+    // new one. The flag is dropped here along with any other flag, so
+    // it can't be mistaken for a file to open.
+    let files: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
+
+    // `App::new` seeds its initial buffer from the first file itself;
+    // anything beyond that (e.g. Explorer's "Open With" on multiple
+    // selected files) opens as extra buffers right after startup, same
+    // landing spot an IPC hand-off's files use
+    // (`App::apply_open_files`).
+    let mut app = App::new(proxy, files.first().map(|arg| arg.to_string()));
+    for extra in files.iter().skip(1) {
         app.open_startup_file(Path::new(extra));
     }
     event_loop.run_app(&mut app)?;

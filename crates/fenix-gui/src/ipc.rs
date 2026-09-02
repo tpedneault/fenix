@@ -73,7 +73,7 @@ fn negotiate_at(addr: SocketAddr, args: &[String]) -> Role {
 }
 
 /// One line per path, then closes the connection -- the server reads
-/// to EOF and splits on `\n` (see `parse_paths`). `false` on any
+/// to EOF and splits on `\n` (see `parse_request`). `false` on any
 /// failure (nothing listening, or it stopped listening mid-connect),
 /// which `negotiate_at` treats as "there wasn't really a live instance
 /// after all."
@@ -87,12 +87,41 @@ fn send_to(addr: SocketAddr, args: &[String]) -> bool {
     stream.write_all(payload.as_bytes()).is_ok()
 }
 
-/// Splits a received payload into its file paths -- blank lines
-/// dropped, so an empty payload (a bare relaunch with no file
-/// arguments, just meant to focus the existing window) yields an empty
-/// list rather than one blank entry.
-fn parse_paths(raw: &str) -> Vec<String> {
-    raw.lines().map(str::to_string).filter(|l| !l.is_empty()).collect()
+/// What one hand-off is asking the running instance to do.
+#[derive(Debug, PartialEq)]
+pub struct Request {
+    /// Whether the launch passed `--new-window`: open another OS window
+    /// for these files rather than putting them in whichever window is
+    /// already focused. What makes a desktop shortcut on a second
+    /// monitor add a frame to the running editor instead of jumping
+    /// focus back to the first monitor.
+    pub new_window: bool,
+    pub paths: Vec<String>,
+}
+
+/// The flag a launch passes to ask for its own window.
+pub const NEW_WINDOW_FLAG: &str = "--new-window";
+
+/// Splits a received payload into its request. Blank lines are
+/// dropped, so an empty payload (a bare relaunch with no arguments,
+/// just meant to focus the existing window) yields an empty path list
+/// rather than one blank entry.
+///
+/// Anything else beginning with `-` is dropped too rather than being
+/// taken for a filename: an unrecognized flag turning into an attempt
+/// to open a file called `--colour` is a worse outcome than ignoring
+/// it, and a real path starting with a dash can still be passed as
+/// `./-weird.txt`.
+pub fn parse_request(raw: &str) -> Request {
+    let mut request = Request { new_window: false, paths: Vec::new() };
+    for line in raw.lines().filter(|line| !line.is_empty()) {
+        if line == NEW_WINDOW_FLAG {
+            request.new_window = true;
+        } else if !line.starts_with('-') {
+            request.paths.push(line.to_string());
+        }
+    }
+    request
 }
 
 /// Spawns the background thread that accepts hand-offs from later
@@ -103,8 +132,9 @@ fn parse_paths(raw: &str) -> Vec<String> {
 /// already uses (`GitSession`'s poller, `jira_sync_issues`, the
 /// terminal's async spawn, ...). Deliberately thin and not unit tested
 /// on its own (spawning a real thread and blocking on real accepted
-/// sockets isn't something a unit test should do) -- `parse_paths` and
-/// `negotiate_at` carry the logic that's actually worth pinning down.
+/// sockets isn't something a unit test should do) -- `parse_request`
+/// and `negotiate_at` carry the logic that's actually worth pinning
+/// down.
 pub fn spawn_accept_loop(listener: TcpListener, proxy: EventLoopProxy<FenixUserEvent>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -113,7 +143,13 @@ pub fn spawn_accept_loop(listener: TcpListener, proxy: EventLoopProxy<FenixUserE
             if stream.read_to_string(&mut buf).is_err() {
                 continue;
             }
-            let _ = proxy.send_event(FenixUserEvent::OpenFiles(parse_paths(&buf)));
+            let request = parse_request(&buf);
+            let event = if request.new_window {
+                FenixUserEvent::OpenFilesInNewFrame(request.paths)
+            } else {
+                FenixUserEvent::OpenFiles(request.paths)
+            };
+            let _ = proxy.send_event(event);
         }
     });
 }
@@ -133,13 +169,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_paths_splits_on_newlines_and_drops_blank_lines() {
-        assert_eq!(parse_paths("a\nb\n\nc\n"), vec!["a", "b", "c"]);
+    fn parse_request_splits_on_newlines_and_drops_blank_lines() {
+        assert_eq!(parse_request("a\nb\n\nc\n").paths, vec!["a", "b", "c"]);
     }
 
     #[test]
-    fn parse_paths_of_an_empty_payload_is_an_empty_list() {
-        assert!(parse_paths("").is_empty());
+    fn parse_request_of_an_empty_payload_asks_for_nothing() {
+        let request = parse_request("");
+        assert!(request.paths.is_empty());
+        assert!(!request.new_window);
+    }
+
+    #[test]
+    fn parse_request_recognizes_the_new_window_flag_and_keeps_the_paths() {
+        let request = parse_request("--new-window\nC:/notes.md\n");
+        assert!(request.new_window);
+        assert_eq!(request.paths, vec!["C:/notes.md"]);
+    }
+
+    #[test]
+    fn parse_request_asks_for_a_window_even_with_no_files_to_put_in_it() {
+        let request = parse_request("--new-window\n");
+        assert!(request.new_window);
+        assert!(request.paths.is_empty());
+    }
+
+    #[test]
+    fn parse_request_drops_an_unrecognized_flag_instead_of_opening_a_file_named_after_it() {
+        let request = parse_request("--colour\nreal.txt\n");
+        assert!(!request.new_window);
+        assert_eq!(request.paths, vec!["real.txt"]);
     }
 
     #[test]
@@ -168,6 +227,6 @@ mod tests {
         assert!(matches!(role, Role::HandedOff));
 
         let received = rx.recv_timeout(Duration::from_secs(2)).expect("the accept thread should have received the payload");
-        assert_eq!(parse_paths(&received), vec!["C:\\file.tcl", "C:\\other.tcl"]);
+        assert_eq!(parse_request(&received).paths, vec!["C:\\file.tcl", "C:\\other.tcl"]);
     }
 }

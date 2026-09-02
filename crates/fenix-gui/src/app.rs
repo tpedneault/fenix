@@ -15,9 +15,11 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, 
 use fenix_vim::{Mode, ScrollTarget as VimScrollTarget, VimEvent, VimState, VisualKind};
 use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
@@ -1269,6 +1271,12 @@ pub enum FenixUserEvent {
     /// empty list means "just focus me," no file to open (a bare
     /// relaunch with no arguments).
     OpenFiles(Vec<String>),
+    /// The same hand-off, but from a launch that passed
+    /// `--new-window`: open another OS window first, then open these
+    /// paths in it. What makes `fenix --new-window` from a shortcut on
+    /// a second monitor add a frame to the running editor instead of
+    /// handing its files to the window already on the first one.
+    OpenFilesInNewFrame(Vec<String>),
     /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
     /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
     /// spawns it on -- same "can't afford to block the main thread"
@@ -3093,6 +3101,15 @@ impl WorkspaceList {
         &self.workspaces[self.active].name
     }
 
+    /// Every pane in *every* workspace here, not just the active one --
+    /// what tearing down a whole frame needs (`App::close_sessions_in_
+    /// active_frame`). A PDF or VNC session opens in a workspace of its
+    /// own, so "which sessions live in this frame" can't be answered
+    /// from the active workspace alone.
+    fn all_panes(&self) -> Vec<fenix_window::WindowId> {
+        self.workspaces.iter().flat_map(|workspace| workspace.windows.windows()).collect()
+    }
+
     fn len(&self) -> usize {
         self.workspaces.len()
     }
@@ -3235,6 +3252,36 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     )
 }
 
+/// Where `new_frame` should put the window it's about to create --
+/// see `App::next_frame_placement`. Each part is optional because a
+/// platform that won't report monitors or window positions leaves the
+/// decision to the window manager, which is a better answer than
+/// guessing coordinates.
+struct FramePlacement {
+    position: Option<PhysicalPosition<i32>>,
+    size: Option<PhysicalSize<u32>>,
+    /// Whether to maximize onto the monitor `position` lands on, once
+    /// the window exists.
+    maximized: bool,
+}
+
+/// Whether a desktop-coordinate point falls on `monitor`. A thin
+/// `MonitorHandle`-reading wrapper around `desktop_rect_contains`,
+/// which is where the actual rule lives -- a `MonitorHandle` can only
+/// come from a real event loop, so the geometry has to be reachable
+/// without one to be testable at all.
+fn monitor_contains(monitor: &MonitorHandle, point: (i32, i32)) -> bool {
+    desktop_rect_contains(monitor.position(), monitor.size(), point)
+}
+
+/// Point-in-rectangle over desktop coordinates. Left/top inclusive,
+/// right/bottom exclusive, so two monitors sharing an edge never both
+/// claim the same pixel -- the same convention
+/// `fenix_window::Rect::contains_point` already uses for panes.
+fn desktop_rect_contains(at: PhysicalPosition<i32>, size: PhysicalSize<u32>, point: (i32, i32)) -> bool {
+    point.0 >= at.x && point.0 < at.x + size.width as i32 && point.1 >= at.y && point.1 < at.y + size.height as i32
+}
+
 /// Everything that belongs to one OS window rather than to the editor
 /// as a whole: its winit window and swapchain, its own text and rect
 /// renderers, its own split layout and workspaces, and its own last-
@@ -3285,6 +3332,12 @@ pub struct App {
     frames: Vec<Option<FrameState>>,
     /// Index into `frames` of the frame whose state is live on `App`.
     active_frame: usize,
+    /// Frames asked for by a `fenix --new-window` hand-off that haven't
+    /// been opened yet, each with the paths to open in it (possibly
+    /// empty). Drained by `about_to_wait`, which -- unlike
+    /// `handle_user_event`, where the request arrives -- has the
+    /// `&ActiveEventLoop` that creating a window needs.
+    pending_frames: Vec<Vec<String>>,
     window: Option<Arc<Window>>,
     /// The wgpu instance/adapter/device/queue every frame shares -- see
     /// `GpuContext`'s own doc comment for why there's one of these
@@ -3994,8 +4047,11 @@ impl App {
     /// opened in a test just never has live-updating panes, which is
     /// already true today (nothing there needs a working `docker`
     /// either, per every existing "never fails" test in this file).
-    pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>) -> Self {
-        let file_arg = env::args().nth(1);
+    /// `file_arg` is the first *file* this launch was given, already
+    /// separated from any flags by `main` -- read there rather than
+    /// from `env::args()` here, because `fenix --new-window notes.md`
+    /// would otherwise try to open a file called `--new-window`.
+    pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>, file_arg: Option<String>) -> Self {
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
         // Recording lives here, not inside `with_file` -- `with_file` is
@@ -4100,6 +4156,7 @@ impl App {
             // `FrameState`. See the field's own doc comment.
             frames: vec![None],
             active_frame: 0,
+            pending_frames: Vec::new(),
             window: None,
             gpu_context: None,
             gpu: None,
@@ -4271,6 +4328,234 @@ impl App {
         };
         self.frames[self.active_frame] = Some(outgoing);
         self.active_frame = frame;
+    }
+
+    /// Raises the active frame's OS window and asks it to repaint --
+    /// what every command that moves editor focus between frames has to
+    /// end with, or the keystrokes would keep going to whichever window
+    /// the OS still considers foreground.
+    fn focus_active_frame_window(&self) {
+        if let Some(window) = &self.window {
+            window.focus_window();
+            window.request_redraw();
+        }
+    }
+
+    /// `SPC w n`: opens another OS window, showing the focused buffer in
+    /// a single pane, and moves focus to it. The two windows share
+    /// everything but layout -- one buffer list, one undo history, one
+    /// PDF worker -- so the same file can be open in both and edits show
+    /// up in each.
+    ///
+    /// A silent no-op before `resumed` has built the shared
+    /// `GpuContext`: there'd be no device to hang a second swapchain
+    /// off. That can't happen from a real keystroke (the window has to
+    /// exist for one to arrive) and headless tests use `test_add_frame`.
+    pub(crate) fn new_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(context) = &self.gpu_context else { return };
+
+        let placement = self.next_frame_placement(event_loop);
+        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        if let Some(position) = placement.position {
+            attrs = attrs.with_position(position);
+        }
+        if let Some(size) = placement.size {
+            attrs = attrs.with_inner_size(size);
+        }
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                self.set_error(format!("couldn't open a new window ({err})"));
+                return;
+            }
+        };
+
+        let gpu = context.attach(Arc::clone(&window));
+        let mut text = TextPipeline::new(&gpu);
+        text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
+        let bg_rect = RectRenderer::new(&gpu);
+        let popup_rect = RectRenderer::new(&gpu);
+        let caret_rect = RectRenderer::new(&gpu);
+
+        let buffer = self.focused_buffer_id();
+        let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.frames.push(Some(FrameState {
+            window: Some(Arc::clone(&window)),
+            gpu: Some(gpu),
+            text: Some(text),
+            bg_rect: Some(bg_rect),
+            popup_rect: Some(popup_rect),
+            caret_rect: Some(caret_rect),
+            workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
+            cursor_pos: None,
+        }));
+        let opened = self.frames.len() - 1;
+
+        // Maximizing *after* creation, with the window already
+        // positioned on the target monitor, is what makes it fill that
+        // monitor rather than whichever one the OS considers primary --
+        // and it respects the taskbar, which sizing to the raw monitor
+        // rectangle wouldn't.
+        if placement.maximized {
+            window.set_maximized(true);
+        }
+        self.activate_frame(opened);
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// Where a new frame should open: the first monitor, left to right,
+    /// that hasn't got a Fenix frame on it already -- so on a multi-
+    /// monitor desk `SPC w n` lands on the empty screen instead of on
+    /// top of the window you're already looking at.
+    ///
+    /// Falls back to a cascade offset from the active frame when every
+    /// monitor is occupied (or when the platform reports no monitors at
+    /// all), so a second frame on a single screen is still reachable and
+    /// doesn't land exactly on top of the first.
+    fn next_frame_placement(&self, event_loop: &ActiveEventLoop) -> FramePlacement {
+        let occupied: Vec<(i32, i32)> = (0..self.frames.len()).filter_map(|frame| self.frame_center(frame)).collect();
+        let mut monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+        monitors.sort_by_key(|monitor| monitor.position().x);
+
+        if let Some(free) = monitors.iter().find(|monitor| !occupied.iter().any(|&at| monitor_contains(monitor, at))) {
+            let size = free.size();
+            return FramePlacement {
+                position: Some(free.position()),
+                // A sensible restored-down size for a window that's
+                // about to be maximized onto this monitor.
+                size: Some(PhysicalSize::new(size.width / 2, size.height / 2)),
+                maximized: true,
+            };
+        }
+
+        const CASCADE: i32 = 48;
+        let position = self
+            .window
+            .as_ref()
+            .and_then(|window| window.inner_position().ok())
+            .map(|at| PhysicalPosition::new(at.x + CASCADE, at.y + CASCADE));
+        FramePlacement { position, size: self.window.as_ref().map(|window| window.inner_size()), maximized: false }
+    }
+
+    /// The centre of `frame`'s window in desktop coordinates -- how
+    /// "which monitor is this frame on" is decided. `None` for a frame
+    /// with no window yet, or on a platform that won't report window
+    /// positions.
+    fn frame_center(&self, frame: usize) -> Option<(i32, i32)> {
+        let window = self.frame_window(frame)?;
+        let at = window.inner_position().ok()?;
+        let size = window.inner_size();
+        Some((at.x + size.width as i32 / 2, at.y + size.height as i32 / 2))
+    }
+
+    /// `SPC w Q`: closes the focused frame. Closing the *last* frame is
+    /// quitting, so it goes through the ordinary unsaved-changes gate
+    /// rather than silently dropping your only window -- the same
+    /// posture `close_window` takes for the last pane.
+    pub(crate) fn close_frame(&mut self, event_loop: &ActiveEventLoop) {
+        if self.frames.len() <= 1 {
+            self.request_quit(event_loop);
+            return;
+        }
+        self.drop_frame(self.active_frame);
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// `SPC w O`: closes every frame except the focused one. The
+    /// frame-level counterpart of `SPC w o`, and equally permanent.
+    pub(crate) fn only_frame(&mut self) {
+        while self.frames.len() > 1 {
+            // Always a frame other than the active one: with more than
+            // one frame open, index 0 and the last index can't both be
+            // the active one.
+            let victim = if self.active_frame == 0 { self.frames.len() - 1 } else { 0 };
+            self.drop_frame(victim);
+        }
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// `SPC w W`: moves focus to the next frame, wrapping -- the
+    /// frame-level counterpart of `SPC w w`.
+    pub(crate) fn cycle_frame(&mut self) {
+        if self.frames.len() <= 1 {
+            return;
+        }
+        let next = (self.active_frame + 1) % self.frames.len();
+        self.activate_frame(next);
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// Removes `frame` for good: tears down the sessions living in it,
+    /// then drops its `FrameState`, which drops its `Window` (closing
+    /// the OS window) and its swapchain. Refuses on the last frame --
+    /// callers that mean "quit" say so explicitly.
+    ///
+    /// Whichever frame was active stays active, unless it's the one
+    /// being dropped; then focus lands on its neighbour. The live
+    /// fields are always handed to a frame that will still exist
+    /// *before* the removal, because `activate_frame` swaps against a
+    /// parked frame and the dying one is about to stop being one.
+    fn drop_frame(&mut self, frame: usize) {
+        if self.frames.len() <= 1 || frame >= self.frames.len() {
+            return;
+        }
+        let keep = self.active_frame;
+        self.activate_frame(frame);
+        self.close_sessions_in_active_frame();
+
+        let survivor = if keep == frame {
+            if frame == 0 {
+                1
+            } else {
+                frame - 1
+            }
+        } else {
+            keep
+        };
+        self.activate_frame(survivor);
+        self.frames.remove(frame);
+        if self.active_frame > frame {
+            self.active_frame -= 1;
+        }
+    }
+
+    /// Tears down every session whose panes live in the active frame --
+    /// called by `drop_frame` while the frame being dropped is still the
+    /// live one, because each session's own close path touches
+    /// `workspaces` and `buffers` and has to act on the layout it
+    /// actually belongs to.
+    ///
+    /// Without this, closing a frame would strand whatever it was
+    /// holding open: a pdfium worker still keeping a document loaded, a
+    /// live VNC socket, a Docker or Git session still polling in the
+    /// background -- each pointing at panes that no longer exist.
+    fn close_sessions_in_active_frame(&mut self) {
+        let panes = self.workspaces.all_panes();
+
+        let pdf_keys: Vec<PathBuf> = panes.iter().filter_map(|&pane| self.pdf_session_key_for_pane(pane)).collect();
+        for key in pdf_keys {
+            self.pdf_session_forget(&key);
+        }
+        let vnc_keys: Vec<String> = panes.iter().filter_map(|&pane| self.vnc_session_key_for_pane(pane)).collect();
+        for key in vnc_keys {
+            self.vnc_session_close(&key);
+        }
+        // One pane apiece is enough to identify these: a panel session
+        // builds all of its panes in one workspace, so they're either
+        // all in this frame or none of them are.
+        if self.docker_session.as_ref().is_some_and(|session| panes.contains(&session.containers_pane)) {
+            self.docker_session_close();
+        }
+        if self.git_session.as_ref().is_some_and(|session| panes.contains(&session.status_pane)) {
+            self.git_session_close();
+        }
+        if self.jira_session.as_ref().is_some_and(|session| panes.contains(&session.issues_pane)) {
+            self.jira_session_close();
+        }
     }
 
     fn windows(&self) -> &WindowTree<BufferId> {
@@ -11592,6 +11877,12 @@ impl App {
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
+            // Deferred rather than handled here: opening a window needs
+            // an `&ActiveEventLoop`, which `handle_user_event` doesn't
+            // take (it's deliberately the `ActiveEventLoop`-free half of
+            // `user_event`, so it stays directly testable). `about_to_
+            // wait` runs moments later and does have one.
+            FenixUserEvent::OpenFilesInNewFrame(paths) => self.pending_frames.push(paths),
             FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
             FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
             FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
@@ -15848,10 +16139,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let previous = self.active_frame;
         self.activate_frame(frame);
         match event {
-            // Same unsaved-changes check as `:q`/`SPC q q` -- the window's
-            // own X button shouldn't be able to silently discard work
-            // either.
-            WindowEvent::CloseRequested => self.request_quit(event_loop),
+            // The X button closes that one frame, exactly like
+            // `SPC w Q`. On the *last* frame that is quitting, so
+            // `close_frame` routes it through the same unsaved-changes
+            // check as `:q`/`SPC q q` -- the X button shouldn't be able
+            // to silently discard work either.
+            WindowEvent::CloseRequested => self.close_frame(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
@@ -15917,6 +16210,15 @@ impl ApplicationHandler<FenixUserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let mut needs_redraw = false;
+
+        // Frames requested by a `fenix --new-window` hand-off, which
+        // arrived somewhere without an `&ActiveEventLoop` to open a
+        // window with. See `App::pending_frames`.
+        for paths in std::mem::take(&mut self.pending_frames) {
+            self.new_frame(event_loop);
+            self.apply_open_files(paths);
+            needs_redraw = true;
+        }
 
         if now >= self.next_blink {
             self.blink_visible = !self.blink_visible;
@@ -16354,6 +16656,121 @@ mod tests {
                 "{pane:?} is claimed by two frames -- every App-level map keyed by pane id would be ambiguous"
             );
         }
+    }
+
+    #[test]
+    fn a_point_on_a_monitor_is_inside_its_rectangle_and_a_point_past_it_is_not() {
+        let at = PhysicalPosition::new(1920, 0);
+        let size = PhysicalSize::new(2560, 1440);
+        assert!(desktop_rect_contains(at, size, (1920, 0)), "top-left corner is inclusive");
+        assert!(desktop_rect_contains(at, size, (3000, 700)), "interior");
+        assert!(!desktop_rect_contains(at, size, (1919, 700)), "one pixel left belongs to the monitor next door");
+        assert!(!desktop_rect_contains(at, size, (4480, 700)), "right edge is exclusive");
+        assert!(!desktop_rect_contains(at, size, (3000, 1440)), "bottom edge is exclusive");
+    }
+
+    #[test]
+    fn a_monitor_to_the_left_of_the_origin_still_contains_its_own_points() {
+        // Windows puts a monitor left of the primary one at a negative
+        // x -- desktop coordinates are signed, and the arithmetic here
+        // has to survive that.
+        let at = PhysicalPosition::new(-1920, -200);
+        let size = PhysicalSize::new(1920, 1080);
+        assert!(desktop_rect_contains(at, size, (-1000, 0)));
+        assert!(!desktop_rect_contains(at, size, (10, 0)));
+    }
+
+    #[test]
+    fn dropping_a_frame_removes_it_and_leaves_focus_where_it_was() {
+        let mut app = App::with_file(None);
+        let stays = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), stays);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_the_active_frame_moves_focus_to_a_neighbour() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.focused_buffer_id(), first, "focus fell back to the surviving frame's own layout");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_a_frame_shifts_the_active_index_down_when_it_sat_after_the_one_removed() {
+        let mut app = App::with_file(None);
+        let a = app.buffers.open_scratch();
+        let b = app.buffers.open_scratch();
+        let second = app.test_add_frame(a);
+        let third = app.test_add_frame(b);
+        app.activate_frame(third);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 2);
+        assert_eq!(app.active_frame, 1, "the third frame is now at index 1");
+        assert_eq!(app.focused_buffer_id(), b, "and it is still the one being looked at");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_the_only_frame_is_refused() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+
+        app.drop_frame(0);
+
+        assert_eq!(app.frames.len(), 1, "closing the last frame is quitting, and goes through `close_frame` instead");
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn only_frame_closes_every_other_frame_and_keeps_the_focused_one() {
+        let mut app = App::with_file(None);
+        let a = app.buffers.open_scratch();
+        let b = app.buffers.open_scratch();
+        app.test_add_frame(a);
+        let third = app.test_add_frame(b);
+        app.activate_frame(third);
+
+        app.only_frame();
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), b, "the frame that was focused is the one that survived");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn cycle_frame_wraps_around_and_is_a_no_op_with_one_frame() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        app.test_add_frame(other);
+
+        app.cycle_frame();
+        assert_eq!(app.focused_buffer_id(), other);
+        app.cycle_frame();
+        assert_eq!(app.focused_buffer_id(), first, "wrapped back round");
+
+        app.only_frame();
+        app.cycle_frame();
+        assert_eq!(app.active_frame, 0);
     }
 
     #[test]
@@ -24350,6 +24767,35 @@ mod tests {
         session.page_point_size = (612.0, 792.0);
         session.last_pane_size = (612, 792);
         (guard, canonical, app)
+    }
+
+    #[test]
+    fn closing_a_frame_forgets_the_pdf_session_that_lived_in_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close.pdf");
+        assert!(app.pdf_sessions.contains_key(&key));
+
+        let elsewhere = app.buffers.open_scratch();
+        let second = app.test_add_frame(elsewhere);
+        app.activate_frame(second);
+        app.drop_frame(0); // the frame the PDF is open in
+
+        assert!(
+            !app.pdf_sessions.contains_key(&key),
+            "the pdfium worker would still be holding the document open with no pane left to show it"
+        );
+        assert_eq!(app.frames.len(), 1);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn closing_a_frame_leaves_a_pdf_session_open_in_another_frame_alone() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close_other.pdf");
+        let elsewhere = app.buffers.open_scratch();
+        let second = app.test_add_frame(elsewhere);
+
+        app.drop_frame(second);
+
+        assert!(app.pdf_sessions.contains_key(&key), "closing an unrelated frame must not tear down this one's session");
     }
 
     /// Seeds a session with a render taller than its pane, so there is

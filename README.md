@@ -120,6 +120,13 @@ for anyone curious to poke around or build on it.
   a dired buffer's own directory for one with no path) -- with a split
   open, two different files are labeled at a glance, not just whichever
   one happens to be focused (the modeline only ever names that one).
+  One editor can also drive several OS windows at once (`SPC w n`) --
+  one per monitor, say. They are one process sharing one buffer list, one
+  undo history and one PDF worker, so the same file can be open in both
+  and edits show up in each; only the split layout is per window.
+  Inside the `SPC w` group, lowercase acts on a split and uppercase on the
+  whole OS window. `fenix --new-window <file>` adds one from a shortcut or
+  the shell instead of handing the file to the window already open.
   The focused pane's title is colored with an accent so it's obvious at
   a glance which one has focus, whether you're editing, or inside the
   Docker or Git panel. On the Docker and Git panels specifically, every
@@ -475,6 +482,9 @@ popup shows what keys continue it.
 | `SPC w h/j/k/l` | Move focus between windows |
 | `SPC w w` | Cycle to the next window |
 | `SPC w q` / `SPC w o` / `SPC w =` | Close window / close all others / balance splits |
+| `SPC w n` | Open another OS window, on the next monitor with no Fenix window on it |
+| `SPC w W` | Cycle to the next OS window |
+| `SPC w Q` / `SPC w O` | Close this OS window / close all the others |
 | `SPC b b` | Switch buffer |
 | `SPC b n` / `SPC b p` | Next / previous buffer |
 | `SPC b k` | Kill (close) the focused buffer |
