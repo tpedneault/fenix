@@ -23,6 +23,7 @@ fenix-format = { path = "../fenix-format" }
 fenix-git = { path = "../fenix-git" }
 fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
+fenix-lsp = { path = "../fenix-lsp" }
 fenix-mib = { path = "../fenix-mib" }
 fenix-pdf = { path = "../fenix-pdf" }
 fenix-picker = { path = "../fenix-picker" }
@@ -35,7 +36,9 @@ fenix-vnc = { path = "../fenix-vnc" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }
+lsp-types = "0.97"
 pollster = "1.0.1"
+serde_json = "1"
 vt100 = "0.16"
 wgpu = "30.0.1"
 winit = "0.30.13"

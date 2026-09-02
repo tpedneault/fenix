@@ -914,6 +914,85 @@ struct PdfSession {
     last_search_query: String,
 }
 
+/// One running language server for one `fenix_syntax::LanguageId`.
+/// Unlike `VncSession`/`PdfSession`/etc., this has no pane/buffer/
+/// workspace of its own -- a language server has no UI surface by
+/// itself; it's attached to whichever ordinary text buffers share its
+/// language, feeding diagnostics/completion/hover/etc. into panes that
+/// already exist for other reasons.
+struct LspSession {
+    client: fenix_lsp::LspClient,
+    /// `None` when opened without a real `event_proxy` (every test) --
+    /// same posture as `VncSession::reader`/`TerminalState::reader`.
+    /// Held only for its `Drop` side effect once set.
+    #[allow(dead_code)]
+    reader: Option<LspReader>,
+    /// `None` until the `initialize` response has actually landed --
+    /// no request beyond `initialize` itself is sent before this, per
+    /// spec (a server hasn't necessarily finished setting up its own
+    /// state to answer anything else yet).
+    capabilities: Option<lsp_types::ServerCapabilities>,
+    /// Canonicalized paths that have had `textDocument/didOpen` sent to
+    /// this server, each mapped to `(last_synced_edit_count, next_
+    /// version)` -- `last_synced_edit_count` is `Buffer::edit_count()`'s
+    /// value as of the last successful `didOpen`/`didChange` for this
+    /// path (compared against the buffer's *current* count every frame
+    /// to decide whether another `didChange` is due, see `App::sync_lsp_
+    /// for_focused_buffer`); `next_version` is the LSP document version
+    /// to send on the next `didChange` (the spec requires a
+    /// monotonically increasing version per document). Also doubles as
+    /// "does this server already know about this path" -- so a second
+    /// buffer for the same path doesn't double-open it, and `didClose`
+    /// only fires for a path this server actually knows about.
+    open_documents: HashMap<PathBuf, (u64, i32)>,
+}
+
+/// Background reader for one `LspSession` -- drains `fenix_lsp::
+/// LspClient::spawn`'s returned channel for as long as the connection
+/// lives, forwarding every decoded event as `FenixUserEvent::Lsp`.
+/// Simpler than `VncReader`: LSP messages (diagnostics, completion
+/// results, ...) arrive at nowhere near VNC's per-pixel-rect volume, so
+/// there's no need to apply anything directly on this thread to avoid
+/// stalling input behind a burst -- everything just gets forwarded.
+struct LspReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl LspReader {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, language: fenix_syntax::LanguageId, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match receiver.recv() {
+                Ok(event) => {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let disconnected = matches!(event, fenix_lsp::LspEvent::Disconnected(_));
+                    if !send(FenixUserEvent::Lsp { language, event }) || disconnected {
+                        return;
+                    }
+                }
+                Err(_) => return, // the LspClient side hung up -- session closed/dropped
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for LspReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -1223,6 +1302,13 @@ struct JiraPrompt {
 /// do* -- `App::user_event` decides the "do."
 #[derive(Debug)]
 pub enum FenixUserEvent {
+    /// One decoded event from a language server's connection (a
+    /// response, notification, server-initiated request, or a
+    /// disconnect), from that language's `LspReader`. Carries `language`
+    /// explicitly since more than one server can be live at once and
+    /// events from a slow-to-answer one can arrive well after focus
+    /// moved to a different language's buffer.
+    Lsp { language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent },
     /// A fresh `docker stats --no-stream` snapshot, from the active
     /// Docker session's background poller.
     StatsReady(Vec<fenix_docker::ContainerStat>),
@@ -3895,6 +3981,23 @@ pub struct App {
     /// rather than allocated per frame, because a full-screen dirty
     /// region runs to several megabytes.
     vnc_upload_scratch: Vec<u8>,
+    /// One running language server per language, keyed by
+    /// `fenix_syntax::LanguageId` -- spawned lazily the first time a
+    /// buffer of that language is focused (`ensure_lsp_session`). A
+    /// single entry per language for now, not yet the `Vec<LspSession>`
+    /// (several attached servers, e.g. pyright for types alongside ruff
+    /// for lint/format) the wider design calls for -- deliberately
+    /// proven with one server end-to-end first, widened when a second
+    /// server actually gets wired in, same "prove it, then generalize"
+    /// order the transport itself was already built in.
+    lsp_sessions: HashMap<fenix_syntax::LanguageId, LspSession>,
+    /// The most recent `textDocument/publishDiagnostics` for each file,
+    /// keyed by its canonical path (LSP publishes per-URI regardless of
+    /// whether a buffer for it is currently open, so this can't be keyed
+    /// by `BufferId`). Cleared for a path when a server publishes an
+    /// empty list for it (which means "no more diagnostics," not "no
+    /// change") or when that path's buffer closes.
+    diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
     /// The VM name whose session currently owns raw keyboard input, if
     /// any -- same "this pane eats every key, Vim doesn't apply" role as
     /// `terminal_focused`, generalized to name *which* of up to several
@@ -4573,6 +4676,8 @@ impl App {
             jira_prompt: None,
             jira_session: None,
             vnc_sessions: HashMap::new(),
+            lsp_sessions: HashMap::new(),
+            diagnostics: HashMap::new(),
             vnc_upload_scratch: Vec::new(),
             vnc_focused: None,
             vnc_hidden_cursor: None,
@@ -5202,6 +5307,190 @@ impl App {
     /// `picker_add_project_prompt`'s own doc comment for why.
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        self.sync_lsp_for_focused_buffer();
+    }
+
+    /// Makes sure the focused buffer's language server (if any is
+    /// configured/available for its language) has an up to date picture
+    /// of it: spawns that language's server if it isn't already running
+    /// (`ensure_lsp_session`), sends `textDocument/didOpen` the first
+    /// time (once the session is actually initialized), and after that
+    /// compares `Buffer::edit_count()` against what was last synced --
+    /// a mismatch means real edits landed since, answered with a full-
+    /// text `textDocument/didChange` (whole-document sync for v1, not
+    /// incremental range edits -- `Buffer::drain_edits`/`EditDelta`
+    /// would let this send just the changed range later, but full-text
+    /// is correct today, just not maximally efficient on a large file).
+    ///
+    /// Called from `refresh_project_root` (every focus change) *and*
+    /// every `redraw` (every rendered frame) -- focus change alone
+    /// would send `didOpen` but then never notice an edit made while
+    /// staying on the same buffer, since nothing else marks "this
+    /// buffer changed" the way switching away/back does.
+    fn sync_lsp_for_focused_buffer(&mut self) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
+        let cwd = self.project_root.clone().unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+        self.ensure_lsp_session(language, &cwd);
+
+        // `fenix_lsp::normalize` strips Windows' `\\?\` verbatim prefix
+        // (which `canonicalize` always adds there) -- everywhere else
+        // a canonicalized path is compared against one that came back
+        // from a server's URI (`open_documents`, `App::diagnostics`'
+        // own keys) needs the same normalized form, or two spellings of
+        // the same file stop matching each other.
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path));
+        let edit_count = self.open().buffer.edit_count();
+        // Fetched unconditionally, before `session` below takes a
+        // mutable borrow of `self.lsp_sessions` -- both branches that
+        // might actually use it need the buffer's *current* text, and
+        // `self.open()` (an immutable borrow of a different `self`
+        // field) can't coexist with that mutable borrow.
+        let text = self.open().buffer.text();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        if session.capabilities.is_none() {
+            return;
+        }
+        let Some(uri) = fenix_lsp::path_to_uri(&canonical) else { return };
+
+        match session.open_documents.get(&canonical).copied() {
+            None => {
+                let params = lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language), version: 0, text },
+                };
+                if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
+                    session.open_documents.insert(canonical, (edit_count, 1));
+                }
+            }
+            Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
+                let params = lsp_types::DidChangeTextDocumentParams {
+                    text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version: next_version },
+                    content_changes: vec![lsp_types::TextDocumentContentChangeEvent { range: None, range_length: None, text }],
+                };
+                if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
+                    session.open_documents.insert(canonical, (edit_count, next_version + 1));
+                }
+            }
+            Some(_) => {} // already open and already in sync -- the common case, most frames
+        }
+    }
+
+    /// Spawns a language server for `language` if one isn't already
+    /// running (a no-op otherwise, regardless of whether the existing
+    /// session is healthy -- a dead one is replaced by `apply_lsp_event`'s
+    /// own `Disconnected` handling removing it first, not respawned here
+    /// on every focus change), resolving its command via `lsp::resolve_
+    /// server_command` (a `[lsp]` override, or `fenix-lsp`'s built-in
+    /// per-language default) and using `cwd` as both its working
+    /// directory and its advertised project root -- a server has no
+    /// other way to know what "the project" even is. Silently does
+    /// nothing if no command is configured or known for `language` (same
+    /// posture as completion quietly having nothing to offer for a
+    /// language with no ctags support).
+    fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
+        if self.lsp_sessions.contains_key(&language) {
+            return;
+        }
+        let Some((program, args)) = crate::lsp::resolve_server_command(language, &self.config.lsp_servers) else { return };
+        match fenix_lsp::LspClient::spawn(&program, &args, cwd) {
+            Ok((client, receiver)) => {
+                let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, language, move |event| proxy.send_event(event).is_ok()));
+                self.lsp_sessions.insert(language, LspSession { client, reader, capabilities: None, open_documents: HashMap::new() });
+                self.send_lsp_initialize(language, cwd);
+            }
+            Err(err) => {
+                self.set_error(format!("couldn't start {program} for {language:?}: {err}"));
+            }
+        }
+    }
+
+    /// Sends the `initialize` request for a freshly-spawned session --
+    /// deliberately not folded into `ensure_lsp_session` itself, so a
+    /// later reconnect (once one exists) can re-send just this without
+    /// re-spawning the process. `initialize` is always the very first
+    /// request sent on a fresh connection (see `fenix_lsp::LspClient::
+    /// next_id`'s own doc comment: it starts at 1 and only ever
+    /// increments), so its response is always id 1 -- relied on by
+    /// `apply_lsp_event` instead of a general pending-request map, which
+    /// nothing else needs yet.
+    fn send_lsp_initialize(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
+        let Some(session) = self.lsp_sessions.get(&language) else { return };
+        let root_uri = fenix_lsp::path_to_uri(cwd);
+        let params = lsp_types::InitializeParams {
+            process_id: Some(std::process::id()),
+            #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
+            root_uri: root_uri.clone(),
+            capabilities: crate::lsp::client_capabilities(),
+            workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
+            ..Default::default()
+        };
+        let _ = session.client.request::<lsp_types::request::Initialize>(params);
+    }
+
+    /// Dispatches one decoded event from a language server's connection.
+    fn apply_lsp_event(&mut self, language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent) {
+        match event {
+            fenix_lsp::LspEvent::Response { id, result } => {
+                // `initialize`'s response is always id 1 -- see `send_
+                // lsp_initialize`'s own doc comment. No other request
+                // is sent yet, so no other id is possible here.
+                if id == 1 {
+                    match result {
+                        Ok(value) => {
+                            let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
+                            if let Some(session) = self.lsp_sessions.get_mut(&language) {
+                                session.capabilities = capabilities;
+                                let _ = session.client.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
+                            }
+                            // Now that the session is actually
+                            // initialized, send `didOpen` for the
+                            // focused buffer if it's this language (the
+                            // request that triggered spawning this
+                            // session in the first place couldn't send
+                            // it yet -- capabilities weren't known).
+                            self.sync_lsp_for_focused_buffer();
+                        }
+                        Err(err) => self.set_error(format!("{language:?} language server failed to initialize: {}", err.message)),
+                    }
+                }
+            }
+            fenix_lsp::LspEvent::Notification { method, params } => {
+                if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
+                    if let Ok(diagnostics) = serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
+                        self.apply_lsp_diagnostics(diagnostics);
+                    }
+                }
+            }
+            fenix_lsp::LspEvent::ServerRequest { id, method, .. } => {
+                // Not yet answering any server-initiated request (e.g.
+                // `workspace/configuration`) -- replying with a generic
+                // "method not found" error at least resolves it, rather
+                // than leaving a spec-compliant server waiting forever
+                // for a response it's entitled to.
+                if let Some(session) = self.lsp_sessions.get(&language) {
+                    let _ = session.client.respond(id, Err(fenix_lsp::ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }));
+                }
+            }
+            fenix_lsp::LspEvent::Disconnected(reason) => {
+                self.lsp_sessions.remove(&language);
+                self.set_error(format!("{language:?} language server disconnected: {reason}"));
+            }
+        }
+    }
+
+    /// Records (or clears) one file's diagnostics -- `textDocument/
+    /// publishDiagnostics` is keyed by URI regardless of whether a
+    /// buffer for it is currently open, and an *empty* list is the
+    /// server's way of saying "no more diagnostics here," not "nothing
+    /// changed," so it's stored as an actual removal rather than an
+    /// empty `Vec` left behind.
+    fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
+        let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
+        if params.diagnostics.is_empty() {
+            self.diagnostics.remove(&path);
+        } else {
+            self.diagnostics.insert(path, params.diagnostics);
+        }
     }
 
     /// Records `path` as recently-opened for the dashboard's "Recent
@@ -12771,6 +13060,7 @@ impl App {
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
+            FenixUserEvent::Lsp { language, event } => self.apply_lsp_event(language, event),
             FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
@@ -14294,8 +14584,32 @@ impl App {
             };
             return (mode_label, format!("│ {filename}{workspace_indicator}   {position} "));
         }
-        let suffix =
-            format!("│ {filename}{modified}{workspace_indicator}{recording_indicator}   Ln {}, Col {} ", line + 1, col + 1);
+        // Error/warning counts for whatever the focused buffer's own
+        // language server last published for its path, if any -- the
+        // simplest possible "is anything actually wrong here" signal;
+        // inline squiggle-equivalent markup and a real diagnostics list
+        // (`SPC c d`) are a follow-up, this is deliberately the smallest
+        // slice that's still genuinely useful on its own. Canonicalizes
+        // the path on every call (matching how `apply_lsp_diagnostics`
+        // keys the map) rather than caching -- a plain `stat`, not worth
+        // the extra bookkeeping unless it actually shows up as slow.
+        let diagnostics_indicator = ob
+            .buffer
+            .path()
+            .map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())))
+            .and_then(|p| self.diagnostics.get(&p))
+            .filter(|diags| !diags.is_empty())
+            .map(|diags| {
+                let errors = diags.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();
+                let warnings = diags.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)).count();
+                format!("   {errors}E {warnings}W")
+            })
+            .unwrap_or_default();
+        let suffix = format!(
+            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{diagnostics_indicator}   Ln {}, Col {} ",
+            line + 1,
+            col + 1
+        );
         (mode_label, suffix)
     }
 
@@ -15840,6 +16154,15 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Cheap per-frame check (an integer comparison against `Buffer::
+        // edit_count()`, same "cheap no-op most frames" shape as the PDF
+        // resize-tracking and VNC resize-debounce loops just below in
+        // this same function) for whether the focused buffer's language
+        // server needs a `textDocument/didChange` -- editing doesn't
+        // otherwise have a dedicated "something changed" hook the way
+        // focus changes do (`refresh_project_root`), so this is checked
+        // here instead, once per rendered frame.
+        self.sync_lsp_for_focused_buffer();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
         // reconfigure -- see `GpuState::pending_resize`'s own doc
@@ -22919,6 +23242,49 @@ mod tests {
         app.handle_user_event(FenixUserEvent::StatsReady(Vec::new()));
         app.handle_user_event(FenixUserEvent::LogLine(app.focused_buffer_id(), "a line".to_string()));
         app.handle_user_event(FenixUserEvent::LogEnded(app.focused_buffer_id()));
+        app.handle_user_event(FenixUserEvent::Lsp {
+            language: fenix_syntax::LanguageId::Python,
+            event: fenix_lsp::LspEvent::Disconnected("test".to_string()),
+        });
+    }
+
+    #[test]
+    fn apply_lsp_diagnostics_stores_and_then_clears_them_by_path() {
+        let mut app = App::with_file(None);
+        let path = std::env::temp_dir().join("fenix-lsp-test-diagnostics.py");
+        let uri = fenix_lsp::path_to_uri(&path).unwrap();
+        let diag = lsp_types::Diagnostic { range: lsp_types::Range::default(), message: "oops".to_string(), ..Default::default() };
+        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri: uri.clone(), diagnostics: vec![diag.clone()], version: None });
+        assert_eq!(app.diagnostics.get(&path), Some(&vec![diag]));
+
+        // An empty list clears it -- that's the server's own "no more
+        // diagnostics here" signal, not "nothing changed."
+        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None });
+        assert_eq!(app.diagnostics.get(&path), None);
+    }
+
+    #[test]
+    fn modeline_shows_error_and_warning_counts_for_the_focused_buffers_diagnostics() {
+        let dir = TempDir::new("modeline_diagnostics");
+        let file = dir.write("has_bugs.py", "x = 1\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        assert!(!app.modeline_text().contains('E'), "no diagnostics yet -- shouldn't show a count");
+
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&file).unwrap());
+        let uri = fenix_lsp::path_to_uri(&canonical).unwrap();
+        let error = lsp_types::Diagnostic { severity: Some(lsp_types::DiagnosticSeverity::ERROR), message: "bad".to_string(), ..Default::default() };
+        let warning = lsp_types::Diagnostic { severity: Some(lsp_types::DiagnosticSeverity::WARNING), message: "meh".to_string(), ..Default::default() };
+        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri, diagnostics: vec![error, warning], version: None });
+
+        let modeline = app.modeline_text();
+        assert!(modeline.contains("1E 1W"), "expected a 1E 1W indicator, got: {modeline}");
+    }
+
+    #[test]
+    fn ensure_lsp_session_is_a_no_op_for_a_language_with_no_configured_or_default_command() {
+        let mut app = App::with_file(None);
+        app.ensure_lsp_session(fenix_syntax::LanguageId::Batch, &std::env::temp_dir());
+        assert!(!app.lsp_sessions.contains_key(&fenix_syntax::LanguageId::Batch));
     }
 
     #[test]

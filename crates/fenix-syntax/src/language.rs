@@ -1,7 +1,7 @@
 use tree_sitter::Language;
 
 /// Which tree-sitter grammar a buffer is highlighted with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LanguageId {
     Rust,
     Toml,

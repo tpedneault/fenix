@@ -25,7 +25,9 @@ mod client;
 mod envelope;
 pub mod per_language;
 mod position;
+mod uri;
 
 pub use client::{LspClient, LspEvent};
 pub use envelope::ResponseError;
 pub use position::{char_offset_to_position, position_to_char_offset};
+pub use uri::{normalize, path_to_uri, uri_to_path};
