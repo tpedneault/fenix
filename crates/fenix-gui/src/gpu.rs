@@ -3,11 +3,39 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-/// Owns the wgpu surface/device/queue for the editor window.
+/// Everything a wgpu setup owns that *isn't* tied to one particular
+/// window: the instance, the adapter, and the logical device/queue pair.
+/// Created once, then shared by every frame (OS window) the app opens --
+/// `attach` hands each new one its own swapchain on this same device.
+///
+/// One device rather than one per window on purpose. A `wgpu` resource
+/// (texture, buffer, pipeline, bind group) belongs to the device that
+/// created it and can't be used with another, so per-window devices
+/// would mean a PDF page's texture, a VNC framebuffer's texture, and
+/// every pipeline and shader existing once *per window* -- and a pane's
+/// content becoming unusable the moment it moved between windows.
+/// Several surfaces on one device is the shape wgpu is built for.
+pub struct GpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    /// The surface format every frame is configured with -- resolved
+    /// once, from the first window's capabilities (see `new`), so every
+    /// frame's swapchain agrees and one set of render pipelines works
+    /// for all of them.
+    pub format: wgpu::TextureFormat,
+}
+
+/// One frame's own swapchain: the surface, its configuration, and its
+/// current size. `device`/`queue` are `Arc` clones of the shared
+/// `GpuContext`'s, kept as fields here (rather than reached through a
+/// context reference) so every existing `gpu.device`/`gpu.queue` call
+/// site keeps working unchanged.
 pub struct GpuState {
     pub surface: wgpu::Surface<'static>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
     pub config: wgpu::SurfaceConfiguration,
     pub size: PhysicalSize<u32>,
     /// A size reported by `resize` that hasn't been applied to the
@@ -24,11 +52,15 @@ pub struct GpuState {
     pending_resize: Option<PhysicalSize<u32>>,
 }
 
-impl GpuState {
-    pub async fn new(window: Arc<Window>) -> Self {
+impl GpuContext {
+    /// Builds the shared context together with the *first* frame's
+    /// swapchain -- the adapter has to be requested against a real
+    /// surface, so the two can't be created independently. Every later
+    /// frame goes through `attach` instead, which needs no `await`.
+    pub async fn new(window: Arc<Window>) -> (Self, GpuState) {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).expect("create surface");
+        let surface = instance.create_surface(window).expect("create surface");
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -75,8 +107,49 @@ impl GpuState {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         surface.configure(&device, &config);
 
-        Self { surface, device, queue, config, size, pending_resize: None }
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        let context =
+            Self { instance, adapter, device: Arc::clone(&device), queue: Arc::clone(&queue), format: config.format };
+        let state = GpuState { surface, device, queue, config, size, pending_resize: None };
+        (context, state)
     }
+
+    /// A second (third, ...) frame's swapchain on this same device.
+    /// Synchronous, unlike `new`: the expensive, awaitable part
+    /// (adapter and device request) already happened.
+    ///
+    /// The surface is forced to the context's `format` rather than
+    /// asking this surface for its own default -- see `new`'s own note
+    /// on why an `*Srgb` render target is wrong for every pipeline in
+    /// this codebase, and `GpuContext::format`'s doc comment for why
+    /// every frame has to agree on one.
+    // Nothing opens a second frame yet -- the caller arrives with the
+    // `frame.new` command. Without this, the whole context reads as dead
+    // code, since `attach` is the only thing that consumes its fields.
+    #[allow(dead_code)]
+    pub fn attach(&self, window: Arc<Window>) -> GpuState {
+        let size = window.inner_size();
+        let surface = self.instance.create_surface(window).expect("create surface");
+        let mut config = surface
+            .get_default_config(&self.adapter, size.width.max(1), size.height.max(1))
+            .expect("surface unsupported by adapter");
+        config.format = self.format;
+        config.present_mode = wgpu::PresentMode::AutoVsync;
+        surface.configure(&self.device, &config);
+
+        GpuState {
+            surface,
+            device: Arc::clone(&self.device),
+            queue: Arc::clone(&self.queue),
+            config,
+            size,
+            pending_resize: None,
+        }
+    }
+}
+
+impl GpuState {
 
     /// Records the window's latest reported size -- doesn't touch the
     /// surface itself; see `pending_resize`'s own doc comment for why

@@ -120,6 +120,24 @@ for anyone curious to poke around or build on it.
   a dired buffer's own directory for one with no path) -- with a split
   open, two different files are labeled at a glance, not just whichever
   one happens to be focused (the modeline only ever names that one).
+  One editor can also drive several OS windows at once (`SPC w n`) --
+  one per monitor, say. They are one process sharing one buffer list, one
+  undo history and one PDF worker, so the same file can be open in both
+  and edits show up in each; only the split layout is per window.
+  Inside the `SPC w` group, lowercase acts on a split and uppercase on the
+  whole OS window. `fenix --new-window <file>` adds one from a shortcut or
+  the shell instead of handing the file to the window already open.
+  Directional pane navigation ignores the boundary between them: walking
+  off the left edge of the window on one monitor continues into the window
+  on the monitor beside it, landing on whichever of its panes is actually
+  adjacent (its rightmost, coming from that side -- not its first). It is
+  one rule over one list of rectangles in desktop coordinates, so panes in
+  the current window win simply by being nearer, and an open sidebar is
+  reached before the next monitor for the same reason.
+  The windows share one font database and one glyph atlas, so opening a
+  second one doesn't re-scan your system fonts, and each scales text by
+  its own monitor's DPI factor -- `font_size` is a logical size, so the
+  same setting looks the same on a 100% screen and a 150% one.
   The focused pane's title is colored with an accent so it's obvious at
   a glance which one has focus, whether you're editing, or inside the
   Docker or Git panel. On the Docker and Git panels specifically, every
@@ -472,9 +490,12 @@ popup shows what keys continue it.
 | `SPC m a` | Browse to and register a new MIB root directory |
 | `SPC m d` | Fuzzy-find and remove a configured MIB root |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
-| `SPC w h/j/k/l` | Move focus between windows |
+| `SPC w h/j/k/l` | Move focus between windows -- and across OS windows, by where they sit on the desktop |
 | `SPC w w` | Cycle to the next window |
 | `SPC w q` / `SPC w o` / `SPC w =` | Close window / close all others / balance splits |
+| `SPC w n` | Open another OS window, on the next monitor with no Fenix window on it |
+| `SPC w W` | Cycle to the next OS window |
+| `SPC w Q` / `SPC w O` | Close this OS window / close all the others |
 | `SPC b b` | Switch buffer |
 | `SPC b n` / `SPC b p` | Next / previous buffer |
 | `SPC b k` | Kill (close) the focused buffer |
@@ -857,6 +878,11 @@ host2 = test-vm|10.0.0.6|5900
 doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
 doc2 = Time Code Formats|C:\refs\301x0b4.pdf
 doc3 = Team Onboarding Notes|C:\refs\onboarding.md
+
+[windows]
+restore_windows = true
+window1 = 1920,0,2560,1400|true
+window2 = 4480,0,1920,1040|true
 ```
 
 | Section | Key | Meaning |
@@ -878,6 +904,8 @@ doc3 = Team Onboarding Notes|C:\refs\onboarding.md
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
+| `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
+| `windows` | `window1`, `window2`, ... | One remembered OS window, as `X,Y,WIDTH,HEIGHT\|MAXIMIZED`. Written by Fenix on exit, not hand-authored -- `X,Y` is the outer frame's desktop position and `WIDTH,HEIGHT` the client area, which is the pair a window can actually be restored from. A window whose saved rectangle no longer lands on a connected monitor is placed by the window manager instead of opening off-screen |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path

@@ -293,6 +293,16 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('q')], "close window", "window.close");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('o')], "only", "window.only");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('=')], "balance", "window.balance");
+        // OS windows ("frames") share this group with splits, one shift
+        // key apart: lowercase acts on a split, uppercase on the whole
+        // window. `n` is the exception -- there's no lowercase "new
+        // window" for it to collide with, and `SPC w n` reads better
+        // than `SPC w N` for the one command in the group you reach for
+        // first.
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('n')], "new frame", "frame.new");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('W')], "cycle frame", "frame.cycle");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('Q')], "close frame", "frame.close");
+        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('O')], "only frame", "frame.only");
 
         t.label_group(&[spc, KeyPress::char('b')], "buffer");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('b')], "switch buffer", "buffer.switch");

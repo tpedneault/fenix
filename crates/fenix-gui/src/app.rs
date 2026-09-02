@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -15,9 +17,11 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, 
 use fenix_vim::{Mode, ScrollTarget as VimScrollTarget, VimEvent, VimState, VisualKind};
 use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
@@ -27,7 +31,7 @@ use crate::completion;
 use crate::dashboard;
 use crate::docker_panel;
 use crate::git_panel;
-use crate::gpu::GpuState;
+use crate::gpu::{GpuContext, GpuState};
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
@@ -1269,6 +1273,12 @@ pub enum FenixUserEvent {
     /// empty list means "just focus me," no file to open (a bare
     /// relaunch with no arguments).
     OpenFiles(Vec<String>),
+    /// The same hand-off, but from a launch that passed
+    /// `--new-window`: open another OS window first, then open these
+    /// paths in it. What makes `fenix --new-window` from a shortcut on
+    /// a second monitor add a frame to the running editor instead of
+    /// handing its files to the window already on the first one.
+    OpenFilesInNewFrame(Vec<String>),
     /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
     /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
     /// spawns it on -- same "can't afford to block the main thread"
@@ -3093,6 +3103,15 @@ impl WorkspaceList {
         &self.workspaces[self.active].name
     }
 
+    /// Every pane in *every* workspace here, not just the active one --
+    /// what tearing down a whole frame needs (`App::close_sessions_in_
+    /// active_frame`). A PDF or VNC session opens in a workspace of its
+    /// own, so "which sessions live in this frame" can't be answered
+    /// from the active workspace alone.
+    fn all_panes(&self) -> Vec<fenix_window::WindowId> {
+        self.workspaces.iter().flat_map(|workspace| workspace.windows.windows()).collect()
+    }
+
     fn len(&self) -> usize {
         self.workspaces.len()
     }
@@ -3235,8 +3254,194 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     )
 }
 
-pub struct App {
+/// Somewhere `SPC w h/j/k/l` can move focus to, anywhere across every
+/// open frame -- see `App::nav_targets`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavTarget {
+    Pane { frame: usize, pane: fenix_window::WindowId },
+    /// A frame's sidebar. Not a leaf in any `WindowTree` -- it's a
+    /// panel drawn beside one -- but it is somewhere focus can land, so
+    /// it joins the candidate list as an ordinary rectangle. That
+    /// replaces the hand-written "Left from the leftmost pane focuses
+    /// the sidebar" rule with plain geometry, which also gets the
+    /// harder cases right for free: leftwards out of a sidebar
+    /// continues to the window on the monitor to its left, and a
+    /// sidebar is preferred over another monitor's pane only because
+    /// it is nearer.
+    Sidebar { frame: usize },
+}
+
+/// The client-area size assumed for a frame that hasn't got a real
+/// window yet (only a headless test). Navigation compares candidates
+/// against each other, so only *relative* geometry matters -- the same
+/// reason `fenix_window`'s own `navigate` has always laid its tree out
+/// against an arbitrary reference size.
+const NAV_REFERENCE_SIZE: (f32, f32) = (1600.0, 900.0);
+
+/// Where `new_frame` should put the window it's about to create --
+/// see `App::next_frame_placement`. Each part is optional because a
+/// platform that won't report monitors or window positions leaves the
+/// decision to the window manager, which is a better answer than
+/// guessing coordinates.
+struct FramePlacement {
+    position: Option<PhysicalPosition<i32>>,
+    size: Option<PhysicalSize<u32>>,
+    /// Whether to maximize onto the monitor `position` lands on, once
+    /// the window exists.
+    maximized: bool,
+}
+
+/// Whether a freshly measured window layout is worth writing to disk.
+///
+/// An empty measurement means there was nothing to measure -- a
+/// headless run, or an exit before the window ever came up -- and
+/// recording it would wipe a real arrangement off disk.
+///
+/// The unchanged check matters more than it looks. `Config::save`
+/// regenerates the whole file from struct state, so it drops any
+/// comments and hand-formatting in `config.ini`. That was already true
+/// of every other `save` call, but those only fire when you
+/// deliberately change a setting; this one would otherwise fire on
+/// every single exit.
+fn layout_worth_saving(measured: &[fenix_config::WindowLayout], saved: &[fenix_config::WindowLayout]) -> bool {
+    !measured.is_empty() && measured != saved
+}
+
+impl From<fenix_config::WindowLayout> for FramePlacement {
+    fn from(layout: fenix_config::WindowLayout) -> Self {
+        Self {
+            position: Some(PhysicalPosition::new(layout.x, layout.y)),
+            size: Some(PhysicalSize::new(layout.width, layout.height)),
+            maximized: layout.maximized,
+        }
+    }
+}
+
+/// Whether a desktop-coordinate point falls on `monitor`. A thin
+/// `MonitorHandle`-reading wrapper around `desktop_rect_contains`,
+/// which is where the actual rule lives -- a `MonitorHandle` can only
+/// come from a real event loop, so the geometry has to be reachable
+/// without one to be testable at all.
+fn monitor_contains(monitor: &MonitorHandle, point: (i32, i32)) -> bool {
+    desktop_rect_contains(monitor.position(), monitor.size(), point)
+}
+
+/// Point-in-rectangle over desktop coordinates. Left/top inclusive,
+/// right/bottom exclusive, so two monitors sharing an edge never both
+/// claim the same pixel -- the same convention
+/// `fenix_window::Rect::contains_point` already uses for panes.
+fn desktop_rect_contains(at: PhysicalPosition<i32>, size: PhysicalSize<u32>, point: (i32, i32)) -> bool {
+    point.0 >= at.x && point.0 < at.x + size.width as i32 && point.1 >= at.y && point.1 < at.y + size.height as i32
+}
+
+/// Everything that belongs to one OS window rather than to the editor
+/// as a whole: its winit window and swapchain, its own text and rect
+/// renderers, its own split layout and workspaces, and its own last-
+/// known cursor position.
+///
+/// "Frame" is Emacs's word for an OS window, borrowed here because this
+/// codebase already calls a *split* a window (`fenix_window::WindowId`,
+/// `SPC w`, `WindowTree`) and so needs a different word for the thing
+/// the window manager draws.
+///
+/// This type only ever holds a frame that is *parked* -- see
+/// `App::frames` for the whole arrangement.
+struct FrameState {
     window: Option<Arc<Window>>,
+    gpu: Option<GpuState>,
+    text: Option<TextPipeline>,
+    bg_rect: Option<RectRenderer>,
+    popup_rect: Option<RectRenderer>,
+    caret_rect: Option<RectRenderer>,
+    workspaces: WorkspaceList,
+    cursor_pos: Option<(f32, f32)>,
+    /// This frame's top-left corner in desktop coordinates -- see
+    /// `App::frame_origin`.
+    origin: (i32, i32),
+    /// The sidebar is per-frame: a project tree opened on one monitor
+    /// stays on that monitor instead of appearing in every window at
+    /// once. Its listing state travels with it, so switching frames
+    /// doesn't reset where you'd browsed to.
+    sidebar: Option<ExplorerState>,
+    sidebar_open: bool,
+    sidebar_focused: bool,
+    sidebar_scroll: usize,
+    /// Whether *this* frame shows the terminal panel. The shell itself
+    /// (`App::terminal`) stays global -- one session, one process. Two
+    /// frames can therefore both have the panel open and both show the
+    /// same live shell, which is odd but harmless; nothing breaks, and
+    /// giving each frame its own PTY is a bigger question than window
+    /// layout.
+    terminal_open: bool,
+    terminal_focused: bool,
+}
+
+pub struct App {
+    /// Every open frame, in a stable order -- `frames[0]` is the one
+    /// the app started with. Each entry holds that frame's state *while
+    /// it is parked*, and is `None` for exactly one index --
+    /// `active_frame` -- whose state is instead the live set of fields
+    /// on `App` itself: `window`, `gpu`, `text`, the three
+    /// `RectRenderer`s, `workspaces` and `cursor_pos`.
+    ///
+    /// That split is deliberate. Keeping the active frame's state
+    /// directly on `App`, rather than reaching through
+    /// `frames[active_frame]` at every use, is what lets the whole
+    /// editor keep being written against one implicit "the window" the
+    /// way it always has been -- every `self.windows()`,
+    /// `self.pane_state(..)`, `self.gpu`, `self.text` reads the frame
+    /// that currently has focus, with no call site changed and no
+    /// second way to spell it.
+    ///
+    /// Code that needs to act on a *different* frame calls
+    /// `activate_frame` first, which swaps that frame's parked state
+    /// into the live fields and parks the outgoing one. `window_event`
+    /// is the main caller: it activates whichever frame an event
+    /// arrived from before dispatching it, which is also what makes a
+    /// background frame's `RedrawRequested` paint its own layout
+    /// through its own swapchain.
+    frames: Vec<Option<FrameState>>,
+    /// Index into `frames` of the frame whose state is live on `App`.
+    active_frame: usize,
+    /// Index into `frames` of the frame that actually has editor focus.
+    /// Equal to `active_frame` except while something has *temporarily*
+    /// activated another frame -- which is what handling an event from,
+    /// or repainting, a background frame does.
+    ///
+    /// The difference matters for anything that should exist in exactly
+    /// one place at a time no matter how many windows are open: the
+    /// which-key popup, an open picker, the file explorer, a prompt.
+    /// Those all live on `App` rather than per frame (only one window
+    /// can be typed into, so only one can have raised them), and
+    /// `redraw` draws them only when the frame it is painting is this
+    /// one. Without that check, opening a picker would show it in every
+    /// window at once.
+    focused_frame: usize,
+    /// The active frame's top-left corner in desktop coordinates,
+    /// refreshed whenever it moves or resizes. Cached rather than read
+    /// from the window on demand so that directional navigation can
+    /// place *every* frame -- including parked ones, whose position is
+    /// otherwise only reachable through their own window handle -- and
+    /// so headless tests can set one.
+    frame_origin: (i32, i32),
+    /// Frames asked for by a `fenix --new-window` hand-off that haven't
+    /// been opened yet, each with the paths to open in it (possibly
+    /// empty). Drained by `about_to_wait`, which -- unlike
+    /// `handle_user_event`, where the request arrives -- has the
+    /// `&ActiveEventLoop` that creating a window needs.
+    pending_frames: Vec<Vec<String>>,
+    window: Option<Arc<Window>>,
+    /// The wgpu instance/adapter/device/queue every frame shares -- see
+    /// `GpuContext`'s own doc comment for why there's one of these
+    /// rather than one per window. `None` until the first `resumed`,
+    /// same posture as `gpu`/`text`/`bg_rect`.
+    gpu_context: Option<GpuContext>,
+    /// The font database, glyph caches and GPU atlas every frame's
+    /// `TextPipeline` shares -- see `text::FontContext`. Built once
+    /// alongside `gpu_context`, because building it scans the system
+    /// font database and is the single most expensive thing opening a
+    /// window would otherwise repeat.
+    fonts: Option<Rc<RefCell<text::FontContext>>>,
     gpu: Option<GpuState>,
     text: Option<TextPipeline>,
     /// Opaque panel backgrounds (modeline bar, which-key popup) and the
@@ -3940,8 +4145,11 @@ impl App {
     /// opened in a test just never has live-updating panes, which is
     /// already true today (nothing there needs a working `docker`
     /// either, per every existing "never fails" test in this file).
-    pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>) -> Self {
-        let file_arg = env::args().nth(1);
+    /// `file_arg` is the first *file* this launch was given, already
+    /// separated from any flags by `main` -- read there rather than
+    /// from `env::args()` here, because `fenix --new-window notes.md`
+    /// would otherwise try to open a file called `--new-window`.
+    pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>, file_arg: Option<String>) -> Self {
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
         // Recording lives here, not inside `with_file` -- `with_file` is
@@ -4041,7 +4249,17 @@ impl App {
             .collect();
 
         Self {
+            // One frame, and it's the active one -- so its state is the
+            // live set of fields right here rather than a parked
+            // `FrameState`. See the field's own doc comment.
+            frames: vec![None],
+            active_frame: 0,
+            focused_frame: 0,
+            frame_origin: (0, 0),
+            pending_frames: Vec::new(),
             window: None,
+            gpu_context: None,
+            fonts: None,
             gpu: None,
             text: None,
             bg_rect: None,
@@ -4157,6 +4375,432 @@ impl App {
     /// pair of accessors goes through here (or `windows_mut`) rather than
     /// touching `self.workspaces` directly, mirroring the `open`/
     /// `open_mut` discipline already used for buffers.
+    /// `frame`'s winit window, whether that frame is the active one
+    /// (its state is live on `App`) or parked. `None` before the frame
+    /// has been through `resumed`, and for an out-of-range index.
+    fn frame_window(&self, frame: usize) -> Option<&Arc<Window>> {
+        match self.frames.get(frame)? {
+            Some(parked) => parked.window.as_ref(),
+            None => self.window.as_ref(),
+        }
+    }
+
+    /// `frame`'s split layout and workspaces, parked or live -- the
+    /// read-only counterpart to `activate_frame` for the handful of
+    /// places (`about_to_wait`'s animation check, cross-frame
+    /// navigation) that need to look at a frame without making it the
+    /// active one.
+    fn frame_workspaces(&self, frame: usize) -> Option<&WorkspaceList> {
+        match self.frames.get(frame)? {
+            Some(parked) => Some(&parked.workspaces),
+            None => Some(&self.workspaces),
+        }
+    }
+
+    /// Which frame owns the winit window `id` belongs to.
+    fn frame_index_of(&self, id: WindowId) -> Option<usize> {
+        (0..self.frames.len()).find(|&frame| self.frame_window(frame).map(|w| w.id()) == Some(id))
+    }
+
+    /// Makes `frame` the active one: its parked state moves into the
+    /// live fields on `App`, and the outgoing frame's live state is
+    /// parked in its place. A no-op when `frame` is already active or
+    /// out of range.
+    ///
+    /// Every field is swapped through `mem::replace` against the
+    /// incoming frame's own value, so nothing ever needs a placeholder
+    /// to stand in for a moved-out `WorkspaceList` -- and the "exactly
+    /// one `None` in `frames`, at `active_frame`" invariant holds at
+    /// every point this function returns.
+    fn activate_frame(&mut self, frame: usize) {
+        if frame == self.active_frame {
+            return;
+        }
+        let Some(Some(incoming)) = self.frames.get_mut(frame).map(Option::take) else { return };
+        let outgoing = FrameState {
+            window: std::mem::replace(&mut self.window, incoming.window),
+            gpu: std::mem::replace(&mut self.gpu, incoming.gpu),
+            text: std::mem::replace(&mut self.text, incoming.text),
+            bg_rect: std::mem::replace(&mut self.bg_rect, incoming.bg_rect),
+            popup_rect: std::mem::replace(&mut self.popup_rect, incoming.popup_rect),
+            caret_rect: std::mem::replace(&mut self.caret_rect, incoming.caret_rect),
+            workspaces: std::mem::replace(&mut self.workspaces, incoming.workspaces),
+            cursor_pos: std::mem::replace(&mut self.cursor_pos, incoming.cursor_pos),
+            origin: std::mem::replace(&mut self.frame_origin, incoming.origin),
+            sidebar: std::mem::replace(&mut self.sidebar, incoming.sidebar),
+            sidebar_open: std::mem::replace(&mut self.sidebar_open, incoming.sidebar_open),
+            sidebar_focused: std::mem::replace(&mut self.sidebar_focused, incoming.sidebar_focused),
+            sidebar_scroll: std::mem::replace(&mut self.sidebar_scroll, incoming.sidebar_scroll),
+            terminal_open: std::mem::replace(&mut self.terminal_open, incoming.terminal_open),
+            terminal_focused: std::mem::replace(&mut self.terminal_focused, incoming.terminal_focused),
+        };
+        self.frames[self.active_frame] = Some(outgoing);
+        self.active_frame = frame;
+    }
+
+    /// Moves editor focus to `frame` for good, as opposed to
+    /// `activate_frame`'s temporary switch: this is what a keystroke, a
+    /// click, or a frame command does, and the only thing that moves
+    /// `focused_frame`. See that field's doc comment for what turns on
+    /// the distinction.
+    fn focus_frame(&mut self, frame: usize) {
+        self.activate_frame(frame);
+        self.focused_frame = self.active_frame;
+    }
+
+    /// Re-reads the active frame's position from the OS. Called
+    /// whenever it could have changed -- the window moved, was resized,
+    /// or was just created -- because directional navigation across
+    /// frames is decided from these coordinates.
+    ///
+    /// Reads `inner_position` rather than the outer one a `Moved` event
+    /// carries: pane rectangles are relative to the client area, so the
+    /// client area's corner is what they have to be offset by.
+    fn refresh_frame_origin(&mut self) {
+        if let Some(at) = self.window.as_ref().and_then(|window| window.inner_position().ok()) {
+            self.frame_origin = (at.x, at.y);
+        }
+    }
+
+    /// The configured body text size *before* any DPI scaling -- what
+    /// `config.ini` holds and what `SPC t =`/`SPC t -` step. Each
+    /// frame's pipeline gets this multiplied by its own monitor's
+    /// scale factor.
+    fn logical_font_size(&self) -> f32 {
+        self.config.font_size.unwrap_or(text::FONT_SIZE)
+    }
+
+    /// The active frame's DPI scale factor -- 1.0 before its window
+    /// exists, which is also the right answer for a headless test.
+    fn frame_scale(&self) -> f32 {
+        self.window.as_ref().map(|window| window.scale_factor() as f32).unwrap_or(1.0)
+    }
+
+    /// Re-applies the configured font size to every frame, each at its
+    /// own monitor's scale factor. Every frame, not just the active
+    /// one, because `SPC t =` is an editor-wide preference: two windows
+    /// on differently-scaled monitors should end up the same apparent
+    /// size as each other, not the same pixel size.
+    fn apply_font_size(&mut self) {
+        let logical = self.logical_font_size();
+        let previous = self.active_frame;
+        for frame in 0..self.frames.len() {
+            self.activate_frame(frame);
+            let scale = self.frame_scale();
+            if let Some(text) = &mut self.text {
+                text.set_font_size(logical, scale);
+            }
+        }
+        self.activate_frame(previous);
+    }
+
+    /// Raises the active frame's OS window and asks it to repaint --
+    /// what every command that moves editor focus between frames has to
+    /// end with, or the keystrokes would keep going to whichever window
+    /// the OS still considers foreground.
+    fn focus_active_frame_window(&self) {
+        if let Some(window) = &self.window {
+            window.focus_window();
+            window.request_redraw();
+        }
+    }
+
+    /// `SPC w n`: opens another OS window, showing the focused buffer in
+    /// a single pane, and moves focus to it. The two windows share
+    /// everything but layout -- one buffer list, one undo history, one
+    /// PDF worker -- so the same file can be open in both and edits show
+    /// up in each.
+    ///
+    /// A silent no-op before `resumed` has built the shared
+    /// `GpuContext`: there'd be no device to hang a second swapchain
+    /// off. That can't happen from a real keystroke (the window has to
+    /// exist for one to arrive) and headless tests use `test_add_frame`.
+    pub(crate) fn new_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let placement = self.next_frame_placement(event_loop);
+        self.open_frame(event_loop, placement);
+    }
+
+    /// The half of `new_frame` that takes where to put the window as an
+    /// argument, so restoring a saved layout can reuse it (see
+    /// `restore_saved_windows`) instead of asking for a free monitor.
+    fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
+        let (Some(context), Some(fonts)) = (&self.gpu_context, &self.fonts) else { return };
+
+        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        if let Some(position) = placement.position {
+            attrs = attrs.with_position(position);
+        }
+        if let Some(size) = placement.size {
+            attrs = attrs.with_inner_size(size);
+        }
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(err) => {
+                self.set_error(format!("couldn't open a new window ({err})"));
+                return;
+            }
+        };
+
+        let gpu = context.attach(Arc::clone(&window));
+        let mut text = TextPipeline::new(&gpu, Rc::clone(fonts));
+        text.set_font_size(self.logical_font_size(), window.scale_factor() as f32);
+        let bg_rect = RectRenderer::new(&gpu);
+        let popup_rect = RectRenderer::new(&gpu);
+        let caret_rect = RectRenderer::new(&gpu);
+
+        let buffer = self.focused_buffer_id();
+        let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.frames.push(Some(FrameState {
+            window: Some(Arc::clone(&window)),
+            gpu: Some(gpu),
+            text: Some(text),
+            bg_rect: Some(bg_rect),
+            popup_rect: Some(popup_rect),
+            caret_rect: Some(caret_rect),
+            workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
+            cursor_pos: None,
+            origin: (0, 0),
+            sidebar: None,
+            sidebar_open: false,
+            sidebar_focused: false,
+            sidebar_scroll: 0,
+            terminal_open: false,
+            terminal_focused: false,
+        }));
+        let opened = self.frames.len() - 1;
+
+        // Maximizing *after* creation, with the window already
+        // positioned on the target monitor, is what makes it fill that
+        // monitor rather than whichever one the OS considers primary --
+        // and it respects the taskbar, which sizing to the raw monitor
+        // rectangle wouldn't.
+        if placement.maximized {
+            window.set_maximized(true);
+        }
+        self.focus_frame(opened);
+        self.refresh_frame_origin();
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// Where a new frame should open: the first monitor, left to right,
+    /// that hasn't got a Fenix frame on it already -- so on a multi-
+    /// monitor desk `SPC w n` lands on the empty screen instead of on
+    /// top of the window you're already looking at.
+    ///
+    /// Falls back to a cascade offset from the active frame when every
+    /// monitor is occupied (or when the platform reports no monitors at
+    /// all), so a second frame on a single screen is still reachable and
+    /// doesn't land exactly on top of the first.
+    fn next_frame_placement(&self, event_loop: &ActiveEventLoop) -> FramePlacement {
+        let occupied: Vec<(i32, i32)> = (0..self.frames.len()).filter_map(|frame| self.frame_center(frame)).collect();
+        let mut monitors: Vec<MonitorHandle> = event_loop.available_monitors().collect();
+        monitors.sort_by_key(|monitor| monitor.position().x);
+
+        if let Some(free) = monitors.iter().find(|monitor| !occupied.iter().any(|&at| monitor_contains(monitor, at))) {
+            let size = free.size();
+            return FramePlacement {
+                position: Some(free.position()),
+                // A sensible restored-down size for a window that's
+                // about to be maximized onto this monitor.
+                size: Some(PhysicalSize::new(size.width / 2, size.height / 2)),
+                maximized: true,
+            };
+        }
+
+        const CASCADE: i32 = 48;
+        let position = self
+            .window
+            .as_ref()
+            .and_then(|window| window.inner_position().ok())
+            .map(|at| PhysicalPosition::new(at.x + CASCADE, at.y + CASCADE));
+        FramePlacement { position, size: self.window.as_ref().map(|window| window.inner_size()), maximized: false }
+    }
+
+    /// Reopens the windows recorded in `config.windows`, called once
+    /// from `resumed` after the first window exists. The first saved
+    /// entry is applied to that window; each remaining one opens a
+    /// frame of its own. Focus ends on the first, wherever it sits.
+    ///
+    /// A saved rectangle is handed to the OS as-is. If a monitor has
+    /// been unplugged since, Windows clamps the window back onto a
+    /// visible screen rather than leaving it stranded off the edge --
+    /// which is the whole reason this records rectangles instead of
+    /// monitor names (see `fenix_config::WindowLayout`).
+    fn restore_saved_windows(&mut self, event_loop: &ActiveEventLoop) {
+        if self.config.restore_windows == Some(false) {
+            return;
+        }
+        let layouts = self.config.windows.clone();
+        let Some((first, rest)) = layouts.split_first() else { return };
+
+        if let Some(window) = &self.window {
+            window.set_outer_position(PhysicalPosition::new(first.x, first.y));
+            let _ = window.request_inner_size(PhysicalSize::new(first.width, first.height));
+            window.set_maximized(first.maximized);
+        }
+        self.refresh_frame_origin();
+
+        for layout in rest {
+            self.open_frame(event_loop, FramePlacement::from(*layout));
+        }
+        self.focus_frame(0);
+        self.focus_active_frame_window();
+    }
+
+    /// Records every open window's geometry into `config`, then writes
+    /// it -- called from `exiting`, the one place every quit path
+    /// (`SPC q q`, `:q`, the last window's X button, `SPC q Q`) is
+    /// guaranteed to pass through.
+    ///
+    /// A failure to write is reported to stderr and otherwise ignored,
+    /// the same posture `save` already has everywhere else it's called:
+    /// losing a window arrangement is not worth refusing to exit over.
+    fn save_window_layout(&mut self) {
+        let layouts: Vec<fenix_config::WindowLayout> = (0..self.frames.len())
+            .filter_map(|frame| {
+                let window = self.frame_window(frame)?;
+                let at = window.outer_position().ok()?;
+                let size = window.inner_size();
+                Some(fenix_config::WindowLayout {
+                    x: at.x,
+                    y: at.y,
+                    width: size.width,
+                    height: size.height,
+                    maximized: window.is_maximized(),
+                })
+            })
+            .collect();
+        if !layout_worth_saving(&layouts, &self.config.windows) {
+            return;
+        }
+        self.config.windows = layouts;
+        if let Err(err) = self.config.save() {
+            eprintln!("fenix: couldn't save the window layout ({err})");
+        }
+    }
+
+    /// The centre of `frame`'s window in desktop coordinates -- how
+    /// "which monitor is this frame on" is decided. `None` for a frame
+    /// with no window yet, or on a platform that won't report window
+    /// positions.
+    fn frame_center(&self, frame: usize) -> Option<(i32, i32)> {
+        let window = self.frame_window(frame)?;
+        let at = window.inner_position().ok()?;
+        let size = window.inner_size();
+        Some((at.x + size.width as i32 / 2, at.y + size.height as i32 / 2))
+    }
+
+    /// `SPC w Q`: closes the focused frame. Closing the *last* frame is
+    /// quitting, so it goes through the ordinary unsaved-changes gate
+    /// rather than silently dropping your only window -- the same
+    /// posture `close_window` takes for the last pane.
+    pub(crate) fn close_frame(&mut self, event_loop: &ActiveEventLoop) {
+        if self.frames.len() <= 1 {
+            self.request_quit(event_loop);
+            return;
+        }
+        self.drop_frame(self.active_frame);
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// `SPC w O`: closes every frame except the focused one. The
+    /// frame-level counterpart of `SPC w o`, and equally permanent.
+    pub(crate) fn only_frame(&mut self) {
+        while self.frames.len() > 1 {
+            // Always a frame other than the active one: with more than
+            // one frame open, index 0 and the last index can't both be
+            // the active one.
+            let victim = if self.active_frame == 0 { self.frames.len() - 1 } else { 0 };
+            self.drop_frame(victim);
+        }
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// `SPC w W`: moves focus to the next frame, wrapping -- the
+    /// frame-level counterpart of `SPC w w`.
+    pub(crate) fn cycle_frame(&mut self) {
+        if self.frames.len() <= 1 {
+            return;
+        }
+        let next = (self.active_frame + 1) % self.frames.len();
+        self.focus_frame(next);
+        self.focus_active_frame_window();
+        self.wake_caret();
+    }
+
+    /// Removes `frame` for good: tears down the sessions living in it,
+    /// then drops its `FrameState`, which drops its `Window` (closing
+    /// the OS window) and its swapchain. Refuses on the last frame --
+    /// callers that mean "quit" say so explicitly.
+    ///
+    /// Whichever frame was active stays active, unless it's the one
+    /// being dropped; then focus lands on its neighbour. The live
+    /// fields are always handed to a frame that will still exist
+    /// *before* the removal, because `activate_frame` swaps against a
+    /// parked frame and the dying one is about to stop being one.
+    fn drop_frame(&mut self, frame: usize) {
+        if self.frames.len() <= 1 || frame >= self.frames.len() {
+            return;
+        }
+        let keep = self.active_frame;
+        self.activate_frame(frame);
+        self.close_sessions_in_active_frame();
+
+        let survivor = if keep == frame {
+            if frame == 0 {
+                1
+            } else {
+                frame - 1
+            }
+        } else {
+            keep
+        };
+        self.focus_frame(survivor);
+        self.frames.remove(frame);
+        if self.active_frame > frame {
+            self.active_frame -= 1;
+        }
+        self.focused_frame = self.active_frame;
+    }
+
+    /// Tears down every session whose panes live in the active frame --
+    /// called by `drop_frame` while the frame being dropped is still the
+    /// live one, because each session's own close path touches
+    /// `workspaces` and `buffers` and has to act on the layout it
+    /// actually belongs to.
+    ///
+    /// Without this, closing a frame would strand whatever it was
+    /// holding open: a pdfium worker still keeping a document loaded, a
+    /// live VNC socket, a Docker or Git session still polling in the
+    /// background -- each pointing at panes that no longer exist.
+    fn close_sessions_in_active_frame(&mut self) {
+        let panes = self.workspaces.all_panes();
+
+        let pdf_keys: Vec<PathBuf> = panes.iter().filter_map(|&pane| self.pdf_session_key_for_pane(pane)).collect();
+        for key in pdf_keys {
+            self.pdf_session_forget(&key);
+        }
+        let vnc_keys: Vec<String> = panes.iter().filter_map(|&pane| self.vnc_session_key_for_pane(pane)).collect();
+        for key in vnc_keys {
+            self.vnc_session_close(&key);
+        }
+        // One pane apiece is enough to identify these: a panel session
+        // builds all of its panes in one workspace, so they're either
+        // all in this frame or none of them are.
+        if self.docker_session.as_ref().is_some_and(|session| panes.contains(&session.containers_pane)) {
+            self.docker_session_close();
+        }
+        if self.git_session.as_ref().is_some_and(|session| panes.contains(&session.status_pane)) {
+            self.git_session_close();
+        }
+        if self.jira_session.as_ref().is_some_and(|session| panes.contains(&session.issues_pane)) {
+            self.jira_session_close();
+        }
+    }
+
     fn windows(&self) -> &WindowTree<BufferId> {
         self.workspaces.active()
     }
@@ -11201,20 +11845,102 @@ impl App {
         self.split_window(SplitKind::Horizontal);
     }
 
-    /// `SPC w hjkl`: moves focus to the nearest window in that direction
-    /// by real layout geometry, not tree adjacency -- a no-op at the
-    /// grid's edge (`WindowTree::navigate`'s own contract).
+    /// `SPC w hjkl`: moves focus to the nearest pane in that direction
+    /// by real layout geometry, not tree adjacency -- and *across OS
+    /// windows*, not just within one. Walking off the left edge of the
+    /// window on one monitor continues into the window on the monitor
+    /// beside it, landing on whichever of its panes is actually nearest
+    /// (its rightmost, coming from the left edge -- not its first).
+    ///
+    /// One list of rectangles in desktop coordinates, one rule
+    /// (`fenix_window::pick`). Panes in the current window are
+    /// simply nearer than panes in the next window over, so ordinary
+    /// same-window navigation behaves exactly as it always has without
+    /// being a special case, and neither is the sidebar (see
+    /// `NavTarget::Sidebar`).
+    ///
+    /// A no-op at the outermost edge of the outermost window.
     pub(crate) fn navigate_window(&mut self, dir: NavDirection) {
-        let moved = self.windows_mut().navigate(dir);
-        // The sidebar isn't a leaf in `WindowTree` -- it's a separate panel
-        // drawn to the left of it -- so plain `navigate(Left)` has no way to
-        // reach it. Treat it as one more step further left: only when
-        // ordinary window navigation can't move any further (already at the
-        // leftmost pane) does `Left` hand focus to an open sidebar instead.
-        if dir == NavDirection::Left && !moved && self.sidebar_open && !self.sidebar_focused {
-            self.sidebar_focused = true;
+        let from = if self.sidebar_focused {
+            NavTarget::Sidebar { frame: self.active_frame }
+        } else {
+            NavTarget::Pane { frame: self.active_frame, pane: self.focused_pane_id() }
+        };
+        let targets = self.nav_targets();
+        let Some(target) = fenix_window::pick(&targets, from, dir) else { return };
+
+        let frame = match target {
+            NavTarget::Pane { frame, .. } | NavTarget::Sidebar { frame } => frame,
+        };
+        if frame != self.active_frame {
+            self.focus_frame(frame);
+            self.focus_active_frame_window();
+        }
+        match target {
+            NavTarget::Pane { pane, .. } => {
+                self.windows_mut().focus(pane);
+                // Mirrors `handle_click_at`'s own rule: focusing a pane
+                // always clears both panel-focus overrides, since they
+                // sit outside the tree and nothing else would.
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+            }
+            NavTarget::Sidebar { .. } => {
+                self.sidebar_focused = true;
+                self.terminal_focused = false;
+            }
         }
         self.wake_caret();
+    }
+
+    /// Every pane (and sidebar) of every open frame, as rectangles in
+    /// one desktop coordinate space -- each frame's own layout offset by
+    /// where its client area sits on the desktop.
+    ///
+    /// Computed by briefly activating each frame in turn, so the
+    /// existing `frame_metrics`/`frame_geometry` pair -- which read the
+    /// live sidebar and terminal state, and are what `redraw` and mouse
+    /// hit-testing already agree with -- can be reused verbatim rather
+    /// than reimplemented against a parked frame. Whichever frame was
+    /// active is active again on return.
+    fn nav_targets(&mut self) -> Vec<(NavTarget, fenix_window::Rect)> {
+        let previous = self.active_frame;
+        let mut targets = Vec::new();
+        for frame in 0..self.frames.len() {
+            self.activate_frame(frame);
+            targets.extend(self.active_frame_nav_targets(frame));
+        }
+        self.activate_frame(previous);
+        targets
+    }
+
+    /// The active frame's own navigation targets, in desktop
+    /// coordinates. `frame` is passed in rather than read from
+    /// `active_frame` only so the caller's loop index is what ends up
+    /// in the keys.
+    fn active_frame_nav_targets(&self, frame: usize) -> Vec<(NavTarget, fenix_window::Rect)> {
+        let (width, height) = self
+            .gpu
+            .as_ref()
+            .map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
+            .unwrap_or(NAV_REFERENCE_SIZE);
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(height);
+        let geometry = self.frame_geometry(width, sidebar_px, terminal_h, modeline_top);
+
+        let (origin_x, origin_y) = (self.frame_origin.0 as f32, self.frame_origin.1 as f32);
+        let to_desktop = |rect: fenix_window::Rect| fenix_window::Rect {
+            x: rect.x + origin_x,
+            y: rect.y + origin_y,
+            w: rect.w,
+            h: rect.h,
+        };
+
+        let mut targets: Vec<(NavTarget, fenix_window::Rect)> =
+            geometry.panes.iter().map(|&(pane, rect)| (NavTarget::Pane { frame, pane }, to_desktop(rect))).collect();
+        if let Some(rect) = geometry.sidebar_rect {
+            targets.push((NavTarget::Sidebar { frame }, to_desktop(rect)));
+        }
+        targets
     }
 
     /// `SPC w w`: cycles focus to the next window in a stable pre-order
@@ -11356,9 +12082,16 @@ impl App {
     /// can't happen for a keybinding a running window is dispatching,
     /// but `App::new`/headless tests can call these before `resumed()`.
     fn adjust_font_size(&mut self, size: f32) {
-        let Some(text) = &mut self.text else { return };
-        text.set_font_size(size);
-        self.config.font_size = Some(text.font_size());
+        if self.text.is_none() {
+            return;
+        }
+        // The *logical* size is what's persisted and what the steps
+        // move: each frame's pipeline multiplies it by its own
+        // monitor's scale factor (see `apply_font_size`), so storing
+        // the already-scaled result would bake one monitor's DPI into
+        // the config file.
+        self.config.font_size = Some(size.clamp(text::MIN_FONT_SIZE, text::MAX_FONT_SIZE));
+        self.apply_font_size();
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save font size: {err}");
         }
@@ -11389,13 +12122,17 @@ impl App {
     }
 
     pub(crate) fn increase_font_size(&mut self) {
-        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
-        self.adjust_font_size(current + FONT_SIZE_STEP);
+        if self.text.is_none() {
+            return;
+        }
+        self.adjust_font_size(self.logical_font_size() + FONT_SIZE_STEP);
     }
 
     pub(crate) fn decrease_font_size(&mut self) {
-        let Some(current) = self.text.as_ref().map(|t| t.font_size()) else { return };
-        self.adjust_font_size(current - FONT_SIZE_STEP);
+        if self.text.is_none() {
+            return;
+        }
+        self.adjust_font_size(self.logical_font_size() - FONT_SIZE_STEP);
     }
 
     pub(crate) fn reset_font_size(&mut self) {
@@ -11476,6 +12213,12 @@ impl App {
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
+            // Deferred rather than handled here: opening a window needs
+            // an `&ActiveEventLoop`, which `handle_user_event` doesn't
+            // take (it's deliberately the `ActiveEventLoop`-free half of
+            // `user_event`, so it stays directly testable). `about_to_
+            // wait` runs moments later and does have one.
+            FenixUserEvent::OpenFilesInNewFrame(paths) => self.pending_frames.push(paths),
             FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
             FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
             FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
@@ -14557,6 +15300,18 @@ impl App {
         let visible_lines = text::visible_line_count(window_height, modeline_height, line_height);
         let caret_is_block = self.caret_is_block();
 
+        // Whether this frame is the one with editor focus, and so the
+        // one that draws the single-instance UI: the which-key popup,
+        // an open picker, the file explorer, a prompt, a completion or
+        // menu popup. All of that lives on `App` rather than per frame
+        // (only one window can be typed into, so only one can have
+        // raised it), and painting it unconditionally would show the
+        // same picker in every open window. A background frame draws
+        // its panes, its own sidebar and terminal, and its modeline --
+        // nothing else.
+        let overlays_here = self.active_frame == self.focused_frame;
+        let main_view = if overlays_here { self.main_view } else { MainView::Editor };
+
         // Sidebar is independent of window splits *and* `main_view` --
         // kept alive (and its own scroll adjusted) even while a full-
         // buffer explorer is showing in the focused pane, but only
@@ -14567,7 +15322,7 @@ impl App {
         if let Some(sidebar) = &self.sidebar {
             self.sidebar_scroll = scroll_to_include(self.sidebar_scroll, sidebar.selected, visible_lines);
         }
-        let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
+        let show_sidebar = self.sidebar_open && main_view == MainView::Editor;
         let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
         let sidebar_render = if show_sidebar {
             self.sidebar.as_ref().map(|s| self.explorer_row_spans(s, self.sidebar_scroll, visible_lines, false))
@@ -14700,7 +15455,7 @@ impl App {
             // all: an empty pane, no file list, and no way to see what
             // was being typed. Checked here, once, rather than repeated
             // in both blocks' own conditions.
-            let overlay_covers_pane = is_focused && matches!(self.main_view, MainView::Explorer | MainView::Picker);
+            let overlay_covers_pane = is_focused && matches!(main_view, MainView::Explorer | MainView::Picker);
 
             // A VNC pane's content is a live pixel framebuffer, not
             // text -- rendered as a separate textured-quad layer (see
@@ -14797,7 +15552,7 @@ impl App {
                 }
             }
 
-            if is_focused && self.main_view == MainView::Explorer {
+            if is_focused && main_view == MainView::Explorer {
                 let rows = pane_visible_lines + 1;
                 if let Some(explorer) = &self.explorer {
                     self.explorer_scroll = scroll_to_include(self.explorer_scroll, explorer.selected, pane_visible_lines);
@@ -14824,7 +15579,7 @@ impl App {
                 });
                 continue;
             }
-            if is_focused && self.main_view == MainView::Picker {
+            if is_focused && main_view == MainView::Picker {
                 let rows = pane_visible_lines + 1;
                 if let Some(picker) = &self.active_picker {
                     self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), pane_visible_lines);
@@ -15026,27 +15781,27 @@ impl App {
         // at. Resolved (and, if needed, row-truncated) here rather than
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
-        let which_key_popup = self.which_key_popup(window_width, modeline_top);
+        let which_key_popup = overlays_here.then(|| self.which_key_popup(window_width, modeline_top)).flatten();
         // Never `Some` at the same time as `which_key_popup`/`completion_
         // popup` in practice -- it only shows while a Docker pane is
         // focused, where a leader/operator-pending sequence or an Insert-
         // mode completion session can't simultaneously be active.
-        let docker_menu_popup = self.docker_menu_popup(window_width, modeline_top);
+        let docker_menu_popup = overlays_here.then(|| self.docker_menu_popup(window_width, modeline_top)).flatten();
         // Same non-coexistence reasoning as `docker_menu_popup` above,
         // just for the Git session.
-        let git_menu_popup = self.git_menu_popup(window_width, modeline_top);
+        let git_menu_popup = overlays_here.then(|| self.git_menu_popup(window_width, modeline_top)).flatten();
         // Same non-coexistence reasoning again, for the Jira session.
-        let jira_menu_popup = self.jira_menu_popup(window_width, modeline_top);
+        let jira_menu_popup = overlays_here.then(|| self.jira_menu_popup(window_width, modeline_top)).flatten();
         // Never `Some` at the same time as `which_key_popup` -- one only
         // appears mid-Normal/-pending-sequence, the other only in Insert
         // mode -- so `popup_rects` below never ends up with more than one
         // entry in practice, even though it's shaped as a list.
-        let completion_popup = panes_render.iter().find(|p| p.pane == focused_pane).and_then(|focused| {
+        let completion_popup = overlays_here.then_some(()).and_then(|()| panes_render.iter().find(|p| p.pane == focused_pane)).and_then(|focused| {
             self.completion_popup(window_width, modeline_top, focused.rect, focused.caret, focused.gutter_px, focused.content_frac)
         });
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
-        let prompt_popup = self.prompt_popup(window_width, modeline_top);
+        let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let caret_alpha = self.caret_alpha();
 
         let (
@@ -15687,13 +16442,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let window =
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
-        let gpu = pollster::block_on(GpuState::new(window.clone()));
+        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+        let fonts = Rc::new(RefCell::new(text::FontContext::new(&gpu)));
         // No priming call needed for pane content -- `redraw()` populates
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
         // immediately after this.
-        let mut text = TextPipeline::new(&gpu);
-        text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
+        let mut text = TextPipeline::new(&gpu, Rc::clone(&fonts));
+        text.set_font_size(self.logical_font_size(), window.scale_factor() as f32);
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
@@ -15701,6 +16457,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let pdf_pipeline = PdfPipeline::new(&gpu);
 
         self.window = Some(window);
+        self.gpu_context = Some(gpu_context);
+        self.fonts = Some(fonts);
         self.gpu = Some(gpu);
         self.text = Some(text);
         self.bg_rect = Some(bg_rect);
@@ -15708,15 +16466,68 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.caret_rect = Some(caret_rect);
         self.vnc_pipeline = Some(vnc_pipeline);
         self.pdf_pipeline = Some(pdf_pipeline);
+        self.refresh_frame_origin();
+        self.restore_saved_windows(event_loop);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    /// The one place every quit path is guaranteed to pass through --
+    /// `SPC q q`, `:q`, `SPC q Q`, and the last window's X button all
+    /// end in `event_loop.exit()`, which lands here.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_window_layout();
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(frame) = self.frame_index_of(id) else { return };
+        // Every event is handled with the frame it arrived from active,
+        // so the handlers below -- all written against one implicit
+        // window -- resolve to the right frame's layout, renderers and
+        // swapchain without any of them knowing frames exist.
+        //
+        // Whether that frame then *keeps* editor focus depends on what
+        // the event was. Real input moves focus with it: a keystroke, a
+        // click, or the OS telling us this window was focused. Anything
+        // else -- a resize, a plain hover (Windows delivers mouse moves
+        // to whatever window is under the pointer, focused or not), a
+        // background frame asking to repaint -- is handled in that
+        // frame's context and then hands focus straight back.
+        let keeps_focus = matches!(
+            &event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::Focused(true)
+        );
+        let previous = self.active_frame;
+        if keeps_focus {
+            self.focus_frame(frame);
+        } else {
+            self.activate_frame(frame);
+        }
         match event {
-            // Same unsaved-changes check as `:q`/`SPC q q` -- the window's
-            // own X button shouldn't be able to silently discard work
-            // either.
-            WindowEvent::CloseRequested => self.request_quit(event_loop),
+            // The X button closes that one frame, exactly like
+            // `SPC w Q`. On the *last* frame that is quitting, so
+            // `close_frame` routes it through the same unsaved-changes
+            // check as `:q`/`SPC q q` -- the X button shouldn't be able
+            // to silently discard work either.
+            WindowEvent::CloseRequested => self.close_frame(event_loop),
+            // A window moving between monitors changes nothing about
+            // how it draws, but it does change where it sits relative
+            // to the other frames -- which is what `SPC w h`/`l`
+            // crossing a window boundary is decided from.
+            WindowEvent::Moved(_) => self.refresh_frame_origin(),
+            // Dragged onto a monitor with different scaling: the same
+            // configured size now needs a different number of physical
+            // pixels to look the same. Uses the event's factor rather
+            // than the window's, which may not have caught up yet.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let logical = self.logical_font_size();
+                if let Some(text) = &mut self.text {
+                    text.set_font_size(logical, scale_factor as f32);
+                }
+                self.resync_terminal_cols();
+            }
             WindowEvent::Resized(size) => {
+                // Maximizing (and being snapped, and un-maximizing)
+                // moves the client area's corner as well as its size.
+                self.refresh_frame_origin();
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size);
                 }
@@ -15773,11 +16584,23 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             _ => {}
         }
+        if !keeps_focus {
+            self.activate_frame(previous);
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let mut needs_redraw = false;
+
+        // Frames requested by a `fenix --new-window` hand-off, which
+        // arrived somewhere without an `&ActiveEventLoop` to open a
+        // window with. See `App::pending_frames`.
+        for paths in std::mem::take(&mut self.pending_frames) {
+            self.new_frame(event_loop);
+            self.apply_open_files(paths);
+            needs_redraw = true;
+        }
 
         if now >= self.next_blink {
             self.blink_visible = !self.blink_visible;
@@ -15812,17 +16635,22 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // ordinary blink-driven redraw below is more than enough to
         // eventually show its (much less frequent) updates.
         let vnc_focused = self.vnc_focused.is_some();
-        let animating = blink_transitioning
-            || pulse_active
-            || self.workspaces.active_scroll_anims().contains_key(&self.focused_pane_id())
-            || vnc_focused;
+        // Any frame's focused pane mid-scroll keeps the clock running,
+        // not just the active frame's -- a smooth scroll started on one
+        // monitor has to keep easing after focus moves to another.
+        let scroll_animating = (0..self.frames.len())
+            .filter_map(|frame| self.frame_workspaces(frame))
+            .any(|workspaces| workspaces.active_scroll_anims().contains_key(&workspaces.active().focused_id()));
+        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused;
         if animating {
             needs_redraw = true;
         }
 
         if needs_redraw {
-            if let Some(window) = &self.window {
-                window.request_redraw();
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
             }
         }
 
@@ -15986,6 +16814,49 @@ impl App {
         self.set_pane_content(focused, id);
     }
 
+    /// Adds a parked second (third, ...) frame showing `buffer` in a
+    /// single pane, and returns its index. The headless equivalent of
+    /// what the `frame.new` command does for real -- minus the winit
+    /// window and GPU resources, which a test can't have and which
+    /// nothing about frame *bookkeeping* depends on (every render field
+    /// is already `Option` for exactly this reason).
+    #[cfg(test)]
+    fn test_add_frame(&mut self, buffer: BufferId) -> usize {
+        let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        self.frames.push(Some(FrameState {
+            window: None,
+            gpu: None,
+            text: None,
+            bg_rect: None,
+            popup_rect: None,
+            caret_rect: None,
+            workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
+            cursor_pos: None,
+            origin: (0, 0),
+            sidebar: None,
+            sidebar_open: false,
+            sidebar_focused: false,
+            sidebar_scroll: 0,
+            terminal_open: false,
+            terminal_focused: false,
+        }));
+        self.frames.len() - 1
+    }
+
+    /// Puts `frame`'s client area at `origin` in desktop coordinates --
+    /// the headless stand-in for `refresh_frame_origin`, which needs a
+    /// real window to ask. Cross-window navigation is decided entirely
+    /// from these, so this is what lets it be tested without monitors.
+    #[cfg(test)]
+    fn test_place_frame(&mut self, frame: usize, origin: (i32, i32)) {
+        match self.frames.get_mut(frame) {
+            Some(Some(parked)) => parked.origin = origin,
+            // The active frame's state is the live set on `App`.
+            Some(None) => self.frame_origin = origin,
+            None => {}
+        }
+    }
+
     /// The focused pane's live cursor -- test-only convenience wrapping
     /// `pane_state`, since tests can't borrow two fields at once the way
     /// production code inlines it (`focused_buffer_and_cursor_mut`, etc.).
@@ -16076,6 +16947,437 @@ mod tests {
         // enough room, so the clock is omitted rather than rendered with
         // visual overlap onto the existing text.
         assert!(!modeline_clock_fits(10, 47.0, 2.0, 5));
+    }
+
+    /// Every index in `frames` is parked except `active_frame`, which
+    /// is `None` because its state is live on `App` -- the invariant
+    /// `activate_frame` exists to uphold, asserted directly.
+    fn assert_one_live_frame(app: &App) {
+        for (frame, parked) in app.frames.iter().enumerate() {
+            assert_eq!(
+                parked.is_none(),
+                frame == app.active_frame,
+                "frame {frame} parked={} with active_frame={}",
+                parked.is_some(),
+                app.active_frame
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_app_has_exactly_one_frame_and_it_is_the_live_one() {
+        let app = App::with_file(None);
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_another_frame_swaps_in_its_layout_and_parks_the_outgoing_one() {
+        let mut app = App::with_file(None);
+        let original = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        app.activate_frame(second);
+        assert_eq!(app.active_frame, second);
+        // The live layout is now the second frame's, so the ordinary
+        // "what am I looking at" accessors report *its* buffer.
+        assert_eq!(app.focused_buffer_id(), other);
+        assert_one_live_frame(&app);
+
+        app.activate_frame(0);
+        assert_eq!(app.focused_buffer_id(), original);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_a_frame_preserves_the_split_layout_it_was_parked_with() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.split_horizontal();
+        assert_eq!(app.windows().window_count(), 3);
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        assert_eq!(app.windows().window_count(), 1, "a fresh frame starts with a single pane");
+
+        app.activate_frame(0);
+        assert_eq!(app.windows().window_count(), 3, "the first frame's splits survived being parked");
+    }
+
+    #[test]
+    fn activating_the_frame_that_is_already_active_changes_nothing() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        app.activate_frame(0);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn activating_a_frame_that_does_not_exist_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        app.activate_frame(7);
+        assert_eq!(app.active_frame, 0, "a bogus index must not leave the app pointing at a frame it hasn't got");
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn frame_workspaces_reads_a_parked_frame_without_activating_it() {
+        let mut app = App::with_file(None);
+        let original = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        let parked = app.frame_workspaces(second).expect("the second frame exists");
+        assert_eq!(*parked.active().focused_content(), other);
+        // Reading it must not have moved focus.
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), original);
+        assert!(app.frame_workspaces(9).is_none());
+    }
+
+    #[test]
+    fn panes_in_different_frames_never_share_an_id() {
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        let first_frame_panes = app.windows().windows();
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        app.split_horizontal();
+
+        for pane in app.windows().windows() {
+            assert!(
+                !first_frame_panes.contains(&pane),
+                "{pane:?} is claimed by two frames -- every App-level map keyed by pane id would be ambiguous"
+            );
+        }
+    }
+
+    #[test]
+    fn a_point_on_a_monitor_is_inside_its_rectangle_and_a_point_past_it_is_not() {
+        let at = PhysicalPosition::new(1920, 0);
+        let size = PhysicalSize::new(2560, 1440);
+        assert!(desktop_rect_contains(at, size, (1920, 0)), "top-left corner is inclusive");
+        assert!(desktop_rect_contains(at, size, (3000, 700)), "interior");
+        assert!(!desktop_rect_contains(at, size, (1919, 700)), "one pixel left belongs to the monitor next door");
+        assert!(!desktop_rect_contains(at, size, (4480, 700)), "right edge is exclusive");
+        assert!(!desktop_rect_contains(at, size, (3000, 1440)), "bottom edge is exclusive");
+    }
+
+    #[test]
+    fn a_monitor_to_the_left_of_the_origin_still_contains_its_own_points() {
+        // Windows puts a monitor left of the primary one at a negative
+        // x -- desktop coordinates are signed, and the arithmetic here
+        // has to survive that.
+        let at = PhysicalPosition::new(-1920, -200);
+        let size = PhysicalSize::new(1920, 1080);
+        assert!(desktop_rect_contains(at, size, (-1000, 0)));
+        assert!(!desktop_rect_contains(at, size, (10, 0)));
+    }
+
+    #[test]
+    fn dropping_a_frame_removes_it_and_leaves_focus_where_it_was() {
+        let mut app = App::with_file(None);
+        let stays = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), stays);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_the_active_frame_moves_focus_to_a_neighbour() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.focused_buffer_id(), first, "focus fell back to the surviving frame's own layout");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_a_frame_shifts_the_active_index_down_when_it_sat_after_the_one_removed() {
+        let mut app = App::with_file(None);
+        let a = app.buffers.open_scratch();
+        let b = app.buffers.open_scratch();
+        let second = app.test_add_frame(a);
+        let third = app.test_add_frame(b);
+        app.activate_frame(third);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.frames.len(), 2);
+        assert_eq!(app.active_frame, 1, "the third frame is now at index 1");
+        assert_eq!(app.focused_buffer_id(), b, "and it is still the one being looked at");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn dropping_the_only_frame_is_refused() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+
+        app.drop_frame(0);
+
+        assert_eq!(app.frames.len(), 1, "closing the last frame is quitting, and goes through `close_frame` instead");
+        assert_eq!(app.focused_buffer_id(), before);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn only_frame_closes_every_other_frame_and_keeps_the_focused_one() {
+        let mut app = App::with_file(None);
+        let a = app.buffers.open_scratch();
+        let b = app.buffers.open_scratch();
+        app.test_add_frame(a);
+        let third = app.test_add_frame(b);
+        app.activate_frame(third);
+
+        app.only_frame();
+
+        assert_eq!(app.frames.len(), 1);
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_buffer_id(), b, "the frame that was focused is the one that survived");
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn cycle_frame_wraps_around_and_is_a_no_op_with_one_frame() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        let other = app.buffers.open_scratch();
+        app.test_add_frame(other);
+
+        app.cycle_frame();
+        assert_eq!(app.focused_buffer_id(), other);
+        app.cycle_frame();
+        assert_eq!(app.focused_buffer_id(), first, "wrapped back round");
+
+        app.only_frame();
+        app.cycle_frame();
+        assert_eq!(app.active_frame, 0);
+    }
+
+    #[test]
+    fn the_sidebar_belongs_to_the_frame_that_opened_it() {
+        let mut app = App::with_file(None);
+        app.toggle_sidebar();
+        assert!(app.sidebar_open);
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        assert!(!app.sidebar_open, "a sidebar opened on one monitor must not appear on the other as well");
+
+        app.activate_frame(0);
+        assert!(app.sidebar_open, "and it is still there when you come back");
+    }
+
+    #[test]
+    fn the_terminal_panel_shows_only_in_the_frame_it_was_opened_in() {
+        let mut app = App::with_file(None);
+        app.toggle_terminal();
+        assert!(app.terminal_open);
+
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.activate_frame(second);
+        assert!(!app.terminal_open);
+
+        app.activate_frame(0);
+        assert!(app.terminal_open);
+    }
+
+    #[test]
+    fn activating_a_frame_to_paint_it_does_not_move_editor_focus() {
+        let mut app = App::with_file(None);
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        // What repainting a background frame does.
+        app.activate_frame(second);
+        assert_eq!(app.active_frame, second);
+        assert_eq!(app.focused_frame, 0, "a repaint must not steal focus from the window being typed into");
+
+        // What a keystroke, a click or a frame command does.
+        app.focus_frame(second);
+        assert_eq!(app.focused_frame, second);
+    }
+
+    #[test]
+    fn cycling_frames_moves_editor_focus_with_it() {
+        let mut app = App::with_file(None);
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+
+        app.cycle_frame();
+
+        assert_eq!(app.active_frame, second);
+        assert_eq!(app.focused_frame, second);
+    }
+
+    #[test]
+    fn closing_a_frame_leaves_editor_focus_on_one_that_still_exists() {
+        let mut app = App::with_file(None);
+        let other = app.buffers.open_scratch();
+        let second = app.test_add_frame(other);
+        app.focus_frame(second);
+
+        app.drop_frame(second);
+
+        assert_eq!(app.focused_frame, app.active_frame);
+        assert!(app.focused_frame < app.frames.len());
+    }
+
+    /// Two frames side by side, each split into two panes -- the left
+    /// frame's client area at the desktop origin, the right frame's
+    /// immediately beside it (`NAV_REFERENCE_SIZE.0` is the width a
+    /// windowless frame is laid out at). Returns each frame's panes in
+    /// left-to-right order.
+    fn two_frames_side_by_side(app: &mut App) -> (Vec<fenix_window::WindowId>, usize, Vec<fenix_window::WindowId>) {
+        app.split_vertical();
+        app.test_place_frame(0, (0, 0));
+        let left_panes = app.windows().windows();
+
+        let elsewhere = app.buffers.open_scratch();
+        let right = app.test_add_frame(elsewhere);
+        app.focus_frame(right);
+        app.test_place_frame(right, (NAV_REFERENCE_SIZE.0 as i32, 0));
+        app.split_vertical();
+        let right_panes = app.windows().windows();
+
+        (left_panes, right, right_panes)
+    }
+
+    #[test]
+    fn navigating_left_out_of_a_window_lands_on_the_nearest_pane_of_the_window_beside_it() {
+        let mut app = App::with_file(None);
+        let (left_panes, _right, right_panes) = two_frames_side_by_side(&mut app);
+        app.windows_mut().focus(right_panes[0]); // leftmost pane of the right-hand window
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, 0, "focus crossed into the window on the left");
+        assert_eq!(app.focused_frame, 0, "and it is a real focus move, not a temporary activation");
+        assert_eq!(
+            app.focused_pane_id(),
+            left_panes[1],
+            "landed on that window's *rightmost* pane -- the one actually adjacent -- not its first"
+        );
+    }
+
+    #[test]
+    fn navigating_right_back_out_of_a_window_lands_on_the_next_windows_leftmost_pane() {
+        let mut app = App::with_file(None);
+        let (left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        app.focus_frame(0);
+        app.windows_mut().focus(left_panes[1]); // rightmost pane of the left-hand window
+
+        app.navigate_window(NavDirection::Right);
+
+        assert_eq!(app.active_frame, right);
+        assert_eq!(app.focused_pane_id(), right_panes[0]);
+    }
+
+    #[test]
+    fn navigation_stays_inside_a_window_while_it_has_somewhere_to_go() {
+        let mut app = App::with_file(None);
+        let (_left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        app.windows_mut().focus(right_panes[1]); // rightmost pane of the right-hand window
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, right, "the neighbouring pane is nearer than the other window");
+        assert_eq!(app.focused_pane_id(), right_panes[0]);
+    }
+
+    #[test]
+    fn navigating_off_the_outermost_edge_of_the_outermost_window_is_a_no_op() {
+        let mut app = App::with_file(None);
+        let (left_panes, _right, _right_panes) = two_frames_side_by_side(&mut app);
+        app.focus_frame(0);
+        app.windows_mut().focus(left_panes[0]);
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, 0);
+        assert_eq!(app.focused_pane_id(), left_panes[0]);
+    }
+
+    #[test]
+    fn an_open_sidebar_is_reached_before_the_window_on_the_monitor_to_its_left() {
+        let dir = TempDir::new("nav_sidebar_before_other_frame");
+        let mut app = App::with_file(None);
+        let (_left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
+        // The right-hand window has its own sidebar open.
+        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar_open = true;
+        app.windows_mut().focus(right_panes[0]);
+
+        app.navigate_window(NavDirection::Left);
+
+        assert_eq!(app.active_frame, right, "the sidebar in this window is nearer than the next window over");
+        assert!(app.sidebar_focused);
+
+        // One more step left leaves the window entirely.
+        app.navigate_window(NavDirection::Left);
+        assert_eq!(app.active_frame, 0);
+        assert!(!app.sidebar_focused, "focusing a pane clears the sidebar override");
+    }
+
+    #[test]
+    fn a_saved_window_layout_becomes_the_placement_it_is_restored_at() {
+        let layout = fenix_config::WindowLayout { x: -1920, y: 40, width: 1600, height: 900, maximized: true };
+
+        let placement = FramePlacement::from(layout);
+
+        assert_eq!(placement.position, Some(PhysicalPosition::new(-1920, 40)));
+        assert_eq!(placement.size, Some(PhysicalSize::new(1600, 900)));
+        assert!(placement.maximized);
+    }
+
+    #[test]
+    fn saving_the_window_layout_with_no_real_windows_leaves_the_saved_one_alone() {
+        let mut app = App::with_file(None);
+        let saved = vec![fenix_config::WindowLayout { x: 10, y: 20, width: 800, height: 600, maximized: false }];
+        app.config.windows = saved.clone();
+
+        // A headless run has no windows to measure. Recording an empty
+        // layout here would wipe a real arrangement off disk the next
+        // time the app happened to exit before its window came up.
+        app.save_window_layout();
+
+        assert_eq!(app.config.windows, saved);
+    }
+
+    #[test]
+    fn a_window_layout_is_only_written_when_it_actually_changed() {
+        let one = fenix_config::WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: false };
+        let moved = fenix_config::WindowLayout { x: 40, y: 0, width: 800, height: 600, maximized: false };
+
+        assert!(layout_worth_saving(&[one], &[]), "first run, nothing recorded yet");
+        assert!(layout_worth_saving(&[moved], &[one]), "the window moved");
+        assert!(layout_worth_saving(&[one, moved], &[one]), "a second window was opened");
+        assert!(!layout_worth_saving(&[one], &[one]), "nothing moved -- don't reformat config.ini for nothing");
+        assert!(!layout_worth_saving(&[], &[one]), "nothing measured must never wipe a real arrangement");
     }
 
     #[test]
@@ -16733,6 +18035,20 @@ mod tests {
     // `App::with_file` *can* verify is that these are safe no-ops before
     // `resumed()` has run (`self.text` is `None` at that point) rather
     // than panicking.
+    #[test]
+    fn the_logical_font_size_is_the_configured_one_not_a_dpi_scaled_one() {
+        let mut app = App::with_file(None);
+        app.config.font_size = None;
+        assert_eq!(app.logical_font_size(), text::FONT_SIZE, "unset falls back to the default");
+
+        app.config.font_size = Some(20.0);
+        assert_eq!(app.logical_font_size(), 20.0);
+        // Whatever a monitor's scale factor is, it is applied on the way
+        // out to a pipeline -- never folded back into the stored value,
+        // which would bake one monitor's DPI into config.ini.
+        assert_eq!(app.frame_scale(), 1.0, "no window yet, so no scaling");
+    }
+
     #[test]
     fn font_size_adjustments_are_safe_no_ops_before_the_gpu_exists() {
         let mut app = App::with_file(None);
@@ -24072,6 +25388,35 @@ mod tests {
         session.page_point_size = (612.0, 792.0);
         session.last_pane_size = (612, 792);
         (guard, canonical, app)
+    }
+
+    #[test]
+    fn closing_a_frame_forgets_the_pdf_session_that_lived_in_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close.pdf");
+        assert!(app.pdf_sessions.contains_key(&key));
+
+        let elsewhere = app.buffers.open_scratch();
+        let second = app.test_add_frame(elsewhere);
+        app.activate_frame(second);
+        app.drop_frame(0); // the frame the PDF is open in
+
+        assert!(
+            !app.pdf_sessions.contains_key(&key),
+            "the pdfium worker would still be holding the document open with no pane left to show it"
+        );
+        assert_eq!(app.frames.len(), 1);
+        assert_one_live_frame(&app);
+    }
+
+    #[test]
+    fn closing_a_frame_leaves_a_pdf_session_open_in_another_frame_alone() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close_other.pdf");
+        let elsewhere = app.buffers.open_scratch();
+        let second = app.test_add_frame(elsewhere);
+
+        app.drop_frame(second);
+
+        assert!(app.pdf_sessions.contains_key(&key), "closing an unrelated frame must not tear down this one's session");
     }
 
     /// Seeds a session with a render taller than its pane, so there is

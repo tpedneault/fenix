@@ -1,11 +1,31 @@
 mod nav;
 
-pub use nav::NavDirection;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+pub use nav::{pick, NavDirection};
 
 /// Identity of one leaf window in a `WindowTree`, stable across splits and
 /// closes of *other* windows (only closing a window invalidates its own id).
+///
+/// Unique across *every* tree in the process, not just within one -- ids
+/// come from `alloc_id`'s single counter rather than a per-tree one. The
+/// host app keys several of its own side tables by this id (`App::pane_
+/// titles`, `pdf_outline_panes`, `pdf_search_panes`, every panel session's
+/// pane fields), and those tables span every workspace -- and, once one
+/// process drives several OS windows, every window too. A per-tree counter
+/// made two different panes in two different trees genuinely
+/// indistinguishable in those maps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(u32);
+
+/// Hands out the next never-yet-used `WindowId`. `Relaxed` is enough:
+/// the only thing being ordered against is this counter itself, and all
+/// that's required of it is that no two reads ever see the same value
+/// (which `fetch_add` guarantees on its own, at any ordering).
+fn alloc_id() -> WindowId {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+    WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 /// `Horizontal` stacks two windows with a horizontal divider between them
 /// (Vim's `:split`); `Vertical` places them side by side with a vertical
@@ -250,13 +270,12 @@ fn split_rect(bounds: Rect, kind: SplitKind, ratio: f32) -> (Rect, Rect) {
 pub struct WindowTree<T> {
     root: Option<Node<T>>,
     focused: WindowId,
-    next_id: u32,
 }
 
 impl<T> WindowTree<T> {
     pub fn new(content: T) -> Self {
-        let id = WindowId(0);
-        Self { root: Some(Node::Leaf { id, content }), focused: id, next_id: 1 }
+        let id = alloc_id();
+        Self { root: Some(Node::Leaf { id, content }), focused: id }
     }
 
     fn root(&self) -> &Node<T> {
@@ -305,8 +324,7 @@ impl<T> WindowTree<T> {
     /// `Vertical`; below, for `Horizontal`) the old one -- Doom Emacs's own
     /// `splitright`/`splitbelow` default. The new window becomes focused.
     pub fn split(&mut self, kind: SplitKind, content: T) -> WindowId {
-        let new_id = WindowId(self.next_id);
-        self.next_id += 1;
+        let new_id = alloc_id();
         let focused = self.focused;
         let old_root = self.root.take().expect("WindowTree::root invariant");
         self.root = Some(old_root.split_leaf(focused, kind, new_id, content));
@@ -462,13 +480,26 @@ mod tests {
         assert!(t.focus(b));
         assert_eq!(t.focused_content(), &"b");
 
-        // An id this tree never allocated -- WindowId's counter is
-        // per-tree, not globally unique, so a real id from some *other*
-        // tree isn't guaranteed to be distinguishable from this one's own
-        // (both start counting from 0); constructing an out-of-range one
-        // directly (tests are a descendant module, so the private tuple
-        // field is reachable) is the only reliable way to test this.
-        assert!(!t.focus(WindowId(999)));
+        // An id this tree never allocated. Ids are process-wide unique
+        // (see `alloc_id`), so a real id from another tree is guaranteed
+        // to be one this tree has never seen -- no need to fabricate an
+        // out-of-range one, and this now exercises the case that
+        // actually happens in the host app (a pane id belonging to some
+        // other workspace, or some other OS window's tree).
+        let other = WindowTree::new("elsewhere");
+        assert!(!t.focus(other.focused_id()));
+    }
+
+    #[test]
+    fn two_trees_never_hand_out_the_same_window_id() {
+        let mut a = WindowTree::new("a");
+        a.split(SplitKind::Vertical, "a2");
+        let mut b = WindowTree::new("b");
+        b.split(SplitKind::Vertical, "b2");
+
+        for id in a.windows() {
+            assert!(!b.windows().contains(&id), "{id:?} was handed out by both trees");
+        }
     }
 
     #[test]
