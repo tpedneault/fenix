@@ -9,6 +9,7 @@ mod icon;
 mod ipc;
 mod jira_panel;
 mod keymap;
+mod markdown;
 mod pdf_outline;
 mod pdf_search;
 mod pdf_texture;

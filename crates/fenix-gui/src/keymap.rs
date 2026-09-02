@@ -248,6 +248,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         );
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('s')], "symbols", "code.symbols");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('x')], "toggle checkbox", "code.toggle_checkbox");
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('o')], "outline", "code.outline");
 
         // SCOS-2000 MIB lookup/insertion -- letters kept identical to
         // the reference elisp implementation's own scheme for muscle-
@@ -742,6 +743,18 @@ mod tests {
         match m.feed(KeyPress::char('x')) {
             fenix_keymap::Step::Matched(&"code.toggle_checkbox") => {}
             _ => panic!("expected SPC c x to resolve to code.toggle_checkbox"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_outline() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('o')) {
+            fenix_keymap::Step::Matched(&"code.outline") => {}
+            _ => panic!("expected SPC c o to resolve to code.outline"),
         }
     }
 

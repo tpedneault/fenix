@@ -80,7 +80,13 @@ for anyone curious to poke around or build on it.
   `O` (open line *above*) doesn't get this -- it would need renumbering
   every ordered item from there down to stay correct, real complexity
   for a much rarer motion than Enter/`o`. `SPC c x` toggles a GFM task
-  checkbox (`- [ ]`/`- [x]`/`- [X]`) on the current line.
+  checkbox (`- [ ]`/`- [x]`/`- [X]`) on the current line. `SPC c o` is a
+  fuzzy picker over every heading in a Markdown buffer, indented by
+  nesting depth -- confirming jumps straight to it, the same shape
+  `SPC s s` (fuzzy-find any line) already has, just filtered to
+  headings. Gated to a detected Markdown buffer specifically, unlike
+  list continuation/checkbox toggling: `#` means "comment," not
+  "heading," in half the languages this editor highlights.
 - **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
   buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
   `Enter` opens a file or navigates into a directory, `-` goes up, `R`
@@ -500,6 +506,7 @@ popup shows what keys continue it.
 | `SPC c F` | Indent region -- reindent the whole focused buffer structurally |
 | `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC c x` | Toggle the GFM task checkbox (`- [ ]`/`- [x]`) on the current line |
+| `SPC c o` | Fuzzy-find a Markdown heading and jump to it |
 | `SPC m i` | Build and insert a telecommand from the MIB |
 | `SPC m t` | Fuzzy-find a MIB telecommand and view its details |
 | `SPC m k` | Fuzzy-find a MIB TM packet and view its details |

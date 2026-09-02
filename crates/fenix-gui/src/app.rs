@@ -35,6 +35,7 @@ use crate::gpu::{GpuContext, GpuState};
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
+use crate::markdown;
 use crate::pdf_outline;
 use crate::pdf_search;
 use crate::popup;
@@ -1673,6 +1674,12 @@ enum ActivePicker {
     /// the configured action to create one (`open_configured_
     /// workspace`).
     WorkspaceLauncher(fenix_picker::PickerState<String>),
+    /// `SPC c o`: a fuzzy picker over every ATX heading in the focused
+    /// Markdown buffer -- same "one candidate per matching line, payload
+    /// its start char offset" shape `BufferSearch` already established,
+    /// just filtered to headings and labeled by nesting depth
+    /// (`markdown::heading_label`) instead of a line number.
+    Outline(fenix_picker::PickerState<usize>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -1708,6 +1715,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferSearch(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
+        ActivePicker::Outline(s) => s.push_char(c),
     }
 }
 
@@ -1740,6 +1748,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
+        ActivePicker::Outline(s) => s.backspace(),
     }
 }
 
@@ -1772,6 +1781,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
+        ActivePicker::Outline(s) => s.move_selection(delta),
     }
 }
 
@@ -1807,6 +1817,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
+        ActivePicker::Outline(s) => s.toggle_mark(),
     }
 }
 
@@ -1839,6 +1850,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferSearch(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
+        ActivePicker::Outline(s) => s.query(),
     }
 }
 
@@ -1871,6 +1883,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
+        ActivePicker::Outline(s) => s.len(),
     }
 }
 
@@ -1903,6 +1916,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
+        ActivePicker::Outline(s) => s.selected_row(),
     }
 }
 
@@ -1951,6 +1965,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -8613,6 +8628,42 @@ impl App {
         self.enter_picker(ActivePicker::BufferSearch(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// `SPC c o`: a fuzzy picker over every ATX heading in the focused
+    /// Markdown buffer -- same "one candidate per matching line, payload
+    /// its start char offset" shape `picker_search_buffer` already
+    /// established for `SPC s s`, filtered to headings and labeled by
+    /// nesting depth (`markdown::heading_label`) instead of a line
+    /// number.
+    ///
+    /// Gated to a detected Markdown buffer, unlike list continuation/
+    /// checkbox toggling: `#` at the start of a line means "comment,"
+    /// not "heading," in half the languages this editor highlights
+    /// (Python, Bash, YAML, Dockerfile, ...), so scanning for it without
+    /// actually knowing the buffer is Markdown would list every comment
+    /// in one of those as a heading.
+    ///
+    /// An empty result (no headings at all) still opens the picker,
+    /// same as `SPC s s` -- "nothing to show" is a legitimate answer
+    /// here, not an error worth a special-cased message.
+    pub(crate) fn picker_outline(&mut self) {
+        if self.focused_language() != Some(fenix_syntax::LanguageId::Markdown) {
+            self.set_error("SPC c o needs a Markdown buffer");
+            return;
+        }
+        let buffer = &self.open().buffer;
+        let visual_lines = buffer.visual_line_count();
+        let candidates = (0..visual_lines)
+            .filter_map(|line| {
+                let start = buffer.line_start_char(line);
+                let len = buffer.line_len(line);
+                let text = buffer.text_range(start, start + len);
+                let (level, title) = markdown::parse_heading(&text)?;
+                Some(fenix_picker::Candidate::new(markdown::heading_label(level, &title), start))
+            })
+            .collect();
+        self.enter_picker(ActivePicker::Outline(fenix_picker::PickerState::new(candidates)));
+    }
+
     /// Points the focused pane at an already-open buffer -- `SPC b b`'s
     /// confirm action, and shared by nothing else (unlike `open_file_from_
     /// picker`, there's no path to resolve/read; the buffer already
@@ -11214,6 +11265,15 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.open_configured_workspace(&name);
+            }
+            Some(ActivePicker::Outline(state)) => {
+                let Some(offset) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                cursor.char_idx = offset.min(buffer.len_chars());
+                let (_, col) = buffer.line_col(cursor);
+                cursor.sticky_col = col;
             }
             None => {}
         }
@@ -13974,6 +14034,7 @@ impl App {
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchWorkspace(_)) => ("SWWS", picker_len(picker)),
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
+                Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return (label, format!("│ {count} matches "));
@@ -24112,6 +24173,63 @@ mod tests {
         app.picker_confirm();
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.test_cursor().char_idx, 11); // "alpha\nbeta\n" is 11 chars
+    }
+
+    #[test]
+    fn picker_outline_lists_only_heading_lines_labeled_by_nesting_depth() {
+        let dir = TempDir::new("picker_outline_lists");
+        let file = dir.write("doc.md", "# Top\nsome text\n## Sub\nmore text\n### SubSub");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.picker_outline();
+
+        match &app.active_picker {
+            Some(ActivePicker::Outline(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["Top", "  Sub", "    SubSub"]);
+            }
+            other => panic!("expected an open Outline picker, got is_some={}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn picker_confirm_on_outline_jumps_to_the_headings_start() {
+        let dir = TempDir::new("picker_outline_confirm");
+        let file = dir.write("doc.md", "# Top\nsome text\n## Sub");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.picker_outline();
+
+        picker_move_selection(app.active_picker.as_mut().unwrap(), 1); // -> "## Sub"
+        app.picker_confirm();
+
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.test_cursor().char_idx, 16); // "# Top\nsome text\n" is 16 chars -- start of "## Sub" is char 16
+    }
+
+    #[test]
+    fn picker_outline_on_a_non_markdown_buffer_errors_instead_of_treating_comments_as_headings() {
+        let dir = TempDir::new("picker_outline_wrong_language");
+        let file = dir.write("script.py", "# not a heading, a comment\nx = 1");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.picker_outline();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.modeline_pieces().1.contains("Markdown"));
+    }
+
+    #[test]
+    fn picker_outline_on_a_markdown_buffer_with_no_headings_still_opens_an_empty_picker() {
+        let dir = TempDir::new("picker_outline_empty");
+        let file = dir.write("doc.md", "just prose, no headings here");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.picker_outline();
+
+        match &app.active_picker {
+            Some(picker @ ActivePicker::Outline(_)) => assert_eq!(picker_len(picker), 0),
+            other => panic!("expected an open (if empty) Outline picker, got is_some={}", other.is_some()),
+        }
     }
 
     #[test]

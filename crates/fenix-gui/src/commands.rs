@@ -171,6 +171,7 @@ impl CommandRegistry {
             cmd_symbols,
         );
         registry.register("code.toggle_checkbox", "Toggle the GFM task checkbox on the current line", cmd_toggle_checkbox);
+        registry.register("code.outline", "Fuzzy-find a Markdown heading and jump to it", cmd_outline);
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
         registry.register("mib.lookup_telecommand", "Fuzzy-find a MIB telecommand and view its details", cmd_mib_lookup_telecommand);
@@ -584,6 +585,10 @@ fn cmd_format_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_toggle_checkbox(ctx: &mut CommandCtx) {
     ctx.app.toggle_checkbox();
+}
+
+fn cmd_outline(ctx: &mut CommandCtx) {
+    ctx.app.picker_outline();
 }
 
 fn cmd_symbols(ctx: &mut CommandCtx) {
