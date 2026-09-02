@@ -143,6 +143,13 @@ impl CommandRegistry {
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
         registry.register("workspace.prev", "Switch to the previous workspace", cmd_prev_workspace);
         registry.register("workspace.remove", "Remove the active workspace", cmd_remove_workspace);
+        registry.register("workspace.switch", "Switch to an open workspace by name", cmd_switch_workspace);
+        registry.register(
+            "workspace.find",
+            "Open a configured workspace by name, creating it if it isn't already open",
+            cmd_find_workspace,
+        );
+        registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
         registry.register(
             "completion.refresh_tags",
             "Refresh Tcl completion tags (re-scans the project with ctags)",
@@ -540,6 +547,18 @@ fn cmd_prev_workspace(ctx: &mut CommandCtx) {
 
 fn cmd_remove_workspace(ctx: &mut CommandCtx) {
     ctx.app.remove_workspace();
+}
+
+fn cmd_switch_workspace(ctx: &mut CommandCtx) {
+    ctx.app.picker_switch_workspace();
+}
+
+fn cmd_find_workspace(ctx: &mut CommandCtx) {
+    ctx.app.start_workspace_launcher_picker();
+}
+
+fn cmd_rename_workspace(ctx: &mut CommandCtx) {
+    ctx.app.start_rename_workspace_prompt();
 }
 
 fn cmd_completion_refresh_tags(ctx: &mut CommandCtx) {
