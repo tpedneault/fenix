@@ -22,14 +22,27 @@ use crate::textobject;
 pub enum VimEvent {
     None,
     RequestSave,
-    /// `:q`/`SPC q q` -- the host should quit, but only after checking
-    /// for unsaved changes first (unlike `RequestForceQuit`).
-    RequestQuit,
-    /// `:q!` -- quit unconditionally, bypassing the unsaved-changes
-    /// check `RequestQuit` triggers on the host side. Real Vim's own
-    /// `!` convention for "I know, do it anyway."
-    RequestForceQuit,
-    RequestSaveAndQuit,
+    /// `:q`/`SPC b k` -- the host should close the *current buffer*,
+    /// but only after checking it for unsaved changes first (unlike
+    /// `RequestForceCloseBuffer`). Never quits the application --
+    /// see `RequestQuitAll` for that.
+    RequestCloseBuffer,
+    /// `:q!` -- close the current buffer unconditionally, discarding
+    /// any changes, bypassing the check `RequestCloseBuffer` triggers
+    /// on the host side. Real Vim's own `!` convention for "I know, do
+    /// it anyway."
+    RequestForceCloseBuffer,
+    /// `:wq`/`:x` -- save the current buffer (if it needs it) then
+    /// close it.
+    RequestSaveAndCloseBuffer,
+    /// `:qa`/`:quitall`/`SPC q q` -- quit the whole application, but
+    /// only after checking every buffer for unsaved changes first.
+    RequestQuitAll,
+    /// `:qa!`/`:quitall!` -- quit the whole application unconditionally.
+    RequestForceQuitAll,
+    /// `:wqa`/`:xa` -- save every buffer that needs it, then quit the
+    /// whole application.
+    RequestSaveAllAndQuit,
     /// A yank or paste just happened over this char range -- modeled on
     /// orbit-emacs's own yank/paste pulse feature, for the host UI to
     /// briefly highlight and fade. Not raised for Block-mode yank/paste
@@ -3849,7 +3862,7 @@ mod tests {
 
         keys(&mut vim, &mut b, &mut c, ":wq");
         let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
-        assert_eq!(ev, VimEvent::RequestSaveAndQuit);
+        assert_eq!(ev, VimEvent::RequestSaveAndCloseBuffer);
     }
 
     #[test]

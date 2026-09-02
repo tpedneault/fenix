@@ -50,6 +50,50 @@ pub enum BufferKind {
     /// pending replace would touch, one row each, toggle-able before
     /// anything is actually written to disk.
     SearchReplace,
+    /// A live VNC console view (`SPC v v`) -- same "real buffer, just
+    /// tagged" shape as `Docker`/`Git`/`Jira` in that it's a real pane
+    /// slot in the window tree, but unlike those there is nothing
+    /// meaningful to put in the buffer's own text at all: the actual
+    /// pixel content is a separate GPU-side texture layer keyed by this
+    /// buffer's pane, never stored in `buffer` itself (see
+    /// `BufferList::open_vnc`).
+    Vnc,
+    /// An open PDF document, rendered one page at a time (`SPC r ...`) --
+    /// same "real pane slot, no meaningful text content" shape as `Vnc`:
+    /// the rasterized page bitmap is a separate GPU-side texture layer
+    /// keyed by this buffer's pane, never stored in `buffer` itself (see
+    /// `BufferList::open_pdf`). Deliberately never carries the PDF's real
+    /// file path on the `Buffer` itself either -- see `open_pdf`'s own
+    /// doc comment for why.
+    Pdf,
+    /// A PDF's flattened bookmark tree (`SPC r o`), shown as an indented
+    /// listing in its own companion pane next to the `Pdf` pane it was
+    /// opened from -- unlike `Pdf` itself, this *is* real Vim-navigable
+    /// text (same "real buffer, just tagged" shape as `Dashboard`), since
+    /// an outline is naturally just a list of lines, not pixel content.
+    PdfOutline,
+    /// A PDF text search's flat match list (`SPC r /`), shown as one row
+    /// per hit in its own companion pane next to the `Pdf` pane it was
+    /// searched from -- same "real buffer, just tagged" shape as
+    /// `PdfOutline`, just a list of matches instead of bookmarks.
+    PdfSearchResults,
+}
+
+impl BufferKind {
+    /// Whether a dirty flag on a buffer of this kind reflects real,
+    /// savable user work. `Text` and `Table` are the same underlying,
+    /// path-backed `fenix_core::Buffer` a real file lives in (`Table`
+    /// is just `Text` retagged in place, see its own doc comment
+    /// above). `Dashboard`/`Explorer`/`Docker`/`Git`/`Jira`/
+    /// `SearchReplace`/`Vnc` are always pathless, host-regenerated (or,
+    /// for `Vnc`, never-written-to-at-all) views that can never be
+    /// saved -- for the text-generating ones, content gets rewritten by
+    /// the host on every refresh, which trips `dirty` with nothing the
+    /// user could ever do to clear it again, so treating that as
+    /// "unsaved work" is wrong.
+    pub fn tracks_unsaved_changes(self) -> bool {
+        matches!(self, BufferKind::Text | BufferKind::Table)
+    }
 }
 
 /// One open buffer's full state. `cursor` here is the buffer's
@@ -159,6 +203,47 @@ impl BufferList {
     /// re-renders `text` via `Buffer::replace_range` on refresh.
     pub fn open_jira(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Jira)
+    }
+
+    /// An empty, pathless buffer tagged `Vnc` -- `SPC v v`. Deliberately
+    /// `Buffer::empty()`, not `Buffer::from_text(...)` like `open_docker`/
+    /// `open_jira` seed a rendered text panel: a VNC pane's content is a
+    /// live pixel framebuffer, not text, so there is nothing to seed --
+    /// this buffer only exists to give the pane a `BufferId` slot in the
+    /// window tree; its own (always-empty) text is never shown.
+    pub fn open_vnc(&mut self) -> BufferId {
+        self.insert(Buffer::empty(), None, BufferKind::Vnc)
+    }
+
+    /// An empty, pathless buffer tagged `Pdf` -- `SPC r o`. Same reasoning
+    /// as `open_vnc`: the rendered page bitmap is a GPU-side texture, not
+    /// text, so there is nothing to seed. Deliberately `Buffer::empty()`
+    /// with no path attached even though a PDF *does* have a real path on
+    /// disk (unlike a VNC session) -- `Buffer::save_as` unconditionally
+    /// overwrites whatever path it's given with the buffer's own (always
+    /// empty) rope content, so attaching the real PDF path here would
+    /// make a stray `:w` silently truncate the user's actual PDF file.
+    /// The host (`fenix-gui`) keeps the real path in its own side table
+    /// instead.
+    pub fn open_pdf(&mut self) -> BufferId {
+        self.insert(Buffer::empty(), None, BufferKind::Pdf)
+    }
+
+    /// A real buffer seeded with `text` (an indented, flattened rendering
+    /// of a PDF's bookmark tree) and tagged `PdfOutline` -- `SPC r o`.
+    /// Same "real buffer, just tagged" shape as `open_dashboard`/
+    /// `open_docker`, unlike `open_pdf`/`open_vnc`'s empty-buffer shape:
+    /// an outline's content genuinely is text worth Vim-navigating
+    /// (`j`/`k`/`/`/`n`), not a stand-in pane slot for pixel content.
+    pub fn open_pdf_outline(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::PdfOutline)
+    }
+
+    /// A real buffer seeded with `text` (one formatted row per text-
+    /// search match) and tagged `PdfSearchResults` -- `SPC r /`. Same
+    /// "real buffer, just tagged" shape as `open_pdf_outline`.
+    pub fn open_pdf_search_results(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::PdfSearchResults)
     }
 
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
@@ -310,6 +395,20 @@ mod tests {
     }
 
     #[test]
+    fn tracks_unsaved_changes_is_true_only_for_text_and_table() {
+        assert!(BufferKind::Text.tracks_unsaved_changes());
+        assert!(BufferKind::Table.tracks_unsaved_changes());
+        assert!(!BufferKind::Dashboard.tracks_unsaved_changes());
+        assert!(!BufferKind::Explorer.tracks_unsaved_changes());
+        assert!(!BufferKind::Docker.tracks_unsaved_changes());
+        assert!(!BufferKind::Git.tracks_unsaved_changes());
+        assert!(!BufferKind::Jira.tracks_unsaved_changes());
+        assert!(!BufferKind::SearchReplace.tracks_unsaved_changes());
+        assert!(!BufferKind::Vnc.tracks_unsaved_changes());
+        assert!(!BufferKind::Pdf.tracks_unsaved_changes());
+    }
+
+    #[test]
     fn open_scratch_creates_an_empty_unnamed_buffer() {
         let mut list = BufferList::new();
         let id = list.open_scratch();
@@ -347,6 +446,36 @@ mod tests {
         assert_eq!(ob.buffer.text(), "containers\nimages\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Docker);
+    }
+
+    #[test]
+    fn open_vnc_creates_an_empty_pathless_buffer_tagged_vnc() {
+        let mut list = BufferList::new();
+        let id = list.open_vnc();
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Vnc);
+    }
+
+    #[test]
+    fn open_pdf_creates_an_empty_pathless_buffer_tagged_pdf() {
+        let mut list = BufferList::new();
+        let id = list.open_pdf();
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::Pdf);
+    }
+
+    #[test]
+    fn open_pdf_search_results_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_pdf_search_results("p.  1  the quick brown fox\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "p.  1  the quick brown fox\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::PdfSearchResults);
     }
 
     #[test]

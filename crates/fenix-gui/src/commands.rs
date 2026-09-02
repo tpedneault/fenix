@@ -34,6 +34,7 @@ impl CommandRegistry {
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
         registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
+        registry.register("app.save_all_and_quit", "Save every unsaved buffer, then quit Fenix", cmd_save_all_and_quit);
         registry.register(
             "view.cycle_line_numbers",
             "Cycle the line-number gutter: off, absolute, relative",
@@ -61,6 +62,11 @@ impl CommandRegistry {
             cmd_search_replace_project,
         );
         registry.register("file.find", "Open a file by typing its path (bypasses .gitignore)", cmd_file_find);
+        registry.register(
+            "file.explore",
+            "Browse the filesystem from your home directory; open a file directly, or fuzzy-search recursively from wherever you navigate to",
+            cmd_file_explore,
+        );
         registry.register("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", cmd_file_find_all);
         registry.register("file.recent", "Fuzzy-find a recently-opened file", cmd_file_recent);
         registry.register("file.rename", "Rename the current file on disk", cmd_file_rename);
@@ -82,6 +88,21 @@ impl CommandRegistry {
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
+        registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
+        registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
+        registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
+        registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
+        registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
+        registry.register("pdf.documents", "Open a document from the config.ini [documents] index", cmd_pdf_documents);
+        registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
+        registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
+        registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
+        registry.register("pdf.zoom_in", "Zoom the focused PDF session in", cmd_pdf_zoom_in);
+        registry.register("pdf.zoom_out", "Zoom the focused PDF session out", cmd_pdf_zoom_out);
+        registry.register("pdf.fit_page", "Fit the focused PDF session's page to the pane", cmd_pdf_fit_page);
+        registry.register("pdf.fit_width", "Fit the focused PDF session's page to the pane's width", cmd_pdf_fit_width);
+        registry.register("pdf.toggle_outline", "Toggle the focused PDF session's outline/bookmarks panel", cmd_pdf_toggle_outline);
+        registry.register("pdf.search", "Search the focused PDF session's text for a word or phrase", cmd_pdf_search);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
@@ -108,7 +129,9 @@ impl CommandRegistry {
         registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
-        registry.register("buffer.kill", "Close the focused buffer", cmd_kill_buffer);
+        registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
+        registry.register("buffer.kill_force", "Close the focused buffer immediately, discarding any unsaved changes", cmd_kill_buffer_force);
+        registry.register("buffer.save_and_kill", "Save the focused buffer (if needed) then close it", cmd_save_and_kill_buffer);
         registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);
         registry.register("workspace.new", "Create a new workspace", cmd_new_workspace);
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
@@ -181,6 +204,10 @@ fn cmd_quit_force(ctx: &mut CommandCtx) {
     ctx.event_loop.exit();
 }
 
+fn cmd_save_all_and_quit(ctx: &mut CommandCtx) {
+    ctx.app.request_save_all_and_quit(ctx.event_loop);
+}
+
 fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
     ctx.app.cycle_line_number_mode();
 }
@@ -223,6 +250,10 @@ fn cmd_search_replace_project(ctx: &mut CommandCtx) {
 
 fn cmd_file_find(ctx: &mut CommandCtx) {
     ctx.app.start_find_file_prompt();
+}
+
+fn cmd_file_explore(ctx: &mut CommandCtx) {
+    ctx.app.start_explore_from_home();
 }
 
 fn cmd_file_find_all(ctx: &mut CommandCtx) {
@@ -291,6 +322,66 @@ fn cmd_docker_build(ctx: &mut CommandCtx) {
 
 fn cmd_docker_close(ctx: &mut CommandCtx) {
     ctx.app.docker_session_close();
+}
+
+fn cmd_vnc_open(ctx: &mut CommandCtx) {
+    ctx.app.start_vnc_picker();
+}
+
+fn cmd_vnc_close(ctx: &mut CommandCtx) {
+    ctx.app.vnc_close_focused_session();
+}
+
+fn cmd_vnc_screenshot(ctx: &mut CommandCtx) {
+    ctx.app.vnc_screenshot();
+}
+
+fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_next_page();
+}
+
+fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_prev_page();
+}
+
+fn cmd_pdf_documents(ctx: &mut CommandCtx) {
+    ctx.app.start_document_picker();
+}
+
+fn cmd_pdf_first_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_first_page();
+}
+
+fn cmd_pdf_last_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_last_page();
+}
+
+fn cmd_pdf_goto_page(ctx: &mut CommandCtx) {
+    ctx.app.start_pdf_goto_page_prompt();
+}
+
+fn cmd_pdf_zoom_in(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_in();
+}
+
+fn cmd_pdf_zoom_out(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_out();
+}
+
+fn cmd_pdf_fit_page(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_fit_page();
+}
+
+fn cmd_pdf_fit_width(ctx: &mut CommandCtx) {
+    ctx.app.pdf_zoom_fit_width();
+}
+
+fn cmd_pdf_toggle_outline(ctx: &mut CommandCtx) {
+    ctx.app.pdf_toggle_outline();
+}
+
+fn cmd_pdf_search(ctx: &mut CommandCtx) {
+    ctx.app.start_pdf_search_prompt();
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {
@@ -399,6 +490,14 @@ fn cmd_prev_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_kill_buffer(ctx: &mut CommandCtx) {
     ctx.app.kill_buffer();
+}
+
+fn cmd_kill_buffer_force(ctx: &mut CommandCtx) {
+    ctx.app.force_kill_buffer();
+}
+
+fn cmd_save_and_kill_buffer(ctx: &mut CommandCtx) {
+    ctx.app.save_and_close_buffer();
 }
 
 fn cmd_new_scratch_buffer(ctx: &mut CommandCtx) {

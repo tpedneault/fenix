@@ -24,15 +24,17 @@ fenix-git = { path = "../fenix-git" }
 fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-mib = { path = "../fenix-mib" }
+fenix-pdf = { path = "../fenix-pdf" }
 fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-table = { path = "../fenix-table" }
 fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
+fenix-vnc = { path = "../fenix-vnc" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
-image = { version = "0.25", default-features = false, features = ["ico"] }
+image = { version = "0.25", default-features = false, features = ["ico", "png"] }
 pollster = "1.0.1"
 vt100 = "0.16"
 wgpu = "30.0.1"

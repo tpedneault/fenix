@@ -90,6 +90,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('f')], "find file", "file.find");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('e')], "explore from home", "file.explore");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('a')], "find file (all)", "file.find_all");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('r')], "recent files", "file.recent");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('R')], "rename file", "file.rename");
@@ -200,6 +201,34 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // bearing, not stylistic).
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('s')], "submit jira edit", "jira.submit_edit");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('x')], "cancel jira edit", "jira.cancel_edit");
+
+        // VNC console panes (`fenix-vnc`) -- one connection per
+        // configured `Config.vnc_hosts` entry, each staying live in the
+        // background once opened. Mirrors the docker/jira groups' exact
+        // shape.
+        t.label_group(&[spc, KeyPress::char('v')], "vnc");
+        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('v')], "open/switch vnc session", "vnc.open");
+        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('q')], "close vnc session", "vnc.close");
+        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('s')], "save vnc screenshot", "vnc.screenshot");
+
+        t.label_group(&[spc, KeyPress::char('r')], "reader (pdf)");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('n')], "next page", "pdf.next_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('p')], "previous page", "pdf.prev_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('[')], "first page", "pdf.first_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char(']')], "last page", "pdf.last_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('g')], "go to page", "pdf.goto_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('=')], "zoom in", "pdf.zoom_in");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('-')], "zoom out", "pdf.zoom_out");
+        // `f` is the document index, not fit-page: picking a reference
+        // off the shelf is something you do to *start* reading, from any
+        // buffer, while fit-page is a zoom adjustment you make while
+        // already in a PDF pane -- where the bare `0` binding sits under
+        // your fingers anyway. `SPC r 0` mirrors that bare key.
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "find document", "pdf.documents");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('0')], "fit page", "pdf.fit_page");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "toggle outline", "pdf.toggle_outline");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
         t.insert(
@@ -613,6 +642,35 @@ mod tests {
         match m.feed(KeyPress::char('x')) {
             fenix_keymap::Step::Matched(&"jira.cancel_edit") => {}
             _ => panic!("expected SPC j x to resolve to jira.cancel_edit"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_vnc_open_close_and_screenshot() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('v'));
+        match m.feed(KeyPress::char('v')) {
+            fenix_keymap::Step::Matched(&"vnc.open") => {}
+            _ => panic!("expected SPC v v to resolve to vnc.open"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('v'));
+        match m.feed(KeyPress::char('q')) {
+            fenix_keymap::Step::Matched(&"vnc.close") => {}
+            _ => panic!("expected SPC v q to resolve to vnc.close"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('v'));
+        match m.feed(KeyPress::char('s')) {
+            fenix_keymap::Step::Matched(&"vnc.screenshot") => {}
+            _ => panic!("expected SPC v s to resolve to vnc.screenshot"),
         }
     }
 

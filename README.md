@@ -73,6 +73,14 @@ for anyone curious to poke around or build on it.
   is also available, with the fuller dired feature set (git-status
   badges, marking, batch create/rename/copy/move/delete, inline subtree
   expansion) -- those aren't yet wired up for the buffer-backed form.
+  `SPC f e` starts that same fuller explorer at your home directory
+  instead of the current file's -- for a file that isn't in any project
+  and isn't worth typing an absolute path for (something in
+  `~/Downloads`, say): navigate down with the usual `j k l h`/`Enter`
+  and open it directly, or press `S` once you're close to fuzzy-search
+  every file under wherever you've navigated to, recursively (the same
+  candidate list `SPC p f` builds, just rooted there instead of the
+  project).
 - **Files menu** (`SPC f ...`): `SPC f f` opens a file by typing its
   path (`~` expands to home, a relative path resolves against the
   project root) -- unlike every fuzzy finder here, it doesn't enumerate
@@ -212,6 +220,40 @@ for anyone curious to poke around or build on it.
   cluttering the list (e.g. Done/Closed) -- folded into the JQL query
   itself, so it stays applied across refreshes; resets when you close
   and reopen the panel.
+- **VNC console panes** (`SPC v ...`): configure VM hosts by hand under
+  `[vnc]`, then `SPC v v` fuzzy-picks one by name to open (or switch
+  back to) a live VNC connection as an ordinary, splittable pane. Each
+  session connects once and stays live in the background indefinitely
+  (instant switching thereafter), auto-reconnects with backoff if it
+  drops, and throttles its poll rate while unfocused. Mouse and keyboard
+  forward straight to the VM while the pane is focused (`Ctrl-\` to
+  release, same convention as the terminal panel); clipboard is
+  mirrored both ways. `SPC v s` saves the current frame as a PNG.
+  Client-side scaling only, and no encryption/authentication at all --
+  trusted-network hosts only.
+- **PDF viewer** (`SPC r ...`): open a `.pdf` file the same way you'd
+  open any other file (typed path, the explorer, a CLI argument) and it
+  renders as a scaled-to-fit page in an ordinary, splittable pane instead
+  of loading as text. The mouse wheel, `j`/`k` and the arrow keys scroll
+  the document continuously -- straight through page boundaries, so a
+  scroll never dead-ends at the bottom of a page -- and `PageDown`/
+  `PageUp`, `n`/`p`, `Home`/`End` turn/jump pages outright, all as bare
+  single keystrokes while a PDF pane is focused. `SPC r g` jumps
+  straight to a typed page number; `+`/`-`/`0`/`w` (or `SPC r =`/
+  `SPC r -`/`SPC r 0`/`SPC r w`) zoom in/out and fit the page/width, with
+  `h`/`l` panning sideways across whatever doesn't fit in the pane at the
+  current zoom. The status line shows `Page N/M` and the current zoom in
+  place of the line/column an ordinary buffer shows. The render
+  re-fits automatically on window resize (except at a fixed percentage
+  zoom, which stays put across a resize on purpose). `SPC r o` toggles a
+  split-pane outline/bookmarks panel -- a real, Vim-navigable listing
+  where `Enter` on an entry jumps the PDF straight to its page. `SPC r /`
+  searches the whole document for a word or phrase and lists every match
+  (page number plus surrounding context) in its own split pane, `Enter`
+  jumping straight to that match's page the same way the outline does.
+  Requires `pdfium.dll` (see
+  [Optional external tools](#optional-external-tools)) -- without it,
+  opening a PDF shows an error instead of a blank pane.
 - **Autocompletion**: a popup that's always available, sourced from
   whatever's already been typed in the current buffer (`<C-n>`/`<C-p>`-
   style buffer-word completion, any language) -- layered, for Tcl
@@ -327,6 +369,21 @@ and degrade gracefully (never a hard error) if they're not:
   unreachable daemon) the panel just shows an empty listing instead of
   failing.
 
+The PDF viewer (`SPC r ...`) needs a native library rather than a
+`PATH` executable, so it's set up once by hand rather than
+auto-detected:
+
+- [`pdfium`](https://github.com/bblanchon/pdfium-binaries) — download
+  the prebuilt release for your platform (`pdfium-win-x64.tgz` on
+  Windows) and place `pdfium.dll` (or `libpdfium.so`/`libpdfium.dylib`
+  elsewhere) next to `fenix.exe`, i.e. in whichever `target/debug/` or
+  `target/release/` directory you actually run the built binary from.
+  `FENIX_PDFIUM_PATH` can point at a different directory instead (handy
+  for switching between `debug`/`release` builds without copying it
+  twice), and a system-wide install is tried as a last resort. Without
+  it, opening a `.pdf` shows a status-line error naming where it looked
+  rather than a blank pane or a crash.
+
 ### Running the tests
 
 ```bash
@@ -346,6 +403,7 @@ popup shows what keys continue it.
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `SPC f j` | Open the file explorer at the current file's directory |
+| `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
 | `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
@@ -383,6 +441,24 @@ popup shows what keys continue it.
 | `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
 | `SPC j q` | Close the JIRA dashboard session |
 | `SPC j s` / `SPC j x` | Submit / cancel a pending comment or description edit |
+| `SPC v v` | Open (or switch to) a configured VNC session by name |
+| `SPC v q` | Close the focused VNC session |
+| `SPC v s` | Save the focused VNC session's current frame as a PNG |
+| `SPC r n` | Turn the focused PDF session to the next page |
+| `SPC r p` | Turn the focused PDF session to the previous page |
+| `SPC r g` | Prompt for a page number and jump to it |
+| `SPC r [` / `SPC r ]` | Jump to the first / last page |
+| `SPC r =` / `SPC r -` | Zoom the focused PDF session in / out |
+| `SPC r f` | Open a document from the `config.ini` `[documents]` index |
+| `SPC r 0` | Fit the page to the pane |
+| `SPC r w` | Fit the page's width to the pane |
+| `SPC r o` | Toggle the focused PDF session's outline/bookmarks panel |
+| `SPC r /` | Search the focused PDF session's text for a word or phrase |
+| wheel, `j` / `k`, `Down` / `Up` | Scroll the document, continuing onto the next/previous page at an edge (PDF panes only) |
+| `PageDown` / `PageUp`, `n` / `p` | Next / previous page (PDF panes only) |
+| `Home` / `End`, `g` / `G` | First / last page (PDF panes only) |
+| `h` / `l`, `Left` / `Right` | Pan sideways while the page is wider than the pane (PDF panes only) |
+| `+` / `-` / `0` / `w` / `/` | Zoom in / out, fit page, fit width, search (PDF panes only) |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Format the active Visual selection |
 | `SPC c F` | Format the whole focused buffer |
@@ -581,6 +657,149 @@ the JQL query (`AND status NOT IN (...)`), so it stays applied across
 `SPC j r` refreshes; it resets when the panel is closed and reopened,
 and isn't saved to `config.ini`.
 
+### VNC console panes (`SPC v v`)
+
+Embeds a live VNC (RFB) connection to a VM as an ordinary, splittable
+pane -- configure hosts once under `[vnc]` (see Configuration below),
+then `SPC v v` fuzzy-picks one by name to open or switch straight to
+it. Each session connects the first time you pick it and then stays
+live in the background indefinitely, so switching back later is
+instant, not a fresh handshake; an unfocused/hidden session polls at a
+much slower rate to stay cheap while you're not looking at it, and a
+dropped connection retries automatically with backoff before giving up
+and leaving the pane on its last frame.
+
+| Keys | Action |
+|---|---|
+| `SPC v v` | Open or switch to a configured VNC session (picker by name) |
+| `SPC v q` | Close the focused VNC session |
+| `SPC v s` | Save the focused session's current frame as a timestamped PNG |
+| `Ctrl-\` | Release keyboard capture back to the editor (same chord as the terminal panel) |
+
+Clicking into a VNC pane both focuses it and starts sending your mouse
+there; every other key while it's focused is forwarded to the VM
+instead of Vim, exactly like the terminal panel. Clipboard content is
+mirrored in both directions: the VM's clipboard always flows to yours
+as it changes, and yours flows to the VM whenever you focus a session.
+
+Resizing is client-side only (the video scales to fit the pane; the
+VM's own resolution is never changed), and the connection is always
+made in the clear -- there's no encryption or authentication support at
+all, matching the assumption that every configured host is on a
+trusted local network. Don't point this at anything reachable over an
+untrusted network without your own tunnel (SSH port-forwarding, a VPN)
+in front of it.
+
+### PDF viewer (`SPC r ...`)
+
+Opening a `.pdf` -- by typed path (`SPC f f`), the explorer, a recent
+file, or a CLI argument -- renders it as a scaled-to-fit page in an
+ordinary, splittable pane instead of loading its raw bytes as text.
+Rendering happens on one shared background worker (every open PDF
+shares it), so opening a document never blocks the editor and several
+can be open at once.
+
+Reading is done with bare single keystrokes while the PDF pane is
+focused -- a three-key leader chord per page is not a page-turn gesture
+anyone would use to read a 50-page document. The `SPC r ...` bindings all
+still work (and are what the which-key menu discovers); they're the same
+commands, just reachable in one keystroke here.
+
+| Keys | Action |
+|---|---|
+| mouse wheel, `j` / `k`, `Down` / `Up` | Scroll the page; at the bottom/top edge, continue onto the next/previous page |
+| `PageDown` / `PageUp`, `n` / `p`, `SPC r n` / `SPC r p` | Next / previous page |
+| `Home` / `End`, `g` / `G`, `SPC r [` / `SPC r ]` | First / last page |
+| `SPC r g` | Prompt for a page number and jump to it |
+| `+` / `-`, `SPC r =` / `SPC r -` | Zoom in / out, in coarse 10% steps |
+| `0`, `SPC r 0` | Fit the whole page to the pane (the default) |
+| `w`, `SPC r w` | Fit the page's width to the pane -- a tall page then scrolls vertically instead of shrinking further |
+| `h` / `l`, `Left` / `Right` | Pan sideways once the page is wider than the pane |
+| `SPC r o` | Toggle the outline/bookmarks panel |
+| `/`, `SPC r /` | Search the document's text |
+
+`SPC r f` opens a fuzzy picker over a **document index** you define by
+hand in `config.ini`:
+
+```ini
+[documents]
+doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
+doc2 = Time Code Formats|C:\refs\301x0b4.pdf
+```
+
+Each entry is a display name and a path. The picker lists and
+fuzzy-matches the *names*, so a reference you open constantly is two
+keystrokes and a few characters away rather than a path to go hunting
+for. Confirming opens that document **in the focused pane**, replacing
+whatever it was showing -- unlike every other way of opening a PDF
+(`SPC f f`, the explorer, a CLI argument), which gives the document its
+own workspace. Picking a reference off a shelf means "show it to me
+here", and if the pane already held a different PDF, that one (and its
+outline/search companion panes) is retired first. An entry can point at
+any file Fenix opens, not just a PDF -- a Markdown or plain-text
+reference opens as ordinary editable text. A path that has since moved
+is reported by name instead of opening an empty buffer, and an empty or
+missing `[documents]` section says so rather than opening a picker over
+nothing.
+
+Scrolling is continuous across page boundaries in both directions:
+scrolling past the bottom of a page turns to the next one at its top,
+and scrolling back up past the top turns to the previous one at its
+*bottom*, so scrolling back retraces exactly what scrolling forward
+covered. Under the default fit-page zoom there is never anything to
+scroll within a page, so every scroll gesture simply turns the page.
+
+The status line shows `Page N/M` and the current zoom (`Fit page`,
+`Fit width`, or a percentage) where an ordinary buffer shows `Ln`/`Col`
+-- a PDF pane has no text and no cursor, so a line/column there would be
+meaningless.
+
+The outline panel (`SPC r o`) opens as a split next to the PDF pane,
+listing the document's bookmark tree flattened into indented lines (a
+nested bookmark just gets deeper indentation -- there's no tree widget,
+so this is the whole tree in one flat, ordinary buffer). It's real,
+Vim-navigable text: move around it with `j`/`k`/`gg`/`G`/`/` like
+anything else, and press `Enter` on an entry to jump the PDF straight to
+its page. `SPC r o` again -- from either the outline pane or the PDF
+pane -- closes it. The outline is fetched once per document (a PDF's
+bookmarks can't change while it's open) and cached, so reopening it is
+instant after the first time; a PDF with no bookmarks at all shows a
+single explanatory line instead of an empty pane.
+
+`SPC r /` prompts for a search query and, once it comes back, opens (or
+reuses, if one's already showing for this document) a results pane
+listing every match in page order as `p.NNN  <context>` -- one line per
+occurrence, anywhere in the document, not just the current page. It's
+the same kind of real, Vim-navigable buffer the outline panel is;
+`Enter` on a result jumps the PDF pane straight to that match's page. A
+query with no hits shows an explanatory placeholder line rather than an
+empty pane, same as the outline's no-bookmarks case. Search runs fresh
+against the document each time rather than keeping the whole document's
+text extracted in memory between searches -- there's no results cache to
+go stale, just a brief "searching..." status message while it works.
+
+The page re-renders to fit whenever its pane is resized, *except* at a
+fixed zoom percentage (`SPC r =`/`SPC r -`), which stays exactly where
+you left it across a resize instead of silently re-fitting -- panning
+with `hjkl` then just shows a different part of the same render, no
+fresh page turn needed. Fit-page/fit-width do still re-render on
+resize, since what "fits" depends on the pane's own size by definition.
+
+Pages are rasterized straight to BGRA and uploaded to a GPU texture. The
+crop that's uploaded is only recomputed when the visible window actually
+changes (a page turn, a resize, a zoom, a pan), the texture behind it is
+only recreated when that crop's *size* changes, and a render that
+already fits the pane exactly -- the fit-page default -- is uploaded
+without being copied through a crop buffer at all.
+
+A PDF pane's buffer is always empty and pathless -- the rendered page
+lives in a GPU texture, not the buffer's own text -- so `:w`/`SPC f s`
+on one is a no-op, same as every other generated panel in Fenix;
+there's no risk of a stray save overwriting the real PDF file on disk.
+Needs `pdfium.dll` (see [Optional external tools](#optional-external-tools))
+-- without it, opening a PDF reports the error in the status line
+rather than rendering.
+
 ### Autocompletion popup (Tcl, Insert mode)
 
 | Keys | Action |
@@ -629,6 +848,15 @@ base_url = https://jira.example.com
 token = your-personal-access-token
 project1 = PROJ|My Project
 user1 = jo1111111|John Doe
+
+[vnc]
+host1 = build-vm|10.0.0.5|5900
+host2 = test-vm|10.0.0.6|5900
+
+[documents]
+doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
+doc2 = Time Code Formats|C:\refs\301x0b4.pdf
+doc3 = Team Onboarding Notes|C:\refs\onboarding.md
 ```
 
 | Section | Key | Meaning |
@@ -644,10 +872,12 @@ user1 = jo1111111|John Doe
 | `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
 | `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
+| `documents` | `doc1`, `doc2`, ... | One entry in the `SPC r f` document index, as `NAME\|PATH` (numbered, same reason as `mib`'s roots). `NAME` is what the picker lists and fuzzy-matches; `PATH` can be any file Fenix opens, PDF or not |
 | `jira` | `base_url` | The self-hosted Jira Server/Data Center instance's REST API root (e.g. `https://jira.example.com`) — see the JIRA dashboard feature above |
 | `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
+| `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path

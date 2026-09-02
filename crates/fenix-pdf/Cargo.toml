@@ -1,0 +1,7 @@
+[package]
+name = "fenix-pdf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pdfium-render = "0.9"

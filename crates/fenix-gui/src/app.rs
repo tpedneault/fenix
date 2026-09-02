@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,8 +17,8 @@ use fenix_window::{NavDirection, SplitKind, WindowTree};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::ModifiersState;
-use winit::window::{Icon, Window, WindowId};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
@@ -31,11 +31,15 @@ use crate::gpu::GpuState;
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
+use crate::pdf_outline;
+use crate::pdf_search;
 use crate::popup;
 use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
+use crate::pdf_texture::{PdfPipeline, PdfTexture};
+use crate::vnc_texture::{VncPipeline, VncTexture};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the caret takes to fade in/out at each blink toggle, instead
@@ -487,6 +491,395 @@ impl Drop for TerminalState {
     }
 }
 
+/// The guest's mouse cursor image for one session, as delivered by the
+/// `CursorPseudo` encoding (`fenix_vnc::VncFrame::Cursor`).
+///
+/// The pixels are kept alongside the GPU texture because the two are
+/// filled in at different times: the image arrives on `VncReader`'s
+/// thread, while creating a texture for it needs `&wgpu::Device` and so
+/// has to wait for the next `redraw`. `texture: None` means "arrived,
+/// not uploaded yet."
+struct VncCursor {
+    width: u16,
+    height: u16,
+    /// Offset of the actual pointing tip within the image -- the cursor
+    /// is drawn with this point at the pointer position, not its
+    /// top-left corner.
+    hotspot_x: u16,
+    hotspot_y: u16,
+    bgra: Vec<u8>,
+    texture: Option<VncTexture>,
+}
+
+/// Streams decoded `fenix_vnc::VncFrame`s for one VNC session --
+/// `Rect`/`Copy` are applied *directly* to the session's shared
+/// `framebuffer` right here, on this thread, and never forwarded any
+/// further; everything else (`Resolution`/`ClipboardText`/`Bell`/
+/// `Disconnected`) still becomes a `FenixUserEvent::VncFrame`, same
+/// "background thread, stopped via a kill that unblocks its blocking
+/// read" shape as `TerminalReader`.
+///
+/// The `Rect`/`Copy` split exists because a single server
+/// `FramebufferUpdate` can decode into anywhere from one to hundreds of
+/// these (e.g. everything a remote-side window drag/resize touches).
+/// Forwarding each one as its own winit event used to mean the main
+/// thread's single event-dispatch queue -- which also carries every
+/// mouse-move/click/key `WindowEvent` -- got monopolized draining a
+/// burst, visibly stalling input and drawing the screen in progressive
+/// bands ("scanlines") instead of appearing to update at once. Applying
+/// them here instead, against a plain `Mutex`-guarded CPU buffer (see
+/// `fenix_vnc::framebuffer::VncFramebuffer`, which has no threading
+/// awareness of its own), means the main thread's `redraw` only ever
+/// has to do *one* GPU upload per actual rendered frame, however many
+/// rects arrived since the last one -- completely decoupled from
+/// network/decode timing, and never competing with input for the same
+/// queue. Carries the session's own key (`Config.vnc_hosts`'s name)
+/// since a frame can arrive well after focus moved elsewhere, same
+/// reasoning as `LogLine`'s explicit `BufferId`.
+struct VncReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl VncReader {
+    fn spawn(
+        receiver: std::sync::mpsc::Receiver<fenix_vnc::VncFrame>,
+        key: String,
+        framebuffer: Arc<Mutex<fenix_vnc::framebuffer::VncFramebuffer>>,
+        send: impl Fn(FenixUserEvent) -> bool + Send + 'static,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match receiver.recv() {
+                Ok(frame) => {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    match &frame {
+                        fenix_vnc::VncFrame::Rect { x, y, width, height, bgra } => {
+                            framebuffer.lock().unwrap().apply_rect(*x, *y, *width, *height, bgra);
+                            continue;
+                        }
+                        fenix_vnc::VncFrame::Copy { dst, src } => {
+                            framebuffer.lock().unwrap().apply_copy(*dst, *src);
+                            continue;
+                        }
+                        fenix_vnc::VncFrame::UpdateEnd => {
+                            // The one point at which what's been applied
+                            // is a whole, self-consistent frame -- see
+                            // `VncFramebuffer::commit`. Nothing reaches
+                            // the screen until this lands, which is what
+                            // keeps `redraw` from ever showing a
+                            // half-applied update. Handled entirely here,
+                            // never forwarded: the main thread learns
+                            // about it by finding a dirty region waiting.
+                            framebuffer.lock().unwrap().commit();
+                            continue;
+                        }
+                        fenix_vnc::VncFrame::Resolution { width, height } => {
+                            // Resized here, synchronously, before the
+                            // event below is even sent -- this same
+                            // thread processes every subsequent `Rect`
+                            // for the new resolution in order, so if the
+                            // resize were deferred to the main thread
+                            // instead, a post-resize rect could arrive
+                            // and get silently clamped/dropped by
+                            // `blit_rect` against the *old*-sized
+                            // buffer. Still forwarded below so the main
+                            // thread knows to recreate the GPU texture,
+                            // which needs `&wgpu::Device` and so must
+                            // stay main-thread-only.
+                            framebuffer.lock().unwrap().resize(*width, *height);
+                        }
+                        fenix_vnc::VncFrame::Cursor { .. }
+                        | fenix_vnc::VncFrame::ClipboardText(_)
+                        | fenix_vnc::VncFrame::Bell
+                        | fenix_vnc::VncFrame::Disconnected(_) => {}
+                    }
+                    if !send(FenixUserEvent::VncFrame(key.clone(), frame)) {
+                        return;
+                    }
+                }
+                Err(_) => return, // the VncClient side hung up -- session closed/dropped
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for VncReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Note: unlike `DockerLogFollower`, closing the connection isn't
+        // this type's job -- `VncSession`'s own field order (see its own
+        // doc comment) drops `client` first, which is what actually
+        // unblocks this thread's blocking `recv()` via the channel
+        // closing.
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// One live VNC console pane (`SPC v v`) -- one pane/buffer per session,
+/// unlike Docker's six/Git's seven/Jira's four, since a VM console is a
+/// single view, not a multi-pane dashboard. Field order matters: `client`
+/// must drop before `reader` (Rust drops struct fields in declaration
+/// order) -- closing the connection first is what unblocks `reader`'s
+/// blocking `recv()` via the channel closing, same "kill the source
+/// first" ordering `TerminalState` already establishes for its own
+/// `session`/`reader` pair. `framebuffer` has no such requirement -- it's
+/// a plain `Arc`, shared with (not owned by) `reader`'s background
+/// thread, dropped independently whenever its last owner goes away.
+struct VncSession {
+    client: fenix_vnc::VncClient,
+    /// `None` when opened without a real `event_proxy` (every test) --
+    /// same posture as `TerminalState::reader`/`DockerSession::stats_
+    /// poller`. Held only for its `Drop` side effect once set.
+    #[allow(dead_code)]
+    reader: Option<VncReader>,
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    host: String,
+    port: u16,
+    /// The VM's framebuffer, shared with `reader`'s background thread --
+    /// every incoming `Rect`/`Copy` frame is applied directly there, on
+    /// that thread, never routed through a winit event (see `VncReader::
+    /// spawn`'s own doc comment for why: a burst of hundreds of rects
+    /// from one server update, each round-tripped through the winit
+    /// event queue and processed on the main thread, is what used to
+    /// make ordinary mouse/keyboard input visibly stall behind it). The
+    /// render thread (`redraw`) only ever locks this briefly, once per
+    /// frame, to pull whatever's changed since the last time it looked.
+    framebuffer: Arc<Mutex<fenix_vnc::framebuffer::VncFramebuffer>>,
+    /// `None` until the GPU exists *and* a resolution is known -- created
+    /// lazily in `redraw` (see `VncPipeline::create_texture`), recreated
+    /// whenever `framebuffer`'s dimensions change.
+    texture: Option<VncTexture>,
+    /// The `(width, height)` `texture` was created for -- `VncTexture`
+    /// itself doesn't record its own size, and `redraw`'s dirty-upload
+    /// path needs this to detect when `framebuffer` has already been
+    /// resized (by `reader`'s thread) past what the currently-bound GPU
+    /// texture covers, before the `Resolution` event that will reset
+    /// `texture` to `None` has actually been processed on the main
+    /// thread. See `redraw`'s own VNC-texture loop.
+    texture_dims: (u16, u16),
+    /// The guest's current mouse cursor, from `VncFrame::Cursor` (the
+    /// `CursorPseudo` encoding) -- `None` until the server sends one, or
+    /// when it sends an empty one to mean "no cursor here."
+    ///
+    /// Requesting that encoding is what stops the server compositing the
+    /// cursor into the framebuffer itself, where every pointer move would
+    /// damage two regions and keep the update stream permanently busy
+    /// (see `fenix_vnc::VncFrame::Cursor`). The trade is that nothing
+    /// draws it for us any more, so `redraw` composites this on top of
+    /// the pane at `pointer_pos`.
+    cursor: Option<VncCursor>,
+    /// Where this session's pointer was last placed, in framebuffer
+    /// pixels -- the position `send_pointer` last reported, and so where
+    /// `cursor` belongs. `None` before the pointer has ever entered the
+    /// pane, which is also when there's nothing to draw.
+    pointer_pos: Option<(u16, u16)>,
+    /// The RFB pointer bitmask of currently-held mouse buttons -- resent
+    /// in full on every move/click/wheel tick, per RFB's stateful
+    /// pointer semantics (see `fenix_vnc::VncClient::send_pointer`'s own
+    /// doc comment).
+    pointer_buttons: u8,
+    /// Consecutive reconnect attempts since the last successful
+    /// connection -- `vnc_reconnect_delay` backs off based on this, and
+    /// `MAX_VNC_RECONNECT_ATTEMPTS` caps it so a permanently-unreachable
+    /// VM eventually stops retrying instead of retrying forever.
+    reconnect_attempts: u32,
+}
+
+/// How a `PdfSession`'s current page is scaled onto its pane -- what
+/// `pdf_target_size` turns into an actual pixel render target. `FitPage`/
+/// `FitWidth` consult the pane's own current pixel size (so a resize
+/// re-renders at a new target); `Percent` deliberately doesn't (so a
+/// resize just re-crops/re-pans the existing render instead of asking
+/// pdfium to render again) -- see `pdf_target_size`'s own doc comment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PdfZoom {
+    FitPage,
+    FitWidth,
+    /// Percent of "native" size, where 100 means one render pixel per PDF
+    /// point (see `fenix_pdf::coords::percent_size`). Clamped to
+    /// `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_PERCENT` by every call site
+    /// that changes it (`pdf_zoom_in`/`pdf_zoom_out`), not by this type.
+    Percent(u32),
+}
+
+/// `Percent` zoom bounds -- generous enough to be useful (25% to read a
+/// dense multi-column page's overall layout, 400% to make fine print
+/// legible) while keeping the largest possible render (and its GPU
+/// texture) bounded: a 400%-zoomed US Letter page is already ~2448x3168
+/// px, comfortably inside any real GPU's texture size limit.
+const PDF_ZOOM_MIN_PERCENT: u32 = 25;
+const PDF_ZOOM_MAX_PERCENT: u32 = 400;
+/// How much `pdf_zoom_in`/`pdf_zoom_out` moves the effective percentage
+/// per press -- coarse on purpose (see the PDF viewing plan's own
+/// reasoning: a typed-percentage prompt is more precision than this
+/// feature needs).
+const PDF_ZOOM_STEP_PERCENT: u32 = 10;
+/// How far `pdf_pan` moves `PdfSession::scroll_offset` per keypress, in
+/// rendered pixels.
+const PDF_PAN_STEP_PX: u32 = 60;
+
+/// Turns a zoom mode into an actual pixel render target, given the
+/// page's native point size and the pane's current pixel size.
+/// Degenerate inputs (no known page size yet, or a zero-sized pane)
+/// return `(0, 0)`, which every call site treats as "nothing to render
+/// yet" rather than dispatching a bogus request.
+fn pdf_target_size(zoom: PdfZoom, page_pts: (f32, f32), pane_px: (u32, u32)) -> (u32, u32) {
+    if page_pts.0 <= 0.0 || page_pts.1 <= 0.0 || pane_px.0 == 0 || pane_px.1 == 0 {
+        return (0, 0);
+    }
+    match zoom {
+        PdfZoom::FitPage => fenix_pdf::coords::fit_page_size(page_pts.0, page_pts.1, pane_px.0, pane_px.1),
+        PdfZoom::FitWidth => fenix_pdf::coords::fit_width_size(page_pts.0, page_pts.1, pane_px.0),
+        PdfZoom::Percent(percent) => fenix_pdf::coords::percent_size(page_pts.0, page_pts.1, percent),
+    }
+}
+
+/// Where `open_pdf_path_with` puts a newly opened document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfPlacement {
+    /// Its own new workspace -- what opening a `.pdf` by path has always
+    /// done (`SPC f f`, the explorer, a CLI argument, the recent-files
+    /// list). A document opened out of nowhere shouldn't evict whatever
+    /// the user already had laid out in the current one.
+    NewWorkspace,
+    /// The currently focused pane, replacing whatever it was showing --
+    /// what `SPC r f`'s document index does. The user picked this
+    /// deliberately from a shelf of things they read constantly, in the
+    /// pane they were looking at; sending it to a new workspace would
+    /// make "open the Space Packet Protocol here" mean "open it
+    /// somewhere else".
+    FocusedPane,
+}
+
+/// How a session's current zoom reads in the modeline. `FitPage`/
+/// `FitWidth` have no percentage of their own, so they're named rather
+/// than converted into one (`pdf_effective_percent`'s derived number is
+/// for *stepping* from, not for display -- showing "97%" for what the
+/// user asked to be a fit would be noise, not information).
+fn pdf_zoom_label(session: &PdfSession) -> String {
+    match session.zoom {
+        PdfZoom::FitPage => "Fit page".to_string(),
+        PdfZoom::FitWidth => "Fit width".to_string(),
+        PdfZoom::Percent(percent) => format!("{percent}%"),
+    }
+}
+
+/// One open PDF document (`SPC r o`) -- one pane/buffer per document,
+/// same shape as `VncSession`. Keyed in `App::pdf_sessions` by the
+/// document's canonicalized path (not `fenix_pdf::PdfDocKey`, which is
+/// the worker's own internal identity for it) so reopening an
+/// already-open PDF switches to the existing pane instead of duplicating
+/// it, mirroring `vnc_sessions`'s own by-name dedup.
+struct PdfSession {
+    doc_key: fenix_pdf::PdfDocKey,
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    page_count: u32,
+    current_page: u32,
+    /// Which page `texture` currently shows, if any -- `None` until the
+    /// first `PageRendered` reply lands. Compared against `current_page`
+    /// so a page-turn only needs a new render dispatched, not applied
+    /// (and vice versa: a stale reply for a page the session has already
+    /// turned away from again is still applied here, just immediately
+    /// superseded by the next one -- see `pending_request_id`'s own doc
+    /// comment for the actual staleness guard).
+    rendered_page: Option<u32>,
+    /// The pixel size last asked for in a dispatched `RenderPage` request
+    /// -- compared against `pdf_target_size`'s own current computation
+    /// every frame (see `redraw`'s pane-classification loop) to decide
+    /// whether a resize/zoom change needs a fresh render. `(0, 0)` until
+    /// the first request goes out.
+    last_requested_size: (u32, u32),
+    /// Bumped on every dispatched `RenderPage` request; a `PageRendered`/
+    /// `RenderFailed` reply whose own `request_id` doesn't match this is
+    /// stale (superseded by a later request, e.g. several resize events
+    /// in a row) and silently dropped -- see `fenix_pdf::PdfResponse::
+    /// PageRendered`'s own doc comment.
+    pending_request_id: u64,
+    /// This document's current page's native size, in PDF points (1/72
+    /// inch) -- `(0.0, 0.0)` until the first `Opened`/`PageRendered`
+    /// reply reports it. `pdf_target_size` can't compute anything
+    /// meaningful before this is known.
+    page_point_size: (f32, f32),
+    /// How this session is currently zoomed. Defaults to `FitPage`.
+    zoom: PdfZoom,
+    /// The pane's own current on-screen pixel size, refreshed
+    /// unconditionally every frame in `redraw`'s pane-classification loop
+    /// -- what `pdf_zoom_in`/`pdf_zoom_out`/`pdf_zoom_fit_page`/
+    /// `pdf_zoom_fit_width`/`pdf_goto_page` (all run from a keypress, not
+    /// from that loop) read to compute and dispatch a render immediately,
+    /// rather than changing `zoom`/`current_page` and waiting a frame for
+    /// the classification loop's own resize-detection to notice.
+    last_pane_size: (u32, u32),
+    /// Top-left pixel offset into `full_bgra` currently shown -- reset to
+    /// `(0, 0)` (top-left) by every fresh render (see `apply_pdf_
+    /// response`'s `PageRendered` arm). Only matters once a render is
+    /// larger than the pane in some dimension (`FitWidth`'s tall-page
+    /// case, or any `Percent` zoom bigger than what the pane can show
+    /// whole) -- clamped against `full_bgra`'s actual size and the pane's
+    /// current size every frame in `redraw`, not here.
+    scroll_offset: (u32, u32),
+    /// Whether the *next* render to land should start scrolled to the
+    /// bottom of the page rather than the top. Set only by a backwards
+    /// page turn that came from scrolling/paging *up* past the top edge
+    /// (`pdf_scroll`): continuing to scroll up should walk smoothly onto
+    /// the bottom of the previous page, the way every other reader
+    /// behaves, not jump to its top and hide everything the reader was
+    /// about to reach. Cleared as soon as it's applied, so an ordinary
+    /// page turn/jump/zoom still lands at the top.
+    land_at_bottom: bool,
+    /// The full, uncropped BGRA bitmap from the most recent `PageRendered`
+    /// reply that wasn't superseded -- unlike Phase 0's `pending_bgra`,
+    /// kept around rather than taken/cleared once uploaded, because
+    /// panning needs to re-crop this *same* render at a new `scroll_
+    /// offset` without asking pdfium to render again.
+    full_bgra: Option<(u32, u32, Vec<u8>)>,
+    /// `(visible_w, visible_h, scroll_x, scroll_y)` of whatever's
+    /// currently uploaded to `texture` -- compared each frame against
+    /// what the current pane size/`scroll_offset` actually calls for, so
+    /// `redraw` only touches the GPU when something real changed (a new
+    /// render, a resize, or a pan), not on every single frame regardless.
+    last_uploaded: Option<(u32, u32, u32, u32)>,
+    /// `None` until the GPU exists *and* a page has actually been
+    /// rendered -- created lazily in `redraw` (see `PdfPipeline::
+    /// create_texture`), recreated whenever the visible crop's pixel size
+    /// changes.
+    texture: Option<PdfTexture>,
+    /// This document's flattened bookmark tree, fetched lazily on the
+    /// first `SPC r o` and cached forever after -- a PDF's bookmark tree
+    /// can't change while it's open, so a later toggle-open never needs
+    /// to ask the worker again. `None` until fetched (or if the document
+    /// turns out to have no bookmarks, this stays `Some(vec![])`, not
+    /// `None` -- see `apply_pdf_response`'s `Outline` arm).
+    outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
+    /// Bumped on every dispatched `Search` request; a `SearchResults`
+    /// reply whose own `request_id` doesn't match this is stale
+    /// (superseded by a newer search fired before the first one came
+    /// back) and silently dropped -- same guard `pending_request_id`
+    /// gives page renders.
+    pending_search_request_id: u64,
+    /// The query text of the most recently *dispatched* search, kept
+    /// here rather than threaded through `PdfResponse::SearchResults`
+    /// (which reports only matches, not the query that produced them) --
+    /// what `apply_pdf_response`'s `SearchResults` arm needs to render a
+    /// "(no matches for ...)" placeholder with the right text once the
+    /// reply lands. Empty until the first search.
+    last_search_query: String,
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -876,6 +1269,30 @@ pub enum FenixUserEvent {
     /// empty list means "just focus me," no file to open (a bare
     /// relaunch with no arguments).
     OpenFiles(Vec<String>),
+    /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
+    /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
+    /// spawns it on -- same "can't afford to block the main thread"
+    /// reasoning as `TerminalSpawned` (a slow/unreachable VM would
+    /// otherwise freeze the whole editor). `name` is the VM's configured
+    /// name (`Config.vnc_hosts`'s own key), not implicitly "whatever's
+    /// focused," since the connect can finish well after the user's
+    /// moved on; `host`/`port` ride along explicitly (not re-derived
+    /// from config on arrival) so a reconnect still completes correctly
+    /// even if the config changed or that entry's since been removed.
+    /// Wrapped (`VncConnectResult`) for the same reason `TerminalSpawned`
+    /// wraps its own result -- `fenix_vnc::VncClient` has no `Debug` impl.
+    VncConnected { name: String, host: String, port: u16, result: VncConnectResult },
+    /// One decoded VNC update, from a session's `VncReader` background
+    /// thread. Carries the VM's name explicitly, same reasoning as
+    /// `VncConnected`/`LogLine`.
+    VncFrame(String, fenix_vnc::VncFrame),
+    /// One reply from the shared PDF worker thread (`App::pdf_worker`) --
+    /// see `fenix_pdf::PdfResponse`'s own doc comment for what each
+    /// variant means. Unlike `VncFrame`, this carries the *whole*
+    /// response rather than routing through a separate per-session key
+    /// field: `fenix_pdf::PdfDocKey` already rides along inside every
+    /// `PdfResponse` variant, so there's nothing to add out here.
+    PdfResponse(fenix_pdf::PdfResponse),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -887,6 +1304,19 @@ impl std::fmt::Debug for TerminalSpawnResult {
         match &self.0 {
             Ok(_) => write!(f, "TerminalSpawnResult(Ok(..))"),
             Err(err) => write!(f, "TerminalSpawnResult(Err({err:?}))"),
+        }
+    }
+}
+
+/// See `FenixUserEvent::VncConnected`'s own doc comment for why this
+/// wrapper exists.
+pub struct VncConnectResult(std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>);
+
+impl std::fmt::Debug for VncConnectResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Ok(_) => write!(f, "VncConnectResult(Ok(..))"),
+            Err(err) => write!(f, "VncConnectResult(Err({err:?}))"),
         }
     }
 }
@@ -944,11 +1374,20 @@ enum MainView {
 /// `PickMibRootDir` is the same idea for `SPC m a`, except `S` starts
 /// `mib_root_prompt` (a label to go with the browsed directory) instead
 /// of registering anything directly -- see `start_mib_root_label_prompt`.
+/// `FindFrom` is for `SPC f e`: browsing starts at the home directory
+/// (not the project root -- the whole point is reaching files *outside*
+/// any project without typing their absolute path) and opening a file
+/// works exactly as in `Browse`, but `S` additionally fires off a
+/// recursive fuzzy `FindFile` picker rooted at whatever directory is
+/// currently being browsed -- lets you either navigate straight to a
+/// known file or narrow the rest of the way by name once you've gotten
+/// close. See `start_explore_from_home`/`start_find_from_here`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExplorerPurpose {
     Browse,
     PickProjectDir,
     PickMibRootDir,
+    FindFrom,
 }
 
 /// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
@@ -1184,6 +1623,19 @@ enum ActivePicker {
     /// alias back into `mib_insert` and advances to the next parameter
     /// (`mib_resume_insert`).
     MibArgumentAlias(fenix_picker::PickerState<String>),
+    /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
+    /// `String`-identity shape as `MibArgumentAlias` -- confirming calls
+    /// `open_vnc_session` with the picked name (connects if this is the
+    /// first time it's been opened this run, otherwise just switches to
+    /// the already-live session).
+    VncHost(fenix_picker::PickerState<String>),
+    /// `SPC r f`: `config.documents`' configured reference shelf, one
+    /// candidate per `[documents]` entry -- the label is the name the
+    /// user gave it ("Space Packet Protocol"), the payload the path it
+    /// points at. Confirming opens that document *in the focused pane*
+    /// (`open_document`), unlike every other path-opening route into a
+    /// PDF, which gets its own workspace -- see `PdfPlacement`.
+    Document(fenix_picker::PickerState<PathBuf>),
     /// `c` on a `BufferKind::Table` buffer: fuzzy-find a column by its
     /// synthesized name, confirming jumps the cursor to that column's
     /// start on the current row (`table_column_start`). The payload is
@@ -1225,6 +1677,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::MibTmParameter(s) => s.push_char(c),
         ActivePicker::MibCalibration(s) => s.push_char(c),
         ActivePicker::MibArgumentAlias(s) => s.push_char(c),
+        ActivePicker::VncHost(s) => s.push_char(c),
+        ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
         ActivePicker::BufferSearch(s) => s.push_char(c),
     }
@@ -1253,6 +1707,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::MibTmParameter(s) => s.backspace(),
         ActivePicker::MibCalibration(s) => s.backspace(),
         ActivePicker::MibArgumentAlias(s) => s.backspace(),
+        ActivePicker::VncHost(s) => s.backspace(),
+        ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
         ActivePicker::BufferSearch(s) => s.backspace(),
     }
@@ -1281,6 +1737,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::MibTmParameter(s) => s.move_selection(delta),
         ActivePicker::MibCalibration(s) => s.move_selection(delta),
         ActivePicker::MibArgumentAlias(s) => s.move_selection(delta),
+        ActivePicker::VncHost(s) => s.move_selection(delta),
+        ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
     }
@@ -1312,6 +1770,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::MibTmParameter(s) => s.toggle_mark(),
         ActivePicker::MibCalibration(s) => s.toggle_mark(),
         ActivePicker::MibArgumentAlias(s) => s.toggle_mark(),
+        ActivePicker::VncHost(s) => s.toggle_mark(),
+        ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
     }
@@ -1340,6 +1800,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::MibTmParameter(s) => s.query(),
         ActivePicker::MibCalibration(s) => s.query(),
         ActivePicker::MibArgumentAlias(s) => s.query(),
+        ActivePicker::VncHost(s) => s.query(),
+        ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
         ActivePicker::BufferSearch(s) => s.query(),
     }
@@ -1368,6 +1830,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::MibTmParameter(s) => s.len(),
         ActivePicker::MibCalibration(s) => s.len(),
         ActivePicker::MibArgumentAlias(s) => s.len(),
+        ActivePicker::VncHost(s) => s.len(),
+        ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
         ActivePicker::BufferSearch(s) => s.len(),
     }
@@ -1396,6 +1860,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::MibTmParameter(s) => s.selected_row(),
         ActivePicker::MibCalibration(s) => s.selected_row(),
         ActivePicker::MibArgumentAlias(s) => s.selected_row(),
+        ActivePicker::VncHost(s) => s.selected_row(),
+        ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
         ActivePicker::BufferSearch(s) => s.selected_row(),
     }
@@ -1440,6 +1906,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::MibTmParameter(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibCalibration(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibArgumentAlias(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
@@ -2761,7 +3229,10 @@ struct JiraEditSession {
 /// (`hjkl`, `gg`/`G`, `/`, `n`/`N`, ...) is unaffected either way -- only
 /// dispatch that actually mutates the buffer text is ever reverted.
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
-    matches!(kind, BufferKind::Docker | BufferKind::Git | BufferKind::Jira)
+    matches!(
+        kind,
+        BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf | BufferKind::PdfOutline | BufferKind::PdfSearchResults
+    )
 }
 
 pub struct App {
@@ -2775,7 +3246,32 @@ pub struct App {
     /// in front of that text" at once, so the caret gets its own renderer
     /// drawn after text instead of sharing this one.
     bg_rect: Option<RectRenderer>,
+    /// A second, independent `RectRenderer` for the popup overlay pass,
+    /// for exactly the reason `text::TextPipeline::popup_renderer` is a
+    /// second `TextRenderer`: `RectRenderer::flush` rewrites its *one*
+    /// vertex buffer via `queue.write_buffer`, and queued writes land
+    /// before any command buffer submitted after them. Reusing `bg_rect`
+    /// for the overlay pass therefore overwrote the start of the very
+    /// buffer the base pass's already-recorded draw call reads from, in
+    /// the same not-yet-submitted encoder -- so the base layer's *first*
+    /// rect of the frame silently became the popup's background rect
+    /// every time any popup was open. With a PDF/VNC pane focused (no
+    /// current-line or selection highlights to be pushed ahead of it)
+    /// that first rect is the modeline's own background bar, which is
+    /// why opening the which-key menu made the modeline appear to vanish
+    /// while the mode badge -- pushed second -- stayed put.
+    popup_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    /// The textured-quad pipeline every open VNC session's live
+    /// framebuffer is drawn through -- one pipeline shared by every
+    /// session (each owns its own `VncTexture`, see `VncSession`).
+    /// `None` until a real GPU exists, same posture as `text`/`bg_rect`/
+    /// `caret_rect`.
+    vnc_pipeline: Option<VncPipeline>,
+    /// The textured-quad pipeline every open PDF session's current page
+    /// render is drawn through -- mirrors `vnc_pipeline` exactly, just
+    /// for `PdfTexture` instead of `VncTexture`.
+    pdf_pipeline: Option<PdfPipeline>,
 
     /// Every open buffer, keyed by `BufferId` -- syntax state lives on
     /// each buffer's own `OpenBuffer`. Live cursor/scroll position is
@@ -2914,6 +3410,14 @@ pub struct App {
     /// `SPC f f`'s typed-path prompt, when in progress -- a plain
     /// capturing prompt, same shape as `pending_grep_query`.
     find_file_prompt: Option<String>,
+    /// `SPC r g`'s type-a-page-number prompt, when in progress -- same
+    /// self-contained capturing-prompt shape as `find_file_prompt`, just
+    /// digits-only (see `pdf_goto_page_prompt_key`).
+    pdf_goto_page_prompt: Option<String>,
+    /// `SPC r /`'s type-a-query prompt, when in progress -- same self-
+    /// contained capturing-prompt shape as `pdf_goto_page_prompt`, free
+    /// text instead of digits-only (see `pdf_search_prompt_key`).
+    pdf_search_prompt: Option<String>,
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
@@ -3023,6 +3527,86 @@ pub struct App {
     /// The active Jira multi-pane session (`SPC j j`), if any -- see
     /// `JiraSession`'s own doc comment.
     jira_session: Option<JiraSession>,
+    /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
+    /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
+    /// `Option<VncSession>` like `docker_session`/`git_session`/
+    /// `jira_session`: those are each a singleton tool where a second
+    /// concurrent session has no meaning, while several simultaneous,
+    /// independently-live VM consoles is the entire point here.
+    vnc_sessions: HashMap<String, VncSession>,
+    /// Reusable staging buffer for VNC texture uploads -- `redraw`
+    /// extracts each session's dirty sub-rectangle into this before
+    /// handing it to the GPU (the framebuffer itself is strided by its
+    /// full width, so a sub-rect can't be uploaded in place). Held here,
+    /// rather than allocated per frame, because a full-screen dirty
+    /// region runs to several megabytes.
+    vnc_upload_scratch: Vec<u8>,
+    /// The VM name whose session currently owns raw keyboard input, if
+    /// any -- same "this pane eats every key, Vim doesn't apply" role as
+    /// `terminal_focused`, generalized to name *which* of up to several
+    /// concurrent sessions it refers to (there's still only ever one
+    /// focused at a time). `Ctrl-\` clears it, same chord/meaning as
+    /// `terminal_focused`'s own.
+    vnc_focused: Option<String>,
+    /// VM names with a connect currently in flight on a background
+    /// thread -- lets `open_vnc_session` show a "Connecting..."
+    /// placeholder and refuse a redundant second connect attempt if the
+    /// picker is used again on the same name before the first finishes.
+    vnc_connecting: HashSet<String>,
+    /// Every open PDF document (`SPC r o`), keyed by canonicalized path --
+    /// see `PdfSession`'s own doc comment on why path rather than
+    /// `fenix_pdf::PdfDocKey`.
+    pdf_sessions: HashMap<PathBuf, PdfSession>,
+    /// Reusable staging buffer for PDF texture uploads, exactly the
+    /// `vnc_upload_scratch` idea one crate over: `redraw` crops the
+    /// visible window out of a session's full page render into this
+    /// before handing it to the GPU. Held here rather than allocated per
+    /// frame because a zoomed-in page's visible crop runs to several
+    /// megabytes and gets rewritten on every single pan keypress.
+    pdf_crop_scratch: Vec<u8>,
+    /// The one shared background worker for every open PDF document --
+    /// see `fenix_pdf`'s own top-level doc comment for why there's only
+    /// ever one, not one per document. Spawned lazily by `open_pdf_path`
+    /// on the first PDF this session ever opens, then kept for the rest
+    /// of the process's lifetime.
+    pdf_worker: Option<fenix_pdf::PdfWorker>,
+    /// The real on-disk filename for each open `BufferKind::Pdf` buffer,
+    /// keyed by `BufferId` -- consulted by `buffer_display_name`. A side
+    /// table rather than the buffer's own path because a PDF buffer is
+    /// deliberately kept pathless (see `BufferList::open_pdf`'s own doc
+    /// comment on why: a real path there would let a stray `:w` truncate
+    /// the actual PDF file on disk).
+    pdf_display_names: HashMap<BufferId, String>,
+    /// The outline pane currently open for a PDF session, if any --
+    /// keyed the same way `pdf_sessions` is (canonicalized PDF path).
+    /// `pdf_toggle_outline` consults this both to know whether to open a
+    /// new one or close the existing one, and to find the pane to close.
+    pdf_outline_panes: HashMap<PathBuf, fenix_window::WindowId>,
+    /// Per-line metadata for each open `BufferKind::PdfOutline` buffer's
+    /// generated text, keyed by that buffer's own `BufferId` -- same
+    /// per-buffer-keyed shape as `dashboard_lines`.
+    pdf_outline_lines: HashMap<BufferId, Vec<Option<pdf_outline::PdfOutlineLine>>>,
+    /// Which `pdf_sessions` key (PDF path) an outline buffer was opened
+    /// from -- what `pdf_outline_activate_selected` and `pdf_toggle_
+    /// outline` (when the outline pane itself is focused) use to find
+    /// the companion PDF pane/session.
+    pdf_outline_source: HashMap<BufferId, PathBuf>,
+    /// The search-results pane currently open for a PDF session, if any --
+    /// same "one at a time per session, keyed by canonicalized path" shape
+    /// as `pdf_outline_panes`. A fresh `SPC r /` search replaces whatever
+    /// results pane is already open for that session rather than stacking
+    /// a second one.
+    pdf_search_panes: HashMap<PathBuf, fenix_window::WindowId>,
+    /// Per-line metadata for each open `BufferKind::PdfSearchResults`
+    /// buffer's generated text, keyed by that buffer's own `BufferId` --
+    /// same per-buffer-keyed shape as `pdf_outline_lines`.
+    pdf_search_result_lines: HashMap<BufferId, Vec<Option<pdf_search::PdfSearchResultLine>>>,
+    /// Which `pdf_sessions` key (PDF path) a search-results buffer was
+    /// opened from -- what `pdf_search_activate_selected` and `pdf_
+    /// close_search_pane` (when the results pane itself is focused) use
+    /// to find the companion PDF pane/session. Mirrors `pdf_outline_
+    /// source` exactly.
+    pdf_search_source: HashMap<BufferId, PathBuf>,
     /// The active `c`/`e` comment/description edit session, if any -- see
     /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
     /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
@@ -3285,6 +3869,65 @@ fn wheel_delta_lines(delta: MouseScrollDelta, line_height: f32) -> isize {
     }
 }
 
+/// How many consecutive automatic reconnect attempts a dropped VNC
+/// session gets before `apply_vnc_connected` gives up and leaves it for
+/// the user to reopen manually -- a permanently-unreachable VM (powered
+/// off, network gone) shouldn't retry forever.
+const MAX_VNC_RECONNECT_ATTEMPTS: u32 = 6;
+
+/// Exponential backoff for VNC reconnect attempts: 2, 4, 8, 16, 30, 30...
+/// seconds, capped so a long-unreachable VM still gets retried at a
+/// sane, bounded interval rather than the delay growing without limit.
+fn vnc_reconnect_delay(attempts: u32) -> Duration {
+    let secs = 2u64.saturating_pow(attempts.min(4)).min(30);
+    Duration::from_secs(secs)
+}
+
+/// The ordered `(keysym, down)` pairs `App::send_vnc_key` should
+/// actually send for one logical key event, bracketed with `Control_L`/
+/// `Alt_L`/`Super_L` down/up for whichever of `mods` are held --
+/// `fenix_vnc::keysym::keysym_for` deliberately leaves that wrapping to
+/// the caller (see that module's own doc comment), since this app's
+/// `KeyPress` model bundles a held modifier onto the "real" key rather
+/// than reporting the modifier key's own press/release as a separate
+/// event. Without this, only the bare key ever reached the guest --
+/// Ctrl-C, Ctrl-Alt-F2, Alt-Tab *inside the guest*, none of it worked,
+/// only what typing the same key unmodified would've produced.
+///
+/// Modifiers go down before, and up after, the real key (down before on
+/// press, up after on release) -- correct for the common case of one
+/// modified key at a time. Holding two non-modifier keys under the same
+/// modifier simultaneously (e.g. Ctrl held while `a` and `b` are both
+/// down) can release that modifier a little early, right when the first
+/// of the two is released, even if the physical modifier key is still
+/// held for the second -- an inherent gap in this model (no standalone
+/// modifier-key events exist to bracket around instead), not something
+/// this per-keystroke bracketing can fully close. A plain function
+/// (not a method) so this ordering is unit-testable without a live
+/// `VncClient` connection.
+fn vnc_key_sequence(keysym: u32, mods: Mods, down: bool) -> Vec<(u32, bool)> {
+    let modifiers =
+        [(mods.ctrl, fenix_vnc::keysym::CONTROL_L), (mods.alt, fenix_vnc::keysym::ALT_L), (mods.super_, fenix_vnc::keysym::SUPER_L)];
+    let mut sequence = Vec::new();
+    if down {
+        sequence.extend(modifiers.into_iter().filter(|(held, _)| *held).map(|(_, sym)| (sym, true)));
+        sequence.push((keysym, true));
+    } else {
+        sequence.push((keysym, false));
+        sequence.extend(modifiers.into_iter().filter(|(held, _)| *held).map(|(_, sym)| (sym, false)));
+    }
+    sequence
+}
+
+/// What pressed key at the armed `quit_confirm` prompt resolves to --
+/// same "wait for exactly one more raw key" shape as `GitConfirmAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitConfirmAction {
+    Quit,
+    ShowDirtyBuffers,
+    Cancel,
+}
+
 impl App {
     /// `proxy` is what lets background threads (the Docker panel's
     /// stats poller/log follower, Phases 5-6) wake the main event loop
@@ -3308,7 +3951,24 @@ impl App {
         // whatever machine happens to run the tests. Real launches
         // always go through `new`, so this still fires for actual use.
         if let Some(path) = &file_arg {
-            app.record_recent_file(Path::new(path));
+            let path = Path::new(path);
+            if Self::looks_like_pdf(path) {
+                // `with_file` couldn't route this to `open_pdf_path`
+                // itself (its own doc comment explains why: it runs
+                // before `self` exists, and opening a PDF needs `self`'s
+                // `event_proxy`/`pdf_worker`) -- it fell back to opening
+                // the dashboard instead, exactly as if no file argument
+                // had been given at all. That placeholder buffer is
+                // still the focused one right here, so it's grabbed and
+                // closed once the real PDF pane replaces it -- otherwise
+                // it would sit around forever as a phantom "*dashboard*"
+                // entry in the buffer switcher nobody asked for.
+                let placeholder = app.focused_buffer_id();
+                app.open_pdf_path(path);
+                app.buffers.close(placeholder);
+            } else {
+                app.record_recent_file(path);
+            }
         }
         app
     }
@@ -3325,11 +3985,17 @@ impl App {
 
         let mut buffers = BufferList::new();
         let mut dashboard_lines = HashMap::new();
-        let initial_id = match file_arg {
+        let initial_id = match &file_arg {
             // Recording this path into `recent_files` happens in `new`,
-            // not here -- see `new`'s own doc comment for why.
-            Some(path) => buffers.open_path(Path::new(&path)),
-            None => {
+            // not here -- see `new`'s own doc comment for why. A PDF arg
+            // falls through to the same dashboard-placeholder branch a
+            // missing arg does: opening it for real needs `self` (the
+            // shared PDF worker lives on `App`, spawned via its own
+            // `event_proxy`), which doesn't exist yet at this point --
+            // `new` recognizes this same placeholder right after
+            // construction and swaps it for the real PDF pane.
+            Some(path) if !Self::looks_like_pdf(Path::new(path)) => buffers.open_path(Path::new(path)),
+            _ => {
                 let dashboard = dashboard::render(known_projects.roots(), recent_files.paths());
                 let id = buffers.open_dashboard(&dashboard.text);
                 dashboard_lines.insert(id, dashboard.lines);
@@ -3379,7 +4045,10 @@ impl App {
             gpu: None,
             text: None,
             bg_rect: None,
+            popup_rect: None,
             caret_rect: None,
+            vnc_pipeline: None,
+            pdf_pipeline: None,
             buffers,
             workspaces,
             line_number_mode: LineNumberMode::Absolute,
@@ -3424,6 +4093,20 @@ impl App {
             jira_lines: HashMap::new(),
             jira_prompt: None,
             jira_session: None,
+            vnc_sessions: HashMap::new(),
+            vnc_upload_scratch: Vec::new(),
+            vnc_focused: None,
+            vnc_connecting: HashSet::new(),
+            pdf_sessions: HashMap::new(),
+            pdf_crop_scratch: Vec::new(),
+            pdf_worker: None,
+            pdf_display_names: HashMap::new(),
+            pdf_outline_panes: HashMap::new(),
+            pdf_outline_lines: HashMap::new(),
+            pdf_outline_source: HashMap::new(),
+            pdf_search_panes: HashMap::new(),
+            pdf_search_result_lines: HashMap::new(),
+            pdf_search_source: HashMap::new(),
             jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -3442,6 +4125,8 @@ impl App {
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
+            pdf_goto_page_prompt: None,
+            pdf_search_prompt: None,
             rename_file_prompt: None,
             delete_file_confirm: false,
             vim,
@@ -4014,12 +4699,46 @@ impl App {
         self.wake_caret();
     }
 
-    /// Whether any open buffer has unsaved changes -- extends the
-    /// modeline's existing single-buffer `[+]` marker (`ob.buffer.
-    /// is_dirty()`) across every open buffer, not just the focused one.
-    /// `request_quit`'s own check.
+    /// Every open buffer whose kind can actually hold savable content
+    /// (`BufferKind::tracks_unsaved_changes`) and is currently dirty,
+    /// in `ids_sorted_by_path()` order. Single source of truth for
+    /// "what would `:qa` warn about" -- generated, pathless views like
+    /// the Jira/Docker/Git panels or the startup dashboard are never
+    /// savable in the first place (`App::save` refuses them outright),
+    /// so their `is_dirty()` -- which the host itself sets every time
+    /// it re-renders them -- would otherwise falsely and permanently
+    /// count as "unsaved work."
+    fn dirty_tracked_buffer_ids(&self) -> Vec<BufferId> {
+        self.buffers
+            .ids_sorted_by_path()
+            .into_iter()
+            .filter(|&id| self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty()))
+            .collect()
+    }
+
+    /// Whether any buffer has unsaved changes worth warning about --
+    /// extends the modeline's existing single-buffer `[+]` marker
+    /// across every open buffer. `request_quit`'s own check.
     fn any_buffer_dirty(&self) -> bool {
-        self.buffers.ids_sorted_by_path().iter().any(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
+        !self.dirty_tracked_buffer_ids().is_empty()
+    }
+
+    /// Up to this many dirty buffer names are listed by name in the
+    /// quit-confirm message before falling back to "(+N more)".
+    const QUIT_CONFIRM_NAME_CAP: usize = 4;
+
+    /// Builds the "N unsaved buffers: a, b, c -- quit anyway?" message
+    /// for `dirty`, naming buffers via `buffer_display_name` (the same
+    /// path/`*dashboard*`/`*docker*`/etc. fallback the modeline already
+    /// uses) so the user knows exactly what `:qa`/`SPC q q` is
+    /// blocking on, not just how many.
+    fn format_quit_confirm_message(&self, dirty: &[BufferId]) -> String {
+        let count = dirty.len();
+        let plural = if count == 1 { "" } else { "s" };
+        let names: Vec<String> = dirty.iter().take(Self::QUIT_CONFIRM_NAME_CAP).map(|&id| self.buffer_display_name(id)).collect();
+        let more = count.saturating_sub(Self::QUIT_CONFIRM_NAME_CAP);
+        let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+        format!("{count} unsaved buffer{plural}: {}{suffix} -- quit anyway? (y=yes / n=no / l=list)", names.join(", "))
     }
 
     /// The event-loop-independent half of `request_quit`: arms `quit_
@@ -4031,51 +4750,106 @@ impl App {
     /// `test_dispatch_key`'s own doc comment for the same limitation
     /// elsewhere in this file).
     fn arm_quit_confirm_if_dirty(&mut self) -> bool {
-        if !self.any_buffer_dirty() {
+        let dirty = self.dirty_tracked_buffer_ids();
+        if dirty.is_empty() {
             return false;
         }
         self.quit_confirm = true;
-        let count = self
-            .buffers
-            .ids_sorted_by_path()
-            .iter()
-            .filter(|&&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()))
-            .count();
-        let plural = if count == 1 { "" } else { "s" };
-        self.set_error(format!("{count} unsaved buffer{plural} -- quit anyway? (y/n)"));
+        self.set_error(self.format_quit_confirm_message(&dirty));
         true
     }
 
-    /// `:q`/`SPC q q`/the window's close button (`app.quit`) -- exits
-    /// immediately if every buffer is saved, otherwise arms `quit_
-    /// confirm` and shows a message instead of exiting, so an accidental
-    /// (or just habitual, forgetting there's unsaved work) `:q` can't
-    /// silently discard it. `:q!`/`app.quit_force` bypasses this
-    /// entirely (`commands::cmd_quit_force`) -- real Vim's own `!`
-    /// convention for "yes, I know, do it anyway."
+    /// `:qa`/`:quitall`/`SPC q q`/the window's close button
+    /// (`app.quit`) -- exits immediately if every buffer is saved,
+    /// otherwise arms `quit_confirm` and shows a message instead of
+    /// exiting, so an accidental (or just habitual, forgetting there's
+    /// unsaved work) quit can't silently discard it. `:qa!`/`app.
+    /// quit_force` bypasses this entirely (`commands::cmd_quit_force`)
+    /// -- real Vim's own `!` convention for "yes, I know, do it
+    /// anyway." Note this is no longer reachable from a bare `:q`/
+    /// `SPC b k` -- those only close the focused buffer now, see
+    /// `App::kill_buffer`.
     pub(crate) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
         if !self.arm_quit_confirm_if_dirty() {
             event_loop.exit();
         }
     }
 
+    /// Saves every dirty, tracked (`BufferKind::tracks_unsaved_
+    /// changes`) buffer that has a path. Refuses the whole operation
+    /// up front -- no partial saves -- if any such buffer has no path
+    /// (nothing to `:w` to yet), naming which one(s) need `:w <path>`
+    /// first. Returns whether it's now safe to quit; callers must not
+    /// quit on `false`, an error has already been set.
+    fn save_all(&mut self) -> bool {
+        let dirty = self.dirty_tracked_buffer_ids();
+        let unnamed: Vec<BufferId> = dirty.iter().copied().filter(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.path().is_none())).collect();
+        if !unnamed.is_empty() {
+            let names: Vec<String> = unnamed.iter().map(|&id| self.buffer_display_name(id)).collect();
+            self.set_error(format!("no file name for {} -- use :w <path> first", names.join(", ")));
+            return false;
+        }
+        for id in dirty {
+            let name = self.buffer_display_name(id);
+            let Some(ob) = self.buffers.get_mut(id) else { continue };
+            if let Err(err) = ob.buffer.save() {
+                self.set_error(format!("save failed for {name}: {err}"));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `:wqa`/`:xa` -- saves every unsaved, savable buffer, then quits
+    /// unconditionally. Deliberately bypasses the `quit_confirm` y/n
+    /// prompt entirely: once `save_all` returns `true` there is by
+    /// definition nothing left dirty to warn about, mirroring real
+    /// Vim's own `:wqa`, which either succeeds outright or errors, but
+    /// never prompts.
+    pub(crate) fn request_save_all_and_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.save_all() {
+            event_loop.exit();
+        }
+    }
+
     /// The event-loop-independent half of `quit_confirm_key`: clears
-    /// `quit_confirm` and reports whether the pressed key confirmed
-    /// (`y`) or cancelled (anything else). Split out for the same
-    /// testability reason as `arm_quit_confirm_if_dirty`.
-    fn resolve_quit_confirm(&mut self, keypress: KeyPress) -> bool {
+    /// `quit_confirm` and reports what the pressed key resolved to --
+    /// `y` confirms, `l` asks to see the offending buffers (chosen to
+    /// not collide with `y`/`n`), anything else cancels. Split out for
+    /// the same testability reason as `arm_quit_confirm_if_dirty`.
+    fn resolve_quit_confirm_action(&mut self, keypress: KeyPress) -> QuitConfirmAction {
         self.quit_confirm = false;
-        keypress.code == KeyCode::Char('y')
+        match keypress.code {
+            KeyCode::Char('y') => QuitConfirmAction::Quit,
+            KeyCode::Char('l') => QuitConfirmAction::ShowDirtyBuffers,
+            _ => QuitConfirmAction::Cancel,
+        }
     }
 
     /// Resolves an armed `quit_confirm` -- `y` quits unconditionally
-    /// (same as `:q!`), anything else cancels. Same "captures the very
+    /// (same as `:qa!`), `l` opens the buffer picker filtered to just
+    /// the dirty buffers so the user can jump to and save them instead
+    /// of guessing, anything else cancels. Same "captures the very
     /// next key" shape as `docker_confirm_key`/`git_confirm_key`.
     fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
-        if self.resolve_quit_confirm(keypress) {
-            event_loop.exit();
+        match self.resolve_quit_confirm_action(keypress) {
+            QuitConfirmAction::Quit => event_loop.exit(),
+            QuitConfirmAction::ShowDirtyBuffers => self.picker_switch_dirty_buffers(),
+            QuitConfirmAction::Cancel => {}
         }
         self.wake_caret();
+    }
+
+    /// `l` at the `quit_confirm` prompt -- the same `SPC b b` picker
+    /// machinery as `picker_switch_buffer`, restricted to just the
+    /// buffers blocking `:qa`/`SPC q q`.
+    fn picker_switch_dirty_buffers(&mut self) {
+        let candidates = self
+            .dirty_tracked_buffer_ids()
+            .into_iter()
+            .map(|id| fenix_picker::Candidate::new(format!("+ {}", self.buffer_display_name(id)), id))
+            .collect();
+        self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Directory the explorer opens in when asked to "start somewhere
@@ -4361,6 +5135,1344 @@ impl App {
         self.wake_caret();
     }
 
+    /// `SPC v v`: opens (or, if already open, switches straight to) the
+    /// named VM's VNC console. Connects lazily -- the first selection of
+    /// a given name is what actually dials it; every later selection
+    /// just switches workspace/focus, since the session stays live in
+    /// the background once opened (this feature's own "each VM stays
+    /// connected" decision). Backgrounds the connect itself (mirrors
+    /// `toggle_terminal`'s own reasoning: a slow/unreachable host would
+    /// otherwise freeze the whole editor for as long as the handshake
+    /// takes).
+    pub(crate) fn open_vnc_session(&mut self, name: &str) {
+        if let Some(session) = self.vnc_sessions.get(name) {
+            let (workspace_index, pane) = (session.workspace_index, session.pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.sync_vnc_focus();
+            self.wake_caret();
+            return;
+        }
+        if self.vnc_connecting.contains(name) {
+            return; // already dialing this one -- SPC v v pressed twice in a row
+        }
+        let Some((_, host, port)) = self.config.vnc_hosts.iter().find(|(n, _, _)| n == name).cloned() else {
+            self.set_error(format!("no VNC host configured named {name}"));
+            return;
+        };
+        self.vnc_connecting.insert(name.to_string());
+        self.start_vnc_connect(name.to_string(), host, port);
+        self.set_message(format!("Connecting to {name}..."));
+        self.wake_caret();
+    }
+
+    /// `SPC r f`: a fuzzy picker over `config.ini`'s `[documents]`
+    /// index -- the shelf of references the user reads often enough to
+    /// want by name rather than by hunting for a path. Same "one
+    /// candidate list, one picker variant" shape as `start_vnc_picker`,
+    /// which the `[vnc]` section already established for a
+    /// hand-configured list.
+    ///
+    /// An empty index says so rather than opening a picker over nothing:
+    /// this is the one list in the app that can only be populated by
+    /// hand-editing `config.ini`, so "no matches" would be indis-
+    /// tinguishable from "you haven't set this up yet".
+    pub(crate) fn start_document_picker(&mut self) {
+        if self.config.documents.is_empty() {
+            self.set_error("no documents configured -- add a [documents] section to config.ini (doc1 = Name|path)".to_string());
+            return;
+        }
+        let candidates = self
+            .config
+            .documents
+            .iter()
+            .map(|(name, path)| fenix_picker::Candidate::new(name.clone(), path.clone()))
+            .collect();
+        self.enter_picker(ActivePicker::Document(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Opens one `[documents]` entry in the focused pane. A PDF goes
+    /// through the reader (`PdfPlacement::FocusedPane`); anything else
+    /// opens as ordinary text, exactly the way `open_file_from_picker`
+    /// already does -- the index is a shelf of *documents*, and there's
+    /// no reason a plain-text or Markdown reference can't live on it.
+    ///
+    /// A configured path that no longer exists reports that by name
+    /// rather than opening an empty buffer titled after a file that
+    /// isn't there: this list is hand-maintained and long-lived, so a
+    /// moved or renamed file is the expected failure, and silently
+    /// creating a blank buffer for it would look like the document was
+    /// empty.
+    fn open_document(&mut self, path: &Path) {
+        if !path.exists() {
+            self.set_error(format!("{} no longer exists -- check its [documents] entry in config.ini", path.display()));
+            return;
+        }
+        if Self::looks_like_pdf(path) {
+            self.open_pdf_path_with(path, PdfPlacement::FocusedPane);
+            return;
+        }
+        let id = self.buffers.open_path(path);
+        let focused = self.focused_pane_id();
+        self.set_pane_content(focused, id);
+        self.refresh_project_root();
+        self.record_recent_file(path);
+        self.main_view = MainView::Editor;
+        self.wake_caret();
+    }
+
+    /// `SPC v v`: a fuzzy picker over every configured VNC host name --
+    /// confirming calls `open_vnc_session`, same "one candidate list,
+    /// one picker variant" shape as `picker_pick_theme`.
+    pub(crate) fn start_vnc_picker(&mut self) {
+        let candidates = self.config.vnc_hosts.iter().map(|(name, _, _)| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
+        self.enter_picker(ActivePicker::VncHost(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The actual background-thread connect, shared by the first connect
+    /// (`open_vnc_session`) and every later reconnect attempt
+    /// (`schedule_vnc_reconnect`) -- both just need "dial this host:port,
+    /// report back via the same `FenixUserEvent::VncConnected`."
+    fn start_vnc_connect(&mut self, name: String, host: String, port: u16) {
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = fenix_vnc::VncClient::connect(&host, port);
+                    let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // run synchronously, same posture as `toggle_terminal`'s
+                // own `None` branch.
+                let result = fenix_vnc::VncClient::connect(&host, port);
+                self.apply_vnc_connected(name, host, port, result);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::VncConnected` handling -- covers both a brand
+    /// new session (nothing in `vnc_sessions` for `name` yet) and a
+    /// reconnect attempt after a `Disconnected` frame (the session, and
+    /// its pane/buffer/workspace, are kept alive across the gap -- see
+    /// `VncSession`'s own doc comment on field drop order). A failed
+    /// *first* connect just reports the error, no auto-retry -- retrying
+    /// forever against e.g. a typo'd hostname would be pure noise. A
+    /// failed *reconnect* backs off and tries again up to `MAX_VNC_
+    /// RECONNECT_ATTEMPTS` times before giving up and leaving the pane
+    /// showing its last-known frame, reopenable manually.
+    fn apply_vnc_connected(&mut self, name: String, host: String, port: u16, result: std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>) {
+        self.vnc_connecting.remove(&name);
+        if self.vnc_sessions.contains_key(&name) {
+            match result {
+                Ok((client, receiver)) => {
+                    // Reuses the *existing* shared framebuffer (a cheap
+                    // `Arc::clone`, not a fresh one) so the last-good
+                    // picture stays visible across the reconnect gap,
+                    // same posture as never resetting it here before
+                    // this rewrite.
+                    let Some(framebuffer) = self.vnc_sessions.get(&name).map(|s| s.framebuffer.clone()) else { return };
+                    let reader = self.event_proxy.clone().map(|proxy| {
+                        VncReader::spawn(receiver, name.clone(), framebuffer, move |event| proxy.send_event(event).is_ok())
+                    });
+                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                        session.client = client;
+                        session.reader = reader;
+                        session.reconnect_attempts = 0;
+                    }
+                    self.set_message(format!("VNC {name} reconnected"));
+                }
+                Err(err) => {
+                    let attempts = self.vnc_sessions.get(&name).map_or(0, |s| s.reconnect_attempts) + 1;
+                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                        session.reconnect_attempts = attempts;
+                    }
+                    if attempts >= MAX_VNC_RECONNECT_ATTEMPTS {
+                        self.set_error(format!("VNC {name}: reconnect failed after {attempts} attempts ({err}) -- giving up; reopen manually with SPC v v"));
+                    } else {
+                        self.set_error(format!("VNC {name}: reconnect failed ({err}); retrying..."));
+                        self.schedule_vnc_reconnect(name, host, port, attempts);
+                    }
+                }
+            }
+            self.wake_caret();
+            return;
+        }
+
+        match result {
+            Ok((client, receiver)) => {
+                let buffer = self.buffers.open_vnc();
+                let cursor = Cursor::at_start();
+                self.workspaces.new_workspace(buffer, cursor);
+                let workspace_index = self.workspaces.active_index();
+                let pane = self.focused_pane_id();
+                self.pane_titles.insert(pane, format!("VNC: {name}"));
+                let framebuffer = Arc::new(Mutex::new(fenix_vnc::framebuffer::VncFramebuffer::new()));
+                let reader = self.event_proxy.clone().map(|proxy| {
+                    VncReader::spawn(receiver, name.clone(), framebuffer.clone(), move |event| proxy.send_event(event).is_ok())
+                });
+                self.vnc_sessions.insert(
+                    name,
+                    VncSession {
+                        client,
+                        reader,
+                        workspace_index,
+                        pane,
+                        buffer,
+                        host,
+                        port,
+                        framebuffer,
+                        texture: None,
+                        texture_dims: (0, 0),
+                        cursor: None,
+                        pointer_pos: None,
+                        pointer_buttons: 0,
+                        reconnect_attempts: 0,
+                    },
+                );
+                self.sync_vnc_focus();
+            }
+            Err(err) => {
+                self.set_error(format!("couldn't connect to {name}: {err}"));
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// Backs off, then retries a dropped VNC connection -- spawned on its
+    /// own one-shot thread (a plain `std::thread::sleep` there costs
+    /// nothing real, unlike blocking the main thread would) that sleeps
+    /// for `vnc_reconnect_delay(attempts)` and then runs the exact same
+    /// connect `start_vnc_connect` does. A no-op without a real
+    /// `event_proxy` (every test) -- there's nothing to retry against in
+    /// a headless test anyway.
+    fn schedule_vnc_reconnect(&mut self, name: String, host: String, port: u16, attempts: u32) {
+        let Some(proxy) = self.event_proxy.clone() else { return };
+        let delay = vnc_reconnect_delay(attempts);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let result = fenix_vnc::VncClient::connect(&host, port);
+            let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+        });
+    }
+
+    /// `SPC v q`: closes whichever VNC session owns the currently focused
+    /// pane/buffer, if any -- unlike `docker.close`/`git.close`/`jira.
+    /// close` (which always mean "the one session," since only one of
+    /// each ever exists at a time), this needs its own "which one" scan
+    /// since several VNC sessions can be open at once.
+    pub(crate) fn vnc_close_focused_session(&mut self) {
+        let Some(key) = self.vnc_session_key_for_buffer(self.focused_buffer_id()) else {
+            self.set_error("no VNC session focused");
+            return;
+        };
+        self.vnc_session_close(&key);
+    }
+
+    /// Tears down one VNC session: drops the connection (closing the
+    /// socket, per `fenix_vnc::VncClient`'s own `Drop`), closes its
+    /// buffer, clears its pane title, and removes its workspace --
+    /// mirrors `docker_session_close`/`jira_session_close` exactly,
+    /// generalized to look the session up by name instead of assuming
+    /// there's only one.
+    pub(crate) fn vnc_session_close(&mut self, name: &str) {
+        let Some(session) = self.vnc_sessions.remove(name) else { return };
+        if self.vnc_focused.as_deref() == Some(name) {
+            self.set_vnc_focused(None);
+        }
+        self.buffers.close(session.buffer);
+        self.pane_titles.remove(&session.pane);
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Finds whichever VNC session (if any) owns `id` as its pane's
+    /// buffer -- a linear scan over at most a handful of sessions, not a
+    /// real cost; needed because sessions are keyed by name, not by
+    /// buffer, unlike Docker/Git/Jira's flat per-session buffer-id lists.
+    fn vnc_session_key_for_buffer(&self, id: BufferId) -> Option<String> {
+        self.vnc_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
+    }
+
+    /// Same as `vnc_session_key_for_buffer`, keyed by pane instead --
+    /// used by mouse-hit-testing, which resolves a click to a pane, not
+    /// directly to a buffer.
+    fn vnc_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<String> {
+        self.vnc_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
+    }
+
+    /// Recomputes `vnc_focused` from whichever pane is actually focused
+    /// right now -- called after every focus-changing action (opening a
+    /// session, pane navigation, a click) instead of trying to intercept
+    /// every such call site individually. Also throttles every *other*
+    /// open session down to `IDLE_REFRESH_MILLIS` and the newly-focused
+    /// one (if any) back up to full rate -- see `fenix_vnc::VncClient::
+    /// set_active`'s own doc comment for why this is safe to do on every
+    /// focus change rather than only on a real visibility transition.
+    fn sync_vnc_focus(&mut self) {
+        let focused_key = self.vnc_session_key_for_buffer(self.focused_buffer_id());
+        let newly_focused = focused_key.is_some() && focused_key != self.vnc_focused;
+        self.set_vnc_focused(focused_key.clone());
+        for (key, session) in self.vnc_sessions.iter() {
+            session.client.set_active(Some(key) == focused_key.as_ref());
+        }
+        // Mirror the local clipboard to the VM on genuinely *becoming*
+        // focused (not on every call -- most calls here are just
+        // reconfirming the same pane) -- simpler than intercepting `p`/
+        // `P` inside a focused VNC pane to inject a paste keystroke
+        // sequence, which would invent a keybinding meaning that only
+        // exists inside a VNC pane. The guest's own paste keystroke
+        // (typed normally) then just forwards as an ordinary keysym.
+        if newly_focused {
+            if let Some((key, text)) = focused_key.clone().zip(self.clipboard.as_mut().and_then(|c| c.get_text().ok())) {
+                if let Some(session) = self.vnc_sessions.get(&key) {
+                    session.client.send_clipboard(text);
+                }
+            }
+        }
+    }
+
+    /// The one place `vnc_focused` is actually written -- besides the
+    /// field itself, keeps two OS-level pointer concerns in sync with
+    /// input capture.
+    ///
+    /// The cursor *grab*: confined to the window while some VNC session
+    /// has capture, released the moment it doesn't. Keyboard capture
+    /// (`vnc_focused`) already means every keystroke goes straight to the
+    /// guest instead of vim's own dispatch; without also confining the
+    /// pointer, a drag started inside a VNC pane can wander onto another
+    /// window or monitor mid-gesture and strand a mouse button held down
+    /// in the guest. `Confined`, not `Locked`: pointer forwarding
+    /// (`handle_vnc_pointer_move`) maps the cursor's real *absolute*
+    /// window-local position onto the framebuffer, which needs the actual
+    /// cursor position, not `Locked`'s relative-motion-from-center
+    /// scheme.
+    ///
+    /// The cursor's *visibility*: hidden while captured, so the guest's
+    /// own pointer is the only one on screen. Without this there are
+    /// visibly two -- the host's, and the guest's drawn either by
+    /// `redraw` (from `VncFrame::Cursor`) or by the server compositing it
+    /// into the framebuffer when it doesn't support `CursorPseudo` --
+    /// tracking each other a few pixels apart, since the two have
+    /// different shapes and hotspots. Exactly one of those guest cursors
+    /// always exists, so hiding the host's can't leave a captured session
+    /// with no pointer at all.
+    ///
+    /// Both are best-effort: not every platform/backend supports
+    /// grabbing (see `CursorGrabMode::Confined`'s own platform notes),
+    /// and a failure isn't fatal to using the app, just to the
+    /// convenience.
+    fn set_vnc_focused(&mut self, key: Option<String>) {
+        if key == self.vnc_focused {
+            return;
+        }
+        self.vnc_focused = key;
+        if let Some(window) = &self.window {
+            let captured = self.vnc_focused.is_some();
+            let mode = if captured { CursorGrabMode::Confined } else { CursorGrabMode::None };
+            let _ = window.set_cursor_grab(mode);
+            window.set_cursor_visible(!captured);
+        }
+    }
+
+    /// Sends one key event (down or up) to the named VNC session, mapped
+    /// through `fenix_vnc::keysym::keysym_for` -- `None` for a key with
+    /// no keysym mapping (silently dropped, same posture `encode_
+    /// terminal_key`'s own `None` case already has). The actual sequence
+    /// of keysyms this turns into (bracketed with any held modifiers) is
+    /// `vnc_key_sequence`'s own job -- split out as a plain function so
+    /// that ordering is unit-testable without a live `VncClient`
+    /// connection.
+    fn send_vnc_key(&mut self, key: &str, keypress: KeyPress, down: bool) {
+        let Some(keysym) = fenix_vnc::keysym::keysym_for(keypress) else { return };
+        let Some(session) = self.vnc_sessions.get(key) else { return };
+        for (sym, sym_down) in vnc_key_sequence(keysym, keypress.mods, down) {
+            session.client.send_key(sym, sym_down);
+        }
+    }
+
+    /// `FenixUserEvent::VncFrame` handling -- decodes/applies one update
+    /// from a session's background reader thread. A no-op if the named
+    /// session's since been closed (a stray frame from an already-
+    /// superseded/closed connection, same "arrived after the fact"
+    /// reasoning `apply_terminal_output` doesn't need but `GitMainReady`/
+    /// `GitRefreshReady` do).
+    ///
+    /// `Rect`/`Copy` never reach this function at all -- `VncReader`
+    /// applies those directly to the session's shared `framebuffer` on
+    /// its own thread (see its own doc comment for why). `Resolution`
+    /// only needs to reset `texture` here (the buffer itself was already
+    /// resized, under the lock, by the reader thread before this event
+    /// was even sent); `Disconnected` still needs the error message and
+    /// reconnect scheduling. Both redraw immediately -- rare, discrete,
+    /// non-bursty events, unlike the pixel traffic that used to flow
+    /// through here.
+    fn apply_vnc_frame(&mut self, key: String, frame: fenix_vnc::VncFrame) {
+        match frame {
+            fenix_vnc::VncFrame::Resolution { .. } => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                // Recreated lazily next redraw, once the new size is
+                // known and (if not already) a real GPU exists.
+                session.texture = None;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            fenix_vnc::VncFrame::Rect { .. } | fenix_vnc::VncFrame::Copy { .. } | fenix_vnc::VncFrame::UpdateEnd => {
+                debug_assert!(false, "VncReader applies Rect/Copy/UpdateEnd directly and never forwards them");
+            }
+            fenix_vnc::VncFrame::Cursor { width, height, hotspot_x, hotspot_y, bgra } => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                // A zero-sized cursor is the server's way of saying "draw
+                // nothing here" -- keeping an empty `VncCursor` around
+                // would just mean a zero-area quad every frame.
+                session.cursor = if width == 0 || height == 0 {
+                    None
+                } else {
+                    // `texture: None` -- uploading needs `&wgpu::Device`,
+                    // so the next `redraw` builds it. Cursor shapes change
+                    // rarely (per hovered widget, not per pointer move),
+                    // so this costs a texture creation about as often as
+                    // the guest changes its pointer, not per frame.
+                    Some(VncCursor { width, height, hotspot_x, hotspot_y, bgra, texture: None })
+                };
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            fenix_vnc::VncFrame::ClipboardText(text) => {
+                if let Some(clipboard) = &mut self.clipboard {
+                    let _ = clipboard.set_text(text);
+                }
+            }
+            fenix_vnc::VncFrame::Bell => {}
+            fenix_vnc::VncFrame::Disconnected(reason) => {
+                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                session.reader = None;
+                let (host, port) = (session.host.clone(), session.port);
+                self.set_error(format!("VNC {key} disconnected: {reason} -- reconnecting..."));
+                self.schedule_vnc_reconnect(key, host, port, 0);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
+    /// `SPC v s`: writes the focused VNC session's current framebuffer to
+    /// a timestamped PNG next to the project root (or the process's cwd,
+    /// same fallback `explorer_start_dir` already uses) -- a cheap extra
+    /// once the CPU-side `framebuffer` already exists for every session
+    /// regardless (see `VncSession::framebuffer`'s own doc comment).
+    pub(crate) fn vnc_screenshot(&mut self) {
+        let Some(key) = self.vnc_session_key_for_buffer(self.focused_buffer_id()) else {
+            self.set_error("no VNC session focused");
+            return;
+        };
+        let Some(session) = self.vnc_sessions.get(&key) else { return };
+        let (fb_width, fb_height, snapshot) = {
+            let fb = session.framebuffer.lock().unwrap();
+            let (w, h) = fb.dimensions();
+            (w, h, fb.snapshot())
+        };
+        if fb_width == 0 || fb_height == 0 {
+            self.set_error(format!("VNC {key}: no frame to save yet"));
+            return;
+        }
+        let Some(image_buffer) = image::RgbaImage::from_fn(fb_width as u32, fb_height as u32, |x, y| {
+            let i = (y as usize * fb_width as usize + x as usize) * 4;
+            let b = snapshot[i];
+            let g = snapshot[i + 1];
+            let r = snapshot[i + 2];
+            let a = snapshot[i + 3];
+            image::Rgba([r, g, b, a])
+        })
+        .into()
+        else {
+            self.set_error(format!("VNC {key}: couldn't build the screenshot image"));
+            return;
+        };
+        let dir = self.explorer_start_dir();
+        let filename = format!("vnc-{key}-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let path = dir.join(filename);
+        match image::DynamicImage::ImageRgba8(image_buffer).save(&path) {
+            Ok(()) => self.set_message(format!("saved {}", path.display())),
+            Err(err) => self.set_error(format!("couldn't save screenshot: {err}")),
+        }
+    }
+
+    /// Whether `path` should open as a rendered PDF pane instead of an
+    /// ordinary text buffer -- checked by every real "open this path"
+    /// call site (`open_file_from_picker`, `explorer_open_selected`,
+    /// startup) before it ever reaches `BufferList::open_path`, which has
+    /// no notion of PDFs and would otherwise load the raw bytes as
+    /// (garbage) text. Same case-insensitive extension-check idiom as
+    /// `fenix_syntax::detect_language_from_path`.
+    fn looks_like_pdf(path: &Path) -> bool {
+        path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    }
+
+    /// Points the focused pane at `path` as a PDF (`SPC r o` and every
+    /// path-opening call site once `looks_like_pdf` says so) -- the PDF
+    /// equivalent of `open_file_from_picker`. Reuses an already-open
+    /// session for the same canonicalized path instead of duplicating it
+    /// (mirrors `open_vnc_session`'s "already open -> switch" branch);
+    /// otherwise spawns the shared worker if this is the first PDF
+    /// opened this run, creates the pane/buffer, and dispatches the
+    /// `Open` request -- the actual page count/render arrive later, async,
+    /// via `apply_pdf_response`.
+    pub(crate) fn open_pdf_path(&mut self, path: &Path) {
+        self.open_pdf_path_with(path, PdfPlacement::NewWorkspace);
+    }
+
+    /// `open_pdf_path` with an explicit `PdfPlacement` -- see that enum
+    /// for what each choice means and why the document index
+    /// (`SPC r f`) wants the other one.
+    fn open_pdf_path_with(&mut self, path: &Path, placement: PdfPlacement) {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(session) = self.pdf_sessions.get(&canonical) {
+            let (workspace_index, pane) = (session.workspace_index, session.pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.main_view = MainView::Editor;
+            self.wake_caret();
+            return;
+        }
+
+        if self.pdf_worker.is_none() {
+            let worker = match self.event_proxy.clone() {
+                Some(proxy) => fenix_pdf::PdfWorker::spawn(move |response| {
+                    let _ = proxy.send_event(FenixUserEvent::PdfResponse(response));
+                }),
+                // No event loop to report back through (every test) --
+                // the worker still runs (pdfium calls stay serialized
+                // through it, same as real use), its replies just have
+                // nowhere to go, mirroring `start_vnc_connect`'s own
+                // reasoning for why a synchronous fallback isn't used
+                // here: unlike a plain `VncClient::connect` call, calling
+                // pdfium directly on this thread would reintroduce the
+                // exact concurrent-access hazard the shared worker exists
+                // to prevent (see `fenix_pdf`'s own top-level doc comment).
+                None => fenix_pdf::PdfWorker::spawn(|_| {}),
+            };
+            self.pdf_worker = Some(worker);
+        }
+
+        // Retired *before* the new buffer is created and pointed at, so
+        // its own teardown (which clears `pane_titles` for the pane it
+        // was on -- the very pane about to be reused) can't wipe the new
+        // session's title back out from under it.
+        if placement == PdfPlacement::FocusedPane {
+            if let Some(previous) = self.pdf_session_key_for_pane(self.focused_pane_id()) {
+                if previous == canonical {
+                    return; // already showing exactly this document here
+                }
+                // Its outline/search companions belong to *that*
+                // document, so they go with it -- closed via their own
+                // functions (which need the session to still exist, hence
+                // before `pdf_session_forget`) rather than left as panes
+                // showing a stale bookmark list next to a different PDF.
+                // In the `NewWorkspace` case `remove_active()` takes care
+                // of these for free, which is why `pdf_session_close`
+                // doesn't need this.
+                self.pdf_close_outline_pane(&previous);
+                self.pdf_close_search_pane(&previous);
+                self.pdf_session_forget(&previous);
+            }
+        }
+
+        let buffer = self.buffers.open_pdf();
+        let cursor = Cursor::at_start();
+        match placement {
+            PdfPlacement::NewWorkspace => self.workspaces.new_workspace(buffer, cursor),
+            PdfPlacement::FocusedPane => {
+                let focused = self.focused_pane_id();
+                self.set_pane_content(focused, buffer);
+            }
+        }
+        let workspace_index = self.workspaces.active_index();
+        let pane = self.focused_pane_id();
+        let name = canonical.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| canonical.display().to_string());
+        self.pane_titles.insert(pane, format!("PDF: {name}"));
+        self.pdf_display_names.insert(buffer, name);
+
+        let doc_key = fenix_pdf::PdfDocKey::new();
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Open { key: doc_key, path: canonical.clone() });
+        }
+        self.pdf_sessions.insert(
+            canonical.clone(),
+            PdfSession {
+                doc_key,
+                workspace_index,
+                pane,
+                buffer,
+                page_count: 0,
+                current_page: 0,
+                rendered_page: None,
+                land_at_bottom: false,
+                last_requested_size: (0, 0),
+                pending_request_id: 0,
+                page_point_size: (0.0, 0.0),
+                zoom: PdfZoom::FitPage,
+                last_pane_size: (0, 0),
+                scroll_offset: (0, 0),
+                full_bgra: None,
+                last_uploaded: None,
+                texture: None,
+                outline: None,
+                pending_search_request_id: 0,
+                last_search_query: String::new(),
+            },
+        );
+        self.refresh_project_root();
+        self.record_recent_file(&canonical);
+        self.main_view = MainView::Editor;
+        self.wake_caret();
+    }
+
+    /// Finds whichever PDF session (if any) owns `pane` -- same "keyed by
+    /// something other than buffer/pane, so a linear scan" shape as
+    /// `vnc_session_key_for_pane`.
+    fn pdf_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<PathBuf> {
+        self.pdf_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
+    }
+
+    /// Same as `pdf_session_key_for_pane`, keyed by buffer instead -- what
+    /// `kill_buffer_now` needs to recognize "the buffer about to be
+    /// killed belongs to a PDF session" the same way it already does for
+    /// VNC (`vnc_session_key_for_buffer`).
+    fn pdf_session_key_for_buffer(&self, id: BufferId) -> Option<PathBuf> {
+        self.pdf_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
+    }
+
+    /// Tears down one PDF session: tells the shared worker to drop the
+    /// document (freeing pdfium's own handle for it), closes its buffer,
+    /// clears its pane title/display name, and removes its workspace --
+    /// mirrors `vnc_session_close` exactly. Also cleans up an open
+    /// outline companion pane's side-table entries, if it has one: the
+    /// pane/buffer itself is torn down for free by `remove_active()`
+    /// (the outline pane lives in the same workspace, since `pdf_toggle_
+    /// outline` opens it via a plain split), but `pdf_outline_panes`/
+    /// `pdf_outline_lines`/`pdf_outline_source` don't know that on their
+    /// own and would otherwise keep stale entries forever -- a real leak
+    /// over a long session's worth of opening/closing PDFs, and (worse)
+    /// a wrong answer if this same path is ever reopened: `pdf_outline_
+    /// panes` would still claim an outline pane exists for it when it
+    /// doesn't.
+    fn pdf_session_close(&mut self, key: &Path) {
+        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        self.pdf_session_forget(key);
+        self.workspaces.switch_to_index(workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Everything `pdf_session_close` does *except* removing the
+    /// session's workspace: drops the document on the worker, closes its
+    /// buffer, clears its pane title/display name, and forgets its
+    /// outline/search companion side-table entries. Split out because
+    /// `PdfPlacement::FocusedPane` needs exactly this and nothing more --
+    /// opening a document into a pane that already held a different PDF
+    /// has to retire that session (otherwise two sessions claim the same
+    /// pane and `redraw`'s `find(|s| s.pane == ...)` picks between them
+    /// by `HashMap` iteration order) while *keeping* the workspace the
+    /// new document is about to be shown in.
+    fn pdf_session_forget(&mut self, key: &Path) {
+        let Some(session) = self.pdf_sessions.remove(key) else { return };
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Close { key: session.doc_key });
+        }
+        self.buffers.close(session.buffer);
+        self.pane_titles.remove(&session.pane);
+        self.pdf_display_names.remove(&session.buffer);
+        if self.pdf_outline_panes.remove(key).is_some() {
+            let stale_outline_buffers: Vec<BufferId> =
+                self.pdf_outline_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
+            for buffer in stale_outline_buffers {
+                self.pdf_outline_lines.remove(&buffer);
+                self.pdf_outline_source.remove(&buffer);
+            }
+        }
+        // Same leak/stale-answer reasoning as the outline cleanup just
+        // above, for a still-open search-results companion pane.
+        if self.pdf_search_panes.remove(key).is_some() {
+            let stale_search_buffers: Vec<BufferId> =
+                self.pdf_search_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
+            for buffer in stale_search_buffers {
+                self.pdf_search_result_lines.remove(&buffer);
+                self.pdf_search_source.remove(&buffer);
+            }
+        }
+    }
+
+    /// Dispatches a fresh `RenderPage` request for `key` at `target_w` x
+    /// `target_h` pixels, bumping `pending_request_id` first so a reply to
+    /// an earlier, now-superseded request gets dropped by `apply_pdf_
+    /// response` instead of clobbering a newer one. A no-op if the
+    /// session or worker doesn't exist, the document hasn't reported its
+    /// page count back yet, or `target_w`/`target_h` is degenerate
+    /// (nothing meaningful to render before either is known).
+    fn dispatch_pdf_render(&mut self, key: &Path, target_w: u32, target_h: u32) {
+        if target_w == 0 || target_h == 0 {
+            return;
+        }
+        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        session.pending_request_id += 1;
+        session.last_requested_size = (target_w, target_h);
+        let (doc_key, request_id, page_index) = (session.doc_key, session.pending_request_id, session.current_page);
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, request_id, page_index, target_w, target_h });
+        }
+    }
+
+    /// Recomputes this session's render target from its current `zoom` +
+    /// `page_point_size` + `last_pane_size` and dispatches it -- the
+    /// shared "something changed that isn't a plain resize" path every
+    /// keypress-driven mutator (`pdf_turn_page`, `pdf_goto_page`, the
+    /// `pdf_zoom_*` family) uses instead of duplicating this computation.
+    /// `redraw`'s own pane-classification loop does the equivalent
+    /// computation for the *resize* case specifically, since it's the
+    /// only place that learns about a resize in the first place -- this
+    /// is what everything else reaches for once `last_pane_size` is
+    /// already known from that loop's last pass.
+    fn pdf_dispatch_render_for_zoom(&mut self, key: &Path) {
+        let Some(session) = self.pdf_sessions.get(key) else { return };
+        let (target_w, target_h) = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
+        self.dispatch_pdf_render(key, target_w, target_h);
+    }
+
+    /// `FenixUserEvent::PdfResponse` handling. Every variant carries its
+    /// own `fenix_pdf::PdfDocKey`, not the path `pdf_sessions` is keyed
+    /// by, so each arm scans for the session whose `doc_key` matches
+    /// first -- a no-op (like `apply_vnc_frame`'s per-name lookup) if
+    /// that session's since been closed.
+    fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
+        match response {
+            fenix_pdf::PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
+                session.page_count = page_count;
+                session.page_point_size = (page_width_pts, page_height_pts);
+                // No render dispatched here -- `last_requested_size`
+                // stays `(0, 0)`, which `redraw`'s pane-classification
+                // loop (the only place that actually knows this pane's
+                // real current pixel size) treats as "never rendered
+                // yet" and requests the first render itself on the very
+                // next frame, the same way it reacts to any later resize.
+            }
+            fenix_pdf::PdfResponse::OpenFailed { key, message } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                self.set_error(format!("couldn't open {}: {message}", path.display()));
+            }
+            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
+                if request_id != session.pending_request_id || page_index != session.current_page {
+                    return; // superseded by a later request/page turn since this one was dispatched
+                }
+                session.rendered_page = Some(page_index);
+                session.page_point_size = (page_width_pts, page_height_pts);
+                // A fresh render always starts scrolled to the top-left,
+                // and always invalidates whatever's currently uploaded
+                // (see `last_uploaded`'s own doc comment) -- `redraw`
+                // recreates the texture from `full_bgra` as needed, same
+                // "defer the actual GPU work to redraw" shape VNC's own
+                // `Resolution` arm uses.
+                // `u32::MAX` rather than a computed bottom offset:
+                // `redraw` already clamps `scroll_offset` against the
+                // render's real size and the pane's current size every
+                // frame (the only place both are known together), so
+                // "as far down as this page goes" needs no second copy
+                // of that math here.
+                session.scroll_offset = if session.land_at_bottom { (0, u32::MAX) } else { (0, 0) };
+                session.land_at_bottom = false;
+                session.full_bgra = Some((width, height, bgra));
+                session.last_uploaded = None;
+                // Self-correction for a PDF whose pages aren't all the
+                // same point-size: `page_width_pts`/`page_height_pts` is
+                // *this* page's real size, which may differ from whatever
+                // was assumed when this request was dispatched (there was
+                // no way to know ahead of a page actually being open) --
+                // if the target this page's real size calls for doesn't
+                // match what was actually rendered, the render just
+                // applied is wrong-sized and immediately superseded by a
+                // corrected one. The mutable `session` borrow must end
+                // before this call (`dispatch_pdf_render` needs its own
+                // `&mut self`), hence computing `corrected` here but
+                // calling after the match arm's borrow is out of scope.
+                //
+                // Tolerated to within a pixel on each axis rather than
+                // demanded exactly: real documents routinely vary their
+                // page boxes in the second decimal place (this is true of
+                // most standards PDFs -- a cover page at 595.22x842pt
+                // followed by a body at 595.38x841.98pt is typical), which
+                // rounds to a fit target one pixel off often enough that
+                // an exact comparison re-renders the whole page a second
+                // time on a large fraction of page turns. A pixel of
+                // difference is invisible -- the render is aspect-correct
+                // for its own page either way, and `redraw` centers it in
+                // the pane -- so paying a full re-render for it is pure
+                // waste on the one path that most needs to feel instant.
+                let corrected = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
+                let off_by = (corrected.0.abs_diff(width), corrected.1.abs_diff(height));
+                if corrected != (0, 0) && (off_by.0 > 1 || off_by.1 > 1) {
+                    self.dispatch_pdf_render(&path, corrected.0, corrected.1);
+                }
+            }
+            fenix_pdf::PdfResponse::RenderFailed { key, request_id, message } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get(&path) else { return };
+                if request_id != session.pending_request_id {
+                    return;
+                }
+                self.set_error(format!("couldn't render page: {message}"));
+            }
+            fenix_pdf::PdfResponse::Outline { key, entries } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                if let Some(session) = self.pdf_sessions.get_mut(&path) {
+                    session.outline = Some(entries.clone());
+                }
+                // Always opens the pane once fetched -- `FetchOutline` is
+                // only ever dispatched by `pdf_toggle_outline` wanting to
+                // show it, so there's no other reason a reply would be in
+                // flight. `pdf_open_outline_pane` re-focuses the session's
+                // own workspace/pane first, so this is correct even if the
+                // user navigated elsewhere while the fetch was in flight.
+                self.pdf_open_outline_pane(&path, &entries);
+            }
+            fenix_pdf::PdfResponse::SearchResults { key, request_id, matches } => {
+                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
+                let Some(session) = self.pdf_sessions.get(&path) else { return };
+                if request_id != session.pending_search_request_id {
+                    return; // superseded by a later search since this one was dispatched
+                }
+                let query = session.last_search_query.clone();
+                self.set_message(format!("{} match{} for \"{query}\"", matches.len(), if matches.len() == 1 { "" } else { "es" }));
+                self.pdf_open_or_update_search_pane(&path, &query, &matches);
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC r n` / `SPC r p`: turns the focused PDF session to the next/
+    /// previous page (clamped to `0..page_count`), dispatching a fresh
+    /// render at the pane's last-known size and this session's current
+    /// zoom -- a no-op at either end of the document, and a no-op if the
+    /// focused pane isn't a PDF session at all.
+    fn pdf_turn_page(&mut self, delta: i32) {
+        self.pdf_turn_page_landing(delta, false);
+    }
+
+    /// `pdf_turn_page` plus control over where the new page starts
+    /// scrolled to -- `land_at_bottom` is what makes scrolling up past
+    /// the top of a page continue onto the *bottom* of the previous one
+    /// (see `PdfSession::land_at_bottom`). Returns whether a page turn
+    /// actually happened, which is what `pdf_scroll` needs to know to
+    /// tell "walked onto the next page" apart from "already at the last
+    /// page, so this scroll did nothing".
+    fn pdf_turn_page_landing(&mut self, delta: i32, land_at_bottom: bool) -> bool {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return false };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return false };
+        if session.page_count == 0 {
+            return false;
+        }
+        let new_page = (session.current_page as i32 + delta).clamp(0, session.page_count as i32 - 1) as u32;
+        if new_page == session.current_page {
+            return false;
+        }
+        session.current_page = new_page;
+        session.land_at_bottom = land_at_bottom;
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+        true
+    }
+
+    pub(crate) fn pdf_next_page(&mut self) {
+        self.pdf_turn_page(1);
+    }
+
+    pub(crate) fn pdf_prev_page(&mut self) {
+        self.pdf_turn_page(-1);
+    }
+
+    /// `SPC r [` / `Home` and `SPC r ]` / `End`: jumps the focused PDF
+    /// session to the first/last page outright. A no-op if the focused
+    /// pane isn't a PDF session, or its page count isn't known yet.
+    pub(crate) fn pdf_first_page(&mut self) {
+        self.pdf_goto_page(1);
+    }
+
+    pub(crate) fn pdf_last_page(&mut self) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(page_count) = self.pdf_sessions.get(&key).map(|session| session.page_count) else { return };
+        self.pdf_goto_page(page_count);
+    }
+
+    /// Scrolls the focused PDF session's page vertically by `delta_px`
+    /// (positive = further *down* the page), turning to the next/previous
+    /// page once there's nothing left to scroll in that direction --
+    /// which is what makes a wheel notch, `j`/`k`, or an arrow key walk
+    /// through a whole document continuously, the way every other PDF
+    /// reader does, instead of dead-ending at the bottom of a page.
+    ///
+    /// The "nothing left to scroll" case covers the common one too:
+    /// fit-to-page renders the page to exactly the size it occupies, so
+    /// there is *never* anything to scroll under the default zoom and
+    /// every scroll gesture turns the page immediately.
+    ///
+    /// A page turn triggered by scrolling *up* lands on the bottom of the
+    /// previous page rather than its top (see `PdfSession::
+    /// land_at_bottom`), so scrolling back up retraces exactly the
+    /// content scrolling down just covered.
+    fn pdf_scroll(&mut self, delta_px: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        let full_h = session.full_bgra.as_ref().map(|(_, h, _)| *h).unwrap_or(0);
+        // Same clamp `redraw` applies (and writes back) every frame --
+        // recomputed here because a keypress can land between two frames,
+        // and because `apply_pdf_response` deliberately parks a "start at
+        // the bottom" offset out of range for this to resolve.
+        let max_scroll_y = full_h.saturating_sub(full_h.min(session.last_pane_size.1));
+        let current = session.scroll_offset.1.min(max_scroll_y);
+        let next = (current as i64 + delta_px as i64).clamp(0, max_scroll_y as i64) as u32;
+        if next != current {
+            session.scroll_offset.1 = next;
+            self.wake_caret();
+            return;
+        }
+        // Already parked against the edge this scroll pushes toward, so
+        // the gesture means "keep going" -- into the next/previous page.
+        if delta_px > 0 {
+            self.pdf_turn_page_landing(1, false);
+        } else if delta_px < 0 {
+            self.pdf_turn_page_landing(-1, true);
+        }
+    }
+
+    /// `SPC r g`: starts the "type a page number" prompt -- a no-op if
+    /// the focused pane isn't a PDF session (nothing to jump within).
+    pub(crate) fn start_pdf_goto_page_prompt(&mut self) {
+        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
+            return;
+        }
+        self.pdf_goto_page_prompt = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `pdf_goto_page_prompt` --
+    /// digits only (this is a 1-indexed page number, not free text), same
+    /// capturing shape as `find_file_prompt_key`.
+    fn pdf_goto_page_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.pdf_goto_page_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_goto_page_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let input = self.pdf_goto_page_prompt.take().unwrap_or_default();
+                if let Ok(page_number) = input.parse::<u32>() {
+                    self.pdf_goto_page(page_number);
+                }
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() && c.is_ascii_digit() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `pdf_goto_page_prompt`
+    /// is active -- mirrors `find_file_prompt_text`.
+    fn pdf_goto_page_prompt_text(&self) -> Option<String> {
+        self.pdf_goto_page_prompt.as_ref().map(|input| format!("go to page: {input}"))
+    }
+
+    /// Jumps the focused PDF session directly to `page_number` (1-indexed,
+    /// as shown to the user -- clamped into `1..=page_count`, so an
+    /// out-of-range number lands on the nearest real page rather than
+    /// being rejected outright, same forgiving posture as most page-jump
+    /// UIs). A no-op if the focused pane isn't a PDF session, or its page
+    /// count isn't known yet.
+    fn pdf_goto_page(&mut self, page_number: u32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        let new_page = page_number.saturating_sub(1).min(session.page_count - 1);
+        if new_page == session.current_page {
+            return;
+        }
+        session.current_page = new_page;
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    /// The effective zoom percentage a session's *current* render sits
+    /// at, used to seed `pdf_zoom_in`/`pdf_zoom_out`'s step regardless of
+    /// which zoom mode got it there (`FitPage`/`FitWidth` have no
+    /// percentage of their own -- this derives one from the actual
+    /// rendered size against the page's native point width). Falls back
+    /// to `100` if nothing's been rendered yet or the page size isn't
+    /// known (nothing to derive a ratio from).
+    fn pdf_effective_percent(session: &PdfSession) -> u32 {
+        let (rendered_w, _) = session.last_requested_size;
+        let (page_w_pts, _) = session.page_point_size;
+        if rendered_w == 0 || page_w_pts <= 0.0 {
+            return 100;
+        }
+        ((rendered_w as f32 / page_w_pts) * 100.0).round().max(1.0) as u32
+    }
+
+    /// Shared body for `pdf_zoom_in`/`pdf_zoom_out`: steps the focused
+    /// session's effective zoom percentage by `delta_percent` (positive
+    /// or negative), clamped to `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_
+    /// PERCENT`, switching it into `PdfZoom::Percent` regardless of
+    /// whatever mode it was in before -- a no-op if the focused pane
+    /// isn't a PDF session.
+    fn pdf_zoom_step(&mut self, delta_percent: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        let current = Self::pdf_effective_percent(session);
+        let stepped = (current as i32 + delta_percent).clamp(PDF_ZOOM_MIN_PERCENT as i32, PDF_ZOOM_MAX_PERCENT as i32) as u32;
+        session.zoom = PdfZoom::Percent(stepped);
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    pub(crate) fn pdf_zoom_in(&mut self) {
+        self.pdf_zoom_step(PDF_ZOOM_STEP_PERCENT as i32);
+    }
+
+    pub(crate) fn pdf_zoom_out(&mut self) {
+        self.pdf_zoom_step(-(PDF_ZOOM_STEP_PERCENT as i32));
+    }
+
+    /// Shared body for `pdf_zoom_fit_page`/`pdf_zoom_fit_width`: sets the
+    /// focused session's zoom mode outright and dispatches a render for
+    /// it -- a no-op if the focused pane isn't a PDF session.
+    fn pdf_set_zoom(&mut self, zoom: PdfZoom) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        session.zoom = zoom;
+        self.pdf_dispatch_render_for_zoom(&key);
+        self.wake_caret();
+    }
+
+    pub(crate) fn pdf_zoom_fit_page(&mut self) {
+        self.pdf_set_zoom(PdfZoom::FitPage);
+    }
+
+    pub(crate) fn pdf_zoom_fit_width(&mut self) {
+        self.pdf_set_zoom(PdfZoom::FitWidth);
+    }
+
+    /// `h`/`j`/`k`/`l` while a PDF pane is focused (see `route_keypress`'s
+    /// own `BufferKind::Pdf` block): nudges `scroll_offset` by
+    /// `PDF_PAN_STEP_PX` in the given direction. Never clamped here --
+    /// `redraw`'s own crop computation clamps against `full_bgra`'s
+    /// actual size and the pane's current size every frame regardless of
+    /// how `scroll_offset` got to wherever it is, so an over-eager pan
+    /// past either edge just settles at that edge next frame rather than
+    /// needing its own bounds check here. A no-op if the focused pane
+    /// isn't a PDF session.
+    fn pdf_pan(&mut self, dx: i32, dy: i32) {
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        let step = PDF_PAN_STEP_PX as i32;
+        session.scroll_offset =
+            ((session.scroll_offset.0 as i32 + dx * step).max(0) as u32, (session.scroll_offset.1 as i32 + dy * step).max(0) as u32);
+        self.wake_caret();
+    }
+
+    /// Jumps the PDF session at `key` directly to `page_index`
+    /// (0-indexed, already clamped by the caller if needed) and
+    /// dispatches a fresh render for it. Unlike `pdf_goto_page`/`pdf_
+    /// turn_page` (which act on whichever pane is *focused*), this takes
+    /// an explicit session key -- what `pdf_outline_activate_selected`
+    /// needs, since the *focused* pane when `Enter` is pressed there is
+    /// the outline pane, not the PDF pane it should jump.
+    fn pdf_jump_session_to_page(&mut self, key: &Path, page_index: u32) {
+        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
+        if session.page_count == 0 {
+            return;
+        }
+        let new_page = page_index.min(session.page_count - 1);
+        if new_page != session.current_page {
+            session.current_page = new_page;
+            self.pdf_dispatch_render_for_zoom(key);
+        }
+        self.wake_caret();
+    }
+
+    /// Closes the outline pane for the PDF session at `key`, if one is
+    /// currently open -- shared by `pdf_toggle_outline`'s toggle-off path
+    /// and `kill_buffer_now`'s "the buffer being killed is a `PdfOutline`
+    /// buffer" branch. Refocuses the companion PDF pane afterward so
+    /// toggling feels like a real toggle rather than a jump elsewhere.
+    fn pdf_close_outline_pane(&mut self, key: &Path) {
+        let Some(pane) = self.pdf_outline_panes.remove(key) else { return };
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let buffer = self.windows().content(pane).copied();
+        self.windows_mut().focus(pane);
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&pane);
+            self.workspaces.active_scroll_anims_mut().remove(&pane);
+        }
+        if let Some(buffer) = buffer {
+            self.buffers.close(buffer);
+            self.pdf_outline_lines.remove(&buffer);
+            self.pdf_outline_source.remove(&buffer);
+        }
+        self.windows_mut().focus(session_pane);
+        self.wake_caret();
+    }
+
+    /// Opens (or, if the worker's reply arrived after the user navigated
+    /// elsewhere, re-opens) an outline pane for the PDF session at `key`,
+    /// showing `entries` -- a plain vertical split off the session's own
+    /// PDF pane, so it always ends up right next to it regardless of
+    /// whatever else might currently be focused. Called both from `pdf_
+    /// toggle_outline`'s "already cached" synchronous path and from
+    /// `apply_pdf_response`'s `Outline` arm (the first-fetch path).
+    fn pdf_open_outline_pane(&mut self, key: &Path, entries: &[fenix_pdf::outline::OutlineEntry]) {
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        self.workspaces.switch_to_index(workspace_index);
+        self.windows_mut().focus(session_pane);
+
+        let (text, lines) = pdf_outline::render(entries);
+        let buffer = self.buffers.open_pdf_outline(&text);
+        let outline_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
+        self.workspaces.active_pane_states_mut().insert(outline_pane, PaneState::seeded_at(Cursor::at_start()));
+        self.pane_titles.insert(outline_pane, "Outline".to_string());
+        self.pdf_outline_lines.insert(buffer, lines);
+        self.pdf_outline_source.insert(buffer, key.to_path_buf());
+        self.pdf_outline_panes.insert(key.to_path_buf(), outline_pane);
+        self.wake_caret();
+    }
+
+    /// `SPC r o`: toggles the focused PDF session's outline/bookmarks
+    /// panel. Three cases: (1) the outline pane itself is focused --
+    /// close it and return to the PDF pane; (2) a PDF pane is focused and
+    /// its outline is already open -- close it (a real toggle, not
+    /// "always open"); (3) a PDF pane is focused and its outline isn't
+    /// open yet -- open it immediately from `PdfSession::outline` if
+    /// already cached from an earlier toggle, or dispatch `FetchOutline`
+    /// and let `apply_pdf_response`'s `Outline` arm open it once the
+    /// reply lands (the bookmark tree can't change while a document's
+    /// open, so this only ever happens once per session). A no-op if
+    /// neither a PDF pane nor its outline pane is focused.
+    pub(crate) fn pdf_toggle_outline(&mut self) {
+        let focused_buffer = self.focused_buffer_id();
+        if self.buffers.get(focused_buffer).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
+            if let Some(key) = self.pdf_outline_source.get(&focused_buffer).cloned() {
+                self.pdf_close_outline_pane(&key);
+            }
+            return;
+        }
+
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+
+        if self.pdf_outline_panes.contains_key(&key) {
+            self.pdf_close_outline_pane(&key);
+            return;
+        }
+
+        if let Some(entries) = self.pdf_sessions.get(&key).and_then(|session| session.outline.clone()) {
+            self.pdf_open_outline_pane(&key, &entries);
+            return;
+        }
+
+        let Some(session) = self.pdf_sessions.get(&key) else { return };
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::FetchOutline { key: session.doc_key });
+        }
+    }
+
+    /// `Enter` on a `BufferKind::PdfOutline` line (see `route_keypress`'s
+    /// own `PdfOutline` block): looks up what the cursor's current line
+    /// means via `pdf_outline_lines`, a no-op for a blank/unstyled line
+    /// (e.g. the "(this PDF has no bookmarks)" placeholder), and
+    /// otherwise jumps the companion PDF pane straight to that entry's
+    /// page -- mirrors `dashboard_activate_selected`'s own cursor-line ->
+    /// side-table -> action shape.
+    fn pdf_outline_activate_selected(&mut self) {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        let buffer_id = self.focused_buffer_id();
+        let page_index = self
+            .pdf_outline_lines
+            .get(&buffer_id)
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .map(|meta| meta.page_index);
+        let Some(page_index) = page_index else { return };
+        let Some(key) = self.pdf_outline_source.get(&buffer_id).cloned() else { return };
+        self.pdf_jump_session_to_page(&key, page_index);
+    }
+
+    /// `SPC r /`: starts the "type a search query" prompt -- a no-op if
+    /// the focused pane isn't a PDF session (nothing to search within),
+    /// same guard `start_pdf_goto_page_prompt` uses.
+    pub(crate) fn start_pdf_search_prompt(&mut self) {
+        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
+            return;
+        }
+        self.pdf_search_prompt = Some(String::new());
+        self.wake_caret();
+    }
+
+    /// Routes one keypress to the in-progress `pdf_search_prompt` -- free
+    /// text (unlike `pdf_goto_page_prompt_key`'s digits-only), same
+    /// capturing shape as `find_file_prompt_key`.
+    fn pdf_search_prompt_key(&mut self, key: KeyPress) {
+        let Some(input) = &mut self.pdf_search_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_search_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let query = self.pdf_search_prompt.take().unwrap_or_default();
+                self.pdf_dispatch_search(query);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `pdf_search_prompt` is
+    /// active -- mirrors `pdf_goto_page_prompt_text`.
+    fn pdf_search_prompt_text(&self) -> Option<String> {
+        self.pdf_search_prompt.as_ref().map(|input| format!("search pdf: {input}"))
+    }
+
+    /// Dispatches a `Search` request for the focused PDF session with
+    /// `query`, bumping `pending_search_request_id` first so a reply to
+    /// an earlier, now-superseded search gets dropped by `apply_pdf_
+    /// response` instead of clobbering a newer one -- same staleness
+    /// guard `pdf_dispatch_render` gives page renders. A no-op (blank
+    /// query, no focused PDF session, or no worker) leaves whatever
+    /// search-results pane already exists untouched.
+    fn pdf_dispatch_search(&mut self, query: String) {
+        if query.trim().is_empty() {
+            return;
+        }
+        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
+        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
+        session.pending_search_request_id += 1;
+        session.last_search_query = query.clone();
+        let request_id = session.pending_search_request_id;
+        let doc_key = session.doc_key;
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Search { key: doc_key, request_id, query });
+        }
+        self.set_message("searching...");
+    }
+
+    /// Closes the search-results pane for the PDF session at `key`, if
+    /// one is currently open -- mirrors `pdf_close_outline_pane` exactly,
+    /// used by `kill_buffer_now`'s "the buffer being killed is a
+    /// `PdfSearchResults` buffer" branch (there's no dedicated toggle key
+    /// for search the way `SPC r o` doubles as open/close for the
+    /// outline -- a fresh `SPC r /` search just replaces this pane's
+    /// content in place instead, see `pdf_open_or_update_search_pane`).
+    fn pdf_close_search_pane(&mut self, key: &Path) {
+        let Some(pane) = self.pdf_search_panes.remove(key) else { return };
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let buffer = self.windows().content(pane).copied();
+        self.windows_mut().focus(pane);
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&pane);
+            self.workspaces.active_scroll_anims_mut().remove(&pane);
+        }
+        if let Some(buffer) = buffer {
+            self.buffers.close(buffer);
+            self.pdf_search_result_lines.remove(&buffer);
+            self.pdf_search_source.remove(&buffer);
+        }
+        self.windows_mut().focus(session_pane);
+        self.wake_caret();
+    }
+
+    /// Opens a search-results pane for the PDF session at `key` showing
+    /// `matches` (a plain vertical split off the session's own PDF pane,
+    /// same as `pdf_open_outline_pane`), or, if one's already open from
+    /// an earlier search on this same session, rewrites its buffer text
+    /// in place instead of stacking a second pane -- same "rewrite the
+    /// whole affected span as one step" tool (`Buffer::replace_range`)
+    /// `set_docker_buffer`'s refresh already uses, and the same
+    /// "a refreshed listing can reorder/add/remove rows, so an old cursor
+    /// position is meaningless against it" reasoning for resetting the
+    /// cursor to the top on every update.
+    fn pdf_open_or_update_search_pane(&mut self, key: &Path, query: &str, matches: &[fenix_pdf::search::PdfSearchMatch]) {
+        let (text, lines) = pdf_search::render(query, matches);
+
+        if let Some(&pane) = self.pdf_search_panes.get(key) {
+            if let Some(buffer) = self.windows().content(pane).copied() {
+                if let Some(ob) = self.buffers.get_mut(buffer) {
+                    let end = ob.buffer.len_chars();
+                    let mut scratch_cursor = Cursor::at_start();
+                    ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
+                }
+                self.pdf_search_result_lines.insert(buffer, lines);
+                for p in self.windows().windows() {
+                    if self.windows().content(p) == Some(&buffer) {
+                        let ps = self.pane_state_mut(p);
+                        *ps = PaneState::seeded_at(Cursor::at_start());
+                    }
+                }
+                self.wake_caret();
+                return;
+            }
+        }
+
+        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
+        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        self.workspaces.switch_to_index(workspace_index);
+        self.windows_mut().focus(session_pane);
+
+        let buffer = self.buffers.open_pdf_search_results(&text);
+        let search_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
+        self.workspaces.active_pane_states_mut().insert(search_pane, PaneState::seeded_at(Cursor::at_start()));
+        self.pane_titles.insert(search_pane, "Search results".to_string());
+        self.pdf_search_result_lines.insert(buffer, lines);
+        self.pdf_search_source.insert(buffer, key.to_path_buf());
+        self.pdf_search_panes.insert(key.to_path_buf(), search_pane);
+        self.wake_caret();
+    }
+
+    /// `Enter` on a `BufferKind::PdfSearchResults` line (see
+    /// `route_keypress`'s own `PdfSearchResults` block): looks up what
+    /// the cursor's current line means via `pdf_search_result_lines`, a
+    /// no-op for a blank/unstyled line (e.g. the "(no matches for ...)"
+    /// placeholder), and otherwise jumps the companion PDF pane straight
+    /// to that match's page -- mirrors `pdf_outline_activate_selected`
+    /// exactly.
+    fn pdf_search_activate_selected(&mut self) {
+        let cursor = self.cursor();
+        let line = self.open().buffer.line_col(&cursor).0;
+        let buffer_id = self.focused_buffer_id();
+        let page_index = self
+            .pdf_search_result_lines
+            .get(&buffer_id)
+            .and_then(|lines| lines.get(line))
+            .and_then(|meta| meta.as_ref())
+            .map(|meta| meta.page_index);
+        let Some(page_index) = page_index else { return };
+        let Some(key) = self.pdf_search_source.get(&buffer_id).cloned() else { return };
+        self.pdf_jump_session_to_page(&key, page_index);
+    }
+
     /// Encodes `keypress` and writes it to the live terminal session, if
     /// any (a no-op if the session's since exited or never started --
     /// shouldn't happen while `terminal_focused`, but no reason to panic
@@ -4504,6 +6616,42 @@ impl App {
         self.main_view = MainView::Editor;
         self.explorer = None;
         self.explorer_purpose = ExplorerPurpose::Browse;
+    }
+
+    /// `SPC f e`: opens the full-buffer file explorer starting at the
+    /// user's home directory, in `FindFrom` mode -- for the file that
+    /// isn't in any project and isn't worth typing an absolute path for
+    /// (e.g. something in `~/Downloads`). Falls back to the process's
+    /// cwd if the home directory can't be determined. Navigate with the
+    /// explorer's usual `j`/`k`/`l`/`h`; `Enter` on a file opens it
+    /// straight away (same as ordinary browsing), or `S` fuzzy-searches
+    /// recursively from wherever you've navigated to (see
+    /// `start_find_from_here`). `q`/`Escape` cancels.
+    pub(crate) fn start_explore_from_home(&mut self) {
+        let start = dirs::home_dir().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let explorer = match ExplorerState::open(&start) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("fenix: couldn't list {} ({err})", start.display());
+                return;
+            }
+        };
+        self.explorer = Some(explorer);
+        self.explorer_purpose = ExplorerPurpose::FindFrom;
+        self.main_view = MainView::Explorer;
+        self.wake_caret();
+    }
+
+    /// `S` on the `FindFrom` explorer (`ExplorerAction::SelectCwd`):
+    /// leaves the explorer and opens a `FindFile` picker over every file
+    /// under `dir`, recursively -- same candidate-building as `SPC p f`/
+    /// `picker_find_file`, just rooted wherever the user navigated
+    /// instead of the project root.
+    fn start_find_from_here(&mut self, dir: &Path) {
+        let candidates = Self::find_file_candidates(dir);
+        self.explorer = None;
+        self.explorer_purpose = ExplorerPurpose::Browse;
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC p s`: unlike find-file/switch-project (which already have a
@@ -5575,7 +7723,7 @@ impl App {
     fn project_replace_cancel(&mut self) {
         let Some(session) = self.project_replace.take() else { return };
         self.project_replace_lines.remove(&session.buffer_id);
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// Writes every `included` entry's replacement -- an already-open
@@ -5640,7 +7788,7 @@ impl App {
         self.set_message(format!(
             "applied {total_replacements} replacement(s) across {files_changed} file(s) ({left_dirty} already open, not yet saved)"
         ));
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
@@ -5655,7 +7803,7 @@ impl App {
             .map(|&id| {
                 let ob = self.buffers.get(id).expect("mru only lists open buffers");
                 let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
-                let marker = if ob.buffer.is_dirty() { "+ " } else { "" };
+                let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
                 fenix_picker::Candidate::new(format!("{marker}{name}"), id)
             })
             .collect();
@@ -5718,15 +7866,22 @@ impl App {
         self.cycle_buffer(-1);
     }
 
-    /// `SPC b k`: closes the focused buffer. Any pane (in this window
+    /// The unconditional half of buffer-closing: closes the focused
+    /// buffer no matter what state it's in. Any pane (in this window
     /// tree) currently showing it falls back to the MRU-next open buffer,
     /// or a fresh scratch buffer if none remain -- never leaves a pane
-    /// pointing at a closed `BufferId`. Closing one of the Docker
-    /// session's six buffers this way really means "close the whole
+    /// pointing at a closed `BufferId`. Closing one of the Docker/Git/
+    /// Jira sessions' buffers this way really means "close the whole
     /// session" (they share live background state, not just a buffer
-    /// slot) -- routed to `docker_session_close` instead of the ordinary
-    /// single-buffer path below.
-    pub(crate) fn kill_buffer(&mut self) {
+    /// slot) -- routed to `docker_session_close`/`git_session_close`/
+    /// `jira_session_close` instead of the ordinary single-buffer path
+    /// below. Used directly (bypassing `kill_buffer`'s dirty guard) by
+    /// callers that are cancelling a generated review buffer
+    /// (`project_replace_cancel` and its apply-flow counterpart) or
+    /// have just deleted the buffer's file on purpose
+    /// (`apply_delete_file`) -- none of those are the user-facing
+    /// "close" action the guard exists for.
+    fn kill_buffer_now(&mut self) {
         let id = self.focused_buffer_id();
         if let Some(session) = &self.docker_session {
             if [
@@ -5759,6 +7914,32 @@ impl App {
                 return;
             }
         }
+        if let Some(session) = &self.jira_session {
+            if [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer].contains(&id) {
+                self.jira_session_close();
+                return;
+            }
+        }
+        if let Some(key) = self.vnc_session_key_for_buffer(id) {
+            self.vnc_session_close(&key);
+            return;
+        }
+        if let Some(key) = self.pdf_session_key_for_buffer(id) {
+            self.pdf_session_close(&key);
+            return;
+        }
+        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
+            if let Some(key) = self.pdf_outline_source.get(&id).cloned() {
+                self.pdf_close_outline_pane(&key);
+                return;
+            }
+        }
+        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfSearchResults) {
+            if let Some(key) = self.pdf_search_source.get(&id).cloned() {
+                self.pdf_close_search_pane(&key);
+                return;
+            }
+        }
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -5774,6 +7955,59 @@ impl App {
         self.buffers.touch(fallback);
         self.refresh_project_root();
         self.wake_caret();
+    }
+
+    /// The guarded half both `:q`/`SPC b k` (`force = false`) and `:q!`
+    /// (`force = true`) share. Unlike the app-wide `quit_confirm` y/n
+    /// prompt, there's no ambiguity about *which* buffer a bare `:q`
+    /// means, so an unsaved tracked (`BufferKind::tracks_unsaved_
+    /// changes`) buffer is a hard refusal naming it, not a prompt.
+    /// `force = true` bypasses this entirely -- same "`!` means I know,
+    /// do it anyway" convention as `:qa!`.
+    fn close_focused_buffer(&mut self, force: bool) {
+        let id = self.focused_buffer_id();
+        if !force && self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty()) {
+            let name = self.buffer_display_name(id);
+            self.set_error(format!("{name} has unsaved changes -- use :q! to discard or :wq to save"));
+            return;
+        }
+        self.kill_buffer_now();
+    }
+
+    /// `SPC b k`/`:q`: closes the focused buffer, refusing (with a
+    /// named error) if it has unsaved changes -- never quits the
+    /// application, even if it's the last buffer open (falls back to a
+    /// fresh scratch buffer instead, per `kill_buffer_now`). See
+    /// `App::request_quit`/`app.quit` (`:qa`/`SPC q q`) for quitting.
+    pub(crate) fn kill_buffer(&mut self) {
+        self.close_focused_buffer(false);
+    }
+
+    /// `:q!`: closes the focused buffer unconditionally, discarding any
+    /// unsaved changes.
+    pub(crate) fn force_kill_buffer(&mut self) {
+        self.close_focused_buffer(true);
+    }
+
+    /// `:wq`/`:x`: saves the focused buffer first if it needs it, then
+    /// closes it. Refuses (naming the buffer) if it's dirty but has no
+    /// path to save to yet, rather than silently discarding it or
+    /// silently succeeding without writing anything.
+    pub(crate) fn save_and_close_buffer(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get(id) else { return };
+        if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() {
+            if ob.buffer.path().is_none() {
+                let name = self.buffer_display_name(id);
+                self.set_error(format!("no file name for {name} -- use :w <path> to save before closing"));
+                return;
+            }
+            self.save();
+            if self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()) {
+                return; // save() already reported the failure; refuse to close
+            }
+        }
+        self.kill_buffer_now();
     }
 
     /// `SPC b X`: opens a fresh, empty, unnamed buffer in the focused pane.
@@ -8155,6 +10389,18 @@ impl App {
                 self.active_picker = None;
                 self.mib_resume_insert(alias);
             }
+            Some(ActivePicker::VncHost(state)) => {
+                let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_vnc_session(&name);
+            }
+            Some(ActivePicker::Document(state)) => {
+                let Some(path) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_document(&path);
+            }
             Some(ActivePicker::TableColumn(state)) => {
                 let Some(column) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -8187,6 +10433,10 @@ impl App {
     /// here, so confirming always means "this is current now, back to
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
+        if Self::looks_like_pdf(path) {
+            self.open_pdf_path(path);
+            return;
+        }
         let id = self.buffers.open_path(path);
         let focused = self.focused_pane_id();
         self.set_pane_content(focused, id);
@@ -8411,7 +10661,7 @@ impl App {
             self.set_error(format!("couldn't delete {}: {err}", path.display()));
             return;
         }
-        self.kill_buffer();
+        self.kill_buffer_now();
     }
 
     /// What to show in place of the modeline while the delete
@@ -8760,9 +11010,13 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickMibRootDir {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.start_mib_root_label_prompt(&cwd);
+                } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::FindFrom {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.start_find_from_here(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
-                // `S` only means something while picking a project/MIB dir.
+                // `S` only means something while picking a project/MIB dir,
+                // or searching from a directory (`SPC f e`).
             }
         }
         self.wake_caret();
@@ -8795,6 +11049,17 @@ impl App {
             match ExplorerState::open(&path) {
                 Ok(new_state) => self.set_active_explorer(new_state),
                 Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
+            }
+            return;
+        }
+
+        if Self::looks_like_pdf(&path) {
+            let was_full_buffer = self.main_view == MainView::Explorer;
+            self.open_pdf_path(&path);
+            if was_full_buffer {
+                self.explorer = None;
+            } else {
+                self.sidebar_focused = false;
             }
             return;
         }
@@ -9211,6 +11476,9 @@ impl App {
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
+            FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
+            FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
+            FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -9218,6 +11486,46 @@ impl App {
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        // Caps Lock has no `fenix_keymap::NamedKey` counterpart -- it's
+        // never a meaningful vim/leader keybinding, so `keymap::to_
+        // keypress` filters it out before either branch below would ever
+        // see it. Special-cased here instead, directly against the raw
+        // winit key: forwarded as an ordinary press/release, but only
+        // while a VNC session has input capture, so the guest's own OS
+        // handles the actual lock toggle exactly as it would from a
+        // directly-attached keyboard. Without this, physically toggling
+        // Caps Lock only flips *this* OS's own lock state (which is all
+        // that decides the case winit reports for the next letter typed)
+        // -- the guest never finds out, so the two lock states silently
+        // drift apart the moment they didn't already agree, with no key
+        // that can resync them afterward.
+        if event.logical_key == Key::Named(NamedKey::CapsLock) {
+            if let Some(key) = self.vnc_focused.clone() {
+                if let Some(session) = self.vnc_sessions.get(&key) {
+                    session.client.send_key(fenix_vnc::keysym::CAPS_LOCK, event.state == ElementState::Pressed);
+                }
+            }
+            return;
+        }
+        if event.state == ElementState::Released {
+            // A focused VNC pane is the one place a real key-*up* matters
+            // at all (RFB's `KeyEvent` genuinely distinguishes held keys
+            // -- auto-repeat, drag-select, etc. -- from a synthetic
+            // immediate down-then-up); nothing else in this app has ever
+            // needed release events, so this is intentionally the only
+            // path that looks at `ElementState::Released`, bypassing
+            // `dispatch_keypress`/`route_keypress` entirely (macro
+            // recording/dot-repeat have no meaningful notion of a key
+            // release either).
+            if let Some(key) = self.vnc_focused.clone() {
+                if let Some(keypress) = keymap::to_keypress(event, self.modifiers) {
+                    if keypress != KeyPress::char('\\').with_ctrl() {
+                        self.send_vnc_key(&key, keypress, false);
+                    }
+                }
+            }
+            return;
+        }
         if event.state != ElementState::Pressed {
             return;
         }
@@ -9297,6 +11605,30 @@ impl App {
             return;
         }
 
+        // A focused VNC pane owns every key the same way a focused
+        // terminal does (same priority tier, same reserved `Ctrl-\`
+        // release chord) -- see `App::vnc_focused`'s own doc comment.
+        // Key *presses* are handled here; the corresponding key
+        // *releases* are handled earlier, directly in `handle_key`,
+        // since `route_keypress`/`dispatch_keypress` are never reached
+        // for anything but a press (see `handle_key`'s own doc comment).
+        if let Some(key) = self.vnc_focused.clone() {
+            if keypress == KeyPress::char('\\').with_ctrl() {
+                // Releases keyboard capture only -- the VNC pane stays
+                // exactly as focused/visible as it was; a plain click
+                // back into it (or reopening it via `SPC v v`) is what
+                // re-engages capture, not anything automatic here. Not
+                // `sync_vnc_focus()`: that derives `vnc_focused` from
+                // which pane is *focused*, which this doesn't change, so
+                // calling it here would just immediately re-capture.
+                self.set_vnc_focused(None);
+            } else {
+                self.send_vnc_key(&key, keypress, true);
+            }
+            self.wake_caret();
+            return;
+        }
+
         // An armed quit confirmation (`:q`/`SPC q q`/the window's close
         // button with unsaved buffers) captures the very next key --
         // same "y confirms, anything else cancels" shape as `docker_
@@ -9347,6 +11679,16 @@ impl App {
         // everything else here.
         if self.find_file_prompt.is_some() {
             self.find_file_prompt_key(keypress);
+            return;
+        }
+        // `SPC r g` -- same capturing-prompt tier.
+        if self.pdf_goto_page_prompt.is_some() {
+            self.pdf_goto_page_prompt_key(keypress);
+            return;
+        }
+        // `SPC r /` -- same capturing-prompt tier.
+        if self.pdf_search_prompt.is_some() {
+            self.pdf_search_prompt_key(keypress);
             return;
         }
         if self.rename_file_prompt.is_some() {
@@ -9655,6 +11997,102 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // A PDF pane's buffer is deliberately empty (see `BufferKind`'s
+        // own doc comment on `Pdf`) -- there's no real text underneath
+        // for any of these to move a cursor through, so a reader's worth
+        // of bare keys is claimed here rather than falling through to Vim
+        // as harmless no-ops on nothing.
+        //
+        // Everything a reader reaches for without thinking is bound
+        // directly, because a three-key leader chord (`SPC r n`) per page
+        // is not a page-turn gesture anyone will use to read a 50-page
+        // document: `PageDown`/`PageUp` and `n`/`p` turn the page,
+        // `j`/`k` and the arrow keys scroll continuously *through* page
+        // boundaries (see `pdf_scroll`), `Home`/`End` jump to the first/
+        // last page, `+`/`-`/`0` zoom, and `/` searches. The `SPC r ...`
+        // leader bindings all still work and are what the which-key menu
+        // discovers -- these are the same commands, reachable in one
+        // keystroke while a PDF is actually focused. `SPC` itself never
+        // reaches here (the leader block above claims it first), which is
+        // why space isn't bound as a page-down.
+        if self.open().kind == BufferKind::Pdf && keypress.mods == Mods::default() {
+            match keypress.code {
+                KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => {
+                    self.pdf_pan(-1, 0);
+                    return;
+                }
+                KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => {
+                    self.pdf_pan(1, 0);
+                    return;
+                }
+                KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => {
+                    self.pdf_scroll(PDF_PAN_STEP_PX as i32);
+                    return;
+                }
+                KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => {
+                    self.pdf_scroll(-(PDF_PAN_STEP_PX as i32));
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::PageDown) | KeyCode::Char('n') => {
+                    self.pdf_next_page();
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::PageUp) | KeyCode::Named(FenixNamedKey::Backspace) | KeyCode::Char('p') => {
+                    self.pdf_prev_page();
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::Home) | KeyCode::Char('g') => {
+                    self.pdf_first_page();
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::End) | KeyCode::Char('G') => {
+                    self.pdf_last_page();
+                    return;
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    self.pdf_zoom_in();
+                    return;
+                }
+                KeyCode::Char('-') => {
+                    self.pdf_zoom_out();
+                    return;
+                }
+                KeyCode::Char('0') => {
+                    self.pdf_zoom_fit_page();
+                    return;
+                }
+                KeyCode::Char('w') => {
+                    self.pdf_zoom_fit_width();
+                    return;
+                }
+                KeyCode::Char('/') => {
+                    self.start_pdf_search_prompt();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // A PDF outline pane is a real Vim-navigable buffer (see
+        // `BufferKind`'s own doc comment on `PdfOutline`) -- every other
+        // key still reaches Vim below unchanged (movement, `/` search,
+        // `gg`/`G`...); only `Enter` means something special on it, same
+        // shape as the Dashboard interception above.
+        if self.open().kind == BufferKind::PdfOutline && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
+            self.pdf_outline_activate_selected();
+            self.wake_caret();
+            return;
+        }
+
+        // A PDF search-results pane -- same shape as the outline
+        // interception just above, just jumping to a match's page
+        // instead of a bookmark's.
+        if self.open().kind == BufferKind::PdfSearchResults && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
+            self.pdf_search_activate_selected();
+            self.wake_caret();
+            return;
         }
 
         // The `SPC s p` project-replace review buffer -- ordinary
@@ -10054,15 +12492,23 @@ impl App {
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
             }
-            VimEvent::RequestQuit => {
+            VimEvent::RequestCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill");
+            }
+            VimEvent::RequestForceCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill_force");
+            }
+            VimEvent::RequestSaveAndCloseBuffer => {
+                CommandRegistry::with_builtins().run(self, event_loop, "buffer.save_and_kill");
+            }
+            VimEvent::RequestQuitAll => {
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
             }
-            VimEvent::RequestForceQuit => {
+            VimEvent::RequestForceQuitAll => {
                 CommandRegistry::with_builtins().run(self, event_loop, "app.quit_force");
             }
-            VimEvent::RequestSaveAndQuit => {
-                CommandRegistry::with_builtins().run(self, event_loop, "file.save");
-                CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
+            VimEvent::RequestSaveAllAndQuit => {
+                CommandRegistry::with_builtins().run(self, event_loop, "app.save_all_and_quit");
             }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
@@ -10364,6 +12810,14 @@ impl App {
                 "*git*".to_string()
             } else if ob.kind == BufferKind::Jira {
                 "*jira*".to_string()
+            } else if ob.kind == BufferKind::Vnc {
+                "*vnc*".to_string()
+            } else if ob.kind == BufferKind::Pdf {
+                self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
+            } else if ob.kind == BufferKind::PdfOutline {
+                "*pdf outline*".to_string()
+            } else if ob.kind == BufferKind::PdfSearchResults {
+                "*pdf search*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -10387,6 +12841,19 @@ impl App {
         self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
     }
 
+    /// The modeline's mode badge: "VNC" while some session has input
+    /// capture (`vnc_focused`), overriding the vim mode label the same
+    /// way a captured VNC pane already overrides every keystroke (see
+    /// `route_keypress`'s own VNC-focused branch) -- there's no Normal/
+    /// Insert/Visual distinction worth showing while every key goes
+    /// straight to the guest instead of vim's own dispatch.
+    fn mode_badge_label(&self) -> &'static str {
+        if self.vnc_focused.is_some() {
+            return "VNC";
+        }
+        if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() }
+    }
+
     /// (mode label, rest-of-modeline suffix) -- always returns real
     /// content now, even while a capturing prompt (`:command`, `/`
     /// search, a git commit prompt, ...) is active: that text lives in
@@ -10405,9 +12872,7 @@ impl App {
         // already have below.
         if let Some(msg) = &self.status_message {
             if msg.set_at.elapsed() < MESSAGE_DURATION {
-                let mode_label =
-                    if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
-                return (mode_label, format!("│ {} ", msg.text));
+                return (self.mode_badge_label(), format!("│ {} ", msg.text));
             }
         }
         if self.main_view == MainView::Explorer {
@@ -10425,6 +12890,9 @@ impl App {
                         ExplorerPurpose::PickMibRootDir => {
                             format!("│ {}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::FindFrom => {
+                            format!("│ {}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
+                        }
                     }
                 }
                 None => String::new(),
@@ -10433,6 +12901,7 @@ impl App {
                 ExplorerPurpose::Browse => "EXPLORE",
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
                 ExplorerPurpose::PickMibRootDir => "ADDMIB",
+                ExplorerPurpose::FindFrom => "FINDFROM",
             };
             return (badge, suffix);
         }
@@ -10459,6 +12928,8 @@ impl App {
                 Some(picker @ ActivePicker::MibTmParameter(_)) => ("MIB-PARAM", picker_len(picker)),
                 Some(picker @ ActivePicker::MibCalibration(_)) => ("MIB-CAL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibArgumentAlias(_)) => ("MIB-ARG", picker_len(picker)),
+                Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
+                Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 None => ("PICKER", 0),
@@ -10467,10 +12938,9 @@ impl App {
         }
         let ob = self.open();
         let filename = self.buffer_display_name(self.focused_buffer_id());
-        let modified = if ob.buffer.is_dirty() { " [+]" } else { "" };
+        let modified = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { " [+]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
-        let mode_label =
-            if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() };
+        let mode_label = self.mode_badge_label();
         // Only shown once there's more than one workspace to distinguish --
         // stays out of the way for the common single-workspace case.
         let workspace_indicator = if self.workspaces.len() > 1 {
@@ -10488,6 +12958,19 @@ impl App {
                 Some(reg) => format!("   recording @{reg}"),
                 None => String::new(),
             };
+        // A PDF pane has no text and no cursor, so "Ln 1, Col 1" is
+        // both wrong and useless there -- it shows where in the
+        // *document* the reader is instead, which is the one thing a
+        // reader checks the status line for (and the only place the
+        // current zoom is visible at all).
+        if let Some(session) = self.pdf_session_key_for_pane(self.focused_pane_id()).and_then(|key| self.pdf_sessions.get(&key)) {
+            let position = if session.page_count == 0 {
+                "opening...".to_string()
+            } else {
+                format!("Page {}/{}   {}", session.current_page + 1, session.page_count, pdf_zoom_label(session))
+            };
+            return (mode_label, format!("│ {filename}{workspace_indicator}   {position} "));
+        }
         let suffix =
             format!("│ {filename}{modified}{workspace_indicator}{recording_indicator}   Ln {}, Col {} ", line + 1, col + 1);
         (mode_label, suffix)
@@ -10526,6 +13009,8 @@ impl App {
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())
+            .or_else(|| self.pdf_goto_page_prompt_text())
+            .or_else(|| self.pdf_search_prompt_text())
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
@@ -10757,6 +13242,10 @@ impl App {
             || ob.kind == BufferKind::Jira
             || ob.kind == BufferKind::Table
             || ob.kind == BufferKind::SearchReplace
+            || ob.kind == BufferKind::Vnc
+            || ob.kind == BufferKind::Pdf
+            || ob.kind == BufferKind::PdfOutline
+            || ob.kind == BufferKind::PdfSearchResults
         {
             return 0;
         }
@@ -11832,6 +14321,11 @@ impl App {
                 self.windows_mut().focus(id);
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
+                // Clicking a VNC pane both focuses and starts
+                // interacting with it (ordinary desktop convention);
+                // clicking anything else releases capture if some other
+                // VNC session had it.
+                self.sync_vnc_focus();
             }
             None => return,
         }
@@ -11919,7 +14413,35 @@ impl App {
                 }
             }
             ScrollTarget::Pane(pane) => {
-                if pane == self.focused_pane_id() {
+                if let Some(key) = self.vnc_session_key_for_pane(pane) {
+                    // A VNC pane has no text to scroll -- forward the
+                    // wheel as an RFB wheel button (bit 3 = up, bit 4 =
+                    // down) instead, a same-position press-then-release
+                    // pointer event pair, the RFB convention for a wheel
+                    // notch (there's no separate "wheel" message).
+                    let bit = if lines > 0 { 0x08 } else { 0x10 };
+                    if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane).copied() {
+                        if let Some(session) = self.vnc_sessions.get_mut(&key) {
+                            let local = (pos.0 - rect.x, pos.1 - rect.y);
+                            let fb_size = session.framebuffer.lock().unwrap().dimensions();
+                            let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), fb_size);
+                            let held = session.pointer_buttons;
+                            session.client.send_pointer(fb_x, fb_y, held | bit);
+                            session.client.send_pointer(fb_x, fb_y, held);
+                        }
+                    }
+                } else if self.pdf_session_key_for_pane(pane).is_some() {
+                    // A PDF pane has no text to scroll either -- the
+                    // wheel moves the rendered page instead, turning
+                    // pages once there's nothing left to scroll (see
+                    // `pdf_scroll`). Focus the pane first: `pdf_scroll`
+                    // acts on whatever session is *focused*, and clicking
+                    // into a document before wheeling it is a step nobody
+                    // performs in a PDF reader.
+                    self.windows_mut().focus(pane);
+                    let delta_px = -(lines as f32 * line_height).round() as i32;
+                    self.pdf_scroll(delta_px);
+                } else if pane == self.focused_pane_id() {
                     self.scroll_focused_pane(lines);
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
                     // Every pane always renders a title bar (`redraw`'s own
@@ -11934,7 +14456,74 @@ impl App {
         self.wake_caret();
     }
 
+    /// The pane (if any) at `pos` and its on-screen pixel rect, whether
+    /// or not it's a VNC pane -- the shared lookup `handle_vnc_pointer_
+    /// move`/`handle_vnc_pointer_button` both need before checking
+    /// `vnc_session_key_for_pane`.
+    fn pane_rect_at(&self, pos: (f32, f32)) -> Option<(fenix_window::WindowId, fenix_window::Rect)> {
+        let (window_width, window_height) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))?;
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some(ScrollTarget::Pane(pane)) = hit_test(&geometry, pos) else { return None };
+        geometry.panes.iter().find(|(id, _)| *id == pane).copied()
+    }
+
+    /// Forwards the current cursor position to whichever VNC session (if
+    /// any) is under it, resending its currently-held button mask along
+    /// with the new position -- RFB's pointer message is stateful, not
+    /// delta-based (see `fenix_vnc::VncClient::send_pointer`'s own doc
+    /// comment). A no-op when the cursor isn't over a VNC pane at all,
+    /// so this costs nothing on every ordinary editing mouse-move.
+    fn handle_vnc_pointer_move(&mut self, pos: (f32, f32)) {
+        let Some((pane, rect)) = self.pane_rect_at(pos) else { return };
+        let Some(key) = self.vnc_session_key_for_pane(pane) else { return };
+        let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+        let local = (pos.0 - rect.x, pos.1 - rect.y);
+        let fb_size = session.framebuffer.lock().unwrap().dimensions();
+        let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), fb_size);
+        session.client.send_pointer(fb_x, fb_y, session.pointer_buttons);
+        // Where `redraw` draws the guest's own cursor image, now that
+        // requesting `CursorPseudo` means the server no longer paints it
+        // into the framebuffer for us (see `VncSession::cursor`).
+        session.pointer_pos = Some((fb_x, fb_y));
+    }
+
+    /// Forwards a mouse button transition to whichever VNC session (if
+    /// any) is under `pos` -- updates that session's held-button mask
+    /// and resends the full mask, same reasoning as `handle_vnc_pointer_
+    /// move`. A no-op for anything not a VNC pane, and for any button
+    /// besides Left/Middle/Right (nothing else maps to an RFB bit).
+    fn handle_vnc_pointer_button(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) {
+        let Some((pane, rect)) = self.pane_rect_at(pos) else { return };
+        let Some(key) = self.vnc_session_key_for_pane(pane) else { return };
+        let bit = match button {
+            MouseButton::Left => 0x01,
+            MouseButton::Middle => 0x02,
+            MouseButton::Right => 0x04,
+            _ => return,
+        };
+        let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+        if pressed {
+            session.pointer_buttons |= bit;
+        } else {
+            session.pointer_buttons &= !bit;
+        }
+        let local = (pos.0 - rect.x, pos.1 - rect.y);
+        let fb_size = session.framebuffer.lock().unwrap().dimensions();
+        let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), fb_size);
+        session.client.send_pointer(fb_x, fb_y, session.pointer_buttons);
+        session.pointer_pos = Some((fb_x, fb_y));
+    }
+
     fn redraw(&mut self) {
+        // Coalesces however many `WindowEvent::Resized` events landed
+        // since the last frame into at most one real swapchain
+        // reconfigure -- see `GpuState::pending_resize`'s own doc
+        // comment for why that matters (a synchronous, GPU-idle-waiting
+        // call on every intermediate size during a drag-resize).
+        if let Some(gpu) = &mut self.gpu {
+            gpu.apply_pending_resize();
+        }
         let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
         else {
             return;
@@ -12051,6 +14640,18 @@ impl App {
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
+        // Every pane this frame whose buffer is `BufferKind::Vnc`, with
+        // its on-screen content rect -- drawn as textured quads once
+        // `gpu`/`vnc_pipeline` are available, well after this CPU-side
+        // prep loop (see this function's own later `vnc_pipeline.draw`
+        // call site).
+        let mut vnc_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        // Same shape as `vnc_panes`, for `BufferKind::Pdf` panes -- also
+        // where a resize gets noticed and turned into a fresh `RenderPage`
+        // request (see the loop body below), since this is the only place
+        // that actually knows each pane's real current on-screen pixel
+        // size.
+        let mut pdf_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -12089,6 +14690,112 @@ impl App {
             let rect = pane_content_rect(rect, line_height, true);
             let is_focused = pane == focused_pane;
             let pane_visible_lines = text::lines_that_fit(rect.h, line_height);
+            // An Explorer/Picker overlay temporarily *replaces* the
+            // focused pane's own content for as long as it's open, and
+            // the two "this pane's content is a bitmap, not text" blocks
+            // below would otherwise claim the pane before either overlay
+            // branch further down ever runs -- so a file picker opened
+            // over a VNC or PDF pane (splitting off a PDF pane and
+            // opening a project file next to it, say) drew nothing at
+            // all: an empty pane, no file list, and no way to see what
+            // was being typed. Checked here, once, rather than repeated
+            // in both blocks' own conditions.
+            let overlay_covers_pane = is_focused && matches!(self.main_view, MainView::Explorer | MainView::Picker);
+
+            // A VNC pane's content is a live pixel framebuffer, not
+            // text -- rendered as a separate textured-quad layer (see
+            // `vnc_panes`/`vnc_pipeline.draw`'s call site below, after
+            // `bg_rect`/`text` are available), regardless of whether
+            // this pane is focused (unlike Explorer/Picker, which are
+            // per-`MainView` overlays shown only in the focused pane --
+            // hence `overlay_covers_pane`). Still gets an ordinary
+            // (empty) `PaneRender` so its title bar renders normally and
+            // no other pane-bookkeeping in this loop needs a special
+            // case for it.
+            if !overlay_covers_pane && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Vnc) {
+                vnc_panes.push((pane, rect));
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    title: pane_title,
+                    spans: Vec::new(),
+                    hl_row: None,
+                    hl_row_strong: false,
+                    marked_rows: Vec::new(),
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
+                    caret: None,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
+
+            // A PDF pane's content is a rendered page bitmap, not text --
+            // same "separate textured-quad layer, still gets an ordinary
+            // empty `PaneRender` for its title bar" shape as `BufferKind::
+            // Vnc` above. This is also where fit-to-page/fit-width
+            // actually track a live resize: `rect`'s pixel size is only
+            // known here, so `last_pane_size` is refreshed unconditionally
+            // every frame (zoom/goto-page/pan, which run from a keypress
+            // outside this loop, read it) and `pdf_target_size`'s result
+            // for the session's current zoom is compared against `last_
+            // requested_size` (set the last time a render was dispatched)
+            // to decide whether a fresh render is actually needed --
+            // covers the pane's first-ever render too, since `last_
+            // requested_size` starts at `(0, 0)` and `pdf_target_size`
+            // only returns `(0, 0)` back before the page's point-size is
+            // known. `Percent` zoom's own target doesn't depend on `rect`
+            // at all (see `pdf_target_size`'s own doc comment), so a
+            // resize alone never re-triggers a render under that mode --
+            // only the crop/pan computation in the texture-upload step
+            // below reacts to it.
+            if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Pdf) {
+                // The resize bookkeeping runs even while an overlay is
+                // covering this pane, so the page is already rendered at
+                // the right size the moment the overlay closes rather
+                // than re-fitting a frame later; only the *drawing* of
+                // the page is skipped (see `overlay_covers_pane`).
+                if let Some(key) = self.pdf_session_key_for_pane(pane) {
+                    let pane_px = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
+                    if let Some(session) = self.pdf_sessions.get_mut(&key) {
+                        session.last_pane_size = pane_px;
+                    }
+                    let needs_render = self.pdf_sessions.get(&key).is_some_and(|session| {
+                        session.page_count > 0 && pdf_target_size(session.zoom, session.page_point_size, pane_px) != session.last_requested_size
+                    });
+                    if needs_render {
+                        self.pdf_dispatch_render_for_zoom(&key);
+                    }
+                }
+                // While an overlay covers this pane, nothing is pushed
+                // to `pdf_panes` and no `PaneRender` is emitted here --
+                // execution falls through to the Explorer/Picker
+                // branches below, which render the overlay into this
+                // pane exactly as they would over any ordinary buffer.
+                if !overlay_covers_pane {
+                    pdf_panes.push((pane, rect));
+                    panes_render.push(PaneRender {
+                        pane,
+                        rect,
+                        title: pane_title,
+                        spans: Vec::new(),
+                        hl_row: None,
+                        hl_row_strong: false,
+                        marked_rows: Vec::new(),
+                        selection_segments: Segments::new(),
+                        pulse_overlay: None,
+                        bracket_match_segments: Segments::new(),
+                        hlsearch_segments: Segments::new(),
+                        caret: None,
+                        content_frac: 0.0,
+                        gutter_px: 0.0,
+                    });
+                    continue;
+                }
+            }
 
             if is_focused && self.main_view == MainView::Explorer {
                 let rows = pane_visible_lines + 1;
@@ -12342,9 +15049,25 @@ impl App {
         let prompt_popup = self.prompt_popup(window_width, modeline_top);
         let caret_alpha = self.caret_alpha();
 
-        let (Some(window), Some(gpu), Some(text), Some(bg_rect), Some(caret_rect)) =
-            (&self.window, &mut self.gpu, &mut self.text, &mut self.bg_rect, &mut self.caret_rect)
-        else {
+        let (
+            Some(window),
+            Some(gpu),
+            Some(text),
+            Some(bg_rect),
+            Some(popup_rect),
+            Some(caret_rect),
+            Some(vnc_pipeline),
+            Some(pdf_pipeline),
+        ) = (
+            &self.window,
+            &mut self.gpu,
+            &mut self.text,
+            &mut self.bg_rect,
+            &mut self.popup_rect,
+            &mut self.caret_rect,
+            &self.vnc_pipeline,
+            &self.pdf_pipeline,
+        ) else {
             return;
         };
 
@@ -12633,6 +15356,148 @@ impl App {
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
         text.prepare(gpu, theme, &prepare_panes, &title_rects, show_sidebar, show_terminal);
 
+        // Creates each visible VNC session's texture the first time it's
+        // needed (a fresh session, or one whose resolution just changed
+        // -- both leave `texture: None`, see `VncSession::texture`'s own
+        // doc comment), uploading the whole framebuffer once so the
+        // first frame after creation is already complete. Once a texture
+        // exists, every later redraw instead just checks whether
+        // `VncReader`'s writes to `framebuffer` have moved its
+        // `generation()` past what's already on the GPU and, if so,
+        // re-uploads it whole -- at most once per actual rendered frame,
+        // however many `Rect`/`Copy` writes landed since then, but never
+        // withheld waiting for a burst to look "finished" (see the
+        // `last_uploaded_generation` branch below for why that withholding
+        // was tried and reverted).
+        // Moved out of `self` for the loop below and put back after: the
+        // loop needs `self.vnc_sessions` borrowed mutably, so it can't
+        // also touch another `self` field. Reused across frames rather
+        // than allocated per frame -- a full-screen dirty region is
+        // several megabytes.
+        let mut upload_scratch = std::mem::take(&mut self.vnc_upload_scratch);
+        for (pane, _) in &vnc_panes {
+            // A direct `self.vnc_sessions` field access, not `self.vnc_
+            // session_key_for_pane(...)` -- that method takes `&self`
+            // for the whole struct, which the borrow checker can't
+            // reconcile with `gpu`/`text`/etc. already being borrowed as
+            // separate field-only bindings above.
+            let Some(session) = self.vnc_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
+            if session.texture.is_none() {
+                let mut fb = session.framebuffer.lock().unwrap();
+                let (w, h) = fb.dimensions();
+                if w > 0 && h > 0 {
+                    let texture = vnc_pipeline.create_texture(gpu, w as u32, h as u32);
+                    vnc_pipeline.upload_rect(gpu, &texture, 0, 0, w as u32, h as u32, fb.pixels());
+                    // The whole texture is now current, so whatever
+                    // region was outstanding has just been covered.
+                    fb.take_dirty();
+                    drop(fb);
+                    session.texture = Some(texture);
+                    session.texture_dims = (w, h);
+                }
+            } else if let Some(texture) = &session.texture {
+                let mut fb = session.framebuffer.lock().unwrap();
+                // Uploads only *committed* frames, and only the region
+                // they touched. `take_dirty` yields nothing until
+                // `VncReader` has seen a `VncFrame::UpdateEnd`, so a
+                // half-applied server update can never reach the screen
+                // -- which is what the torn frames (a window's title bar
+                // drawn in two places, text rows duplicated below a
+                // border, regions that should have been erased still
+                // showing) actually were: RFB updates are atomic per
+                // message, and `CopyRect` is defined against the
+                // framebuffer as it stood when the message began.
+                //
+                // Uploading the returned box rather than the whole
+                // framebuffer is what keeps this cheap: a cursor move or
+                // a line of terminal output touches a few hundred pixels,
+                // not the ~8MB a full-screen re-upload costs.
+                if fb.dimensions() == session.texture_dims {
+                    if let Some((x, y, w, h)) = fb.take_dirty() {
+                        fb.copy_region(x, y, w, h, &mut upload_scratch);
+                        vnc_pipeline.upload_rect(gpu, texture, x as u32, y as u32, w as u32, h as u32, &upload_scratch);
+                    }
+                }
+                // Else (dimension mismatch): `framebuffer` was already
+                // resized (by `VncReader`, on `Resolution`) past what
+                // `texture` was created for, but the `Resolution` event
+                // that will reset `texture` to `None` hasn't reached the
+                // main thread yet -- skip uploading this tick rather than
+                // risk an out-of-bounds GPU write. The very next redraw
+                // (almost certainly the next one, since winit drains all
+                // pending events before the next redraw) takes the
+                // create-texture branch above instead, which is
+                // dims-agnostic and recovers correctly.
+            }
+
+            // Upload the cursor image the server last sent, if it hasn't
+            // been turned into a texture yet. Its own texture rather than
+            // part of the framebuffer's: it has to be alpha blended over
+            // the pane (`VncPipeline::draw_cursor`), and it moves with the
+            // pointer without the framebuffer changing at all.
+            if let Some(cursor) = &mut session.cursor {
+                if cursor.texture.is_none() {
+                    let texture = vnc_pipeline.create_texture(gpu, cursor.width as u32, cursor.height as u32);
+                    vnc_pipeline.upload_rect(gpu, &texture, 0, 0, cursor.width as u32, cursor.height as u32, &cursor.bgra);
+                    cursor.texture = Some(texture);
+                }
+            }
+        }
+        self.vnc_upload_scratch = upload_scratch;
+
+        // Unlike the VNC loop just above (whole framebuffer always maps
+        // onto the whole pane), a PDF render can be smaller than the pane
+        // (fit-to-page/fit-width letterboxing) or larger (zoomed in) --
+        // so what actually gets uploaded is a crop of `full_bgra`, sized
+        // and positioned by `scroll_offset`, clamped against both the
+        // render's real size and the pane's current size (the only place
+        // both are known at once). `last_uploaded` records exactly what
+        // was last cropped/uploaded so a frame where nothing about the
+        // crop changed skips touching the GPU at all; `apply_pdf_
+        // response` resets it to `None` on every fresh render so a new
+        // bitmap always gets uploaded even if its crop key happens to
+        // coincide with the previous one.
+        let mut crop_scratch = std::mem::take(&mut self.pdf_crop_scratch);
+        for (pane, rect) in &pdf_panes {
+            let Some(session) = self.pdf_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
+            let Some((full_w, full_h, full_bytes)) = &session.full_bgra else { continue };
+            let (full_w, full_h) = (*full_w, *full_h);
+            let pane_w = rect.w.max(1.0) as u32;
+            let pane_h = rect.h.max(1.0) as u32;
+            let visible_w = full_w.min(pane_w).max(1);
+            let visible_h = full_h.min(pane_h).max(1);
+            let max_scroll_x = full_w.saturating_sub(visible_w);
+            let max_scroll_y = full_h.saturating_sub(visible_h);
+            let scroll_x = session.scroll_offset.0.min(max_scroll_x);
+            let scroll_y = session.scroll_offset.1.min(max_scroll_y);
+            session.scroll_offset = (scroll_x, scroll_y);
+            let upload_key = (visible_w, visible_h, scroll_x, scroll_y);
+            if session.last_uploaded == Some(upload_key) && session.texture.is_some() {
+                continue;
+            }
+            // Only recreate the texture when the crop's *size* changed
+            // (a resize/zoom/page-size change); a pan keeps the same
+            // size and only moves the window, so it reuses the texture
+            // and bind group it already has -- see `PdfTexture::size`.
+            if session.texture.as_ref().map(|tex| tex.size()) != Some((visible_w, visible_h)) {
+                session.texture = Some(pdf_pipeline.create_texture(gpu, visible_w, visible_h));
+            }
+            let Some(texture) = &session.texture else { continue };
+            // Fit-to-page (the default) renders the page to exactly the
+            // size it will occupy, so the "crop" is the whole bitmap far
+            // more often than not -- uploading `full_bgra` straight
+            // through in that case skips a multi-megabyte allocate-and-
+            // copy per page turn for no loss of generality.
+            if (visible_w, visible_h) == (full_w, full_h) && (scroll_x, scroll_y) == (0, 0) {
+                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, full_bytes);
+            } else {
+                fenix_pdf::crop::crop_bgra_into(&mut crop_scratch, full_bytes, full_w, full_h, scroll_x, scroll_y, visible_w, visible_h);
+                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, &crop_scratch);
+            }
+            session.last_uploaded = Some(upload_key);
+        }
+        self.pdf_crop_scratch = crop_scratch;
+
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -12675,6 +15540,58 @@ impl App {
                 multiview_mask: None,
             });
             bg_rect.render(&mut pass);
+            // Drawn before `text.render`, not after: a VNC pane's title
+            // bar is still ordinary glyphon text (from the same `text`
+            // pipeline, prepared just above) and needs to stay legible
+            // on top of the video frame, not painted over by it.
+            for (pane, rect) in &vnc_panes {
+                let Some(session) = self.vnc_sessions.values().find(|s| s.pane == *pane) else { continue };
+                if let Some(texture) = &session.texture {
+                    vnc_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
+                }
+                // The guest's pointer, drawn on top of its own pane. The
+                // server stopped compositing this into the framebuffer
+                // when we asked for `CursorPseudo` -- which is what keeps
+                // pointer movement from generating framebuffer traffic --
+                // so it's ours to place now. Scaled by the same
+                // pane/framebuffer ratio as the image under it, so it
+                // stays the right size when a pane isn't at the VM's
+                // native resolution, and offset by the hotspot so the
+                // tip lands where the guest thinks the pointer is.
+                let (Some(cursor), Some((px, py))) = (&session.cursor, session.pointer_pos) else { continue };
+                let Some(cursor_texture) = &cursor.texture else { continue };
+                let (fb_w, fb_h) = session.texture_dims;
+                if fb_w == 0 || fb_h == 0 {
+                    continue;
+                }
+                let scale_x = rect.w / fb_w as f32;
+                let scale_y = rect.h / fb_h as f32;
+                let dest_x = rect.x + (px as f32 - cursor.hotspot_x as f32) * scale_x;
+                let dest_y = rect.y + (py as f32 - cursor.hotspot_y as f32) * scale_y;
+                vnc_pipeline.draw_cursor(gpu, &mut pass, cursor_texture, dest_x, dest_y, cursor.width as f32 * scale_x, cursor.height as f32 * scale_y);
+            }
+            // Same "before text, so title bars stay legible" reasoning as
+            // the VNC loop just above.
+            for (pane, rect) in &pdf_panes {
+                let Some(session) = self.pdf_sessions.values().find(|s| s.pane == *pane) else { continue };
+                let (Some(texture), Some((visible_w, visible_h, _, _))) = (&session.texture, session.last_uploaded) else { continue };
+                // Centered within the pane, never stretched to fill it --
+                // unlike VNC's own draw call just above (whole framebuffer
+                // always maps onto the whole pane), a PDF render's pixel
+                // size is already the intended on-screen size (computed by
+                // `pdf_target_size`), so drawing it any larger/smaller
+                // than that would silently re-distort the very aspect
+                // ratio `fit_page_size`/`fit_width_size` exist to
+                // preserve. Smaller than `rect` in an axis (fit-to-page
+                // letterboxing) shows as blank pane background around it;
+                // this loop runs before `text.render` so a fully centered
+                // small page still leaves the title bar legible on top.
+                let dest_w = (visible_w as f32).min(rect.w);
+                let dest_h = (visible_h as f32).min(rect.h);
+                let dest_x = rect.x + (rect.w - dest_w) / 2.0;
+                let dest_y = rect.y + (rect.h - dest_h) / 2.0;
+                pdf_pipeline.draw(gpu, &mut pass, texture, dest_x, dest_y, dest_w, dest_h);
+            }
             text.render(&mut pass);
         }
         // Popups (background + text) and the caret are drawn in a second,
@@ -12692,9 +15609,12 @@ impl App {
         // draw after all text) composite on top of whatever pass one
         // painted, regardless of what that was.
         if !popup_rects.is_empty() {
-            bg_rect.clear();
+            // `popup_rect`, not `bg_rect` -- see `App::popup_rect`'s own
+            // doc comment for what reusing the base layer's renderer here
+            // silently corrupted.
+            popup_rect.clear();
             for &(id, rect) in &popup_rects {
-                bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
                 // The completion popup's own selected-candidate row --
                 // same `theme.hl_line` mechanism a pane's current-line
                 // highlight and a picker/explorer's selected-row highlight
@@ -12703,11 +15623,11 @@ impl App {
                 if id == popup::PopupId::Completion {
                     if let Some(row) = popup_selected_row {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
-                        bg_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.hl_line);
+                        popup_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.hl_line);
                     }
                 }
             }
-            bg_rect.flush(gpu);
+            popup_rect.flush(gpu);
             text.prepare_popups(gpu, theme, &popup_rects);
         }
         {
@@ -12725,7 +15645,7 @@ impl App {
                 multiview_mask: None,
             });
             if !popup_rects.is_empty() {
-                bg_rect.render(&mut pass);
+                popup_rect.render(&mut pass);
                 text.render_popups(&mut pass);
             }
             caret_rect.render(&mut pass);
@@ -12775,13 +15695,19 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let mut text = TextPipeline::new(&gpu);
         text.set_font_size(self.config.font_size.unwrap_or(text::FONT_SIZE));
         let bg_rect = RectRenderer::new(&gpu);
+        let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
+        let vnc_pipeline = VncPipeline::new(&gpu);
+        let pdf_pipeline = PdfPipeline::new(&gpu);
 
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.text = Some(text);
         self.bg_rect = Some(bg_rect);
+        self.popup_rect = Some(popup_rect);
         self.caret_rect = Some(caret_rect);
+        self.vnc_pipeline = Some(vnc_pipeline);
+        self.pdf_pipeline = Some(pdf_pipeline);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -12805,12 +15731,30 @@ impl ApplicationHandler<FenixUserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
+            // Alt-Tabbing (or otherwise switching) away from the window
+            // while a VNC pane has input capture must release it: capture
+            // also confines the OS cursor to this window (`set_vnc_
+            // focused`'s own doc comment), and nothing here would ever
+            // ask the OS to un-confine it on the app's behalf once
+            // another window is in front -- on Windows in particular, a
+            // clip region set via a foreground window doesn't reliably
+            // get torn down just because focus moved elsewhere, which
+            // would otherwise strand the visible cursor at this window's
+            // edge until the user fights their way back into it.
+            WindowEvent::Focused(false) => self.set_vnc_focused(None),
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = Some((position.x as f32, position.y as f32));
+                let pos = (position.x as f32, position.y as f32);
+                self.cursor_pos = Some(pos);
+                self.handle_vnc_pointer_move(pos);
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some(pos) = self.cursor_pos {
+                        self.handle_click(pos);
+                    }
+                }
                 if let Some(pos) = self.cursor_pos {
-                    self.handle_click(pos);
+                    self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -12857,8 +15801,21 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             None => false,
         };
-        let animating =
-            blink_transitioning || pulse_active || self.workspaces.active_scroll_anims().contains_key(&self.focused_pane_id());
+        // A focused VNC session's pixel data can change many times a
+        // second, applied directly to its shared framebuffer by `VncReader`
+        // rather than through a winit event (see that type's own doc
+        // comment) -- this keeps `redraw` ticking at `ANIM_TICK` while a
+        // session has input capture, so it notices and uploads whatever
+        // changed since the last tick promptly. Gated on focus, not just
+        // "some VNC session is open": an unfocused session already polls
+        // the server at the much slower `IDLE_REFRESH_MILLIS`, so the
+        // ordinary blink-driven redraw below is more than enough to
+        // eventually show its (much less frequent) updates.
+        let vnc_focused = self.vnc_focused.is_some();
+        let animating = blink_transitioning
+            || pulse_active
+            || self.workspaces.active_scroll_anims().contains_key(&self.focused_pane_id())
+            || vnc_focused;
         if animating {
             needs_redraw = true;
         }
@@ -16835,6 +19792,60 @@ mod tests {
     }
 
     #[test]
+    fn start_explore_from_home_opens_the_explorer_at_the_home_directory() {
+        let mut app = App::with_file(None);
+        // Something other than the home dir, so a bug that reuses
+        // `project_root` instead of `dirs::home_dir()` would be caught.
+        app.project_root = Some(PathBuf::from("."));
+
+        app.start_explore_from_home();
+
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::FindFrom);
+        let home = dirs::home_dir().expect("test environment should have a home dir");
+        assert_eq!(app.explorer.as_ref().map(|e| e.cwd.as_path()), Some(home.as_path()));
+    }
+
+    #[test]
+    fn select_cwd_in_find_from_mode_opens_a_recursive_find_file_picker_rooted_there() {
+        let dir = TempDir::new("find_from_select_cwd");
+        dir.write("top.txt", "x");
+        dir.write("sub/nested.txt", "x");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer_purpose = ExplorerPurpose::FindFrom;
+        app.main_view = MainView::Explorer;
+
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+
+        assert_eq!(app.main_view, MainView::Picker);
+        assert!(app.explorer.is_none());
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
+        match &app.active_picker {
+            Some(ActivePicker::FindFile(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.iter().any(|l| l.ends_with("top.txt")), "{labels:?}");
+                assert!(labels.iter().any(|l| l.contains("sub") && l.ends_with("nested.txt")), "{labels:?}");
+            }
+            _ => panic!("expected an active FindFile picker"),
+        }
+    }
+
+    #[test]
+    fn select_cwd_in_browse_mode_does_not_open_a_picker() {
+        let dir = TempDir::new("find_from_select_cwd_browse_noop");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer_purpose = ExplorerPurpose::Browse;
+        app.main_view = MainView::Explorer;
+
+        app.explorer_handle_action(ExplorerAction::SelectCwd);
+
+        assert_eq!(app.main_view, MainView::Explorer, "browsing should be untouched by a stray S");
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
     fn mib_root_prompt_enter_with_a_label_registers_and_persists_the_root() {
         let mib_dir = TempDir::new("mib_root_prompt_enter_target");
         let config_dir = TempDir::new("mib_root_prompt_enter_config");
@@ -17135,7 +20146,8 @@ mod tests {
 
     #[test]
     fn picker_switch_buffer_marks_dirty_buffers() {
-        let mut app = App::with_file(None); // one scratch buffer, untouched
+        let mut app = App::with_file(None); // opens the dashboard, not a plain scratch buffer
+        app.new_scratch_buffer(); // an untouched, genuinely trackable Text buffer
         app.picker_switch_buffer();
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
@@ -17149,6 +20161,22 @@ mod tests {
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "+ *scratch*");
+            }
+            _ => panic!("expected a SwitchBuffer picker"),
+        }
+    }
+
+    #[test]
+    fn picker_switch_buffer_never_marks_a_docker_buffer_dirty() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+        app.picker_switch_buffer();
+        match &app.active_picker {
+            Some(ActivePicker::SwitchBuffer(state)) => {
+                for (_, candidate) in state.visible_rows(0, 10) {
+                    assert!(!candidate.label.starts_with("+ "), "docker buffer wrongly marked dirty: {}", candidate.label);
+                }
             }
             _ => panic!("expected a SwitchBuffer picker"),
         }
@@ -17235,6 +20263,112 @@ mod tests {
         for pane in app.windows().windows() {
             assert_eq!(app.windows().content(pane), Some(&scratch_id));
         }
+    }
+
+    #[test]
+    fn kill_buffer_refuses_with_a_named_error_when_the_focused_text_buffer_is_dirty() {
+        let dir = TempDir::new("kill_buffer_dirty_guard");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.kill_buffer();
+
+        assert!(app.buffers.get(id).is_some(), "the dirty buffer should still be open");
+        assert_eq!(app.focused_buffer_id(), id);
+        assert!(app.modeline_pieces().1.contains("a.txt"));
+        assert!(app.modeline_pieces().1.contains("unsaved changes"));
+    }
+
+    #[test]
+    fn force_kill_buffer_discards_changes_and_closes_anyway() {
+        let dir = TempDir::new("force_kill_buffer");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let scratch_id = app.focused_buffer_id();
+        app.test_open_path(&a);
+        let dirty_id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.force_kill_buffer();
+
+        assert!(app.buffers.get(dirty_id).is_none());
+        assert_eq!(app.focused_buffer_id(), scratch_id);
+    }
+
+    #[test]
+    fn kill_buffer_on_a_dirty_jira_buffer_still_closes_because_jira_is_not_tracked() {
+        let mut app = App::with_file(None);
+        app.open_jira_panel();
+        assert_eq!(app.buffers.get(app.focused_buffer_id()).unwrap().kind, BufferKind::Jira);
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+
+        app.kill_buffer();
+
+        assert!(app.jira_session.is_none(), "closing any Jira pane buffer should tear down the whole session");
+    }
+
+    #[test]
+    fn save_and_close_buffer_refuses_when_the_dirty_buffer_has_no_path() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.save_and_close_buffer();
+
+        assert!(app.buffers.get(id).is_some(), "should still be open");
+        assert_eq!(app.focused_buffer_id(), id);
+        assert!(app.modeline_pieces().1.contains(":w <path>"));
+    }
+
+    #[test]
+    fn save_and_close_buffer_saves_then_closes_a_named_dirty_buffer() {
+        let dir = TempDir::new("save_and_close_buffer");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        app.save_and_close_buffer();
+
+        assert!(app.buffers.get(id).is_none());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "!a");
+    }
+
+    #[test]
+    fn save_all_refuses_up_front_when_any_dirty_text_buffer_has_no_path() {
+        let dir = TempDir::new("save_all_refuses");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let named_id = app.focused_buffer_id();
+        app.test_insert('!');
+        app.new_scratch_buffer();
+        let unnamed_id = app.focused_buffer_id();
+        app.test_insert('!');
+
+        assert!(!app.save_all());
+
+        assert!(app.buffers.get(named_id).unwrap().buffer.is_dirty(), "no partial save should have happened");
+        assert!(app.buffers.get(unnamed_id).unwrap().buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+    }
+
+    #[test]
+    fn save_all_saves_every_dirty_named_buffer() {
+        let dir = TempDir::new("save_all_saves");
+        let a = dir.write("a.txt", "a");
+        let b = dir.write("b.txt", "b");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        app.test_insert('!');
+        app.test_open_path(&b);
+        app.test_insert('!');
+
+        assert!(app.save_all());
+
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "!a");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "!b");
     }
 
     #[test]
@@ -17367,6 +20501,117 @@ mod tests {
     fn gutter_chars_is_zero_for_a_docker_buffer() {
         let mut app = App::with_file(None);
         app.open_docker_panel();
+        assert_eq!(app.gutter_chars(app.open()), 0);
+    }
+
+    #[test]
+    fn open_vnc_session_on_an_unconfigured_name_errors_and_creates_nothing() {
+        let mut app = App::with_file(None);
+        let sessions_before = app.vnc_sessions.len();
+
+        app.open_vnc_session("no-such-vm");
+
+        assert_eq!(app.vnc_sessions.len(), sessions_before);
+        assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+    }
+
+    #[test]
+    fn modeline_shows_vnc_badge_only_while_input_capture_is_active() {
+        let mut app = App::with_file(None);
+        assert_ne!(app.modeline_pieces().0, "VNC");
+
+        app.set_vnc_focused(Some("build-vm".to_string()));
+        assert_eq!(app.modeline_pieces().0, "VNC");
+
+        app.set_vnc_focused(None);
+        assert_ne!(app.modeline_pieces().0, "VNC");
+    }
+
+    #[test]
+    fn vnc_key_sequence_sends_the_bare_key_alone_with_no_modifiers_held() {
+        assert_eq!(vnc_key_sequence(b'c' as u32, Mods::default(), true), vec![(b'c' as u32, true)]);
+        assert_eq!(vnc_key_sequence(b'c' as u32, Mods::default(), false), vec![(b'c' as u32, false)]);
+    }
+
+    #[test]
+    fn vnc_key_sequence_brackets_ctrl_before_on_press_and_after_on_release() {
+        let mods = Mods { ctrl: true, alt: false, super_: false };
+        assert_eq!(vnc_key_sequence(b'c' as u32, mods, true), vec![(fenix_vnc::keysym::CONTROL_L, true), (b'c' as u32, true)]);
+        assert_eq!(vnc_key_sequence(b'c' as u32, mods, false), vec![(b'c' as u32, false), (fenix_vnc::keysym::CONTROL_L, false)]);
+    }
+
+    #[test]
+    fn vnc_key_sequence_brackets_every_held_modifier() {
+        let mods = Mods { ctrl: true, alt: true, super_: true };
+        assert_eq!(
+            vnc_key_sequence(b'x' as u32, mods, true),
+            vec![
+                (fenix_vnc::keysym::CONTROL_L, true),
+                (fenix_vnc::keysym::ALT_L, true),
+                (fenix_vnc::keysym::SUPER_L, true),
+                (b'x' as u32, true),
+            ]
+        );
+        assert_eq!(
+            vnc_key_sequence(b'x' as u32, mods, false),
+            vec![
+                (b'x' as u32, false),
+                (fenix_vnc::keysym::CONTROL_L, false),
+                (fenix_vnc::keysym::ALT_L, false),
+                (fenix_vnc::keysym::SUPER_L, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn vnc_close_focused_session_errors_when_nothing_is_focused() {
+        let mut app = App::with_file(None);
+        app.vnc_close_focused_session();
+        assert!(app.modeline_pieces().1.contains("no VNC session focused"));
+    }
+
+    #[test]
+    fn start_vnc_picker_lists_every_configured_host_by_name() {
+        let mut app = App::with_file(None);
+        app.config.vnc_hosts = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
+
+        app.start_vnc_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::VncHost(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["build-vm", "test-vm"]);
+            }
+            other => panic!("expected an open VncHost picker, got is_some={}", other.is_some()),
+        }
+        assert_eq!(app.main_view, MainView::Picker);
+    }
+
+    #[test]
+    fn picker_confirm_on_vnc_host_calls_open_vnc_session_and_closes_the_picker() {
+        let mut app = App::with_file(None);
+        // No host actually configured under this name -- confirms the
+        // picker hands off to `open_vnc_session` (which then reports its
+        // own "not configured" error) rather than that this particular
+        // connect attempt succeeds.
+        app.start_vnc_picker();
+        app.active_picker = Some(ActivePicker::VncHost(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new(
+            "ghost-vm".to_string(),
+            "ghost-vm".to_string(),
+        )])));
+
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+    }
+
+    #[test]
+    fn gutter_chars_is_zero_for_a_vnc_buffer() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_vnc();
+        app.switch_focused_to_buffer(id);
         assert_eq!(app.gutter_chars(app.open()), 0);
     }
 
@@ -18842,13 +22087,15 @@ mod tests {
     }
 
     #[test]
-    fn arm_quit_confirm_if_dirty_arms_and_shows_a_message_when_dirty() {
+    fn arm_quit_confirm_if_dirty_arms_and_names_the_buffer_in_the_message() {
         let mut app = App::with_file(None);
         app.new_scratch_buffer();
         app.test_insert('!');
         assert!(app.arm_quit_confirm_if_dirty());
         assert!(app.quit_confirm);
-        assert!(app.modeline_pieces().1.contains("unsaved buffer"));
+        let message = app.modeline_pieces().1;
+        assert!(message.contains("unsaved buffer"));
+        assert!(message.contains("[No Name]"), "should name the dirty buffer, not just count it: {message}");
     }
 
     #[test]
@@ -18859,14 +22106,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_quit_confirm_only_confirms_on_y() {
+    fn arm_quit_confirm_if_dirty_ignores_non_tracked_buffer_kinds() {
+        // A Jira/Docker/Git/Dashboard buffer's `dirty` flag gets set by
+        // the host's own refresh (it has no path so it can never be
+        // saved to clear it again) -- it must never count as "unsaved
+        // work" blocking a quit.
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let id = app.focused_buffer_id();
+        app.test_insert('!'); // simulates a panel refresh dirtying the buffer
+        assert!(app.buffers.get(id).unwrap().buffer.is_dirty());
+        assert_eq!(app.buffers.get(id).unwrap().kind, BufferKind::Docker);
+
+        assert!(!app.any_buffer_dirty());
+        assert!(!app.arm_quit_confirm_if_dirty());
+        assert!(!app.quit_confirm);
+    }
+
+    #[test]
+    fn format_quit_confirm_message_truncates_after_four_names() {
+        let mut app = App::with_file(None);
+        for _ in 0..5 {
+            app.new_scratch_buffer();
+            app.test_insert('!');
+        }
+        let dirty = app.dirty_tracked_buffer_ids();
+        assert_eq!(dirty.len(), 5);
+        let message = app.format_quit_confirm_message(&dirty);
+        assert!(message.starts_with("5 unsaved buffers:"));
+        assert!(message.ends_with("(+1 more) -- quit anyway? (y=yes / n=no / l=list)"), "{message}");
+    }
+
+    #[test]
+    fn resolve_quit_confirm_action_dispatches_on_y_l_and_anything_else() {
         let mut app = App::with_file(None);
         app.quit_confirm = true;
-        assert!(!app.resolve_quit_confirm(KeyPress::char('n')));
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('n')), QuitConfirmAction::Cancel);
         assert!(!app.quit_confirm);
 
         app.quit_confirm = true;
-        assert!(app.resolve_quit_confirm(KeyPress::char('y')));
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('l')), QuitConfirmAction::ShowDirtyBuffers);
+        assert!(!app.quit_confirm);
+
+        app.quit_confirm = true;
+        assert_eq!(app.resolve_quit_confirm_action(KeyPress::char('y')), QuitConfirmAction::Quit);
         assert!(!app.quit_confirm);
     }
 
@@ -20305,10 +23588,13 @@ mod tests {
     }
 
     #[test]
-    fn is_readonly_buffer_kind_covers_docker_git_and_jira_only() {
+    fn is_readonly_buffer_kind_covers_docker_git_jira_vnc_pdf_and_pdf_outline_only() {
         assert!(is_readonly_buffer_kind(BufferKind::Docker));
         assert!(is_readonly_buffer_kind(BufferKind::Git));
         assert!(is_readonly_buffer_kind(BufferKind::Jira));
+        assert!(is_readonly_buffer_kind(BufferKind::Vnc));
+        assert!(is_readonly_buffer_kind(BufferKind::Pdf));
+        assert!(is_readonly_buffer_kind(BufferKind::PdfOutline));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
         assert!(!is_readonly_buffer_kind(BufferKind::Explorer));
@@ -20636,5 +23922,699 @@ mod tests {
             assert_eq!(clipboard.get_text().unwrap(), "https://jira.example.com/browse/PROJ-1");
         }
         assert!(app.status_message.as_ref().is_some_and(|m| !m.is_error && m.text.contains("PROJ-1")));
+    }
+
+    #[test]
+    fn the_document_picker_lists_every_configured_entry_by_name() {
+        let mut app = App::with_file(None);
+        app.config.documents = vec![
+            ("Space Packet Protocol".to_string(), PathBuf::from("/refs/133x0b2e2.pdf")),
+            ("Time Code Formats".to_string(), PathBuf::from("/refs/301x0b4.pdf")),
+        ];
+
+        app.start_document_picker();
+
+        match &app.active_picker {
+            Some(picker @ ActivePicker::Document(_)) => assert_eq!(picker_len(picker), 2),
+            other => panic!("expected an open Document picker, got is_some={}", other.is_some()),
+        }
+        assert_eq!(app.main_view, MainView::Picker);
+        assert_eq!(picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, 2)[0].1, "Space Packet Protocol");
+    }
+
+    #[test]
+    fn the_document_picker_reports_an_empty_index_instead_of_opening_over_nothing() {
+        let mut app = App::with_file(None);
+
+        app.start_document_picker();
+
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("[documents]")));
+    }
+
+    #[test]
+    fn opening_a_document_whose_path_is_gone_names_it_rather_than_opening_a_blank_buffer() {
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+
+        app.open_document(Path::new("/definitely/not/here/missing.pdf"));
+
+        assert_eq!(app.focused_buffer_id(), before, "the focused pane must be left alone");
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("missing.pdf")));
+    }
+
+    #[test]
+    fn a_non_pdf_document_opens_in_the_focused_pane_as_ordinary_text() {
+        let dir = TempDir::new("document_index_text");
+        dir.write("notes.md", "reference notes
+");
+        let mut app = App::with_file(None);
+        let pane = app.focused_pane_id();
+
+        app.open_document(&dir.path().join("notes.md"));
+
+        assert_eq!(app.focused_pane_id(), pane, "opening in place must not spawn a new workspace");
+        assert!(app.open().buffer.text().contains("reference notes"));
+    }
+
+    #[test]
+    fn pdf_target_size_fit_page_delegates_to_fit_page_size() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (100.0, 200.0), (800, 800)), fenix_pdf::coords::fit_page_size(100.0, 200.0, 800, 800));
+    }
+
+    #[test]
+    fn pdf_target_size_fit_width_delegates_to_fit_width_size() {
+        assert_eq!(pdf_target_size(PdfZoom::FitWidth, (100.0, 200.0), (400, 800)), fenix_pdf::coords::fit_width_size(100.0, 200.0, 400));
+    }
+
+    #[test]
+    fn pdf_target_size_percent_delegates_to_percent_size_and_ignores_pane_size() {
+        let a = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (400, 400));
+        let b = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (4000, 4000));
+        assert_eq!(a, fenix_pdf::coords::percent_size(612.0, 792.0, 150));
+        assert_eq!(a, b, "percent zoom must not depend on pane size");
+    }
+
+    #[test]
+    fn pdf_target_size_is_zero_before_the_page_size_is_known() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (0.0, 0.0), (800, 800)), (0, 0));
+    }
+
+    #[test]
+    fn pdf_target_size_is_zero_for_a_zero_sized_pane() {
+        assert_eq!(pdf_target_size(PdfZoom::FitPage, (612.0, 792.0), (0, 800)), (0, 0));
+    }
+
+    #[test]
+    fn pdf_effective_percent_derives_100_from_a_one_pixel_per_point_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_100.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792);
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
+    }
+
+    #[test]
+    fn pdf_effective_percent_derives_200_from_a_double_size_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_200.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (1224, 1584);
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 200);
+    }
+
+    #[test]
+    fn pdf_effective_percent_falls_back_to_100_before_anything_has_rendered() {
+        let (_guard, key, app) = test_open_pdf("pdf_effective_percent_fallback.pdf");
+        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
+    }
+
+    /// `open_pdf_path` spawns a real `fenix_pdf::PdfWorker` thread, which
+    /// binds and initializes the real pdfium native library -- a process-
+    /// wide resource the same way the OS clipboard is (see `CLIPBOARD_
+    /// TEST_LOCK`'s own doc comment), and just as unsafe to touch from
+    /// several threads at once. Production code never hits this (exactly
+    /// one `App`, hence exactly one `PdfWorker`, for the process's whole
+    /// lifetime), but the test harness runs every `#[test]` fn in
+    /// parallel by default, and each one below builds its own `App` (so
+    /// its own from-scratch `PdfWorker`) -- without this lock, several
+    /// tests' worker threads raced to initialize pdfium concurrently and
+    /// reliably crashed the whole test binary (`STATUS_ACCESS_VIOLATION`).
+    static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Opens a PDF-kind pane the same way `open_pdf_path` does (real
+    /// worker/session/pane wiring, no real pdfium/GPU needed since the
+    /// worker's replies never arrive synchronously in a test) and then
+    /// seeds it with a known page count/size, as if `Opened` had already
+    /// landed -- what every `pdf_goto_page`/`pdf_zoom_*`/`pdf_pan` test
+    /// below needs before those methods do anything.
+    ///
+    /// Builds the `App` itself (rather than taking `&mut App`) so it can
+    /// return `(guard, path, app)` with `guard` named *first* in the
+    /// tuple pattern -- Rust drops a multi-binding `let` in reverse of
+    /// the pattern's left-to-right order, so naming `app` *last* means it
+    /// (and the `PdfWorker`/pdfium instance it owns) is fully dropped and
+    /// joined before `PDF_WORKER_TEST_LOCK` is released at the end of the
+    /// caller's test function. Returning just the guard alongside an
+    /// already-constructed `App` (the first version of this helper) was
+    /// provably not enough: `app` still outlived and dropped *after* that
+    /// guard at the end of each test (reverse-declaration-order, `app`
+    /// having been declared first), so two tests' `PdfWorker` threads
+    /// could still tear down pdfium concurrently on the way out --
+    /// intermittently crashing the test binary (`STATUS_BREAKPOINT`) even
+    /// with the lock in place, until the lock was made to cover the
+    /// worker's *entire* lifetime, spawn through join, not just the spawn
+    /// moment.
+    fn test_open_pdf(path: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf, App) {
+        let guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut app = App::with_file(None);
+        app.open_pdf_path(Path::new(path));
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let session = app.pdf_sessions.get_mut(&canonical).expect("session just opened");
+        session.page_count = 10;
+        session.page_point_size = (612.0, 792.0);
+        session.last_pane_size = (612, 792);
+        (guard, canonical, app)
+    }
+
+    /// Seeds a session with a render taller than its pane, so there is
+    /// something to actually scroll -- `test_open_pdf`'s own defaults
+    /// leave the page fitting the pane exactly (nothing to scroll, every
+    /// scroll turns the page), which is the *other* case worth testing.
+    fn seed_scrollable_render(app: &mut App, key: &Path) {
+        let session = app.pdf_sessions.get_mut(key).expect("session open");
+        session.last_pane_size = (612, 400);
+        session.full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
+        session.scroll_offset = (0, 0);
+    }
+
+    #[test]
+    fn pdf_scroll_moves_within_a_page_that_is_taller_than_the_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_within.pdf");
+        seed_scrollable_render(&mut app, &key);
+
+        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.scroll_offset.1, PDF_PAN_STEP_PX);
+        assert_eq!(session.current_page, 0, "scrolling within a page must not turn it");
+    }
+
+    #[test]
+    fn pdf_scroll_past_the_bottom_edge_turns_to_the_next_page_at_its_top() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_bottom.pdf");
+        seed_scrollable_render(&mut app, &key);
+        // Park it against the bottom edge (792 rendered - 400 visible).
+        app.pdf_sessions.get_mut(&key).unwrap().scroll_offset = (0, 392);
+
+        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.current_page, 1);
+        assert!(!session.land_at_bottom, "a forward page turn starts at the top of the new page");
+    }
+
+    #[test]
+    fn pdf_scroll_past_the_top_edge_turns_back_and_lands_at_the_bottom() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_top.pdf");
+        seed_scrollable_render(&mut app, &key);
+        app.pdf_sessions.get_mut(&key).unwrap().current_page = 3;
+
+        app.pdf_scroll(-(PDF_PAN_STEP_PX as i32));
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.current_page, 2);
+        assert!(session.land_at_bottom, "scrolling back up must continue onto the bottom of the previous page");
+    }
+
+    #[test]
+    fn pdf_scroll_turns_the_page_immediately_when_the_render_fits_the_pane() {
+        // The fit-page default: nothing to scroll within the page, so a
+        // scroll gesture is a page turn outright.
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_fitting.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
+
+        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 1);
+    }
+
+    #[test]
+    fn pdf_scroll_at_the_last_page_bottom_is_a_no_op_rather_than_wrapping() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_last_page.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
+        app.pdf_sessions.get_mut(&key).unwrap().current_page = 9;
+
+        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
+    }
+
+    #[test]
+    fn pdf_first_and_last_page_jump_to_the_ends_of_the_document() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_first_last.pdf");
+
+        app.pdf_last_page();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
+
+        app.pdf_first_page();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn a_rendered_page_lands_at_the_bottom_only_when_scrolling_back_asked_for_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_landing.pdf");
+        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
+        app.pdf_sessions.get_mut(&key).unwrap().land_at_bottom = true;
+        let request_id = app.pdf_sessions.get(&key).unwrap().pending_request_id;
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::PageRendered {
+            key: doc_key,
+            request_id,
+            page_index: 0,
+            width: 612,
+            height: 792,
+            bgra: vec![0u8; 612 * 792 * 4],
+            page_width_pts: 612.0,
+            page_height_pts: 792.0,
+        });
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        // Deliberately out of range -- `redraw` clamps it down to this
+        // render's real bottom; see `apply_pdf_response`'s own comment.
+        assert_eq!(session.scroll_offset, (0, u32::MAX));
+        assert!(!session.land_at_bottom, "the landing request is consumed by the render it applied to");
+    }
+
+    #[test]
+    fn the_modeline_shows_the_page_and_zoom_for_a_pdf_pane_not_a_line_and_column() {
+        let (_guard, _key, mut app) = test_open_pdf("pdf_modeline.pdf");
+        app.pdf_goto_page(4);
+
+        let modeline = app.modeline_text();
+
+        assert!(modeline.contains("Page 4/10"), "{modeline}");
+        assert!(modeline.contains("Fit page"), "{modeline}");
+        assert!(!modeline.contains("Ln "), "{modeline}");
+    }
+
+    #[test]
+    fn pdf_goto_page_jumps_to_the_1_indexed_page_and_dispatches_a_render() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_jumps.pdf");
+
+        app.pdf_goto_page(5);
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.current_page, 4);
+        assert_eq!(session.last_requested_size, fenix_pdf::coords::fit_page_size(612.0, 792.0, 612, 792));
+    }
+
+    #[test]
+    fn pdf_goto_page_clamps_past_the_last_page_to_the_last_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_clamps.pdf");
+
+        app.pdf_goto_page(9999);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
+    }
+
+    #[test]
+    fn pdf_goto_page_prompt_round_trip_via_key_events() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt.pdf");
+
+        app.start_pdf_goto_page_prompt();
+        assert_eq!(app.pdf_goto_page_prompt.as_deref(), Some(""));
+        for ch in "3".chars() {
+            app.pdf_goto_page_prompt_key(KeyPress::char(ch));
+        }
+        assert_eq!(app.pdf_goto_page_prompt_text(), Some("go to page: 3".to_string()));
+        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.pdf_goto_page_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 2);
+    }
+
+    #[test]
+    fn pdf_goto_page_prompt_escape_cancels_without_moving_the_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt_escape.pdf");
+
+        app.start_pdf_goto_page_prompt();
+        app.pdf_goto_page_prompt_key(KeyPress::char('3'));
+        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.pdf_goto_page_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn start_pdf_goto_page_prompt_is_a_no_op_without_a_focused_pdf_pane() {
+        let mut app = App::with_file(None);
+        app.start_pdf_goto_page_prompt();
+        assert!(app.pdf_goto_page_prompt.is_none());
+    }
+
+    #[test]
+    fn pdf_zoom_in_steps_up_from_the_effective_percent_and_switches_to_percent_zoom() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792); // 100%
+
+        app.pdf_zoom_in();
+
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.zoom, PdfZoom::Percent(110));
+    }
+
+    #[test]
+    fn pdf_zoom_out_steps_down_and_clamps_at_the_minimum() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_out_clamp.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT);
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
+            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MIN_PERCENT);
+
+        app.pdf_zoom_out();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT));
+    }
+
+    #[test]
+    fn pdf_zoom_in_clamps_at_the_maximum() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in_clamp.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT);
+        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
+            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MAX_PERCENT);
+
+        app.pdf_zoom_in();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT));
+    }
+
+    #[test]
+    fn pdf_zoom_fit_page_and_fit_width_switch_modes_and_dispatch() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_fit.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(200);
+
+        app.pdf_zoom_fit_width();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitWidth);
+
+        app.pdf_zoom_fit_page();
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitPage);
+    }
+
+    #[test]
+    fn pdf_pan_moves_scroll_offset_in_the_given_direction() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_pan.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().scroll_offset = (100, 100);
+
+        app.pdf_pan(1, 0);
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100));
+
+        app.pdf_pan(0, -1);
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100 - PDF_PAN_STEP_PX));
+    }
+
+    #[test]
+    fn pdf_pan_never_underflows_past_zero() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_pan_underflow.pdf");
+
+        app.pdf_pan(-1, -1);
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (0, 0));
+    }
+
+    fn sample_outline() -> Vec<fenix_pdf::outline::OutlineEntry> {
+        vec![
+            fenix_pdf::outline::OutlineEntry { title: "Chapter 1".to_string(), page_index: 0, depth: 0 },
+            fenix_pdf::outline::OutlineEntry { title: "Chapter 2".to_string(), page_index: 6, depth: 0 },
+        ]
+    }
+
+    #[test]
+    fn pdf_toggle_outline_opens_a_split_pane_from_already_cached_entries() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_open.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        let panes_before = app.windows().window_count();
+
+        app.pdf_toggle_outline();
+
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_outline_panes.contains_key(&key));
+        let outline_buffer = app.focused_buffer_id();
+        assert_eq!(app.buffers.get(outline_buffer).unwrap().kind, BufferKind::PdfOutline);
+        assert_eq!(app.pdf_outline_source.get(&outline_buffer), Some(&key));
+        assert_eq!(app.pdf_outline_lines.get(&outline_buffer).unwrap().len(), 2);
+        assert_eq!(app.open().buffer.text(), "Chapter 1\nChapter 2\n");
+    }
+
+    #[test]
+    fn pdf_toggle_outline_a_second_time_closes_it_and_refocuses_the_pdf_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_close.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // opens the outline pane and focuses it
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_outline = app.windows().window_count();
+
+        app.pdf_toggle_outline(); // outline pane is currently focused -- this closes it
+
+        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert!(app.pdf_outline_lines.is_empty());
+        assert!(app.pdf_outline_source.is_empty());
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_toggle_outline_with_no_cached_outline_dispatches_a_fetch_without_opening_a_pane_yet() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_fetch.pdf");
+        let panes_before = app.windows().window_count();
+
+        app.pdf_toggle_outline();
+
+        // Nothing to show yet -- no reply has landed (the worker's real
+        // reply, if any, has nowhere to go in a test with no event proxy;
+        // see `test_open_pdf`'s own doc comment).
+        assert_eq!(app.windows().window_count(), panes_before);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert!(app.pdf_sessions.get(&key).unwrap().outline.is_none());
+    }
+
+    #[test]
+    fn apply_pdf_response_outline_caches_it_and_opens_the_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_outline_response.pdf");
+        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Outline { key: doc_key, entries: sample_outline() });
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().outline, Some(sample_outline()));
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_outline_panes.contains_key(&key));
+    }
+
+    #[test]
+    fn pdf_outline_activate_selected_jumps_the_companion_pdf_pane_to_that_entrys_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // opens and focuses the outline pane
+
+        // Move the cursor to the second line ("Chapter 2", page_index 6).
+        let start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
+
+        app.pdf_outline_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
+    }
+
+    #[test]
+    fn pdf_outline_activate_selected_on_the_no_bookmarks_placeholder_line_does_nothing() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate_empty.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(Vec::new());
+        app.pdf_toggle_outline();
+
+        app.pdf_outline_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn killing_the_outline_buffer_directly_cleans_up_the_same_as_toggling_it_off() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_outline_kill_buffer.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline(); // outline pane is now focused
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_outline = app.windows().window_count();
+
+        app.kill_buffer_now();
+
+        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
+        assert!(!app.pdf_outline_panes.contains_key(&key));
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_session_close_cleans_up_a_still_open_outline_panes_side_tables() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_outline.pdf");
+        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
+        app.pdf_toggle_outline();
+
+        app.pdf_session_close(&key);
+
+        assert!(app.pdf_outline_panes.is_empty());
+        assert!(app.pdf_outline_lines.is_empty());
+        assert!(app.pdf_outline_source.is_empty());
+    }
+
+    fn sample_matches() -> Vec<fenix_pdf::search::PdfSearchMatch> {
+        vec![
+            fenix_pdf::search::PdfSearchMatch { page_index: 0, char_index: 5, context: "the quick brown fox".to_string() },
+            fenix_pdf::search::PdfSearchMatch { page_index: 6, char_index: 0, context: "jumps over the lazy dog".to_string() },
+        ]
+    }
+
+    #[test]
+    fn start_pdf_search_prompt_is_a_no_op_without_a_focused_pdf_pane() {
+        let mut app = App::with_file(None);
+        app.start_pdf_search_prompt();
+        assert!(app.pdf_search_prompt.is_none());
+    }
+
+    #[test]
+    fn pdf_search_prompt_round_trip_via_key_events_dispatches_a_search() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt.pdf");
+
+        app.start_pdf_search_prompt();
+        assert_eq!(app.pdf_search_prompt.as_deref(), Some(""));
+        for ch in "fox".chars() {
+            app.pdf_search_prompt_key(KeyPress::char(ch));
+        }
+        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fox".to_string()));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.pdf_search_prompt.is_none());
+        let session = app.pdf_sessions.get(&key).unwrap();
+        assert_eq!(session.pending_search_request_id, 1);
+        assert_eq!(session.last_search_query, "fox");
+    }
+
+    #[test]
+    fn pdf_search_prompt_escape_cancels_without_dispatching_a_search() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt_escape.pdf");
+
+        app.start_pdf_search_prompt();
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.pdf_search_prompt.is_none());
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().pending_search_request_id, 0);
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_opens_a_split_pane_with_one_line_per_match() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        session.last_search_query = "dog".to_string();
+        let doc_key = session.doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        assert_eq!(app.windows().window_count(), panes_before + 1);
+        assert!(app.pdf_search_panes.contains_key(&key));
+        let results_buffer = app.focused_buffer_id();
+        assert_eq!(app.buffers.get(results_buffer).unwrap().kind, BufferKind::PdfSearchResults);
+        assert_eq!(app.pdf_search_source.get(&results_buffer), Some(&key));
+        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 2);
+        assert!(app.open().buffer.text().contains("p.  1  the quick brown fox"));
+        assert!(app.open().buffer.text().contains("p.  7  jumps over the lazy dog"));
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_with_a_stale_request_id_is_dropped() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_stale.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 2; // a newer search has since been dispatched
+        let doc_key = session.doc_key;
+        let panes_before = app.windows().window_count();
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        assert_eq!(app.windows().window_count(), panes_before);
+        assert!(!app.pdf_search_panes.contains_key(&key));
+    }
+
+    #[test]
+    fn a_second_search_rewrites_the_existing_results_pane_instead_of_stacking_a_new_one() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_second_search.pdf");
+        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
+        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 1;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+        let panes_with_results = app.windows().window_count();
+        let results_pane = *app.pdf_search_panes.get(&key).unwrap();
+
+        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 2;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults {
+            key: doc_key,
+            request_id: 2,
+            matches: vec![fenix_pdf::search::PdfSearchMatch { page_index: 2, char_index: 0, context: "banana".to_string() }],
+        });
+
+        assert_eq!(app.windows().window_count(), panes_with_results); // no new pane
+        assert_eq!(*app.pdf_search_panes.get(&key).unwrap(), results_pane); // same pane
+        let results_buffer = *app.windows().content(results_pane).unwrap();
+        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 1);
+        assert!(app.buffers.get(results_buffer).unwrap().buffer.text().contains("banana"));
+    }
+
+    #[test]
+    fn apply_pdf_response_search_results_with_no_matches_shows_the_explanatory_placeholder() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_empty.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        session.last_search_query = "xylophone".to_string();
+        let doc_key = session.doc_key;
+
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
+
+        assert_eq!(app.open().buffer.text(), "(no matches for \"xylophone\")");
+    }
+
+    #[test]
+    fn pdf_search_activate_selected_jumps_the_companion_pdf_pane_to_that_matchs_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        // Move the cursor to the second line (page_index 6).
+        let start = app.open().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
+
+        app.pdf_search_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
+    }
+
+    #[test]
+    fn pdf_search_activate_selected_on_the_no_matches_placeholder_line_does_nothing() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate_empty.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
+
+        app.pdf_search_activate_selected();
+
+        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn killing_the_search_results_buffer_directly_cleans_up_the_same_as_closing_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_kill_buffer.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
+        let panes_with_results = app.windows().window_count();
+
+        app.kill_buffer_now();
+
+        assert_eq!(app.windows().window_count(), panes_with_results - 1);
+        assert!(!app.pdf_search_panes.contains_key(&key));
+        assert_eq!(app.focused_pane_id(), pdf_pane);
+    }
+
+    #[test]
+    fn pdf_session_close_cleans_up_a_still_open_search_panes_side_tables() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_search.pdf");
+        let session = app.pdf_sessions.get_mut(&key).unwrap();
+        session.pending_search_request_id = 1;
+        let doc_key = session.doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
+
+        app.pdf_session_close(&key);
+
+        assert!(app.pdf_search_panes.is_empty());
+        assert!(app.pdf_search_result_lines.is_empty());
+        assert!(app.pdf_search_source.is_empty());
     }
 }

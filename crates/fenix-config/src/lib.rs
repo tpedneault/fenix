@@ -71,6 +71,21 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// Frequently-read documents, `(display name, path)`, in the order
+    /// they appear in `config.ini`'s `[documents]` section -- what the
+    /// reader's `SPC r f` index picks from. Same numbered-key `docN =
+    /// NAME|PATH` convention (and same `Vec`-not-`Option` reasoning) as
+    /// `mib_roots`; the path can be any file Fenix can open, not just a
+    /// PDF, though a reference shelf is mostly PDFs in practice.
+    /// Hand-authored by the user, never written by the app itself.
+    pub documents: Vec<(String, PathBuf)>,
+    /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
+    /// `[vnc]` list convention `mib_roots`/`jira_projects` already
+    /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
+    /// is its own sibling to `parse_pair_list` rather than reusing it,
+    /// since `parse_pair_list` only splits one `|`). Hand-typed by the
+    /// user (`SPC v v`), e.g. `("build-vm", "10.0.0.5", 5900)`.
+    pub vnc_hosts: Vec<(String, String, u16)>,
 }
 
 impl Config {
@@ -95,6 +110,8 @@ impl Config {
         let completion = sections.get("completion");
         let mib = sections.get("mib");
         let jira = sections.get("jira");
+        let vnc = sections.get("vnc");
+        let documents = sections.get("documents");
 
         Ok(Self {
             path,
@@ -113,6 +130,8 @@ impl Config {
             jira_token: jira.and_then(|s| s.get("token")).cloned(),
             jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
+            vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
+            documents: documents.map(parse_documents).unwrap_or_default(),
         })
     }
 
@@ -138,6 +157,8 @@ impl Config {
             jira_token: None,
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
+            vnc_hosts: Vec::new(),
+            documents: Vec::new(),
         })
     }
 
@@ -204,6 +225,16 @@ impl Config {
         for (i, (id, name)) in self.jira_users.iter().enumerate() {
             out.push_str(&format!("user{} = {id}|{name}\n", i + 1));
         }
+        out.push('\n');
+        out.push_str("[vnc]\n");
+        for (i, (name, host, port)) in self.vnc_hosts.iter().enumerate() {
+            out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));
+        }
+        out.push('\n');
+        out.push_str("[documents]\n");
+        for (i, (name, doc_path)) in self.documents.iter().enumerate() {
+            out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
+        }
         std::fs::write(&self.path, out)
     }
 
@@ -238,6 +269,41 @@ fn parse_mib_roots(section: &std::collections::BTreeMap<String, String>) -> Vec<
 /// key that doesn't match `{prefix}N`, or a value with no `|`, is
 /// silently skipped, same "a bad entry loses only itself" posture every
 /// other field in this file already has.
+/// Parses the `[vnc]` section's `host1 = NAME|HOST|PORT`, `host2 = ...`
+/// numbered keys into an ordered `(name, host, port)` list -- the same
+/// numbered-key convention as `parse_mib_roots`/`parse_pair_list`, just a
+/// 3-field split (those only handle two fields) since a VNC target needs
+/// a display name, an address, and a port. Sorted by the numeric ordinal,
+/// not the key string. Any key that isn't `hostN`, a value with fewer
+/// than 3 `|`-separated fields, or an unparsable port is silently
+/// skipped -- same "a bad entry loses only itself" posture every other
+/// field in this file already has.
+/// Parses the `[documents]` section's `doc1 = NAME|PATH`, `doc2 = ...`
+/// numbered keys into an ordered `(name, path)` list -- the same shape
+/// and reasoning as `parse_mib_roots`, just a different key prefix and a
+/// user-facing display name rather than an internal label. `|` splits
+/// name from path (not `:`, which Windows paths contain); a key that
+/// isn't `docN`, or a value with no `|`, is silently skipped.
+fn parse_documents(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
+    parse_pair_list(section, "doc").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect()
+}
+
+fn parse_vnc_hosts(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, String, u16)> {
+    let mut hosts: Vec<(usize, String, String, u16)> = section
+        .iter()
+        .filter_map(|(key, value)| {
+            let n = key.strip_prefix("host")?.parse::<usize>().ok()?;
+            let mut parts = value.splitn(3, '|');
+            let name = parts.next()?.trim().to_string();
+            let host = parts.next()?.trim().to_string();
+            let port: u16 = parts.next()?.trim().parse().ok()?;
+            Some((n, name, host, port))
+        })
+        .collect();
+    hosts.sort_by_key(|(n, ..)| *n);
+    hosts.into_iter().map(|(_, name, host, port)| (name, host, port)).collect()
+}
+
 fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<(String, String)> {
     let mut pairs: Vec<(usize, String, String)> = section
         .iter()
@@ -263,6 +329,53 @@ mod tests {
     }
 
     #[test]
+    fn documents_are_parsed_in_ordinal_order_not_key_string_order() {
+        let path = temp_path("documents");
+        std::fs::write(
+            &path,
+            "[documents]\ndoc2 = Time Codes|/refs/301x0b4.pdf\ndoc10 = Tenth|/refs/tenth.pdf\ndoc1 = Space Packet Protocol|C:/refs/133x0b2e2.pdf\n",
+        )
+        .unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["Space Packet Protocol", "Time Codes", "Tenth"]);
+        // A Windows path keeps its drive-letter colon -- `|`, not `:`,
+        // is what splits the name from the path.
+        assert_eq!(config.documents[0].1, PathBuf::from("C:/refs/133x0b2e2.pdf"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_document_entry_with_no_pipe_is_skipped_without_losing_the_others() {
+        let path = temp_path("documents_bad");
+        std::fs::write(&path, "[documents]\ndoc1 = Good|/refs/a.pdf\ndoc2 = no-pipe-here\ndoc3 = Also Good|/refs/b.pdf\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["Good", "Also Good"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn documents_round_trip_through_save_and_load() {
+        let path = temp_path("documents_round_trip");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.documents = vec![
+            ("Space Packet Protocol".to_string(), PathBuf::from("C:/refs/133x0b2e2.pdf")),
+            ("Notes".to_string(), PathBuf::from("/refs/notes.md")),
+        ];
+
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+
+        assert_eq!(reloaded.documents, config.documents);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn loading_a_missing_file_yields_every_field_none_not_an_error() {
         let config = Config::load(temp_path("missing")).unwrap();
         assert!(config.theme.is_none());
@@ -276,6 +389,7 @@ mod tests {
         assert!(config.mib_telecommand_template.is_none());
         assert!(config.mib_telecommand_argument_template.is_none());
         assert!(config.mib_telecommand_argument_separator.is_none());
+        assert!(config.vnc_hosts.is_empty());
     }
 
     #[test]
@@ -438,6 +552,61 @@ mod tests {
                 ("TENTH".to_string(), PathBuf::from("/j")),
             ]
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn vnc_hosts_round_trip_through_save_and_load() {
+        let path = temp_path("vnc_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.vnc_hosts = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(
+            reloaded.vnc_hosts,
+            vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn vnc_hosts_are_ordered_by_numeric_ordinal_not_key_string() {
+        let path = temp_path("vnc_ordinal_order");
+        std::fs::write(&path, "[vnc]\nhost2 = second|10.0.0.2|5900\nhost10 = tenth|10.0.0.10|5900\nhost1 = first|10.0.0.1|5900\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(
+            config.vnc_hosts,
+            vec![
+                ("first".to_string(), "10.0.0.1".to_string(), 5900),
+                ("second".to_string(), "10.0.0.2".to_string(), 5900),
+                ("tenth".to_string(), "10.0.0.10".to_string(), 5900),
+            ]
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_vnc_host_entry_missing_a_field_is_skipped_not_an_error() {
+        let path = temp_path("vnc_bad_entry");
+        std::fs::write(&path, "[vnc]\nhost1 = good|10.0.0.1|5900\nhost2 = missing-port|10.0.0.2\nhost3 = also-good|10.0.0.3|5901\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900), ("also-good".to_string(), "10.0.0.3".to_string(), 5901)]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_vnc_host_entry_with_an_unparsable_port_is_skipped_not_an_error() {
+        let path = temp_path("vnc_bad_port");
+        std::fs::write(&path, "[vnc]\nhost1 = good|10.0.0.1|5900\nhost2 = bad-port|10.0.0.2|not-a-port\n").unwrap();
+
+        let config = Config::load(path.clone()).unwrap();
+
+        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900)]);
         std::fs::remove_file(&path).ok();
     }
 
