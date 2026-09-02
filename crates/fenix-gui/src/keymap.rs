@@ -238,12 +238,12 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         );
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('f')],
-            "format selection",
+            "indent region",
             "code.format_selection",
         );
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('F')],
-            "format buffer",
+            "indent buffer",
             "code.format_buffer",
         );
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('s')], "symbols", "code.symbols");

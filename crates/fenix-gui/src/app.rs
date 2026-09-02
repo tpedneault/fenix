@@ -2484,22 +2484,34 @@ fn xterm_256_rgb(idx: u8) -> (u8, u8, u8) {
     }
 }
 
-/// Dispatches to whichever external formatter handles `language` --
-/// currently just Tcl, via `fenix_format` (see its own doc comment for
-/// why that's a temp-file shell-out rather than stdin). `partial` selects
-/// the fragment-aware variant `format_selection`'s Visual-selection case
-/// needs rather than a complete script. `None` for an unsupported
-/// language or any formatter failure (tool missing, non-zero exit) --
-/// never a hard error, same posture as every other optional external
-/// tool this project shells out to. A free function, not an `App`
-/// method, so it can run in between two separate mutable borrows of
-/// `self.buffers`/`self.workspaces` without fighting the borrow checker.
-fn format_with_external_tool(language: fenix_syntax::LanguageId, source: &str, partial: bool) -> Option<String> {
-    match language {
-        fenix_syntax::LanguageId::Tcl if partial => fenix_format::format_tcl_fragment(source),
-        fenix_syntax::LanguageId::Tcl => fenix_format::format_tcl(source),
-        _ => None,
-    }
+/// The byte ranges `fenix_format::reindent`/`reindent_lines` should
+/// exclude from their bracket scan -- every string/comment span in
+/// `source`, from a fresh, one-shot syntax parse rather than the
+/// buffer's own `OpenBuffer::syntax` (which is only resynced lazily,
+/// from `redraw`'s own rendering pass -- not guaranteed current the
+/// instant a format command actually fires). A one-shot, user-triggered
+/// action easily affords a full reparse; there's no per-frame cost
+/// concern here the way there is for live syntax highlighting.
+///
+/// `None` (no detected language) yields no exclusions at all --
+/// `reindent` still works without them, just without knowing which
+/// brace-shaped characters are actually inside a string or comment
+/// rather than real nesting; a buffer with no recognized extension
+/// stays formattable, just slightly less accurately.
+///
+/// A free function, not an `App` method, for the same reason `format_
+/// with_external_tool` used to be: `format_selection` needs to call
+/// this in between two separate mutable borrows of `self.buffers`/
+/// `self.workspaces`.
+fn reindent_skip_ranges(language: Option<fenix_syntax::LanguageId>, source: &str) -> Vec<std::ops::Range<usize>> {
+    let Some(language) = language else { return Vec::new() };
+    let syntax = fenix_syntax::SyntaxState::new(language, source);
+    syntax
+        .highlights_in_range(source, 0..source.len())
+        .into_iter()
+        .filter(|(_, name)| *name == "string" || name.starts_with("string.") || *name == "comment" || name.starts_with("comment."))
+        .map(|(range, _)| range)
+        .collect()
 }
 
 /// `toggle_comment_lines`'s own language -> line-comment-token table.
@@ -2507,8 +2519,8 @@ fn format_with_external_tool(language: fenix_syntax::LanguageId, source: &str, p
 /// JSON (no comments at all in the spec), Markdown (block `<!-- -->`
 /// only), Batch (`REM`/`::` are both real but neither is unambiguous
 /// enough to toggle automatically) -- same "no-op, not a wrong guess"
-/// posture `format_with_external_tool` already has for a language with
-/// no formatter wired up.
+/// posture the rest of this file takes for a language with no support
+/// for a given feature wired up.
 fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str> {
     use fenix_syntax::LanguageId;
     match language {
@@ -5258,9 +5270,11 @@ impl App {
     }
 
     /// The focused buffer's detected language -- a path-extension check
-    /// used to gate Tcl-only formatting (`format_buffer`/`format_
-    /// selection`), the Tcl-specific slice of `completion_candidates`,
-    /// and `toggle_comment_lines`'s own comment-token lookup.
+    /// used by the Tcl-specific slice of `completion_candidates`,
+    /// `toggle_comment_lines`'s own comment-token lookup, and (to
+    /// exclude string/comment spans from the bracket scan, not to gate
+    /// whether it runs at all -- `format_buffer`/`format_selection`
+    /// work on any buffer regardless) `reindent_skip_ranges`.
     fn focused_language(&self) -> Option<fenix_syntax::LanguageId> {
         self.open().buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
     }
@@ -5347,20 +5361,20 @@ impl App {
         }
     }
 
-    /// `SPC c F` -- formats the whole focused buffer in place via an
-    /// external formatter. A no-op (logged to stderr, not a hard error)
-    /// for a language with no formatter wired up yet, a missing/failing
-    /// formatter binary, or output identical to what's already there.
+    /// `SPC c F` -- reindents the whole focused buffer in place,
+    /// structurally (`fenix_format::reindent`) rather than via a
+    /// per-language external tool -- Emacs' `indent-region`, real
+    /// Vim's `=` operator. Works on any buffer, not just ones with a
+    /// detected language (see `reindent_skip_ranges`'s own doc
+    /// comment for what a detected one buys in accuracy). A no-op if
+    /// the result is identical to what's already there.
     pub(crate) fn format_buffer(&mut self) {
-        let Some(language) = self.focused_language() else {
-            self.set_error("no formatter configured for this buffer's language");
-            return;
-        };
+        let indent_width = self.vim.indent_width();
+        let language = self.focused_language();
         let source = self.open().buffer.text();
-        let Some(formatted) = format_with_external_tool(language, &source, false) else {
-            self.set_error("format failed -- is the formatter for this language installed and on PATH?");
-            return;
-        };
+        let skip = reindent_skip_ranges(language, &source);
+        let last_line = self.open().buffer.line_count().saturating_sub(1);
+        let formatted = fenix_format::reindent(&source, 0, last_line, indent_width, &skip);
         if formatted == source {
             return;
         }
@@ -5369,19 +5383,19 @@ impl App {
         buffer.replace_range(cursor, 0, end, &formatted);
     }
 
-    /// `SPC c f` -- formats the active Visual selection in place, then
-    /// returns to Normal mode (mirroring what an ordinary Visual operator
-    /// does on completion). Only meaningful for Char/Line selections --
-    /// a formatter acts on text, not a column rectangle -- so this is a
-    /// no-op outside Visual mode or on a Visual-Block selection, same
-    /// graceful-degrade posture as `format_buffer`.
+    /// `SPC c f` -- reindents the active Visual selection's lines in
+    /// place, then returns to Normal mode (mirroring what an ordinary
+    /// Visual operator does on completion). The whole buffer is still
+    /// walked for nesting context (`fenix_format::reindent_lines`'s own
+    /// doc comment on why), but only the selection's own lines become
+    /// part of the edit. Only meaningful for Char/Line selections -- a
+    /// line-based reindent has no sensible reading of a column
+    /// rectangle -- so this is a no-op outside Visual mode or on a
+    /// Visual-Block selection.
     pub(crate) fn format_selection(&mut self) {
-        let Some(language) = self.focused_language() else {
-            self.set_error("no formatter configured for this buffer's language");
-            return;
-        };
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
+        let indent_width = self.vim.indent_width();
         let Some(ob) = self.buffers.get_mut(id) else { return };
         let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
         let Some((range, _linewise)) = self.vim.visual_selection_range(&ob.buffer, &pane_state.cursor) else {
@@ -5396,19 +5410,33 @@ impl App {
             });
             return;
         };
-        let selected = ob.buffer.text_range(range.start, range.end);
-        let format_failed = if let Some(formatted) = format_with_external_tool(language, &selected, true) {
-            if formatted != selected {
-                ob.buffer.replace_range(&mut pane_state.cursor, range.start, range.end, &formatted);
-            }
-            false
-        } else {
-            true
-        };
-        self.vim.exit_visual_mode(&pane_state.cursor);
-        if format_failed {
-            self.set_error("format failed -- is the formatter for this language installed and on PATH?");
+
+        // The selection's own char range doesn't need to survive past
+        // this point -- only the line numbers it touches do (a
+        // structural reindent, like real Vim's `=`, always acts on
+        // whole lines regardless of exactly where within them the
+        // selection's own endpoints fall). `range.end` is an exclusive
+        // upper bound, so the line it names isn't necessarily one the
+        // selection actually reaches -- querying at `range.end - 1`
+        // (clamped so an empty selection can't underflow) is what
+        // avoids pulling in one extra line past a selection that
+        // happens to end exactly on a line boundary.
+        let start_line_cursor = Cursor { char_idx: range.start, sticky_col: 0 };
+        let end_line_cursor = Cursor { char_idx: range.end.saturating_sub(1).max(range.start), sticky_col: 0 };
+        let (first_line, _) = ob.buffer.line_col(&start_line_cursor);
+        let (last_line, _) = ob.buffer.line_col(&end_line_cursor);
+
+        let source = ob.buffer.text();
+        let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
+        let skip = reindent_skip_ranges(language, &source);
+        let replacement = fenix_format::reindent_lines(&source, first_line, last_line, indent_width, &skip);
+
+        let start = ob.buffer.line_start_char(first_line);
+        let end = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
+        if ob.buffer.text_range(start, end) != replacement {
+            ob.buffer.replace_range(&mut pane_state.cursor, start, end, &replacement);
         }
+        self.vim.exit_visual_mode(&pane_state.cursor);
     }
 
     /// Replaces the typed prefix with the selected candidate's full
@@ -18741,25 +18769,44 @@ mod tests {
     }
 
     #[test]
-    fn format_buffer_is_a_noop_for_a_language_with_no_formatter_wired_up() {
-        let dir = TempDir::new("format_buffer_non_tcl");
-        let file = dir.write("foo.rs", "fn main(){}");
+    fn format_buffer_reindents_even_a_file_with_no_detected_language() {
+        // The reworked `SPC c F`: a structural reindent (Emacs'
+        // `indent-region`/real Vim's `=`), not a per-language external
+        // tool -- it works on any buffer, extension-recognized or not.
+        let dir = TempDir::new("format_buffer_unknown_extension");
+        let file = dir.write("foo.made-up-extension", "a {\nb\n}");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
 
         app.format_buffer();
 
-        assert_eq!(app.open().buffer.text(), "fn main(){}");
+        assert_eq!(app.open().buffer.text(), "a {\n    b\n}");
     }
 
     #[test]
-    fn format_buffer_never_panics_on_a_tcl_buffer() {
-        let dir = TempDir::new("format_buffer_tcl");
-        let file = dir.write("foo.tcl", "proc foo {} {puts hi}");
+    fn format_buffer_on_a_tcl_file_excludes_a_brace_inside_a_string_from_the_nesting_count() {
+        // A detected language buys real accuracy over the extension-
+        // less case above: without syntax awareness, the stray `{`
+        // inside the string literal would look like a genuine nesting
+        // increase and wrongly indent the line after it.
+        let dir = TempDir::new("format_buffer_tcl_string");
+        let file = dir.write("foo.tcl", "proc foo {} {\nputs \"{ not real\"\nputs hi\n}");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
 
-        // Must not panic regardless of whether `tclfmt` happens to be
-        // installed on this machine.
         app.format_buffer();
+
+        assert_eq!(app.open().buffer.text(), "proc foo {} {\n    puts \"{ not real\"\n    puts hi\n}");
+    }
+
+    #[test]
+    fn format_buffer_on_an_already_correctly_indented_file_is_a_noop() {
+        let dir = TempDir::new("format_buffer_noop");
+        let file = dir.write("foo.tcl", "proc foo {} {\n    puts hi\n}");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let edit_count_before = app.open().buffer.edit_count();
+
+        app.format_buffer();
+
+        assert_eq!(app.open().buffer.edit_count(), edit_count_before, "an unchanged result must not create an undo step");
     }
 
     #[test]
@@ -18786,6 +18833,23 @@ mod tests {
 
         assert_eq!(app.open().buffer.text(), "set x 1\nset y 2");
         assert_eq!(app.vim.mode(), Mode::Visual);
+    }
+
+    #[test]
+    fn format_selection_reindents_only_the_selected_lines_using_the_whole_file_for_context() {
+        let dir = TempDir::new("format_selection_reindent");
+        let file = dir.write("foo.tcl", "if {1} {\nputs a\nputs b\n}");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        // Select just line 1 ("puts a") -- line 2 stays untouched even
+        // though it's just as misindented, proving the edit is scoped
+        // to the selection rather than reformatting the whole buffer.
+        app.test_vim_key(KeyPress::char('j'));
+        app.test_vim_key(KeyPress::char('V'));
+
+        app.format_selection();
+
+        assert_eq!(app.open().buffer.text(), "if {1} {\n    puts a\nputs b\n}");
+        assert_eq!(app.vim.mode(), Mode::Normal);
     }
 
     // -- `gcc`/`gc{motion}` (comment toggling) ---------------------------

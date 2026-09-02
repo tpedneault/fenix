@@ -2099,8 +2099,8 @@ impl VimState {
                     let anchor_cursor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
                     let (anchor_line, _) = buffer.line_col(&anchor_cursor);
                     let (cursor_line, _) = buffer.line_col(cursor);
-                    let (line_lo, line_hi) =
-                        if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
+                    let anchor_was_top = anchor_line <= cursor_line;
+                    let (line_lo, line_hi) = if anchor_was_top { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
                     for l in line_lo..=line_hi {
                         if *action == VisualAction::Indent {
                             indent::indent_line(buffer, cursor, l, self.indent_width);
@@ -2108,10 +2108,38 @@ impl VimState {
                             indent::dedent_line(buffer, cursor, l, self.indent_width);
                         }
                     }
-                    cursor.char_idx = motion::line_first_non_blank(buffer, line_lo);
+                    // Real Vim's own `>`/`<` drop straight back to Normal
+                    // mode after one shift -- surprising enough in
+                    // practice (a repeated `>>` habit from Normal mode
+                    // lands its second press on a bare, incomplete `>`
+                    // that does nothing) that most real Vim configs remap
+                    // `>`/`<` to `>gv`/`<gv`: reselect the same range
+                    // immediately after shifting it, so pressing the key
+                    // again stacks another level with the selection
+                    // staying visibly highlighted throughout. Built in
+                    // here rather than left as the vanilla default.
+                    //
+                    // Indenting only ever changes a line's *leading*
+                    // whitespace, never which lines exist, so the
+                    // reselect doesn't need real Vim's saved `'<`/`'>`
+                    // marks to reconstruct the range -- `line_lo`/
+                    // `line_hi` are still exactly the right line numbers;
+                    // only their fresh first-non-blank char offsets need
+                    // recomputing; anchor and cursor swap back onto
+                    // whichever end they started on, so a second press
+                    // keeps extending the same direction rather than
+                    // flipping.
+                    let lo_first_non_blank = motion::line_first_non_blank(buffer, line_lo);
+                    let hi_first_non_blank = motion::line_first_non_blank(buffer, line_hi);
+                    let (new_anchor, new_cursor) = if anchor_was_top {
+                        (lo_first_non_blank, hi_first_non_blank)
+                    } else {
+                        (hi_first_non_blank, lo_first_non_blank)
+                    };
+                    self.visual_anchor = new_anchor;
+                    cursor.char_idx = new_cursor;
                     let (_, col) = buffer.line_col(cursor);
                     cursor.sticky_col = col;
-                    self.mode = Mode::Normal;
                 }
                 VisualAction::BlockInsertLeft => {
                     if self.visual_kind == VisualKind::Block {
@@ -3779,6 +3807,72 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "v");
         keys(&mut vim, &mut b, &mut c, ">");
         assert_eq!(b.text(), "one\n    two\nthree");
+        // `>`/`<` reselect the same range afterward (see the Indent/
+        // Dedent arm's own doc comment) rather than dropping to Normal
+        // mode the way real vanilla Vim's does.
+        assert_eq!(vim.mode(), Mode::Visual);
+    }
+
+    #[test]
+    fn visual_indent_stacks_with_a_second_press_because_the_selection_stays_active() {
+        // The actual bug report this fixes: pressing `>` twice out of
+        // Normal-mode `>>` habit used to indent once and then silently
+        // swallow the second press (real Vim's own vanilla behavior --
+        // `>` alone exits Visual mode, so the second `>` just starts an
+        // incomplete Normal-mode `>_` sequence). Reselecting after the
+        // first shift means the second press lands on the same trie
+        // entry again instead.
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "j");
+        keys(&mut vim, &mut b, &mut c, ">");
+        keys(&mut vim, &mut b, &mut c, ">");
+        assert_eq!(b.text(), "        one\n        two\nthree\nfour");
+        assert_eq!(vim.mode(), Mode::Visual);
+    }
+
+    #[test]
+    fn visual_dedent_also_stacks_with_a_second_press() {
+        let mut b = buf("            one\n            two\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "j");
+        keys(&mut vim, &mut b, &mut c, "<");
+        keys(&mut vim, &mut b, &mut c, "<");
+        assert_eq!(b.text(), "    one\n    two\nthree");
+    }
+
+    #[test]
+    fn visual_indent_reselect_preserves_which_end_the_anchor_was_on() {
+        // Selection made bottom-to-top (anchor on the later line) --
+        // the reselect after a shift must keep the anchor on that same
+        // later line, not silently flip the selection's direction.
+        let mut b = buf("one\ntwo\nthree");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 }; // start of "two"
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "k"); // move up to "one" -- anchor ("two") is now below the cursor
+        keys(&mut vim, &mut b, &mut c, ">");
+        // A further "jj" from here should extend onto "three" while
+        // leaving "one" alone -- only sensible if the anchor really
+        // did stay on "two" rather than jumping to "one".
+        keys(&mut vim, &mut b, &mut c, "jj");
+        keys(&mut vim, &mut b, &mut c, ">");
+        assert_eq!(b.text(), "    one\n        two\n    three");
+    }
+
+    #[test]
+    fn escape_still_exits_visual_mode_after_an_indent() {
+        let mut b = buf("one\ntwo");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, ">");
+        assert_eq!(vim.mode(), Mode::Visual);
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
         assert_eq!(vim.mode(), Mode::Normal);
     }
 

@@ -155,8 +155,16 @@ impl CommandRegistry {
             "Refresh Tcl completion tags (re-scans the project with ctags)",
             cmd_completion_refresh_tags,
         );
-        registry.register("code.format_selection", "Format the active Visual selection", cmd_format_selection);
-        registry.register("code.format_buffer", "Format the whole focused buffer", cmd_format_buffer);
+        registry.register(
+            "code.format_selection",
+            "Reindent the active Visual selection structurally, language-independent (Emacs' indent-region)",
+            cmd_format_selection,
+        );
+        registry.register(
+            "code.format_buffer",
+            "Reindent the whole focused buffer structurally, language-independent (Emacs' indent-region)",
+            cmd_format_buffer,
+        );
         registry.register(
             "code.symbols",
             "Fuzzy-find a Tcl definition by its fully-qualified name and jump to it",

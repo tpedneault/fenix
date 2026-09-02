@@ -51,7 +51,7 @@ for anyone curious to poke around or build on it.
   jump-only.
 - **`SPC`-leader menu** with a live which-key popup showing available
   continuations as you type a sequence -- reachable from Visual mode as
-  well as Normal, so e.g. `SPC c f` (format the selection) can act on an
+  well as Normal, so e.g. `SPC c f` (indent the selection) can act on an
   active selection without leaving it first.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, Bash, Tcl, Dockerfile/
@@ -289,13 +289,16 @@ for anyone curious to poke around or build on it.
   sourced from the same [Universal Ctags](https://ctags.io/) scan
   autocompletion draws on -- confirming a selection opens the file it's
   defined in (if not already open) and jumps straight to that line.
-- **Formatting**: `SPC c f` formats the active Visual selection, `SPC c
-  F` the whole buffer, by shelling out to an external formatter for the
-  buffer's language -- currently just Tcl, via
-  [`tclfmt`](https://github.com/nmoroze/tclint) (see
-  [Optional external tools](#optional-external-tools)). `SPC` reaches
-  the leader menu from Visual mode as well as Normal for this reason, so
-  `SPC c f` can act on a selection without leaving it first.
+- **Indent region**: `SPC c f` reindents the active Visual selection,
+  `SPC c F` the whole buffer -- structurally, from `{`/`(`/`[` nesting
+  depth (Emacs' own `indent-region`, real Vim's `=` operator), not by
+  shelling out to a per-language external tool. Works on any buffer
+  regardless of detected language; when one *is* detected, a fresh
+  syntax parse excludes every string/comment span from the bracket scan
+  so a stray brace inside a string or comment can't throw off the
+  result. `SPC` reaches the leader menu from Visual mode as well as
+  Normal for this reason, so `SPC c f` can act on a selection without
+  leaving it first.
 - **SCOS-2000 MIB** (`SPC m ...`): fuzzy-find and inspect telecommands
   (`SPC m t`), TM packets (`SPC m k`), TM parameters (`SPC m p`), and
   calibration definitions (`SPC m c`, numeric curves/status
@@ -377,10 +380,6 @@ and degrade gracefully (never a hard error) if they're not:
   non-zero, or produces output this parser doesn't recognize, the
   reason is logged to stderr rather than just silently yielding no
   definitions — check the terminal Fenix was launched from.
-- [`tclfmt`](https://github.com/nmoroze/tclint) (part of the `tclint`
-  project — `pip install tclint`) — formatting Tcl buffers/selections
-  (`SPC c f`/`SPC c F`). Without it on `PATH`, those keys are a no-op
-  (logged to stderr) instead of a hard error.
 - [`docker`](https://docs.docker.com/engine/) or [`podman`](https://podman.io/)
   — the Docker panel (`SPC d d`). Fenix probes `docker` first and falls
   back to `podman` if `docker` isn't runnable (auto-detected once per
@@ -481,8 +480,8 @@ popup shows what keys continue it.
 | `h` / `l`, `Left` / `Right` | Pan sideways while the page is wider than the pane (PDF panes only) |
 | `+` / `-` / `0` / `w` / `/` | Zoom in / out, fit page, fit width, search (PDF panes only) |
 | `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
-| `SPC c f` | Format the active Visual selection |
-| `SPC c F` | Format the whole focused buffer |
+| `SPC c f` | Indent region -- reindent the active Visual selection structurally |
+| `SPC c F` | Indent region -- reindent the whole focused buffer structurally |
 | `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC m i` | Build and insert a telecommand from the MIB |
 | `SPC m t` | Fuzzy-find a MIB telecommand and view its details |
@@ -944,7 +943,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-picker` | Generic fuzzy matching + live-filtered candidate list, used by every fuzzy-finder |
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
 | `fenix-completion` | Completion sources: Tcl keywords, ctags-scanned definitions, external symbols file |
-| `fenix-format` | External formatter shelling (`tclfmt` for Tcl today) — `SPC c f`/`SPC c F` |
+| `fenix-format` | Structural, language-independent reindentation (bracket-nesting depth) — `SPC c f`/`SPC c F` |
 | `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` |
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
