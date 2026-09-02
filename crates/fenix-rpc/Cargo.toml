@@ -1,0 +1,6 @@
+[package]
+name = "fenix-rpc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
