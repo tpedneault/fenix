@@ -11,6 +11,83 @@
 
 use std::io::{self, BufRead, Write};
 
+/// On Windows, `std::process::Command::new` only launches a bare program
+/// name via `CreateProcess`'s own loader, which -- unlike a real shell --
+/// never consults `PATHEXT`. A server/adapter installed as an npm-style
+/// `.cmd` shim (`typescript-language-server`, `bash-language-server`,
+/// ... -- extremely common for JS-ecosystem tooling) fails to spawn at
+/// all with a bare "program not found" this way, even though a terminal
+/// launches the exact same bare name fine. Fixed by searching `PATH` the
+/// same way `cmd.exe` would -- every directory, every extension
+/// `PATHEXT` lists (falling back to the common default if unset) -- and
+/// handing `Command` the resolved full path instead, which Rust's own
+/// Windows `Command` implementation already knows how to run correctly,
+/// `.cmd`/`.bat` script included (internally via `cmd.exe /c`,
+/// transparent to the caller). Shared by `fenix-lsp` and `fenix-dap`
+/// (both spawn a child process by a possibly-bare command name the same
+/// way) rather than duplicated -- this bug class has nothing to do with
+/// LSP or DAP specifically, it's purely a Windows process-spawning gap.
+///
+/// A command that's already a specific path (has an extension, or
+/// contains a path separator) is returned unchanged -- nothing to
+/// resolve, and forcing it through this search would only risk *not*
+/// finding the exact file the caller named. A no-op on every other
+/// platform: Unix has no such gap, since a script's shebang line makes
+/// it directly executable with no shell involved either way.
+#[cfg(windows)]
+pub fn resolve_command(command: &str) -> String {
+    if std::path::Path::new(command).extension().is_some() || command.contains(['/', '\\']) {
+        return command.to_string();
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let extensions: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let Some(path_var) = std::env::var_os("PATH") else { return command.to_string() };
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    command.to_string() // not found anywhere -- let Command::new's own error surface as usual
+}
+
+#[cfg(not(windows))]
+pub fn resolve_command(command: &str) -> String {
+    command.to_string()
+}
+
+/// Strips Windows' `\\?\` "verbatim" prefix, if present -- `std::fs::
+/// canonicalize` always adds it (`C:\Users\...` canonicalizes to
+/// `\\?\C:\Users\...`), but it's a Windows API implementation detail
+/// (opts out of the usual 260-character path length limit and any
+/// further normalization) that has no place in a URI, a DAP `Source`
+/// path, or whatever path representation the rest of an app compares/
+/// hashes against -- a server/adapter would never send it back, so a
+/// caller that canonicalizes a path on one side of a comparison and not
+/// the other (or takes this prefix along unstripped into a message a
+/// protocol peer has to match against its own idea of "this file") gets
+/// two representations of the same file that don't match. Confirmed
+/// live on both sides this crate serves: `fenix-lsp`'s `path_to_uri`
+/// (a malformed `file:////?/C:/...` URI broke diagnostics path-
+/// matching) and `fenix-dap`'s own breakpoint `Source.path` (`debugpy`
+/// silently never matched a breakpoint registered under the verbatim-
+/// prefixed form against the plain-form path it reports for a running
+/// frame -- the breakpoint looked "verified" in the `setBreakpoints`
+/// response but was never actually hit). A no-op on every other
+/// platform (and on a Windows path that was never canonicalized in the
+/// first place).
+pub fn normalize(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str() {
+        Some(s) => match s.strip_prefix(r"\\?\") {
+            Some(stripped) => std::path::PathBuf::from(stripped),
+            None => path,
+        },
+        None => path,
+    }
+}
+
 /// Reads one framed message from `reader`, returning its raw body bytes
 /// (not parsed -- see this module's own doc comment for why).
 ///
@@ -69,6 +146,44 @@ pub fn write_message<W: Write>(writer: &mut W, body: &[u8]) -> io::Result<()> {
     write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
     writer.write_all(body)?;
     writer.flush()
+}
+
+#[cfg(all(test, windows))]
+mod resolve_command_tests {
+    use super::resolve_command;
+
+    #[test]
+    fn a_command_that_already_names_an_extension_is_returned_unchanged() {
+        assert_eq!(resolve_command("pyright-langserver.exe"), "pyright-langserver.exe");
+        assert_eq!(resolve_command("some-tool.cmd"), "some-tool.cmd");
+    }
+
+    #[test]
+    fn a_command_that_is_already_a_path_is_returned_unchanged() {
+        assert_eq!(resolve_command("C:\\tools\\clangd"), "C:\\tools\\clangd");
+        assert_eq!(resolve_command("./bin/clangd"), "./bin/clangd");
+    }
+
+    #[test]
+    fn a_bare_name_found_nowhere_on_path_falls_back_to_itself() {
+        assert_eq!(resolve_command("definitely-not-a-real-lsp-server-binary-xyz"), "definitely-not-a-real-lsp-server-binary-xyz");
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        assert_eq!(normalize(PathBuf::from(r"\\?\C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
+    }
+
+    #[test]
+    fn is_a_no_op_on_a_path_with_no_verbatim_prefix() {
+        assert_eq!(normalize(PathBuf::from(r"C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
+    }
 }
 
 #[cfg(test)]

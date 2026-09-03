@@ -91,6 +91,13 @@ impl CommandRegistry {
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
+        registry.register("debug.start_or_continue", "Start a debug session, or continue one that's stopped", cmd_debug_start_or_continue);
+        registry.register("debug.toggle_breakpoint", "Toggle a breakpoint on the focused buffer's current line", cmd_debug_toggle_breakpoint);
+        registry.register("debug.step_over", "Step over the current line", cmd_debug_step_over);
+        registry.register("debug.step_into", "Step into the current call", cmd_debug_step_into);
+        registry.register("debug.step_out", "Step out of the current function", cmd_debug_step_out);
+        registry.register("debug.add_watch", "Watch the identifier before the cursor", cmd_debug_add_watch);
+        registry.register("debug.stop", "End the running debug session", cmd_debug_stop);
         registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
         registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
@@ -370,6 +377,34 @@ fn cmd_docker_build(ctx: &mut CommandCtx) {
 
 fn cmd_docker_close(ctx: &mut CommandCtx) {
     ctx.app.docker_session_close();
+}
+
+fn cmd_debug_start_or_continue(ctx: &mut CommandCtx) {
+    ctx.app.debug_start_or_continue();
+}
+
+fn cmd_debug_toggle_breakpoint(ctx: &mut CommandCtx) {
+    ctx.app.debug_toggle_breakpoint();
+}
+
+fn cmd_debug_step_over(ctx: &mut CommandCtx) {
+    ctx.app.debug_step_over();
+}
+
+fn cmd_debug_step_into(ctx: &mut CommandCtx) {
+    ctx.app.debug_step_into();
+}
+
+fn cmd_debug_step_out(ctx: &mut CommandCtx) {
+    ctx.app.debug_step_out();
+}
+
+fn cmd_debug_add_watch(ctx: &mut CommandCtx) {
+    ctx.app.debug_add_watch();
+}
+
+fn cmd_debug_stop(ctx: &mut CommandCtx) {
+    ctx.app.debug_stop();
 }
 
 fn cmd_vnc_open(ctx: &mut CommandCtx) {

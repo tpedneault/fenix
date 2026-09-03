@@ -485,6 +485,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "debug-adapter-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "965f309ee9629e4d96d50bf70f1d77e3ccc110a7abc9f1198b4db93d63bfa27a"
+dependencies = [
+ "serde",
+ "serde_json",
+ "typed-builder",
+]
+
+[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,6 +661,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-dap"
+version = "0.0.1"
+dependencies = [
+ "debug-adapter-protocol",
+ "fenix-rpc",
+ "serde_json",
+]
+
+[[package]]
 name = "fenix-docker"
 version = "0.0.1"
 dependencies = [
@@ -684,6 +704,7 @@ dependencies = [
  "fenix-completion",
  "fenix-config",
  "fenix-core",
+ "fenix-dap",
  "fenix-docker",
  "fenix-explorer",
  "fenix-format",
@@ -2932,6 +2953,17 @@ dependencies = [
 
 [[package]]
 name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
@@ -3387,6 +3419,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "typed-builder"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6179333b981641242a768f30f371c9baccbfcc03749627000c500ab88bf4528b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
 ]
 
 [[package]]

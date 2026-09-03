@@ -175,6 +175,28 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('b')], "build image", "docker.build");
         t.insert(&[spc, KeyPress::char('d'), KeyPress::char('q')], "close docker panel", "docker.close");
 
+        // DAP debugger. `SPC d` is already Docker's own group (Doom
+        // Emacs' own convention for debugging), so this nests under
+        // `SPC u` instead -- the one letter in "debUg" not already
+        // claimed by another top-level group (d=docker, e=explorer,
+        // b=buffer, g=git are all taken).
+        t.label_group(&[spc, KeyPress::char('u')], "debug");
+        t.insert(
+            &[spc, KeyPress::char('u'), KeyPress::char('u')],
+            "start/continue",
+            "debug.start_or_continue",
+        );
+        t.insert(
+            &[spc, KeyPress::char('u'), KeyPress::char('b')],
+            "toggle breakpoint",
+            "debug.toggle_breakpoint",
+        );
+        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('n')], "step over", "debug.step_over");
+        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('i')], "step into", "debug.step_into");
+        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('o')], "step out", "debug.step_out");
+        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('w')], "add watch", "debug.add_watch");
+        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('q')], "stop", "debug.stop");
+
         // Lazygit-style Git panel.
         t.label_group(&[spc, KeyPress::char('g')], "git");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");

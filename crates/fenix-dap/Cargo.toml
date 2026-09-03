@@ -1,0 +1,11 @@
+[package]
+name = "fenix-dap"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+debug-adapter-protocol = "0.1.0"
+fenix-rpc = { path = "../fenix-rpc" }
+serde_json = "1"
+
+[dev-dependencies]

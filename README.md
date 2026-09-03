@@ -366,6 +366,26 @@ for anyone curious to poke around or build on it.
   JSON -- every other tool's plain `file:line:col: message` convention
   (gcc/clang/`pytest`/`ctest`) is recovered the same way without
   needing `--message-format=json` at all.
+- **Debugger (DAP)**: `SPC u u` starts a real Debug Adapter Protocol
+  session for the focused buffer (Python via
+  [`debugpy`](https://github.com/microsoft/debugpy)'s
+  `python -m debugpy.adapter` -- `pip install debugpy` is the only setup
+  needed; other languages have no built-in adapter yet, same "detect +
+  guide, no wrong guesses" posture `lsp::default_server_command` already
+  has), or continues one that's stopped at a breakpoint. `SPC u b`
+  toggles a breakpoint on the current line (persists across
+  buffers/sessions, resent live if a session is already running);
+  `SPC u n`/`SPC u i`/`SPC u o` step over/into/out; `SPC u w` watches
+  the identifier before the cursor; `SPC u q` ends the session. A
+  four-pane Call Stack/Variables/Watches/Breakpoints panel (mirroring
+  the Docker panel's own multi-pane shape) updates on every stop, and
+  stopping moves the cursor straight to the current line -- opening the
+  file in a fresh split if it wasn't already showing somewhere, without
+  ever displacing whatever the debug panel's own panes are showing. A
+  project's own launch target -- required for anything that isn't "the
+  script I have open" -- comes from `.fenix/project.ini`'s `[launch]`
+  section (`program`/`args`, the same per-project config file `[tasks]`
+  above already introduced).
 - **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -531,6 +551,11 @@ popup shows what keys continue it.
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |
+| `SPC u u` | Start a debug session, or continue one that's stopped |
+| `SPC u b` | Toggle a breakpoint on the focused buffer's current line |
+| `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |
+| `SPC u w` | Watch the identifier before the cursor |
+| `SPC u q` | End the running debug session |
 | `SPC s s` | Fuzzy-find a line in the current buffer |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |

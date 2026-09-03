@@ -9,26 +9,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Strips Windows' `\\?\` "verbatim" prefix, if present -- `std::fs::
-/// canonicalize` always adds it (`C:\Users\...` canonicalizes to
-/// `\\?\C:\Users\...`), but it's a Windows API implementation detail
-/// (opts out of the usual 260-character path length limit and any
-/// further normalization) that has no place in a URI or in whatever
-/// path representation the rest of this app compares/hashes against --
-/// a server would never send it back, so a caller that canonicalizes a
-/// path on one side of a comparison and not the other (or takes this
-/// prefix along into a URI unstripped) gets two representations of the
-/// same file that don't match. A no-op on every other platform (and on
-/// a Windows path that was never canonicalized in the first place).
-pub fn normalize(path: PathBuf) -> PathBuf {
-    match path.to_str() {
-        Some(s) => match s.strip_prefix(r"\\?\") {
-            Some(stripped) => PathBuf::from(stripped),
-            None => path,
-        },
-        None => path,
-    }
-}
+/// Strips Windows' `\\?\` "verbatim" prefix -- moved to `fenix_rpc`
+/// (see its own doc comment) once `fenix-dap`'s breakpoint `Source`
+/// paths turned out to need the exact same fix as this crate's own
+/// `path_to_uri`: this is a shared "talking to a protocol peer about a
+/// filesystem path" concern, not an LSP-specific one. Re-exported here
+/// so every existing call site in this crate (and in `fenix-gui`, which
+/// calls it as `fenix_lsp::normalize`) keeps working unchanged.
+pub use fenix_rpc::normalize;
 
 /// Converts an absolute filesystem path to a `file://` URI. Returns
 /// `None` if `path` isn't absolute -- a server needs an unambiguous
@@ -128,15 +116,8 @@ fn percent_decode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn normalize_strips_windows_verbatim_prefix() {
-        assert_eq!(normalize(PathBuf::from(r"\\?\C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
-    }
-
-    #[test]
-    fn normalize_is_a_no_op_on_a_path_with_no_verbatim_prefix() {
-        assert_eq!(normalize(PathBuf::from(r"C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
-    }
+    // `normalize`'s own tests now live in `fenix_rpc` (see its own doc
+    // comment for why it moved there).
 
     #[cfg(windows)]
     #[test]

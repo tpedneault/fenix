@@ -82,6 +82,12 @@ pub enum BufferKind {
     /// in" shape as `Docker`'s own Logs pane, just a single pane rather
     /// than a whole six-pane session (see `fenix-gui`'s `TaskSession`).
     TaskOutput,
+    /// The DAP debug session's Call Stack/Variables/Watches/Breakpoints
+    /// panel (`SPC u u`) -- same "real buffer, just tagged" shape as
+    /// `Docker`, all four panes sharing this one kind exactly the way
+    /// Docker's six panes all share `BufferKind::Docker` (see `fenix-
+    /// gui`'s `DebugSession`/`DebugPaneRole`).
+    Debug,
 }
 
 impl BufferKind {
@@ -201,6 +207,12 @@ impl BufferList {
     /// `open_git`/`open_jira`'s panels do.
     pub fn open_task_output(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::TaskOutput)
+    }
+
+    /// A real buffer seeded with `text` and tagged `Debug` -- `SPC u u`.
+    /// Same "real buffer, just tagged" shape as `open_docker`.
+    pub fn open_debug(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Debug)
     }
 
     /// A real buffer seeded with `text` (a rendered status/files/branches/

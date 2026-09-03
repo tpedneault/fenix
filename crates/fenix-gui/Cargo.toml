@@ -17,6 +17,7 @@ fenix-buffers = { path = "../fenix-buffers" }
 fenix-completion = { path = "../fenix-completion" }
 fenix-config = { path = "../fenix-config" }
 fenix-core = { path = "../fenix-core" }
+fenix-dap = { path = "../fenix-dap" }
 fenix-docker = { path = "../fenix-docker" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-format = { path = "../fenix-format" }

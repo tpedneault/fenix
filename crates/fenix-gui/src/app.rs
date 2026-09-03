@@ -543,6 +543,170 @@ impl Drop for TaskRunner {
     }
 }
 
+/// The active DAP debug session (`SPC u u`), if any -- four fixed panes
+/// (Call Stack / Variables / Watches / Breakpoints) in their own
+/// workspace, all sharing `BufferKind::Debug` the way `DockerSession`'s
+/// six panes all share `BufferKind::Docker` (role tracked here, not as
+/// separate `BufferKind` variants -- same reasoning `DockerSession`'s
+/// own doc comment gives). Unlike Docker/Git/Jira there's no periodic
+/// poller: every pane is re-rendered directly from a `stopped`/
+/// `continued`/`terminated` event or a request's own response landing,
+/// which happen exactly when there's something new to show.
+struct DebugSession {
+    workspace_index: usize,
+    call_stack_pane: fenix_window::WindowId,
+    variables_pane: fenix_window::WindowId,
+    watches_pane: fenix_window::WindowId,
+    breakpoints_pane: fenix_window::WindowId,
+    call_stack_buffer: BufferId,
+    variables_buffer: BufferId,
+    watches_buffer: BufferId,
+    breakpoints_buffer: BufferId,
+    client: fenix_dap::DapClient,
+    /// `None` when opened without a real `event_proxy` (every test) --
+    /// same posture as `VncSession::reader`/`LspSession::reader`. Held
+    /// only for its `Drop` side effect once set.
+    #[allow(dead_code)]
+    reader: Option<DapReader>,
+    /// What each still-outstanding request this app sent is actually
+    /// *for*, keyed by the `seq` `DapClient::request` returned -- same
+    /// role as `LspSession::pending`.
+    pending: HashMap<i64, PendingDapRequest>,
+    /// The project root this session was launched from -- not read
+    /// anywhere yet (every path in play, `program` included, is
+    /// already absolute), kept for the same forward-looking reason as
+    /// `LspSession::root`: real future work here (multi-file breakpoint
+    /// resolution against relative adapter-reported paths, a restart
+    /// that re-reads `.fenix/project.ini`) will need it.
+    #[allow(dead_code)]
+    root: PathBuf,
+    program: PathBuf,
+    /// Set once the adapter's `initialized` event has arrived -- gates
+    /// sending `setBreakpoints`/`configurationDone`, which per spec
+    /// can't go out before that (the adapter isn't necessarily ready to
+    /// receive them until then, even though the `launch`/`attach`
+    /// request that triggers it was already sent).
+    initialized: bool,
+    /// `Some(thread_id)` while stopped at a breakpoint/step/pause;
+    /// `None` while running -- what `SPC u u`'s own dual role (start a
+    /// session vs. continue an existing one) and the stepping actions
+    /// key off.
+    stopped_thread: Option<i32>,
+    /// The current top stack frame's id once a `stackTrace` response
+    /// has landed while stopped -- what `scopes`/`evaluate` (Watches)
+    /// requests are issued against.
+    current_frame_id: Option<i32>,
+    /// One `(function name, file, 1-indexed line)` per frame in the
+    /// last `stackTrace` response, top frame first -- what the Call
+    /// Stack pane renders, and what `goto_debug_location` uses to move
+    /// the cursor to the top frame's own location.
+    call_stack: Vec<(String, PathBuf, usize)>,
+    /// One `(scope name, [(variable name, value), ...])` per scope in
+    /// the last completed round of `variables` responses -- accumulated
+    /// across however many scopes `scopes` returned (`pending_scopes`
+    /// tracks how many are still outstanding) so the Variables pane
+    /// renders once with everything, not once per scope with visibly
+    /// partial content.
+    variables: Vec<(String, Vec<(String, String)>)>,
+    /// How many `variables` responses are still outstanding for the
+    /// current stop -- see `variables`'s own doc comment.
+    pending_scopes: usize,
+    /// Watched expressions, in the order `SPC u w` added them --
+    /// re-evaluated (`evaluate` request) after every stop.
+    watches: Vec<String>,
+    /// The last evaluated value for each of `watches`, keyed by the
+    /// expression text itself -- `None` (rendered as `<not evaluated>`)
+    /// until the first `evaluate` response for it lands, e.g. because
+    /// the program hasn't stopped yet since it was added.
+    watch_values: HashMap<String, String>,
+}
+
+/// What an in-flight DAP request was for -- see `DebugSession::pending`'s
+/// own doc comment. Only requests whose *response* needs its own
+/// handling get a variant here -- `continue`/`next`/`stepIn`/`stepOut`/
+/// `pause` don't (the state change they cause arrives via a `stopped`/
+/// `continued` *event* instead, not their own response, which is just a
+/// bare acknowledgement).
+#[derive(Debug, Clone)]
+enum PendingDapRequest {
+    Initialize,
+    Launch,
+    SetBreakpoints,
+    StackTrace,
+    Scopes,
+    Variables { scope_name: String },
+    Evaluate { expression: String },
+}
+
+/// The Call Stack pane's content -- one `name  file:line` row per frame
+/// (top first), or a placeholder while running/before the first stop.
+fn render_call_stack_text(session: &DebugSession) -> String {
+    if session.stopped_thread.is_none() {
+        return "(running)\n".to_string();
+    }
+    if session.call_stack.is_empty() {
+        return "(no stack)\n".to_string();
+    }
+    let mut out = String::new();
+    for (name, path, line) in &session.call_stack {
+        if path.as_os_str().is_empty() {
+            out.push_str(&format!("{name}\n"));
+        } else {
+            out.push_str(&format!("{name}  {}:{line}\n", path.display()));
+        }
+    }
+    out
+}
+
+/// The Variables pane's content -- one `scope:` header per scope
+/// (Locals, Globals, ...) with its own `  name = value` rows indented
+/// under it.
+fn render_variables_text(session: &DebugSession) -> String {
+    if session.variables.is_empty() {
+        return "(no variables)\n".to_string();
+    }
+    let mut out = String::new();
+    for (scope, vars) in &session.variables {
+        out.push_str(&format!("{scope}:\n"));
+        for (name, value) in vars {
+            out.push_str(&format!("  {name} = {value}\n"));
+        }
+    }
+    out
+}
+
+/// The Watches pane's content -- one `expression = value` row per
+/// watch, in the order `SPC u w` added them.
+fn render_watches_text(session: &DebugSession) -> String {
+    if session.watches.is_empty() {
+        return "(no watches -- SPC u w adds the identifier before the cursor)\n".to_string();
+    }
+    let mut out = String::new();
+    for expr in &session.watches {
+        let value = session.watch_values.get(expr).map(String::as_str).unwrap_or("<not evaluated>");
+        out.push_str(&format!("{expr} = {value}\n"));
+    }
+    out
+}
+
+/// The Breakpoints pane's content -- one `file:line` row per configured
+/// breakpoint, file paths sorted so the listing is stable across
+/// refreshes rather than reflecting `HashMap` iteration order.
+fn render_breakpoints_text(breakpoints: &HashMap<PathBuf, std::collections::BTreeSet<usize>>) -> String {
+    let mut paths: Vec<&PathBuf> = breakpoints.iter().filter(|(_, lines)| !lines.is_empty()).map(|(p, _)| p).collect();
+    if paths.is_empty() {
+        return "(no breakpoints -- SPC u b toggles one on the current line)\n".to_string();
+    }
+    paths.sort();
+    let mut out = String::new();
+    for path in paths {
+        for line in &breakpoints[path] {
+            out.push_str(&format!("{}:{line}\n", path.display()));
+        }
+    }
+    out
+}
+
 /// Streams raw PTY output bytes for the terminal panel's shell into
 /// `FenixUserEvent::TerminalOutput` -- same "background thread, stopped
 /// via a kill that unblocks its blocking read" shape as `DockerLog
@@ -1157,6 +1321,51 @@ impl Drop for LspReader {
     }
 }
 
+/// Forwards a `fenix_dap::DapClient`'s event stream into
+/// `FenixUserEvent::Dap` -- identical shape and reasoning to
+/// `LspReader`, just for a debug session instead of a language server
+/// (there's only ever one live debug session at a time, unlike LSP's
+/// per-language map, so this carries no extra key the way `LspReader`
+/// carries `language`).
+struct DapReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DapReader {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_dap::DapEvent>, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let handle = std::thread::spawn(move || loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match receiver.recv() {
+                Ok(event) => {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let disconnected = matches!(event, fenix_dap::DapEvent::Disconnected(_));
+                    if !send(FenixUserEvent::Dap(event)) || disconnected {
+                        return;
+                    }
+                }
+                Err(_) => return, // the DapClient side hung up -- session closed/dropped
+            }
+        });
+        Self { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for DapReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Which of a `DockerSession`'s six panes is currently focused, if
 /// any -- what `App::handle_key`'s Docker action-key routing and
 /// `docker_sync_details` key off.
@@ -1473,6 +1682,11 @@ pub enum FenixUserEvent {
     /// events from a slow-to-answer one can arrive well after focus
     /// moved to a different language's buffer.
     Lsp { language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent },
+    /// One decoded event from the active debug session's adapter
+    /// connection, from `DapReader` -- only one debug session is ever
+    /// live at a time (unlike LSP's per-language map), so this carries
+    /// no extra key.
+    Dap(fenix_dap::DapEvent),
     /// A fresh `docker stats --no-stream` snapshot, from the active
     /// Docker session's background poller.
     StatsReady(Vec<fenix_docker::ContainerStat>),
@@ -3697,6 +3911,7 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::PdfOutline
             | BufferKind::PdfSearchResults
             | BufferKind::TaskOutput
+            | BufferKind::Debug
     )
 }
 
@@ -4170,6 +4385,19 @@ pub struct App {
     /// picker. `None` until a task has actually been run at least once
     /// this session.
     last_task: Option<(fenix_tasks::TaskDef, PathBuf)>,
+    /// The active DAP debug session (`SPC u u`), if any -- see
+    /// `DebugSession`'s own doc comment.
+    debug_session: Option<DebugSession>,
+    /// Configured breakpoints, by canonicalized file path -> the set of
+    /// 1-indexed lines (DAP's own convention, matching `fenix_project::
+    /// grep::GrepMatch`'s) with a breakpoint on them -- persists across
+    /// buffers being closed/reopened and across debug sessions
+    /// (deliberately *not* cleared when a session ends), the same way a
+    /// real debugger's breakpoints outlive any one run. Sent to the
+    /// adapter as a whole-file `setBreakpoints` list (per DAP spec, one
+    /// call replaces every breakpoint in that file, so this is always
+    /// the full source of truth, never a delta).
+    breakpoints: HashMap<PathBuf, std::collections::BTreeSet<usize>>,
     /// Per-line metadata for every real `BufferKind::Git` buffer
     /// currently open (`SPC g g`) -- mirrors `docker_lines` exactly.
     git_lines: HashMap<BufferId, Vec<Option<git_panel::GitLine>>>,
@@ -4910,6 +5138,8 @@ impl App {
             docker_session: None,
             task_session: None,
             last_task: None,
+            debug_session: None,
+            breakpoints: HashMap::new(),
             git_lines: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
@@ -5519,6 +5749,9 @@ impl App {
             || self.git_focused_role().is_some()
             || self.jira_focused_role().is_some()
             || self.task_session.as_ref().is_some_and(|s| s.pane == focused)
+            || self.debug_session.as_ref().is_some_and(|s| {
+                focused == s.call_stack_pane || focused == s.variables_pane || focused == s.watches_pane || focused == s.breakpoints_pane
+            })
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -10849,6 +11082,510 @@ impl App {
         }
     }
 
+    /// `SPC u u` -- starts a debug session for the focused buffer's
+    /// language if none is running yet; sends `continue` if one is
+    /// already stopped at a breakpoint/step; a no-op (with a message)
+    /// if one is running but not currently stopped (nothing useful to
+    /// do -- it's already going).
+    pub(crate) fn debug_start_or_continue(&mut self) {
+        if let Some(session) = &self.debug_session {
+            let Some(thread_id) = session.stopped_thread else {
+                // Already running -- nothing to continue, but still
+                // worth taking the user back to the panel if they'd
+                // navigated away from it (the same "reopen refocuses
+                // the existing session" courtesy `open_docker_panel`
+                // already gives Docker's own panel).
+                let (workspace_index, pane) = (session.workspace_index, session.call_stack_pane);
+                self.workspaces.switch_to_index(workspace_index);
+                self.windows_mut().focus(pane);
+                self.set_error("debug session is already running".to_string());
+                return;
+            };
+            self.send_debug_step(fenix_dap::requests::Request::Continue(fenix_dap::requests::ContinueRequestArguments::builder().thread_id(thread_id).build()));
+            return;
+        }
+
+        let Some(language) = self.focused_language() else {
+            self.set_error("no recognized language for the focused buffer".to_string());
+            return;
+        };
+        let Some((command, adapter_args)) = crate::dap::default_adapter_command(language) else {
+            self.set_error(format!("no known debug adapter for {language:?}"));
+            return;
+        };
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let launch = fenix_dap::read_launch_config(&root);
+        let program = match launch.program {
+            Some(p) => p,
+            None => match self.open().buffer.path() {
+                Some(p) => p.to_path_buf(),
+                None => {
+                    self.set_error("no file to debug -- open one, or set [launch] program in .fenix/project.ini".to_string());
+                    return;
+                }
+            },
+        };
+
+        let (client, rx) = match fenix_dap::DapClient::spawn(&command, &adapter_args, &root) {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.set_error(format!("couldn't start debug adapter `{command}`: {err}"));
+                return;
+            }
+        };
+        let reader = self.event_proxy.clone().map(|proxy| DapReader::spawn(rx, move |event| proxy.send_event(event).is_ok()));
+
+        let header = format!("$ {command} {}\n(starting {language:?} debug session for {})\n", adapter_args.join(" "), program.display());
+        let call_stack_buffer = self.buffers.open_debug(&header);
+        let variables_buffer = self.buffers.open_debug("(no variables)\n");
+        let watches_buffer = self.buffers.open_debug("(no watches -- SPC u w adds the word under the cursor)\n");
+        let breakpoints_buffer = self.buffers.open_debug(&render_breakpoints_text(&self.breakpoints));
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(call_stack_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let call_stack_pane = self.focused_pane_id();
+
+        let variables_pane = self.windows_mut().split(SplitKind::Vertical, variables_buffer);
+        self.workspaces.active_pane_states_mut().insert(variables_pane, PaneState::seeded_at(cursor));
+
+        self.windows_mut().focus(call_stack_pane);
+        let watches_pane = self.windows_mut().split(SplitKind::Horizontal, watches_buffer);
+        self.workspaces.active_pane_states_mut().insert(watches_pane, PaneState::seeded_at(cursor));
+
+        self.windows_mut().focus(variables_pane);
+        let breakpoints_pane = self.windows_mut().split(SplitKind::Horizontal, breakpoints_buffer);
+        self.workspaces.active_pane_states_mut().insert(breakpoints_pane, PaneState::seeded_at(cursor));
+
+        self.windows_mut().focus(call_stack_pane);
+        self.pane_titles.insert(call_stack_pane, "1. Call Stack".to_string());
+        self.pane_titles.insert(variables_pane, "2. Variables".to_string());
+        self.pane_titles.insert(watches_pane, "3. Watches".to_string());
+        self.pane_titles.insert(breakpoints_pane, "4. Breakpoints".to_string());
+
+        let mut session = DebugSession {
+            workspace_index,
+            call_stack_pane,
+            variables_pane,
+            watches_pane,
+            breakpoints_pane,
+            call_stack_buffer,
+            variables_buffer,
+            watches_buffer,
+            breakpoints_buffer,
+            client,
+            reader,
+            pending: HashMap::new(),
+            root,
+            program,
+            initialized: false,
+            stopped_thread: None,
+            current_frame_id: None,
+            call_stack: Vec::new(),
+            variables: Vec::new(),
+            pending_scopes: 0,
+            watches: Vec::new(),
+            watch_values: HashMap::new(),
+        };
+        let init_args = fenix_dap::requests::InitializeRequestArguments::builder().adapter_id("fenix".to_string()).client_id(Some("fenix".to_string())).build();
+        if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Initialize(init_args)) {
+            session.pending.insert(seq, PendingDapRequest::Initialize);
+        }
+        self.debug_session = Some(session);
+    }
+
+    /// Sends a stepping/continuation request (`continue`/`next`/
+    /// `stepIn`/`stepOut`/`pause`) -- these don't get their own
+    /// response tracked in `pending` (see `PendingDapRequest`'s own doc
+    /// comment: the state change they cause arrives via a `stopped`/
+    /// `continued` event instead), so this is a thin, un-tracked send
+    /// shared by every one of them.
+    fn send_debug_step(&mut self, req: fenix_dap::requests::Request) {
+        let Some(session) = self.debug_session.as_ref() else { return };
+        let _ = session.client.request(req);
+    }
+
+    /// `SPC u n`/`SPC u i`/`SPC u o`/`SPC u p` -- step over/into/out, or
+    /// pause. A no-op (with a message) unless actually stopped (step)
+    /// or running (pause would be redundant while already stopped).
+    pub(crate) fn debug_step_over(&mut self) {
+        self.debug_step_request(|thread_id| fenix_dap::requests::Request::Next(fenix_dap::requests::NextRequestArguments::builder().thread_id(thread_id).build()));
+    }
+    pub(crate) fn debug_step_into(&mut self) {
+        self.debug_step_request(|thread_id| fenix_dap::requests::Request::StepIn(fenix_dap::requests::StepInRequestArguments::builder().thread_id(thread_id).build()));
+    }
+    pub(crate) fn debug_step_out(&mut self) {
+        self.debug_step_request(|thread_id| fenix_dap::requests::Request::StepOut(fenix_dap::requests::StepOutRequestArguments::builder().thread_id(thread_id).build()));
+    }
+
+    fn debug_step_request(&mut self, build: impl FnOnce(i32) -> fenix_dap::requests::Request) {
+        let Some(session) = &self.debug_session else {
+            self.set_error("no debug session running".to_string());
+            return;
+        };
+        let Some(thread_id) = session.stopped_thread else {
+            self.set_error("debug session isn't stopped".to_string());
+            return;
+        };
+        self.send_debug_step(build(thread_id));
+    }
+
+    /// `SPC u q` -- ends the debug session entirely: dropping
+    /// `DebugSession` drops its `DapClient`, whose own `Drop` sends
+    /// `disconnect` and tears down the adapter process (see `DapClient::
+    /// drop`'s own doc comment). Doesn't close the panel's workspace --
+    /// same "leave what's already open, just stop the live session
+    /// behind it" posture `finish_task_run`/`finish_docker_log_stream`
+    /// already have; the four panes just stop updating.
+    pub(crate) fn debug_stop(&mut self) {
+        if self.debug_session.is_none() {
+            self.set_error("no debug session running".to_string());
+            return;
+        }
+        self.debug_session = None;
+    }
+
+    /// `SPC u b` -- toggles a breakpoint on the focused buffer's current
+    /// line. Re-renders the Breakpoints pane immediately; if a session
+    /// is running and already past its `initialized` event, also
+    /// resends `setBreakpoints` for this file right away so a
+    /// breakpoint set/cleared mid-session takes effect without needing
+    /// a restart -- exactly what a real debugger's own "toggle
+    /// breakpoint while running" already does.
+    pub(crate) fn debug_toggle_breakpoint(&mut self) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.set_error("buffer has no file to set a breakpoint in".to_string());
+            return;
+        };
+        let (line, _) = self.open().buffer.line_col(&self.cursor());
+        let line = line + 1; // DAP/this map's own 1-indexed convention
+        // `fenix_lsp::normalize` strips Windows' `\\?\` verbatim prefix
+        // (which `canonicalize` always adds there) -- confirmed live
+        // that skipping this breaks DAP breakpoints exactly the way it
+        // once broke LSP diagnostics: the adapter reports the
+        // breakpoint as `verified` against the prefixed path, but never
+        // actually matches it against the plain-form path a running
+        // frame reports, so it's silently never hit. See `fenix_rpc::
+        // normalize`'s own doc comment for both incidents.
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path));
+        let lines = self.breakpoints.entry(canonical.clone()).or_default();
+        if !lines.remove(&line) {
+            lines.insert(line);
+        }
+        if let Some(session) = self.debug_session.as_ref() {
+            if session.initialized {
+                self.send_set_breakpoints_for(&canonical);
+            }
+        }
+        self.refresh_debug_panes();
+    }
+
+    /// `SPC u w` -- adds the identifier immediately before the cursor
+    /// as a watch (`completion::prefix_at_cursor`'s own "what would
+    /// autocomplete right here" notion -- no separate prompt UI for
+    /// v1: place the cursor right after the identifier to watch, the
+    /// same "cursor just past what you mean" convention `ciw`/`*`
+    /// already ask for elsewhere in this app). Re-evaluates immediately
+    /// if currently stopped; otherwise the watch just shows `<not
+    /// evaluated>` until the next stop.
+    pub(crate) fn debug_add_watch(&mut self) {
+        let cursor = self.cursor();
+        let ob = self.open();
+        let Some((_, word)) = completion::prefix_at_cursor(&ob.buffer, &cursor).filter(|(_, w)| !w.is_empty()) else {
+            self.set_error("no identifier before the cursor to watch".to_string());
+            return;
+        };
+        if self.debug_session.as_ref().is_some_and(|s| s.watches.contains(&word)) {
+            return; // already watching this expression
+        }
+        let Some(session) = self.debug_session.as_mut() else {
+            self.set_error("no debug session running".to_string());
+            return;
+        };
+        session.watches.push(word.clone());
+        if let Some(frame_id) = session.current_frame_id {
+            let args = fenix_dap::requests::EvaluateRequestArguments::builder().expression(word.clone()).frame_id(Some(frame_id)).build();
+            if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Evaluate(args)) {
+                session.pending.insert(seq, PendingDapRequest::Evaluate { expression: word });
+            }
+        }
+        self.refresh_debug_panes();
+    }
+
+    /// Sends `setBreakpoints` for `path` from `self.breakpoints`'
+    /// current state -- always the *whole* file's breakpoint list, per
+    /// DAP spec (one call replaces every breakpoint the adapter knows
+    /// about for that source, there's no incremental add/remove
+    /// request).
+    fn send_set_breakpoints_for(&mut self, path: &Path) {
+        let Some(session) = self.debug_session.as_mut() else { return };
+        let lines = self.breakpoints.get(path).cloned().unwrap_or_default();
+        let source = fenix_dap::types::Source::builder().path(Some(path.to_string_lossy().into_owned())).build();
+        let breakpoints = lines.into_iter().map(|line| fenix_dap::types::SourceBreakpoint::builder().line(line as i32).build()).collect();
+        let args = fenix_dap::requests::SetBreakpointsRequestArguments::builder().source(source).breakpoints(breakpoints).build();
+        if let Ok(seq) = session.client.request(fenix_dap::requests::Request::SetBreakpoints(args)) {
+            session.pending.insert(seq, PendingDapRequest::SetBreakpoints);
+        }
+    }
+
+    /// `FenixUserEvent::Dap` handling -- the single dispatch point every
+    /// decoded adapter event passes through, same role `apply_lsp_
+    /// event` plays for language servers.
+    fn apply_dap_event(&mut self, event: fenix_dap::DapEvent) {
+        match event {
+            fenix_dap::DapEvent::Response { request_seq, result } => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                let Some(pending) = session.pending.remove(&request_seq) else { return };
+                self.apply_dap_response(pending, result);
+            }
+            fenix_dap::DapEvent::Event(event) => self.apply_dap_notification(event),
+            // No reverse request this app actually needs to answer yet
+            // (e.g. `runInTerminal`, which neither `debugpy` nor a
+            // future native adapter needs for the `internalConsole`/
+            // piped-output launch shape this app always requests) --
+            // still answered, per spec, rather than left hanging.
+            fenix_dap::DapEvent::ReverseRequest { seq, .. } => {
+                if let Some(session) = self.debug_session.as_ref() {
+                    let err = fenix_dap::responses::ErrorResponse::builder()
+                        .command("unknown".to_string())
+                        .message("not implemented".to_string())
+                        .body(fenix_dap::responses::ErrorResponseBody::new(None))
+                        .build();
+                    let _ = session.client.respond(seq, Err(err));
+                }
+            }
+            // See `DapEvent::Unknown`'s own doc comment -- expected,
+            // not an error; simply nothing to do with it.
+            fenix_dap::DapEvent::Unknown(_) => {}
+            fenix_dap::DapEvent::Disconnected(reason) => {
+                if let Some(session) = self.debug_session.as_mut() {
+                    session.stopped_thread = None;
+                    session.call_stack = vec![("(adapter disconnected)".to_string(), PathBuf::new(), 0)];
+                }
+                self.refresh_debug_panes();
+                self.set_error(format!("debug adapter disconnected: {reason}"));
+            }
+        }
+    }
+
+    fn apply_dap_response(&mut self, pending: PendingDapRequest, result: Result<fenix_dap::responses::SuccessResponse, fenix_dap::responses::ErrorResponse>) {
+        use fenix_dap::responses::SuccessResponse;
+        match pending {
+            PendingDapRequest::Initialize => match result {
+                Ok(_) => {
+                    let Some(session) = self.debug_session.as_ref() else { return };
+                    let language = fenix_syntax::detect_language_from_path(&session.program).unwrap_or(fenix_syntax::LanguageId::Python);
+                    let additional_attributes = crate::dap::launch_arguments(language, &session.program);
+                    let args = fenix_dap::requests::LaunchRequestArguments::builder().additional_attributes(additional_attributes).build();
+                    let Some(session) = self.debug_session.as_mut() else { return };
+                    if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Launch(args)) {
+                        session.pending.insert(seq, PendingDapRequest::Launch);
+                    }
+                }
+                Err(err) => self.set_error(format!("debug adapter failed to initialize: {}", err.message)),
+            },
+            PendingDapRequest::Launch => {
+                if let Err(err) = result {
+                    self.set_error(format!("launch failed: {}", err.message));
+                }
+            }
+            PendingDapRequest::SetBreakpoints => {
+                // Nothing further to do -- the Breakpoints pane already
+                // renders from `self.breakpoints` (the source of truth)
+                // the moment it changes, not from this response; see
+                // `DebugSession::breakpoints_buffer`'s own doc comment
+                // for the disclosed gap this leaves (verified/rejected
+                // status per breakpoint isn't tracked for v1).
+            }
+            PendingDapRequest::StackTrace => {
+                if let Ok(SuccessResponse::StackTrace(body)) = result {
+                    let Some(session) = self.debug_session.as_mut() else { return };
+                    session.call_stack = body
+                        .stack_frames
+                        .iter()
+                        .map(|f| (f.name.clone(), f.source.as_ref().and_then(|s| s.path.clone()).map(PathBuf::from).unwrap_or_default(), f.line.max(0) as usize))
+                        .collect();
+                    let top = body.stack_frames.first();
+                    session.current_frame_id = top.map(|f| f.id);
+                    let top_location = top.and_then(|f| f.source.as_ref().and_then(|s| s.path.clone())).map(|p| (PathBuf::from(p), top.unwrap().line.max(0) as usize));
+                    let frame_id = session.current_frame_id;
+
+                    if let Some((path, line)) = top_location {
+                        self.goto_debug_location(&path, line);
+                    }
+                    self.refresh_debug_panes();
+
+                    if let Some(frame_id) = frame_id {
+                        let Some(session) = self.debug_session.as_mut() else { return };
+                        let args = fenix_dap::requests::ScopesRequestArguments::builder().frame_id(frame_id).build();
+                        if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Scopes(args)) {
+                            session.pending.insert(seq, PendingDapRequest::Scopes);
+                        }
+                        for expr in session.watches.clone() {
+                            let args = fenix_dap::requests::EvaluateRequestArguments::builder().expression(expr.clone()).frame_id(Some(frame_id)).build();
+                            if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Evaluate(args)) {
+                                session.pending.insert(seq, PendingDapRequest::Evaluate { expression: expr });
+                            }
+                        }
+                    }
+                }
+            }
+            PendingDapRequest::Scopes => {
+                if let Ok(SuccessResponse::Scopes(body)) = result {
+                    let Some(session) = self.debug_session.as_mut() else { return };
+                    session.variables.clear();
+                    session.pending_scopes = body.scopes.len();
+                    if body.scopes.is_empty() {
+                        self.refresh_debug_panes();
+                    }
+                    for scope in body.scopes {
+                        let Some(session) = self.debug_session.as_mut() else { return };
+                        let args = fenix_dap::requests::VariablesRequestArguments::builder().variables_reference(scope.variables_reference).build();
+                        if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Variables(args)) {
+                            session.pending.insert(seq, PendingDapRequest::Variables { scope_name: scope.name });
+                        } else {
+                            session.pending_scopes = session.pending_scopes.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            PendingDapRequest::Variables { scope_name } => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                if let Ok(SuccessResponse::Variables(body)) = result {
+                    let vars = body.variables.into_iter().map(|v| (v.name, v.value)).collect();
+                    session.variables.push((scope_name, vars));
+                }
+                session.pending_scopes = session.pending_scopes.saturating_sub(1);
+                if session.pending_scopes == 0 {
+                    self.refresh_debug_panes();
+                }
+            }
+            PendingDapRequest::Evaluate { expression } => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                let value = match result {
+                    Ok(SuccessResponse::Evaluate(body)) => body.result,
+                    _ => "<error>".to_string(),
+                };
+                session.watch_values.insert(expression, value);
+                self.refresh_debug_panes();
+            }
+        }
+    }
+
+    /// One decoded `event` message (`initialized`/`stopped`/
+    /// `continued`/`terminated`/`exited`/... -- everything not routed
+    /// through `apply_dap_response`, since these arrive unsolicited
+    /// rather than as an answer to a specific request).
+    fn apply_dap_notification(&mut self, event: fenix_dap::events::Event) {
+        use fenix_dap::events::Event;
+        match event {
+            Event::Initialized => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                session.initialized = true;
+                let paths: Vec<PathBuf> = self.breakpoints.iter().filter(|(_, lines)| !lines.is_empty()).map(|(p, _)| p.clone()).collect();
+                for path in paths {
+                    self.send_set_breakpoints_for(&path);
+                }
+                let Some(session) = self.debug_session.as_mut() else { return };
+                let _ = session.client.request(fenix_dap::requests::Request::ConfigurationDone);
+            }
+            Event::Stopped(body) => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                let thread_id = body.thread_id.unwrap_or(0);
+                session.stopped_thread = Some(thread_id);
+                let args = fenix_dap::requests::StackTraceRequestArguments::builder().thread_id(thread_id).build();
+                if let Ok(seq) = session.client.request(fenix_dap::requests::Request::StackTrace(args)) {
+                    session.pending.insert(seq, PendingDapRequest::StackTrace);
+                }
+            }
+            Event::Continued(_) => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                session.stopped_thread = None;
+                session.current_frame_id = None;
+                session.call_stack.clear();
+                session.variables.clear();
+                self.refresh_debug_panes();
+            }
+            Event::Terminated(_) | Event::Exited(_) => {
+                let Some(session) = self.debug_session.as_mut() else { return };
+                session.stopped_thread = None;
+                session.call_stack = vec![("(program ended)".to_string(), PathBuf::new(), 0)];
+                self.refresh_debug_panes();
+            }
+            _ => {} // output/module/thread/process/... -- no dedicated pane for these in v1
+        }
+    }
+
+    /// Moves the cursor to `line` (1-indexed) in whichever pane(s)
+    /// already show `path`'s buffer, without stealing focus from
+    /// wherever it currently is; if `path` isn't open in any pane yet,
+    /// opens and focuses it (`open_file_from_picker`), same "visit a
+    /// file" semantics a quickfix jump already has. What conveys "this
+    /// is the current line while stopped" -- see `DebugSession`'s own
+    /// doc comment on why this app relies on the caret's own visibility
+    /// rather than a separate persistent highlight for v1.
+    fn goto_debug_location(&mut self, path: &Path, line: usize) {
+        let Some(buffer_id) = self.buffers.id_for_path(path) else {
+            self.open_file_from_picker(path);
+            self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+            return;
+        };
+        let mut shown_somewhere = false;
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&buffer_id) {
+                shown_somewhere = true;
+                if let Some(ob) = self.buffers.get(buffer_id) {
+                    let target_line = line.saturating_sub(1).min(ob.buffer.visual_line_count().saturating_sub(1));
+                    let char_idx = ob.buffer.line_start_char(target_line);
+                    let (_, sticky) = ob.buffer.line_col(&Cursor { char_idx, sticky_col: 0 });
+                    let ps = self.pane_state_mut(pane);
+                    ps.cursor = Cursor { char_idx, sticky_col: sticky };
+                }
+            }
+        }
+        if !shown_somewhere {
+            self.open_file_from_picker(path);
+            self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+        }
+    }
+
+    /// Re-renders all four Debug panel panes from `self.debug_session`/
+    /// `self.breakpoints`' current state -- called after any state
+    /// change rather than patching each pane individually; cheap enough
+    /// (a handful of stack frames/variables/watches/breakpoints, not
+    /// thousands) that rebuilding beats the bug surface of four
+    /// separately-patched panes drifting out of sync with each other.
+    fn refresh_debug_panes(&mut self) {
+        let Some(session) = &self.debug_session else { return };
+        let (call_stack_buffer, variables_buffer, watches_buffer, breakpoints_buffer) =
+            (session.call_stack_buffer, session.variables_buffer, session.watches_buffer, session.breakpoints_buffer);
+        let call_stack_text = render_call_stack_text(session);
+        let variables_text = render_variables_text(session);
+        let watches_text = render_watches_text(session);
+        let breakpoints_text = render_breakpoints_text(&self.breakpoints);
+        self.set_debug_buffer(call_stack_buffer, &call_stack_text);
+        self.set_debug_buffer(variables_buffer, &variables_text);
+        self.set_debug_buffer(watches_buffer, &watches_text);
+        self.set_debug_buffer(breakpoints_buffer, &breakpoints_text);
+    }
+
+    /// Overwrites one Debug panel pane's whole content with freshly
+    /// rendered `text`, resetting every pane showing it back to the top
+    /// -- same shape as `set_docker_buffer`/`reset_task_output_buffer`.
+    fn set_debug_buffer(&mut self, id: BufferId, text: &str) {
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
     /// `SPC d b`: builds an image from the current project root's
     /// `Dockerfile` (falling back to the process's cwd with no detected
     /// project) -- doesn't need a particular pane focused, unlike the
@@ -14101,6 +14838,7 @@ impl App {
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
             FenixUserEvent::TaskOutputLine(buffer_id, line) => self.append_task_output_line(buffer_id, line),
             FenixUserEvent::TaskFinished(buffer_id, success) => self.finish_task_run(buffer_id, success),
+            FenixUserEvent::Dap(event) => self.apply_dap_event(event),
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
@@ -15481,6 +16219,8 @@ impl App {
                 "*pdf search*".to_string()
             } else if ob.kind == BufferKind::TaskOutput {
                 "*task output*".to_string()
+            } else if ob.kind == BufferKind::Debug {
+                "*debug*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -15940,6 +16680,7 @@ impl App {
             || ob.kind == BufferKind::PdfOutline
             || ob.kind == BufferKind::PdfSearchResults
             || ob.kind == BufferKind::TaskOutput
+            || ob.kind == BufferKind::Debug
         {
             return 0;
         }
@@ -24477,6 +25218,212 @@ mod tests {
         let mut app = App::with_file(None);
         app.kill_running_task();
         assert!(app.modeline_pieces().1.contains("no task is running"));
+    }
+
+    // -- DAP debugger (`SPC u ...`) ---------------------------------------
+
+    #[test]
+    fn debug_toggle_breakpoint_sets_then_clears_a_line() {
+        let dir = TempDir::new("debug_toggle_bp");
+        let file = dir.write("main.py", "a = 1\nb = 2\nc = 3\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('j')); // move to line 2
+
+        app.debug_toggle_breakpoint();
+        // `fenix_lsp::normalize` strips the `\\?\` verbatim prefix
+        // `canonicalize` always adds on Windows -- see `debug_toggle_
+        // breakpoint`'s own doc comment for the real bug this exists to
+        // avoid (a breakpoint registered under the un-normalized form
+        // never actually matches what the adapter reports back).
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&file).unwrap());
+        assert_eq!(app.breakpoints.get(&canonical), Some(&std::collections::BTreeSet::from([2])));
+
+        app.debug_toggle_breakpoint(); // toggling the same line again clears it
+        assert!(app.breakpoints.get(&canonical).is_none_or(|lines| lines.is_empty()));
+    }
+
+    #[test]
+    fn debug_toggle_breakpoint_errors_for_a_pathless_buffer() {
+        let mut app = App::with_file(None);
+        app.debug_toggle_breakpoint();
+        assert!(app.modeline_pieces().1.contains("no file to set a breakpoint"));
+    }
+
+    #[test]
+    fn debug_start_or_continue_errors_for_an_unrecognized_language() {
+        let dir = TempDir::new("debug_no_language");
+        let file = dir.write("notes.txt", "hello\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.debug_start_or_continue();
+        assert!(app.modeline_pieces().1.contains("no recognized language"));
+    }
+
+    #[test]
+    fn debug_start_or_continue_errors_when_no_adapter_is_known_for_the_language() {
+        let dir = TempDir::new("debug_no_adapter");
+        let file = dir.write("main.rs", "fn main() {}\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.debug_start_or_continue();
+        assert!(app.modeline_pieces().1.contains("no known debug adapter"));
+    }
+
+    #[test]
+    fn debug_stepping_and_stop_error_when_no_session_is_running() {
+        let mut app = App::with_file(None);
+        app.debug_step_over();
+        assert!(app.modeline_pieces().1.contains("no debug session running"));
+        app.debug_step_into();
+        assert!(app.modeline_pieces().1.contains("no debug session running"));
+        app.debug_step_out();
+        assert!(app.modeline_pieces().1.contains("no debug session running"));
+        app.debug_stop();
+        assert!(app.modeline_pieces().1.contains("no debug session running"));
+    }
+
+    #[test]
+    fn debug_add_watch_errors_with_no_identifier_before_the_cursor() {
+        let dir = TempDir::new("debug_watch_no_ident");
+        let file = dir.write("main.py", "   \n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.debug_add_watch();
+        assert!(app.modeline_pieces().1.contains("no identifier before the cursor"));
+    }
+
+    /// Builds a `DebugSession` around a real (but trivial and short-
+    /// lived) spawned process -- enough for `DapClient::spawn` to
+    /// succeed and for the session's own state-transition logic
+    /// (`apply_dap_event`/`apply_dap_response`) to be exercised
+    /// directly with fabricated `DapEvent`s, the same "construct the
+    /// session by hand, drive it with synthetic events" shape `apply_
+    /// lsp_response`'s own tests already use for `LspSession`. Whether
+    /// requests sent through `session.client` actually reach anything
+    /// alive doesn't matter here -- only the dispatch logic on the
+    /// receiving side is under test.
+    fn debug_test_session(app: &mut App) {
+        let dir = TempDir::new("debug_session_probe");
+        let (program, args) = echo_command("noop");
+        let (client, _rx) = fenix_dap::DapClient::spawn(&program, &args, dir.path()).expect("echo/cmd should be launchable in any test environment");
+        let call_stack_buffer = app.buffers.open_debug("");
+        let variables_buffer = app.buffers.open_debug("");
+        let watches_buffer = app.buffers.open_debug("");
+        let breakpoints_buffer = app.buffers.open_debug("");
+        let cursor = Cursor::at_start();
+        app.workspaces.new_workspace(call_stack_buffer, cursor);
+        let workspace_index = app.workspaces.active_index();
+        let call_stack_pane = app.focused_pane_id();
+        app.debug_session = Some(DebugSession {
+            workspace_index,
+            call_stack_pane,
+            variables_pane: call_stack_pane,
+            watches_pane: call_stack_pane,
+            breakpoints_pane: call_stack_pane,
+            call_stack_buffer,
+            variables_buffer,
+            watches_buffer,
+            breakpoints_buffer,
+            client,
+            reader: None,
+            pending: HashMap::new(),
+            root: dir.path().to_path_buf(),
+            program: dir.path().join("main.py"),
+            initialized: false,
+            stopped_thread: None,
+            current_frame_id: None,
+            call_stack: Vec::new(),
+            variables: Vec::new(),
+            pending_scopes: 0,
+            watches: Vec::new(),
+            watch_values: HashMap::new(),
+        });
+    }
+
+    #[test]
+    fn goto_debug_location_does_not_hijack_a_focused_debug_pane() {
+        // Reproduces a real bug found live-testing the debugger: a
+        // `stopped` event's own `goto_debug_location` call (jumping to
+        // the breakpoint's file/line) used to silently replace the
+        // focused Call Stack pane's content with the source file the
+        // moment execution stopped -- the exact same class of bug
+        // `quickfix_jump_does_not_hijack_a_focused_task_output_pane`
+        // already caught for the Task Output panel, just for
+        // `DebugSession`'s four panes instead (`focused_pane_holds_a_
+        // tracked_session` had no idea any of them existed).
+        let dir = TempDir::new("debug_goto_hijack");
+        let target = dir.write("main.py", "x = 1\n");
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        let session_workspace_index = app.debug_session.as_ref().unwrap().workspace_index;
+        let session_pane = app.debug_session.as_ref().unwrap().call_stack_pane;
+        let workspace_count_before = app.workspaces.len();
+
+        app.goto_debug_location(&target, 1);
+
+        assert_eq!(app.workspaces.len(), workspace_count_before + 1, "the source file should land in a new workspace");
+        assert_ne!(app.workspaces.active_index(), session_workspace_index);
+        app.workspaces.switch_to_index(session_workspace_index);
+        app.windows_mut().focus(session_pane);
+        assert_eq!(app.open().kind, BufferKind::Debug, "the debug panel's own pane must still show debug output, not the jumped-to file");
+    }
+
+    #[test]
+    fn a_successful_initialize_response_sends_launch_without_panicking() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        let seq = app.debug_session.as_ref().unwrap().client.request(fenix_dap::requests::Request::ConfigurationDone).unwrap();
+        app.debug_session.as_mut().unwrap().pending.insert(seq, PendingDapRequest::Initialize);
+
+        app.apply_dap_event(fenix_dap::DapEvent::Response {
+            request_seq: seq,
+            result: Ok(fenix_dap::responses::SuccessResponse::Initialize(fenix_dap::types::Capabilities::default())),
+        });
+
+        // A `launch` request should now be the one outstanding pending
+        // entry (the `Initialize` one this test inserted was consumed).
+        let session = app.debug_session.as_ref().unwrap();
+        assert!(session.pending.values().any(|p| matches!(p, PendingDapRequest::Launch)));
+    }
+
+    #[test]
+    fn a_stopped_event_records_the_thread_and_requests_a_stack_trace() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+
+        let body = fenix_dap::events::StoppedEventBody::builder().reason(fenix_dap::events::StoppedEventReason::Breakpoint).thread_id(Some(1)).build();
+        app.apply_dap_event(fenix_dap::DapEvent::Event(fenix_dap::events::Event::Stopped(body)));
+
+        let session = app.debug_session.as_ref().unwrap();
+        assert_eq!(session.stopped_thread, Some(1));
+        assert!(session.pending.values().any(|p| matches!(p, PendingDapRequest::StackTrace)));
+    }
+
+    #[test]
+    fn a_continued_event_clears_the_stopped_state_and_refreshes_panes() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        app.debug_session.as_mut().unwrap().stopped_thread = Some(1);
+        app.debug_session.as_mut().unwrap().call_stack = vec![("main".to_string(), PathBuf::from("main.py"), 3)];
+
+        let body = fenix_dap::events::ContinuedEventBody::builder().thread_id(1).build();
+        app.apply_dap_event(fenix_dap::DapEvent::Event(fenix_dap::events::Event::Continued(body)));
+
+        let session = app.debug_session.as_ref().unwrap();
+        assert_eq!(session.stopped_thread, None);
+        assert!(session.call_stack.is_empty());
+        assert_eq!(app.open().buffer.text(), render_call_stack_text(session));
+    }
+
+    #[test]
+    fn an_unknown_adapter_event_is_ignored_without_panicking() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        app.apply_dap_event(fenix_dap::DapEvent::Unknown(serde_json::json!({"type": "event", "event": "debugpySockets"})));
+        assert!(app.debug_session.is_some(), "an unrecognized event must not tear down the session");
+    }
+
+    #[test]
+    fn handle_user_event_never_panics_for_the_dap_variant() {
+        let mut app = App::with_file(None);
+        app.handle_user_event(FenixUserEvent::Dap(fenix_dap::DapEvent::Disconnected("test".to_string())));
     }
 
     #[test]
