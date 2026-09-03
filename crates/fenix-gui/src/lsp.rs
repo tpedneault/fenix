@@ -37,6 +37,19 @@ pub fn client_capabilities() -> lsp_types::ClientCapabilities {
 pub fn default_server_command(language: LanguageId) -> Option<(String, Vec<String>)> {
     match language {
         LanguageId::Python => Some(("pyright-langserver".to_string(), vec!["--stdio".to_string()])),
+        // No `--stdio`/equivalent flag needed -- rust-analyzer speaks
+        // LSP over stdio by default with no arguments at all.
+        LanguageId::Rust => Some(("rust-analyzer".to_string(), Vec::new())),
+        // Same for clangd: stdio is its default transport. Works with
+        // zero project-specific setup, degrading to header-only
+        // diagnostics until a `compile_commands.json` exists nearby
+        // (clangd discovers one on its own, walking up from each
+        // opened file -- nothing this app needs to point it at).
+        LanguageId::C | LanguageId::Cpp => Some(("clangd".to_string(), Vec::new())),
+        LanguageId::Bash => Some(("bash-language-server".to_string(), vec!["start".to_string()])),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]))
+        }
         _ => None,
     }
 }
@@ -54,6 +67,7 @@ pub fn language_config_name(language: LanguageId) -> String {
         LanguageId::Python => "python".to_string(),
         LanguageId::Rust => "rust".to_string(),
         LanguageId::C => "c".to_string(),
+        LanguageId::Cpp => "cpp".to_string(),
         LanguageId::Bash => "bash".to_string(),
         LanguageId::JavaScript => "javascript".to_string(),
         LanguageId::TypeScript => "typescript".to_string(),
@@ -112,8 +126,32 @@ mod tests {
     }
 
     #[test]
+    fn rust_has_a_built_in_default_command_with_no_arguments() {
+        assert_eq!(default_server_command(LanguageId::Rust), Some(("rust-analyzer".to_string(), Vec::new())));
+    }
+
+    #[test]
+    fn c_and_cpp_both_default_to_clangd() {
+        assert_eq!(default_server_command(LanguageId::C), Some(("clangd".to_string(), Vec::new())));
+        assert_eq!(default_server_command(LanguageId::Cpp), Some(("clangd".to_string(), Vec::new())));
+    }
+
+    #[test]
+    fn bash_has_a_built_in_default_command() {
+        assert_eq!(default_server_command(LanguageId::Bash), Some(("bash-language-server".to_string(), vec!["start".to_string()])));
+    }
+
+    #[test]
+    fn javascript_typescript_and_tsx_all_default_to_typescript_language_server() {
+        let expected = Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]));
+        assert_eq!(default_server_command(LanguageId::JavaScript), expected);
+        assert_eq!(default_server_command(LanguageId::TypeScript), expected);
+        assert_eq!(default_server_command(LanguageId::Tsx), expected);
+    }
+
+    #[test]
     fn a_language_with_no_built_in_default_resolves_to_none_absent_config() {
-        assert_eq!(resolve_server_command(LanguageId::Rust, &[]), None);
+        assert_eq!(resolve_server_command(LanguageId::Tcl, &[]), None);
     }
 
     #[test]

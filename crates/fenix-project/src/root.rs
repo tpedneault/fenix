@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 /// no particular priority order -- any one of them is enough. `.git` and
 /// `.projectile` are ecosystem-agnostic; the rest are the common
 /// per-language "this is the top of a package" manifest.
-const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod"];
+const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt"];
 
 /// Walks up from `start` (a file or a directory -- a file's own directory
 /// is where the walk begins) looking for the closest ancestor containing
@@ -41,6 +41,13 @@ mod tests {
     fn finds_a_cargo_toml_marker() {
         let dir = TempDir::new("cargo_marker");
         fs::write(dir.path().join("Cargo.toml"), b"[package]").unwrap();
+        assert_eq!(find_project_root(dir.path()), Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn finds_a_cmakelists_txt_marker() {
+        let dir = TempDir::new("cmake_marker");
+        fs::write(dir.path().join("CMakeLists.txt"), b"project(x)").unwrap();
         assert_eq!(find_project_root(dir.path()), Some(dir.path().to_path_buf()));
     }
 

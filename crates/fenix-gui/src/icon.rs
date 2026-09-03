@@ -56,7 +56,7 @@ pub fn icon_for(name: &str, is_dir: bool, expanded: bool) -> char {
         Some("html" | "htm") => HTML,
         Some("css") => CSS,
         Some("c" | "h") => C_LANG,
-        Some("cpp" | "cc" | "cxx" | "hpp" | "hh") => CPP,
+        Some("cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl") => CPP,
         Some("sh" | "bash" | "tcl" | "tm") => SHELL,
         Some("yaml" | "yml") => YAML,
         Some("toml") => TOML,

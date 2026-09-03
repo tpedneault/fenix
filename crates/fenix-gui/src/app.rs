@@ -922,6 +922,13 @@ struct PdfSession {
 /// already exist for other reasons.
 struct LspSession {
     client: fenix_lsp::LspClient,
+    /// The project root this session was spawned for (`ensure_lsp_
+    /// session`'s own `cwd`) -- kept around so the `initialize`
+    /// response handler can run a per-language environment resolver
+    /// (`fenix_lsp::per_language`) against the same root without
+    /// needing to re-derive it from whatever buffer happens to be
+    /// focused by the time that response actually arrives.
+    root: PathBuf,
     /// `None` when opened without a real `event_proxy` (every test) --
     /// same posture as `VncSession::reader`/`TerminalState::reader`.
     /// Held only for its `Drop` side effect once set.
@@ -2694,7 +2701,7 @@ fn reindent_skip_ranges(language: Option<fenix_syntax::LanguageId>, source: &str
 fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str> {
     use fenix_syntax::LanguageId;
     match language {
-        LanguageId::Rust | LanguageId::C | LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some("//"),
+        LanguageId::Rust | LanguageId::C | LanguageId::Cpp | LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some("//"),
         LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
         LanguageId::Json | LanguageId::Markdown | LanguageId::Batch => None,
     }
@@ -5453,7 +5460,7 @@ impl App {
         match fenix_lsp::LspClient::spawn(&program, &args, cwd) {
             Ok((client, receiver)) => {
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, language, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(language, LspSession { client, reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
+                self.lsp_sessions.insert(language, LspSession { client, root: cwd.to_path_buf(), reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
                 self.send_lsp_initialize(language, cwd);
             }
             Err(err) => {
@@ -5530,6 +5537,22 @@ impl App {
                     if let Some(session) = self.lsp_sessions.get_mut(&language) {
                         session.capabilities = capabilities;
                         let _ = session.client.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
+                        // pyright doesn't infer which interpreter/venv a
+                        // project uses on its own -- without this, "go to
+                        // definition"/hover on a third-party import
+                        // resolves nowhere, since pyright never looked in
+                        // that venv's site-packages at all. Pushed as a
+                        // `workspace/didChangeConfiguration`, the shape
+                        // every pyright integration (VS Code's own
+                        // extension included) actually feeds it; this
+                        // client never declared `workspace/configuration`
+                        // pull support, so a push right after `initialized`
+                        // is the one required step, not just an optimization.
+                        if language == fenix_syntax::LanguageId::Python {
+                            let env = fenix_lsp::per_language::python::resolve(&session.root);
+                            let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
+                            let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
+                        }
                     }
                     // Now that the session is actually initialized,
                     // send `didOpen` for the focused buffer if it's this

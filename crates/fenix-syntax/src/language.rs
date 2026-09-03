@@ -22,6 +22,13 @@ pub enum LanguageId {
     /// sharing the same highlights query.
     Tsx,
     C,
+    /// A distinct grammar from `C` (`tree-sitter-cpp`) -- C++'s own
+    /// syntax (classes, templates, namespaces, `//` isn't special to
+    /// this decision but the grammar itself is) isn't a strict superset
+    /// tree-sitter-c's grammar can parse correctly. `.h` stays mapped to
+    /// `C` regardless (see `detect_language`'s own comment) -- there's
+    /// no extension-only way to tell a C header from a C++ one.
+    Cpp,
     Bash,
     Tcl,
     /// Covers both `Dockerfile` and Podman's `Containerfile` (the same
@@ -53,6 +60,7 @@ impl LanguageId {
             LanguageId::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             LanguageId::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             LanguageId::C => tree_sitter_c::LANGUAGE.into(),
+            LanguageId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             LanguageId::Bash => tree_sitter_bash::LANGUAGE.into(),
             LanguageId::Tcl => tree_sitter_tcl::LANGUAGE.into(),
             LanguageId::Dockerfile => tree_sitter_containerfile::LANGUAGE.into(),
@@ -71,6 +79,7 @@ impl LanguageId {
             LanguageId::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
             LanguageId::TypeScript | LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
             LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
+            LanguageId::Cpp => tree_sitter_cpp::HIGHLIGHT_QUERY,
             LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
             LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
             LanguageId::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY,
@@ -95,6 +104,7 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "ts" | "mts" | "cts" => Some(LanguageId::TypeScript),
         "tsx" => Some(LanguageId::Tsx),
         "c" | "h" => Some(LanguageId::C),
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" => Some(LanguageId::Cpp),
         "sh" | "bash" => Some(LanguageId::Bash),
         "tcl" | "tm" => Some(LanguageId::Tcl),
         "dockerfile" => Some(LanguageId::Dockerfile),
@@ -154,6 +164,11 @@ mod tests {
         assert_eq!(detect_language("tsx"), Some(LanguageId::Tsx));
         assert_eq!(detect_language("c"), Some(LanguageId::C));
         assert_eq!(detect_language("h"), Some(LanguageId::C));
+        assert_eq!(detect_language("cpp"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("cc"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("cxx"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("hpp"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("hxx"), Some(LanguageId::Cpp));
         assert_eq!(detect_language("sh"), Some(LanguageId::Bash));
         assert_eq!(detect_language("tcl"), Some(LanguageId::Tcl));
         assert_eq!(detect_language("tm"), Some(LanguageId::Tcl));

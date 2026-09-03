@@ -57,6 +57,49 @@ pub struct LspClient {
     stderr_thread: Option<JoinHandle<()>>,
 }
 
+/// On Windows, `Command::new` only launches a bare program name via
+/// `CreateProcess`'s own loader, which -- unlike a real shell -- never
+/// consults `PATHEXT`. A server installed as an npm-style `.cmd` shim
+/// (`typescript-language-server`, `bash-language-server`, ... --
+/// extremely common for JS-ecosystem tooling, which is most of it)
+/// fails to spawn at all with a bare "program not found" this way, even
+/// though a terminal launches the exact same bare name fine. Fixed by
+/// searching `PATH` the same way `cmd.exe` would -- every directory,
+/// every extension `PATHEXT` lists (falling back to the common default
+/// if unset) -- and hanging `Command` the resolved full path instead,
+/// which Rust's own Windows `Command` implementation already knows how
+/// to run correctly, `.cmd`/`.bat` script included (internally via
+/// `cmd.exe /c`, transparent to this caller). A command that's already
+/// a specific path (has an extension, or contains a path separator) is
+/// returned unchanged -- nothing to resolve, and forcing it through
+/// this search would only risk *not* finding the exact file the caller
+/// named. A no-op on every other platform: Unix has no such gap, since
+/// a script's shebang line makes it directly executable with no shell
+/// involved either way.
+#[cfg(windows)]
+fn resolve_command(command: &str) -> String {
+    if std::path::Path::new(command).extension().is_some() || command.contains(['/', '\\']) {
+        return command.to_string();
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let extensions: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let Some(path_var) = std::env::var_os("PATH") else { return command.to_string() };
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    command.to_string() // not found anywhere -- let Command::new's own error surface as usual
+}
+
+#[cfg(not(windows))]
+fn resolve_command(command: &str) -> String {
+    command.to_string()
+}
+
 impl LspClient {
     /// Spawns `command` (with `args`), working directory `cwd` (a
     /// language server resolves relative paths -- and often its whole
@@ -64,7 +107,8 @@ impl LspClient {
     /// started in, on top of whatever `rootUri`/`workspaceFolders` the
     /// `initialize` request itself carries).
     pub fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
-        let mut child = Command::new(command)
+        let resolved = resolve_command(command);
+        let mut child = Command::new(&resolved)
             .args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -247,6 +291,28 @@ fn drain_and_discard(mut stderr: ChildStderr) {
             Ok(0) | Err(_) => return,
             Ok(_) => continue,
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod resolve_command_tests {
+    use super::resolve_command;
+
+    #[test]
+    fn a_command_that_already_names_an_extension_is_returned_unchanged() {
+        assert_eq!(resolve_command("pyright-langserver.exe"), "pyright-langserver.exe");
+        assert_eq!(resolve_command("some-tool.cmd"), "some-tool.cmd");
+    }
+
+    #[test]
+    fn a_command_that_is_already_a_path_is_returned_unchanged() {
+        assert_eq!(resolve_command("C:\\tools\\clangd"), "C:\\tools\\clangd");
+        assert_eq!(resolve_command("./bin/clangd"), "./bin/clangd");
+    }
+
+    #[test]
+    fn a_bare_name_found_nowhere_on_path_falls_back_to_itself() {
+        assert_eq!(resolve_command("definitely-not-a-real-lsp-server-binary-xyz"), "definitely-not-a-real-lsp-server-binary-xyz");
     }
 }
 

@@ -54,7 +54,7 @@ for anyone curious to poke around or build on it.
   well as Normal, so e.g. `SPC c f` (indent the selection) can act on an
   active selection without leaving it first.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
-  YAML, Python, JavaScript/TypeScript/TSX, C, Bash, Tcl, Dockerfile/
+  YAML, Python, JavaScript/TypeScript/TSX, C, C++, Bash, Tcl, Dockerfile/
   Containerfile, and Batch (`.bat`/`.cmd`). Docker Compose files already
   get full highlighting for free via the existing YAML support -- no
   separate grammar needed. `Dockerfile`/`Containerfile` are detected by
@@ -321,10 +321,17 @@ for anyone curious to poke around or build on it.
   qualified path (`myns::subns::proc`, no leading `::`), not just the
   bare proc name.
 - **Language servers (LSP)**: a real `lsp-types`/JSON-RPC client, spawned
-  per-language on demand for whichever buffer you open (Python via
-  [`pyright`](https://github.com/microsoft/pyright)'s
-  `pyright-langserver` by default, anything else via a `[lsp]` command
-  you configure -- see [Configuration](#configuration)). Live
+  per-language on demand for whichever buffer you open, with a built-in
+  default command for Python
+  ([`pyright`](https://github.com/microsoft/pyright)'s
+  `pyright-langserver`), Rust
+  ([`rust-analyzer`](https://rust-analyzer.github.io/)), C/C++
+  ([`clangd`](https://clangd.llvm.org/)), Bash
+  ([`bash-language-server`](https://github.com/bash-lsp/bash-language-server)),
+  and JavaScript/TypeScript/TSX
+  ([`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)) --
+  anything else (or an override for one of these) via a `[lsp]` command
+  you configure -- see [Configuration](#configuration). Live
   diagnostics (inline severity-colored markup, modeline error/warning
   counts), `gd` go-to-definition, `gr` find-references (populates the
   quickfix list -- `SPC p n`/`SPC p N` steps through it the same way a
@@ -335,7 +342,11 @@ for anyone curious to poke around or build on it.
   autocompletion already opens (`CompletionKind::Lsp`), rather than
   being a separate mechanism. Every one of these degrades gracefully to
   "not available" (not a hard error) when no server is attached, or the
-  attached one doesn't advertise that capability.
+  attached one doesn't advertise that capability. On Windows, a server
+  installed as an npm-style `.cmd` shim (`typescript-language-server`,
+  `bash-language-server`, and most other JS-ecosystem tooling) launches
+  correctly despite `PATH` resolution quirks Rust's own process-spawning
+  otherwise has no answer for.
 - **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -982,7 +993,7 @@ window2 = 4480,0,1920,1040|true
 | `editor` | `tab_width` | Visual columns a literal tab character expands to when rendered (real Vim's own `:set tabstop`) -- distinct from `indent_width`, which governs what Tab/`>>`/`<<` actually insert (always spaces) |
 | `editor` | `animations` | `true`/`false` -- whether caret-fade, scroll-ease, and yank/paste-pulse animations play at all; unset defaults to `true`. `SPC t a` toggles and persists this live |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
-| `lsp` | `server1`, `server2`, ... | A language server to launch, as `LANGUAGE\|COMMAND` (numbered, same reason as `mib`'s roots) -- `LANGUAGE` is one of `python`, `rust`, `c`, `bash`, `javascript`, `typescript`, `tsx`, ...; `COMMAND` is the program plus arguments, split on whitespace (no shell-quoting support). Overrides the built-in default for that language if one exists (currently just `python` → `pyright-langserver --stdio`); required for every other language |
+| `lsp` | `server1`, `server2`, ... | A language server to launch, as `LANGUAGE\|COMMAND` (numbered, same reason as `mib`'s roots) -- `LANGUAGE` is one of `python`, `rust`, `c`, `cpp`, `bash`, `javascript`, `typescript`, `tsx`, ...; `COMMAND` is the program plus arguments, split on whitespace (no shell-quoting support). Overrides the built-in default for that language if one exists (`python` → `pyright-langserver --stdio`, `rust` → `rust-analyzer`, `c`/`cpp` → `clangd`, `bash` → `bash-language-server start`, `javascript`/`typescript`/`tsx` → `typescript-language-server --stdio`); required for every other language |
 | `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
 | `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
