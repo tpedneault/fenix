@@ -208,8 +208,12 @@ for anyone curious to poke around or build on it.
   Volumes/Networks pane for a Lazydocker-style contextual popup listing
   that pane's available keys; it's purely informational and dismisses on
   the very next keypress, which still does whatever it would normally
-  do. `SPC d b` builds an image from the current project root's
-  `Dockerfile`; `SPC d q` closes the whole session.
+  do. A long Status value (a long bind-mount path, say) word-wraps onto
+  indented continuation lines rather than running off the pane's right
+  edge; the Containers/Images/Volumes/Networks list rows themselves
+  never wrap, so they stay aligned. `SPC d b` builds an image from the
+  current project root's `Dockerfile`; `SPC d q` closes the whole
+  session.
 - **Git panel** (Lazygit-style): `SPC g g` opens a real, seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
   the left (each its own real, Vim-navigable buffer with a title bar),
@@ -226,7 +230,9 @@ for anyone curious to poke around or build on it.
   unstaged/untracked counts) that live-updates on its own every ~2s via
   a background poller, independent of cursor movement -- the inverse of
   the Docker panel's Status/Logs split, same pattern, roles swapped to
-  match what's actually true of each domain. On Branches: `c` checks out
+  match what's actually true of each domain. A long Status value word-
+  wraps onto indented continuation lines, same as the Docker panel's own
+  Status pane. On Branches: `c` checks out
   the branch under the cursor, `n` creates a new one (prompts for a
   name), `d` deletes it (confirm). On Stash: `a` applies the entry under
   the cursor, `g` pops it, `d` drops it (confirm). `u` refreshes the
@@ -251,8 +257,12 @@ for anyone curious to poke around or build on it.
   search for every issue assigned to them, scoped to every currently-
   tracked project, and lists the results in Issues; moving onto an
   issue shows its full detail (description, status, assignee, reporter,
-  dates, comments) in Detail. `SPC j r` refreshes, `SPC j q` closes the
-  session, `SPC j g` jumps straight to any issue by key (even one not
+  dates, comments) in Detail -- the description and every comment's
+  body word-wrap onto as many lines as they need (paragraph breaks
+  survive wrapping intact), so a long real-world description reads as
+  actual prose instead of one line running off the pane. `SPC j r`
+  refreshes, `SPC j q` closes the session, `SPC j g` jumps straight to
+  any issue by key (even one not
   present in the current query). Talks to a self-hosted Jira Server/
   Data Center instance's REST API via a personal access token (see
   [Configuration](#configuration)).

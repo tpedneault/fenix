@@ -22,6 +22,7 @@ mod text;
 mod theme;
 mod tool_status;
 mod vnc_texture;
+mod wrap;
 
 use std::path::Path;
 

@@ -180,8 +180,24 @@ pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
     b.finish()
 }
 
+/// Word-wraps `value` to `crate::wrap::DEFAULT_WRAP_WIDTH`, indenting
+/// continuation lines under the value's own start column -- same
+/// "hanging indent" convention as `docker_panel::push_detail_line`.
+/// Unlike Docker/Git's own version, every wrapped line -- first and
+/// continuation alike -- stays plain `Detail` style with no `dim_from`
+/// split to track: `JiraLine` has no such field, since a Jira Detail
+/// row is dimmed in its *entirety* rather than only past some column
+/// (see `jira_highlights_for_visible_range`'s own doc comment).
 fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
-    b.push(&format!("    {label}: {value}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+    let prefix = format!("    {label}: ");
+    let indent = " ".repeat(prefix.chars().count());
+    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(prefix.chars().count()).max(20);
+    let mut wrapped = crate::wrap::wrap_text(value, wrap_width).into_iter();
+    let first = wrapped.next().unwrap_or_default();
+    b.push(&format!("{prefix}{first}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+    for continuation in wrapped {
+        b.push(&format!("{indent}{continuation}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+    }
 }
 
 fn push_blank(b: &mut Builder) {
@@ -211,8 +227,24 @@ fn push_section_header(b: &mut Builder, title: &str) {
     b.push(&underline, Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
 }
 
+/// Word-wraps one already-newline-split description/comment `line` (a
+/// paragraph or a single sentence, never the raw multi-line body --
+/// callers already split on `\n` first, so any embedded paragraph
+/// breaks the author actually typed survive as their own blank lines
+/// rather than getting collapsed away by wrapping) to `crate::wrap::
+/// DEFAULT_WRAP_WIDTH`, under `indent` -- `"  "` for the description
+/// body, `"    "` for a comment's (one level deeper, matching its own
+/// author/timestamp header's indent) via `render_detail`'s own call
+/// sites.
+fn push_wrapped_body(b: &mut Builder, indent: &str, line: &str) {
+    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(indent.chars().count()).max(20);
+    for wrapped in crate::wrap::wrap_text(line, wrap_width) {
+        b.push(&format!("{indent}{wrapped}"), Some(JiraLine { style: JiraLineStyle::Body, entry: None, badge: None }));
+    }
+}
+
 fn push_body_line(b: &mut Builder, line: &str) {
-    b.push(&format!("  {line}"), Some(JiraLine { style: JiraLineStyle::Body, entry: None, badge: None }));
+    push_wrapped_body(b, "  ", line);
 }
 
 /// Trims a Jira REST API timestamp (`"2024-01-15T10:30:00.000+0000"`)
@@ -284,7 +316,7 @@ pub fn render_detail(detail: Option<&IssueDetail>) -> JiraPanel {
                     let header = format!("  {} @ {}", c.author, format_timestamp(&c.created));
                     b.push(&header, Some(JiraLine { style: JiraLineStyle::Comment, entry: None, badge: None }));
                     for line in c.body.lines() {
-                        b.push(&format!("    {line}"), Some(JiraLine { style: JiraLineStyle::Body, entry: None, badge: None }));
+                        push_wrapped_body(&mut b, "    ", line);
                     }
                 }
             }
@@ -438,6 +470,48 @@ mod tests {
     }
 
     #[test]
+    fn a_long_description_paragraph_word_wraps_onto_several_body_lines() {
+        let mut d = detail("PROJ-1");
+        d.description = Some(
+            "This is a much longer description paragraph than the earlier short test fixture, \
+             deliberately written with enough real prose words in it that it has to wrap onto \
+             more than one line once it goes through the Detail pane's own word-wrapping."
+                .to_string(),
+        );
+        let panel = render_detail(Some(&d));
+        let body_rows = panel.lines.iter().flatten().filter(|l| l.style == JiraLineStyle::Body).count();
+        assert!(body_rows > 1, "expected the long paragraph to wrap onto more than one Body line, got {body_rows}:\n{}", panel.text);
+        assert_eq!(panel.text.lines().count(), panel.lines.len(), "text and lines must stay in lockstep after wrapping");
+    }
+
+    #[test]
+    fn a_description_paragraph_break_survives_wrapping_as_its_own_blank_line() {
+        let mut d = detail("PROJ-1");
+        d.description = Some("First paragraph.\n\nSecond paragraph.".to_string());
+        let panel = render_detail(Some(&d));
+        let body_lines: Vec<&str> = panel.text.lines().skip_while(|l| !l.contains("First paragraph")).collect();
+        assert!(body_lines.iter().any(|l| l.trim().is_empty()), "expected the blank line between paragraphs to survive wrapping");
+    }
+
+    #[test]
+    fn a_short_description_line_never_wraps() {
+        let d = detail("PROJ-1");
+        let panel = render_detail(Some(&d));
+        assert_eq!(panel.text.lines().filter(|l| l.contains("Full description")).count(), 1);
+    }
+
+    #[test]
+    fn a_long_detail_metadata_value_word_wraps_onto_continuation_lines() {
+        let mut d = detail("PROJ-1");
+        d.assignee = Some("A Person With An Extremely Long Full Display Name That Keeps Going And Going And Going And Going".to_string());
+        let panel = render_detail(Some(&d));
+        let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == JiraLineStyle::Detail).count();
+        // Assignee/Reporter/Created/Updated is normally 4 Detail rows --
+        // more than that means Assignee wrapped.
+        assert!(detail_rows > 4, "expected the long assignee name to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
+    }
+
+    #[test]
     fn render_detail_comments_header_includes_the_count() {
         let mut d = detail("PROJ-1");
         d.comments = vec![
@@ -460,6 +534,22 @@ mod tests {
         assert!(panel.text.contains("Jane Smith @ 2024-01-02 00:00"));
         assert!(panel.text.contains("Looking into it"));
         assert!(!panel.text.contains("No comments yet"));
+    }
+
+    #[test]
+    fn a_long_comment_body_word_wraps_onto_several_lines() {
+        let mut d = detail("PROJ-1");
+        d.comments = vec![fenix_jira::Comment {
+            author: "Jane Smith".to_string(),
+            body: "This comment is deliberately written with enough real prose words in it that it \
+                   has to wrap onto more than one line once it goes through the same word-wrapping \
+                   the description body above already gets."
+                .to_string(),
+            created: "2024-01-02T00:00:00.000+0000".to_string(),
+        }];
+        let panel = render_detail(Some(&d));
+        let body_rows = panel.lines.iter().flatten().filter(|l| l.style == JiraLineStyle::Body).count();
+        assert!(body_rows > 1, "expected the long comment to wrap onto more than one Body line, got {body_rows}:\n{}", panel.text);
     }
 
     #[test]

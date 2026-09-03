@@ -292,13 +292,32 @@ pub fn render_details(detail: Option<&DockerDetail>, stat: Option<&ContainerStat
     b.finish()
 }
 
+/// Word-wraps `value` (a container ID, a long bind-mount path, ...) to
+/// `crate::wrap::DEFAULT_WRAP_WIDTH`, indenting every continuation line
+/// to line up under where the value itself starts rather than under the
+/// label -- a hanging indent, same convention a man page uses for a
+/// wrapped description. Only the first line carries the label; every
+/// wrapped continuation is dimmed in full (`dim_from: Some(0)`) since
+/// there's no label portion left on it to keep undimmed, unlike the
+/// first line's `dim_from: Some(prefix len)` (see `DockerLine::dim_from`'s
+/// own doc comment for which half that actually dims).
 fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     let prefix = format!("    {label}: ");
     let dim_from = prefix.chars().count();
+    let indent = " ".repeat(dim_from);
+    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(dim_from).max(20);
+    let mut wrapped = crate::wrap::wrap_text(value, wrap_width).into_iter();
+    let first = wrapped.next().unwrap_or_default();
     b.push(
-        &format!("{prefix}{value}"),
+        &format!("{prefix}{first}"),
         Some(DockerLine { style: DockerLineStyle::Detail, entry: None, dim_from: Some(dim_from), badge: None }),
     );
+    for continuation in wrapped {
+        b.push(
+            &format!("{indent}{continuation}"),
+            Some(DockerLine { style: DockerLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -498,5 +517,40 @@ mod tests {
     fn render_details_lines_stay_the_same_length_as_text() {
         let panel = render_details(Some(&DockerDetail::Container(container("id1", "web"))), None);
         assert_eq!(panel.text.lines().count(), panel.lines.len());
+    }
+
+    fn long_mountpoint_volume() -> Volume {
+        Volume {
+            name: "myvol".to_string(),
+            driver: "local".to_string(),
+            mountpoint: format!("/var/lib/docker/volumes/{}/_data", "x".repeat(90)),
+        }
+    }
+
+    #[test]
+    fn a_long_detail_value_word_wraps_onto_continuation_lines() {
+        let panel = render_details(Some(&DockerDetail::Volume(long_mountpoint_volume())), None);
+        let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == DockerLineStyle::Detail).count();
+        // Name + Driver (unwrapped) + at least 2 lines for the long
+        // Mountpoint value -- more rows than there are fields.
+        assert!(detail_rows > 3, "expected the long mountpoint to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
+        assert!(panel.text.contains("Mountpoint: /var/lib/docker/volumes/"));
+    }
+
+    #[test]
+    fn a_wrapped_details_continuation_line_is_dimmed_in_full() {
+        let panel = render_details(Some(&DockerDetail::Volume(long_mountpoint_volume())), None);
+        let detail_lines: Vec<&DockerLine> = panel.lines.iter().flatten().filter(|l| l.style == DockerLineStyle::Detail).collect();
+        // At least one continuation line dims from column 0 -- the
+        // whole line is value, unlike the first line's `dim_from` sitting
+        // past the "Mountpoint: " label.
+        assert!(detail_lines.iter().any(|l| l.dim_from == Some(0)), "expected a continuation line dimmed from column 0");
+    }
+
+    #[test]
+    fn a_short_detail_value_never_wraps() {
+        let panel = render_details(Some(&DockerDetail::Container(container("id1", "web"))), None);
+        assert_eq!(panel.text.lines().filter(|l| l.contains("Name: web")).count(), 1);
+        assert!(!panel.text.contains("\nweb\n"), "a short value must not spill onto its own continuation line");
     }
 }

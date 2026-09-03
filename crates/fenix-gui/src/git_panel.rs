@@ -384,10 +384,23 @@ pub fn render_status(status: Option<&RepoStatus>, staged: usize, unstaged: usize
     b.finish()
 }
 
+/// Word-wraps `value` to `crate::wrap::DEFAULT_WRAP_WIDTH`, indenting
+/// continuation lines under the value's own start column -- see
+/// `docker_panel::push_detail_line`'s own doc comment, which this
+/// mirrors exactly (down to the `dim_from` handling: `GitLine::dim_from`
+/// plays the identical "everything from here on is the dimmed value"
+/// role `DockerLine::dim_from` does).
 fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     let prefix = format!("    {label}: ");
     let dim_from = prefix.chars().count();
-    b.push(&format!("{prefix}{value}"), Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(dim_from), badge: None }));
+    let indent = " ".repeat(dim_from);
+    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(dim_from).max(20);
+    let mut wrapped = crate::wrap::wrap_text(value, wrap_width).into_iter();
+    let first = wrapped.next().unwrap_or_default();
+    b.push(&format!("{prefix}{first}"), Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(dim_from), badge: None }));
+    for continuation in wrapped {
+        b.push(&format!("{indent}{continuation}"), Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }));
+    }
 }
 
 /// The Main pane's own content: whatever diff/detail text is currently
@@ -666,6 +679,32 @@ mod tests {
         let panel = render_status(Some(&s), 0, 0, 0);
         assert!(panel.text.contains("Upstream: origin/main"));
         assert!(panel.text.contains("Ahead/Behind: +2 -1"));
+    }
+
+    #[test]
+    fn a_long_status_detail_value_word_wraps_onto_continuation_lines() {
+        let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
+        let s = RepoStatus { branch: long_branch.clone(), upstream: None, ahead: 0, behind: 0 };
+        let panel = render_status(Some(&s), 0, 0, 0);
+        let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).count();
+        assert!(detail_rows > 4, "expected the long branch name to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
+        assert_eq!(panel.text.lines().count(), panel.lines.len(), "text and lines must stay in lockstep after wrapping");
+    }
+
+    #[test]
+    fn a_wrapped_status_continuation_line_is_dimmed_in_full() {
+        let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
+        let s = RepoStatus { branch: long_branch, upstream: None, ahead: 0, behind: 0 };
+        let panel = render_status(Some(&s), 0, 0, 0);
+        let detail_lines: Vec<&GitLine> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).collect();
+        assert!(detail_lines.iter().any(|l| l.dim_from == Some(0)), "expected a continuation line dimmed from column 0");
+    }
+
+    #[test]
+    fn a_short_status_detail_value_never_wraps() {
+        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let panel = render_status(Some(&s), 0, 0, 0);
+        assert!(!panel.text.contains("\nmain\n"), "a short value must not spill onto its own continuation line");
     }
 
     #[test]
