@@ -1036,6 +1036,7 @@ ws3 = Podman|docker
 ws4 = Jira|jira
 ws5 = VNC Build|vnc:build-vm
 ws6 = VNC Test|vnc:test-vm
+ws7 = fenix|project:C:\src\fenix
 
 [windows]
 restore_windows = true
@@ -1058,7 +1059,7 @@ window2 = 4480,0,1920,1040|true
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
 | `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
 | `documents` | `doc1`, `doc2`, ... | One entry in the `SPC r f` document index, as `NAME\|PATH` (numbered, same reason as `mib`'s roots). `NAME` is what the picker lists and fuzzy-matches; `PATH` can be any file Fenix opens, PDF or not |
-| `workspaces` | `ws1`, `ws2`, ... | One entry in the `SPC TAB f` workspace shelf, as `NAME\|ACTION` (numbered, same convention as `documents`). `ACTION` is `git`/`jira`/`docker` (opens that built-in panel -- `docker` covers Podman too, since the panel autodetects the engine), `vnc:HOST` (a name from `[vnc]`), or anything else (including empty, as for a plain "Editor" entry) for a workspace with no live session behind it. Picking an already-open entry switches to it instead of creating a duplicate; picking a fresh one creates it and renames it to match, so it shows up correctly next time |
+| `workspaces` | `ws1`, `ws2`, ... | One entry in the `SPC TAB f` workspace shelf, as `NAME\|ACTION` (numbered, same convention as `documents`). `ACTION` is `git`/`jira`/`docker` (opens that built-in panel -- `docker` covers Podman too, since the panel autodetects the engine), `vnc:HOST` (a name from `[vnc]`), `project:PATH` (switches to that project root and opens a find-file picker in it, same as `SPC p p`; adds it to the known-projects list if it isn't there yet), or anything else (including empty, as for a plain "Editor" entry) for a workspace with no live session behind it. Picking an already-open entry switches to it instead of creating a duplicate; picking a fresh one creates it and renames it to match, so it shows up correctly next time |
 | `jira` | `base_url` | The self-hosted Jira Server/Data Center instance's REST API root (e.g. `https://jira.example.com`) — see the JIRA dashboard feature above |
 | `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
@@ -1071,6 +1072,24 @@ Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
 the dashboard) are stored separately as plain newline-separated path
 lists in the same directory (`projects.txt`, `recent_files.txt`) — they're
 data, not settings, so they don't live in `config.ini`.
+
+**`[vnc]`/`[documents]`/`[workspaces]`/`[lsp]` are shelves, not an
+auto-start list.** Adding hosts to `[vnc]` makes them selectable from
+`SPC v v`'s picker; adding entries to `[workspaces]` makes them
+selectable from `SPC TAB f`. Neither opens or connects to anything by
+itself at launch -- `restore_windows`/`[windows]` is the only thing
+Fenix does automatically on startup, and it only reopens each OS
+window's *position and size*, not what was open inside it (every
+restored window starts on a fresh scratch buffer). If you want a
+particular set of VNC connections or projects up the moment Fenix
+starts, run them from `SPC TAB f` once you're in -- there's no
+"autostart on launch" key yet.
+
+`config.ini` can be saved as UTF-8 with or without a byte-order mark --
+both parse correctly (Notepad's "UTF-8" option and PowerShell's
+`Out-File`/`Set-Content` both write one by default; a BOM on a file's
+very first line used to make that whole first section silently vanish,
+fixed since).
 
 ## Architecture
 

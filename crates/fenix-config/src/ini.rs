@@ -42,6 +42,18 @@ pub(crate) fn parse(text: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     let mut sections: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut current: Option<String> = None;
 
+    // Strips a leading UTF-8 BOM (`\u{FEFF}`) if present -- Windows
+    // Notepad's "UTF-8" save option writes one, and so does PowerShell's
+    // `Out-File`/`Set-Content` without `-Encoding utf8NoBOM`, both very
+    // plausible ways for someone to hand-author this file. `str::trim`
+    // does *not* strip it (`\u{FEFF}` isn't Unicode whitespace), so
+    // without this, a BOM'd file has its very first line read as
+    // `"\u{FEFF}[section]"` instead of `"[section]"` -- `strip_prefix('[')`
+    // then fails, the line is silently treated as "not a section header,"
+    // and every key under what was meant to be the file's first section
+    // is dropped as if it came before any `[section]` at all.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
@@ -149,5 +161,24 @@ mod tests {
     #[test]
     fn empty_input_yields_no_sections() {
         assert!(parse("").is_empty());
+    }
+
+    #[test]
+    fn a_leading_utf8_bom_does_not_swallow_the_files_first_section() {
+        // The actual reported bug: a config.ini hand-saved by an editor
+        // that writes a UTF-8 BOM (Notepad's "UTF-8" option, PowerShell's
+        // `Out-File`/`Set-Content` without `-Encoding utf8NoBOM`) had its
+        // entire first section silently vanish -- every key in it read
+        // as "before any section header" and got dropped.
+        let sections = parse("\u{FEFF}[vnc]\nhost1 = build-vm|10.0.0.5|5900\nhost2 = test-vm|10.0.0.6|5901\n[workspaces]\nws1 = VNC Build|vnc:build-vm\n");
+        assert_eq!(sections.get("vnc").unwrap().len(), 2);
+        assert_eq!(sections.get("vnc").unwrap().get("host1"), Some(&"build-vm|10.0.0.5|5900".to_string()));
+        assert_eq!(sections.get("workspaces").unwrap().get("ws1"), Some(&"VNC Build|vnc:build-vm".to_string()));
+    }
+
+    #[test]
+    fn a_bom_on_a_file_with_only_one_section_still_parses_it() {
+        let sections = parse("\u{FEFF}[editor]\ntheme = TempleOS\n");
+        assert_eq!(sections.get("editor").unwrap().get("theme"), Some(&"TempleOS".to_string()));
     }
 }

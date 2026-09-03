@@ -3810,6 +3810,10 @@ enum WorkspaceAction {
     Docker,
     /// The host name to connect to, one of `config.vnc_hosts`.
     Vnc(String),
+    /// A project root to switch to -- `project:PATH`. Not required to be
+    /// in `known_projects` already; opening it via this action adds it,
+    /// same as picking it through `SPC p p` would.
+    Project(PathBuf),
     /// No live session behind it -- what "editor" would be.
     Plain,
 }
@@ -3817,8 +3821,12 @@ enum WorkspaceAction {
 /// Parses one `[workspaces]` entry's action field. `git`/`jira`/
 /// `docker` open the matching built-in panel (`docker` covers Podman
 /// too, since `open_docker_panel` autodetects the engine); `vnc:HOST`
-/// connects to that `[vnc]` entry by name; anything else -- including
-/// an empty string, and any typo -- is a plain workspace with no live
+/// connects to that `[vnc]` entry by name; `project:PATH` switches to
+/// (and, if it isn't tracked yet, registers) that project root -- `PATH`
+/// is taken verbatim as everything after the prefix, not split further,
+/// so a Windows path's own drive-letter colon (`project:C:\src\fenix`)
+/// isn't mistaken for another separator; anything else -- including an
+/// empty string, and any typo -- is a plain workspace with no live
 /// session, rather than an error: a launcher entry with a bad action is
 /// still a usable named workspace, just not a self-populating one.
 fn parse_workspace_action(action: &str) -> WorkspaceAction {
@@ -3828,7 +3836,10 @@ fn parse_workspace_action(action: &str) -> WorkspaceAction {
         "docker" => WorkspaceAction::Docker,
         other => match other.strip_prefix("vnc:") {
             Some(host) if !host.trim().is_empty() => WorkspaceAction::Vnc(host.trim().to_string()),
-            _ => WorkspaceAction::Plain,
+            _ => match other.strip_prefix("project:") {
+                Some(path) if !path.trim().is_empty() => WorkspaceAction::Project(PathBuf::from(path.trim())),
+                _ => WorkspaceAction::Plain,
+            },
         },
     }
 }
@@ -14701,6 +14712,7 @@ impl App {
             WorkspaceAction::Jira => self.open_jira_panel(),
             WorkspaceAction::Docker => self.open_docker_panel(),
             WorkspaceAction::Vnc(host) => self.open_vnc_session(&host),
+            WorkspaceAction::Project(root) => self.open_project_workspace(name, root),
             WorkspaceAction::Plain => self.open_named_workspace(name),
         }
         if self.workspaces.active_index() != before && self.workspaces.active_name() != name {
@@ -14721,6 +14733,24 @@ impl App {
             return;
         }
         self.new_workspace();
+    }
+
+    /// Switches to the already-open workspace named `name`, or else
+    /// creates one and opens `root` in it via `switch_to_project` --
+    /// the same "register, then chain into a find-file picker" behavior
+    /// `SPC p p`/the dashboard's own project entries already use, so a
+    /// `project:` launcher lands you exactly where picking that project
+    /// any other way would. Same idempotence shape as `open_named_
+    /// workspace`: identity is the launcher's configured *name*, not the
+    /// root, so re-running this while that workspace is still open just
+    /// switches to it rather than re-registering/re-picking every time.
+    fn open_project_workspace(&mut self, name: &str, root: PathBuf) {
+        if let Some(idx) = self.workspaces.index_of_name(name) {
+            self.workspaces.switch_to_index(idx);
+            return;
+        }
+        self.new_workspace();
+        self.switch_to_project(root);
     }
 
     pub(crate) fn undo(&mut self) {
@@ -23444,6 +23474,42 @@ mod tests {
         assert_eq!(parse_workspace_action(""), WorkspaceAction::Plain);
         assert_eq!(parse_workspace_action("editor"), WorkspaceAction::Plain, "an unrecognized action is still a usable plain workspace");
         assert_eq!(parse_workspace_action("vnc:"), WorkspaceAction::Plain, "a host-less vnc: falls back to plain rather than connecting nowhere");
+        assert_eq!(parse_workspace_action("project:C:\\src\\fenix"), WorkspaceAction::Project(PathBuf::from("C:\\src\\fenix")));
+        assert_eq!(parse_workspace_action("project:"), WorkspaceAction::Plain, "a path-less project: falls back to plain rather than switching nowhere");
+    }
+
+    #[test]
+    fn opening_a_configured_project_workspace_switches_to_the_project_and_names_the_workspace() {
+        let known_dir = TempDir::new("workspace_project_known");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        let project_dir = TempDir::new("workspace_project_target");
+        project_dir.touch("main.rs");
+        app.config.workspaces = vec![("My Project".to_string(), format!("project:{}", project_dir.path().display()))];
+
+        app.open_configured_workspace("My Project");
+
+        assert_eq!(app.workspaces.active_name(), "My Project");
+        assert_eq!(app.project_root.as_deref(), Some(project_dir.path()));
+        assert!(app.active_picker.is_some(), "should chain into a find-file picker, same as SPC p p");
+    }
+
+    #[test]
+    fn opening_an_already_open_project_workspace_a_second_time_switches_instead_of_reopening() {
+        let known_dir = TempDir::new("workspace_project_known_reopen");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
+        let project_dir = TempDir::new("workspace_project_target_reopen");
+        project_dir.touch("main.rs");
+        app.config.workspaces = vec![("My Project".to_string(), format!("project:{}", project_dir.path().display()))];
+        app.open_configured_workspace("My Project");
+        app.picker_cancel();
+        app.new_workspace(); // some other workspace becomes active
+
+        app.open_configured_workspace("My Project");
+
+        assert_eq!(app.workspaces.len(), 3, "must not have created a second My Project workspace");
+        assert_eq!(app.workspaces.active_name(), "My Project");
     }
 
     #[test]
