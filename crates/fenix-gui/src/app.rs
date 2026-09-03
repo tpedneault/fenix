@@ -411,6 +411,138 @@ impl Drop for DockerLogFollower {
     }
 }
 
+/// The build/task runner's single-pane session (`SPC t t`) -- much
+/// smaller than `DockerSession`'s six panes (see `BufferKind::
+/// TaskOutput`'s own doc comment): one pane, one buffer, one live
+/// runner. `root` is remembered so `SPC t r` (rerun) and a future
+/// `[cmake] build_dir` (Milestone C's own stated follow-up) don't need
+/// to re-derive it from whatever buffer happens to be focused by the
+/// time either fires.
+struct TaskSession {
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    root: PathBuf,
+    /// The live child, if a task is still running -- `None` once it
+    /// finishes (`App::finish_task_run` drops it) or before the very
+    /// first task in this session has been run. Held only for its
+    /// `Drop` side effect (see `TaskRunner`'s own doc comment) beyond
+    /// what `App::kill_running_task` explicitly calls `kill` on.
+    runner: Option<TaskRunner>,
+}
+
+/// One running task's child process plus the threads streaming its
+/// output -- shaped like `DockerLogFollower`, with two differences a
+/// task actually needs that a `docker logs -f` follow never did: stdout
+/// *and* stderr both matter (a compiler's diagnostics are conventionally
+/// on stderr, unlike Docker's own combined-stream logs), and a task
+/// genuinely *finishes* with an exit status worth reporting, rather than
+/// streaming until deliberately killed. `child` is `Arc<Mutex<_>>`
+/// (`DockerLogFollower`'s plain owned `Child` is enough for a follower,
+/// since nothing but its own `Drop` ever touches it) because both the
+/// dedicated wait thread below *and* `App::kill_running_task` need to
+/// reach the same process.
+struct TaskRunner {
+    child: Arc<Mutex<std::process::Child>>,
+    stop: Arc<AtomicBool>,
+    stdout_handle: Option<JoinHandle<()>>,
+    stderr_handle: Option<JoinHandle<()>>,
+    wait_handle: Option<JoinHandle<()>>,
+}
+
+impl TaskRunner {
+    /// `send` mirrors `DockerLogFollower::spawn`'s own callback shape,
+    /// for the same "testable without a real winit `EventLoop`" reason
+    /// -- wrapped in an `Arc` internally (rather than requiring the
+    /// caller's closure itself to be `Clone`) since three threads below
+    /// each need their own handle to it.
+    fn spawn(mut child: std::process::Child, buffer_id: BufferId, send: impl Fn(FenixUserEvent) -> bool + Send + Sync + 'static) -> Self {
+        let send = Arc::new(send);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            let (send, thread_stop) = (send.clone(), stop.clone());
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(stdout).lines() {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(line) = line else { break };
+                    if !send(FenixUserEvent::TaskOutputLine(buffer_id, line)) {
+                        return;
+                    }
+                }
+            })
+        });
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            let (send, thread_stop) = (send.clone(), stop.clone());
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(stderr).lines() {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(line) = line else { break };
+                    if !send(FenixUserEvent::TaskOutputLine(buffer_id, line)) {
+                        return;
+                    }
+                }
+            })
+        });
+
+        let child = Arc::new(Mutex::new(child));
+        let wait_handle = Some({
+            let (send, thread_stop, wait_child) = (send.clone(), stop.clone(), child.clone());
+            std::thread::spawn(move || {
+                let status = wait_child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).wait().ok();
+                // A deliberate `kill()` (`Drop`/`App::kill_running_task`)
+                // also makes `wait()` return -- the `stop` flag is what
+                // tells this apart from a genuine finish, same
+                // distinction `DockerLogFollower`'s own EOF handling
+                // already draws for the same reason.
+                if !thread_stop.load(Ordering::Relaxed) {
+                    let _ = send(FenixUserEvent::TaskFinished(buffer_id, status.map(|s| s.success())));
+                }
+            })
+        });
+
+        Self { child, stop, stdout_handle, stderr_handle, wait_handle }
+    }
+
+    /// `SPC t k` -- ends the task early. Just a kill, not a full
+    /// teardown (`Drop` still runs when the session's `runner` field is
+    /// eventually replaced/dropped) -- the wait thread's own `stop`-
+    /// guarded check above is what keeps this from also emitting a
+    /// spurious `TaskFinished` on top of whatever explicit "killed"
+    /// marker the caller appends itself.
+    fn kill(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
+}
+
+impl Drop for TaskRunner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait(); // reap, avoid a zombie process
+        }
+        if let Some(handle) = self.stdout_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr_handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.wait_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Streams raw PTY output bytes for the terminal panel's shell into
 /// `FenixUserEvent::TerminalOutput` -- same "background thread, stopped
 /// via a kill that unblocks its blocking read" shape as `DockerLog
@@ -1355,6 +1487,19 @@ pub enum FenixUserEvent {
     /// the Details pane show a "log stream ended" marker instead of
     /// just silently going stale.
     LogEnded(BufferId),
+    /// One new line of a running task's stdout or stderr (both feed the
+    /// same event, see `TaskRunner`'s own doc comment for why) --
+    /// carries the target `BufferId` explicitly, same reasoning as
+    /// `LogLine`.
+    TaskOutputLine(BufferId, String),
+    /// A running task's child process exited -- `Some(true)`/`Some(false)`
+    /// for a clean success/failure exit, `None` if its status couldn't be
+    /// determined at all (killed by a signal on a platform that doesn't
+    /// report one, or the wait itself failed). Lets the Task Output panel
+    /// show a final "succeeded"/"failed" marker instead of just quietly
+    /// going stale the way `LogEnded` already does for Docker's own log
+    /// follower.
+    TaskFinished(BufferId, Option<bool>),
     /// A fresh `git status --porcelain=v2 --branch` snapshot (`None`
     /// outside a repo), from the active Git session's background
     /// poller.
@@ -1564,18 +1709,24 @@ struct JumpEntry {
 }
 
 /// One entry in the generalized "list of places, step next/prev"
-/// `App::quickfix` holds -- kept as two variants (one per real source)
-/// rather than converted to one shared position representation at
-/// construction time, since LSP's `Position` (0-indexed, UTF-16
+/// `App::quickfix` holds -- kept as separate variants (one per real
+/// source) rather than converted to one shared position representation
+/// at construction time, since LSP's `Position` (0-indexed, UTF-16
 /// columns) and `rg --vimgrep`'s own convention (1-indexed, char
 /// columns, via `fenix_project::GrepMatch`) need the target file's
 /// actual content to convert between correctly, which isn't
 /// necessarily available (or worth reading off disk) until the entry
 /// is actually jumped to -- see `App::quickfix_step`'s own dispatch.
+/// `Task` reuses `GrepMatch`'s exact shape (path/line/col/text) rather
+/// than inventing its own -- a task's recovered `file:line:col:
+/// message` location is already in that same 1-indexed convention (see
+/// `fenix_tasks::TaskLocation`), and `jump_to_grep_match` needs nothing
+/// source-specific to act on it.
 #[derive(Debug, Clone, PartialEq)]
 enum QuickfixEntry {
     Grep(fenix_project::GrepMatch),
     Lsp { path: PathBuf, position: lsp_types::Position },
+    Task(fenix_project::GrepMatch),
 }
 
 /// One active `CDF_GRPSIZE` repeating group -- the SCOS-2000 MIB's own
@@ -1767,6 +1918,11 @@ enum ActivePicker {
     /// carrying the file/line `tcl_candidates`'s own `CompletionItem`
     /// conversion discards.
     Symbol(fenix_picker::PickerState<fenix_completion::ctags::TagEntry>),
+    /// `SPC p t`: fuzzy-find a discovered task (`fenix_tasks::
+    /// discover_tasks` -- built-in per-project-marker defaults plus any
+    /// `.fenix/project.ini` `[tasks]` overrides) -- confirming runs it
+    /// (`App::run_task`) in the Task Output panel.
+    Task(fenix_picker::PickerState<fenix_tasks::TaskDef>),
     /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
     /// subsystem, confirming opens its detail view (`mib_show_
     /// telecommand`). Same candidate list as `MibTelecommandInsert`,
@@ -1878,6 +2034,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
+        ActivePicker::Task(s) => s.push_char(c),
     }
 }
 
@@ -1911,6 +2068,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
+        ActivePicker::Task(s) => s.backspace(),
     }
 }
 
@@ -1944,6 +2102,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
+        ActivePicker::Task(s) => s.move_selection(delta),
     }
 }
 
@@ -1980,6 +2139,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
+        ActivePicker::Task(s) => s.toggle_mark(),
     }
 }
 
@@ -2013,6 +2173,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
+        ActivePicker::Task(s) => s.query(),
     }
 }
 
@@ -2046,6 +2207,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
+        ActivePicker::Task(s) => s.len(),
     }
 }
 
@@ -2079,6 +2241,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
+        ActivePicker::Task(s) => s.selected_row(),
     }
 }
 
@@ -2128,6 +2291,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Task(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -3525,7 +3689,14 @@ struct JiraEditSession {
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     matches!(
         kind,
-        BufferKind::Docker | BufferKind::Git | BufferKind::Jira | BufferKind::Vnc | BufferKind::Pdf | BufferKind::PdfOutline | BufferKind::PdfSearchResults
+        BufferKind::Docker
+            | BufferKind::Git
+            | BufferKind::Jira
+            | BufferKind::Vnc
+            | BufferKind::Pdf
+            | BufferKind::PdfOutline
+            | BufferKind::PdfSearchResults
+            | BufferKind::TaskOutput
     )
 }
 
@@ -3991,6 +4162,14 @@ pub struct App {
     /// The active Docker multi-pane session (`SPC d d`), if any -- see
     /// `DockerSession`'s own doc comment.
     docker_session: Option<DockerSession>,
+    /// The active build/task runner's single-pane session (`SPC t t`),
+    /// if any -- see `TaskSession`'s own doc comment.
+    task_session: Option<TaskSession>,
+    /// The most recently run task, plus the project root it was run
+    /// from -- what `SPC t r` reruns without going back through the
+    /// picker. `None` until a task has actually been run at least once
+    /// this session.
+    last_task: Option<(fenix_tasks::TaskDef, PathBuf)>,
     /// Per-line metadata for every real `BufferKind::Git` buffer
     /// currently open (`SPC g g`) -- mirrors `docker_lines` exactly.
     git_lines: HashMap<BufferId, Vec<Option<git_panel::GitLine>>>,
@@ -4729,6 +4908,8 @@ impl App {
             docker_menu_open: false,
             pane_titles: HashMap::new(),
             docker_session: None,
+            task_session: None,
+            last_task: None,
             git_lines: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
@@ -5317,14 +5498,19 @@ impl App {
     }
 
     /// Whether the *focused* pane currently belongs to one of the app's
-    /// long-lived side sessions (VNC/PDF/Docker/Git/Jira) rather than
-    /// just showing an ordinary file/scratch buffer -- checked the same
-    /// way each session already answers "is this my pane" for its own
-    /// purposes (`vnc_session_key_for_pane`/`pdf_session_key_for_pane`/
-    /// `docker_focused_role`/`git_focused_role`/`jira_focused_role`), so
-    /// this adds no new bookkeeping, just combines what already exists.
-    /// See `open_buffer_in_focused_pane`'s doc comment for why this
-    /// matters.
+    /// long-lived side sessions (VNC/PDF/Docker/Git/Jira/Task) rather
+    /// than just showing an ordinary file/scratch buffer -- checked the
+    /// same way each session already answers "is this my pane" for its
+    /// own purposes (`vnc_session_key_for_pane`/`pdf_session_key_for_
+    /// pane`/`docker_focused_role`/`git_focused_role`/`jira_focused_
+    /// role`/`task_session`'s own single `pane` field), so this adds no
+    /// new bookkeeping, just combines what already exists. See `open_
+    /// buffer_in_focused_pane`'s doc comment for why this matters --
+    /// `TaskSession` hit the exact same class of bug this guard was
+    /// built for (`SPC p n` jumping to a diagnostic while the Task
+    /// Output pane was focused silently replaced it with the jumped-to
+    /// file, so a later `SPC p r`/`SPC p T` rerun kept running -- just
+    /// into a buffer no pane displayed anymore).
     fn focused_pane_holds_a_tracked_session(&self) -> bool {
         let focused = self.focused_pane_id();
         self.vnc_session_key_for_pane(focused).is_some()
@@ -5332,6 +5518,7 @@ impl App {
             || self.docker_focused_role().is_some()
             || self.git_focused_role().is_some()
             || self.jira_focused_role().is_some()
+            || self.task_session.as_ref().is_some_and(|s| s.pane == focused)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -8673,7 +8860,7 @@ impl App {
         let entry = self.quickfix[target].clone();
         let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         match entry {
-            QuickfixEntry::Grep(m) => {
+            QuickfixEntry::Grep(m) | QuickfixEntry::Task(m) => {
                 self.open_file_from_picker(&m.path);
                 self.jump_to_grep_match(&m);
             }
@@ -10429,6 +10616,236 @@ impl App {
         }
         if let Some(session) = self.docker_session.as_mut() {
             session.log_follower = None;
+        }
+    }
+
+    /// `SPC t t` -- fuzzy-picks a discovered task
+    /// (`fenix_tasks::discover_tasks`) to run. A no-op (with a message)
+    /// with no known project root, or with a project root that has no
+    /// discoverable tasks at all (no recognized marker file, and no
+    /// `.fenix/project.ini` `[tasks]` overrides) -- there's genuinely
+    /// nothing to offer the picker in either case.
+    pub(crate) fn picker_tasks(&mut self) {
+        let Some(root) = self.project_root.clone() else {
+            self.set_error("no project root detected for the focused buffer".to_string());
+            return;
+        };
+        let tasks = fenix_tasks::discover_tasks(&root);
+        if tasks.is_empty() {
+            self.set_error(format!("no known tasks for {}", root.display()));
+            return;
+        }
+        let candidates = tasks.into_iter().map(|t| fenix_picker::Candidate::new(t.name.clone(), t)).collect();
+        self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC t r` -- reruns `last_task` without going back through the
+    /// picker. A no-op (with a message) if nothing has been run yet this
+    /// session.
+    pub(crate) fn rerun_last_task(&mut self) {
+        let Some((task, root)) = self.last_task.clone() else {
+            self.set_error("no task has been run yet".to_string());
+            return;
+        };
+        self.run_task(task, root);
+    }
+
+    /// `SPC t k` -- ends whatever task is currently running. A no-op
+    /// (with a message) if no task is running right now -- either no
+    /// panel is open at all, or one is but its last run already finished
+    /// (`finish_task_run` already cleared `runner`).
+    pub(crate) fn kill_running_task(&mut self) {
+        let Some(session) = &self.task_session else {
+            self.set_error("no task is running".to_string());
+            return;
+        };
+        let Some(runner) = &session.runner else {
+            self.set_error("no task is running".to_string());
+            return;
+        };
+        runner.kill();
+        let buffer = session.buffer;
+        self.append_task_output_text(buffer, "-- task killed --");
+        if let Some(session) = self.task_session.as_mut() {
+            session.runner = None;
+        }
+    }
+
+    /// Runs `task` from `root`, opening the single-pane Task Output
+    /// panel if this is the first task run this session, or reusing
+    /// (and clearing) the existing one otherwise -- replacing any
+    /// previous run's live `runner` first, so there's never two tasks
+    /// running from this app at once (same "one at a time" posture
+    /// `docker_view_logs_selected` already established for the Docker
+    /// log follower). Also records `last_task` for `SPC t r`, and clears
+    /// the quickfix list before anything about this run's own output has
+    /// arrived -- a stale previous run's diagnostics have no business
+    /// surviving into a fresh one.
+    fn run_task(&mut self, task: fenix_tasks::TaskDef, root: PathBuf) {
+        self.last_task = Some((task.clone(), root.clone()));
+        self.quickfix.clear();
+        self.quickfix_index = None;
+        let header = format!("$ {} {}\n", task.command, task.args.join(" "));
+
+        let buffer = if let Some(session) = &self.task_session {
+            let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
+            self.task_session.as_mut().expect("just matched Some above").runner = None; // tear down any previous runner first
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.reset_task_output_buffer(buffer, &header);
+            buffer
+        } else {
+            let buffer = self.buffers.open_task_output(&header);
+            let cursor = Cursor::at_start();
+            self.workspaces.new_workspace(buffer, cursor);
+            let workspace_index = self.workspaces.active_index();
+            let pane = self.focused_pane_id();
+            self.pane_titles.insert(pane, "Task Output".to_string());
+            self.task_session = Some(TaskSession { workspace_index, pane, buffer, root: root.clone(), runner: None });
+            buffer
+        };
+
+        self.start_task_process(task, root, buffer);
+        self.wake_caret();
+    }
+
+    /// Overwrites the Task Output buffer's whole content with `header`
+    /// (a fresh run's own `$ command args` line) and resets every pane
+    /// currently showing it back to the top -- same shape as `set_
+    /// docker_buffer`, just without that one's per-line metadata (there
+    /// is none for task output; see `content_highlights_for_visible_
+    /// range`'s own `BufferKind::TaskOutput` handling, which is exactly
+    /// "none" -- plain foreground text throughout).
+    fn reset_task_output_buffer(&mut self, id: BufferId, header: &str) {
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, header);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    /// Actually spawns `task`'s process and starts streaming its output
+    /// into `buffer`. Without a real `event_proxy` (every test; see
+    /// `App::new`'s own doc comment) there's nothing that could ever
+    /// deliver a `TaskOutputLine`/`TaskFinished` event, so this falls
+    /// back to running the task to completion synchronously and
+    /// appending its whole combined output at once -- same posture
+    /// `docker_view_logs_selected` already established for the same gap.
+    fn start_task_process(&mut self, task: fenix_tasks::TaskDef, root: PathBuf, buffer: BufferId) {
+        let Some(proxy) = self.event_proxy.clone() else {
+            match std::process::Command::new(&task.command).args(&task.args).current_dir(&root).output() {
+                Ok(out) => {
+                    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+                    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                    for line in combined.lines() {
+                        self.append_task_output_line(buffer, line.to_string());
+                    }
+                    self.finish_task_run(buffer, Some(out.status.success()));
+                }
+                Err(err) => self.append_task_output_text(buffer, &format!("fenix: couldn't start `{}`: {err}", task.command)),
+            }
+            return;
+        };
+
+        let Some(child) = fenix_tasks::spawn(&task, &root) else {
+            self.append_task_output_text(buffer, &format!("fenix: couldn't start `{}`", task.command));
+            return;
+        };
+        let runner = TaskRunner::spawn(child, buffer, move |event| proxy.send_event(event).is_ok());
+        if let Some(session) = self.task_session.as_mut() {
+            session.runner = Some(runner);
+        }
+    }
+
+    /// `FenixUserEvent::TaskOutputLine` handling: parses the line
+    /// (`fenix_tasks::parse_line` -- see its own doc comment for why a
+    /// cargo `--message-format=json` line decodes into a human-readable
+    /// multi-line block plus a recovered location, a recognized-but-
+    /// uninteresting cargo JSON line -- `compiler-artifact`, one per
+    /// crate compiled -- into nothing at all, and a plain `gcc`/`clang`/
+    /// `pytest`/`ctest`-style line is tried against the generic
+    /// `file:line:col:` convention instead), appends the display text
+    /// (skipped entirely when empty, rather than leaving a blank line
+    /// behind for every suppressed cargo JSON message), and -- when a
+    /// location was recovered -- feeds it into the generalized quickfix
+    /// list (as a path resolved against this session's own `root`,
+    /// matching `fenix_project::grep_project`'s own `root.join(...)`
+    /// treatment of a tool's root-relative paths) so `SPC p n`/`SPC p N`
+    /// can step through this run's diagnostics the same way a project
+    /// grep or LSP references already do.
+    fn append_task_output_line(&mut self, buffer_id: BufferId, line: String) {
+        if self.task_session.as_ref().map(|s| s.buffer) != Some(buffer_id) {
+            return;
+        }
+        let parsed = fenix_tasks::parse_line(&line);
+        if !parsed.display.is_empty() {
+            self.append_task_output_text(buffer_id, &parsed.display);
+        }
+        if let Some(loc) = parsed.location {
+            let root = self.task_session.as_ref().map(|s| s.root.clone()).unwrap_or_default();
+            let path = root.join(loc.path);
+            self.quickfix.push(QuickfixEntry::Task(fenix_project::GrepMatch { path, line: loc.line, col: loc.col, text: loc.message }));
+        }
+    }
+
+    /// Appends `text` (verbatim, split on any internal `\n` -- a decoded
+    /// cargo compiler message's own `rendered` block is often several
+    /// lines) to the Task Output buffer, auto-following the same way
+    /// `append_docker_log_line` already does for Docker's own live logs:
+    /// any pane currently showing this buffer whose cursor was already
+    /// on the last line before this arrived gets moved to the new last
+    /// line after, so watching a live build stays pinned to the bottom
+    /// unless the user has scrolled up to read something earlier.
+    fn append_task_output_text(&mut self, buffer_id: BufferId, text: &str) {
+        let panes_at_end: Vec<fenix_window::WindowId> = self
+            .windows()
+            .windows()
+            .into_iter()
+            .filter(|&pane| self.windows().content(pane) == Some(&buffer_id))
+            .filter(|&pane| {
+                let Some(ob) = self.buffers.get(buffer_id) else { return false };
+                let (row, _) = ob.buffer.line_col(&self.pane_state(pane).cursor);
+                row + 1 >= ob.buffer.visual_line_count()
+            })
+            .collect();
+
+        let Some(ob) = self.buffers.get_mut(buffer_id) else { return };
+        let mut append_cursor = Cursor { char_idx: ob.buffer.len_chars(), sticky_col: 0 };
+        ob.buffer.insert_str(&mut append_cursor, &format!("{text}\n"));
+
+        if let Some(ob) = self.buffers.get(buffer_id) {
+            let last_line = ob.buffer.visual_line_count().saturating_sub(1);
+            let end_char = ob.buffer.line_start_char(last_line);
+            for pane in panes_at_end {
+                self.pane_state_mut(pane).cursor = Cursor { char_idx: end_char, sticky_col: 0 };
+            }
+        }
+    }
+
+    /// `FenixUserEvent::TaskFinished` handling: appends a final
+    /// succeeded/failed/unknown-status marker and drops the session's
+    /// live `runner` -- same "the child already exited on its own here;
+    /// `Drop` still runs for consistency, but its `kill()`/`wait()` on an
+    /// already-gone process are harmless no-ops" shape `finish_docker_
+    /// log_stream` already established.
+    fn finish_task_run(&mut self, buffer_id: BufferId, success: Option<bool>) {
+        if self.task_session.as_ref().map(|s| s.buffer) != Some(buffer_id) {
+            return;
+        }
+        let marker = match success {
+            Some(true) => "-- task succeeded --",
+            Some(false) => "-- task failed --",
+            None => "-- task ended (unknown status) --",
+        };
+        self.append_task_output_text(buffer_id, marker);
+        if let Some(session) = self.task_session.as_mut() {
+            session.runner = None;
         }
     }
 
@@ -12315,6 +12732,13 @@ impl App {
                 self.jump_to_tag(&tag);
                 self.record_jump(from);
             }
+            Some(ActivePicker::Task(state)) => {
+                let Some(task) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                self.run_task(task, root);
+            }
             Some(ActivePicker::MibTelecommandLookup(state)) => {
                 let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -13675,6 +14099,8 @@ impl App {
             FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
+            FenixUserEvent::TaskOutputLine(buffer_id, line) => self.append_task_output_line(buffer_id, line),
+            FenixUserEvent::TaskFinished(buffer_id, success) => self.finish_task_run(buffer_id, success),
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
@@ -15053,6 +15479,8 @@ impl App {
                 "*pdf outline*".to_string()
             } else if ob.kind == BufferKind::PdfSearchResults {
                 "*pdf search*".to_string()
+            } else if ob.kind == BufferKind::TaskOutput {
+                "*task output*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -15170,6 +15598,7 @@ impl App {
                 Some(picker @ ActivePicker::SwitchWorkspace(_)) => ("SWWS", picker_len(picker)),
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
+                Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return (label, format!("│ {count} matches "));
@@ -15510,6 +15939,7 @@ impl App {
             || ob.kind == BufferKind::Pdf
             || ob.kind == BufferKind::PdfOutline
             || ob.kind == BufferKind::PdfSearchResults
+            || ob.kind == BufferKind::TaskOutput
         {
             return 0;
         }
@@ -23934,6 +24364,152 @@ mod tests {
             language: fenix_syntax::LanguageId::Python,
             event: fenix_lsp::LspEvent::Disconnected("test".to_string()),
         });
+        app.handle_user_event(FenixUserEvent::TaskOutputLine(app.focused_buffer_id(), "a line".to_string()));
+        app.handle_user_event(FenixUserEvent::TaskFinished(app.focused_buffer_id(), Some(true)));
+    }
+
+    #[test]
+    fn picker_tasks_errors_with_no_project_root() {
+        let mut app = App::with_file(None);
+        app.picker_tasks();
+        assert!(app.modeline_pieces().1.contains("no project root"));
+        assert!(app.active_picker.is_none());
+    }
+
+    #[test]
+    fn picker_tasks_errors_when_the_project_root_has_no_discoverable_tasks() {
+        let dir = TempDir::new("no_tasks");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.picker_tasks();
+        assert!(app.modeline_pieces().1.contains("no known tasks"));
+    }
+
+    #[test]
+    fn picker_tasks_opens_a_task_picker_with_the_discovered_candidates() {
+        let dir = TempDir::new("cargo_project");
+        dir.write("Cargo.toml", "[package]\nname=\"x\"");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.picker_tasks();
+
+        match &app.active_picker {
+            Some(ActivePicker::Task(state)) => assert_eq!(state.len(), 3), // build/test/clippy
+            _ => panic!("expected an open Task picker"),
+        }
+    }
+
+    #[test]
+    fn run_task_opens_a_task_output_buffer_with_the_command_header() {
+        let dir = TempDir::new("run_task_header");
+        let mut app = App::with_file(None);
+        let program = if cfg!(windows) { "cmd" } else { "true" };
+        let args: Vec<String> = if cfg!(windows) { vec!["/c".to_string(), "exit".to_string(), "0".to_string()] } else { Vec::new() };
+        let task = fenix_tasks::TaskDef { name: "t".to_string(), command: program.to_string(), args };
+
+        app.run_task(task, dir.path().to_path_buf());
+
+        assert_eq!(app.open().kind, BufferKind::TaskOutput);
+        assert!(app.open().buffer.text().starts_with(&format!("$ {program}")));
+    }
+
+    #[test]
+    fn run_task_without_a_real_event_proxy_captures_output_synchronously() {
+        // `App::with_file` never sets a real `event_proxy` (see its own
+        // doc comment) -- `start_task_process`'s fallback path runs the
+        // command to completion and appends its whole output at once,
+        // same posture `docker_view_logs_selected` already established
+        // for the same gap.
+        let dir = TempDir::new("run_task_sync");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("hello-from-task");
+        let task = fenix_tasks::TaskDef { name: "echo".to_string(), command: program, args };
+
+        app.run_task(task, dir.path().to_path_buf());
+
+        let text = app.open().buffer.text();
+        assert!(text.contains("hello-from-task"), "expected the echoed text in the buffer, got:\n{text}");
+        assert!(text.contains("task succeeded"), "expected a success marker, got:\n{text}");
+    }
+
+    #[test]
+    fn run_task_a_second_time_reuses_the_same_panel_and_clears_the_previous_output() {
+        let dir = TempDir::new("run_task_reuse");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("first-run");
+        app.run_task(fenix_tasks::TaskDef { name: "first".to_string(), command: program, args }, dir.path().to_path_buf());
+        let first_buffer = app.focused_buffer_id();
+
+        let (program2, args2) = echo_command("second-run");
+        app.run_task(fenix_tasks::TaskDef { name: "second".to_string(), command: program2, args: args2 }, dir.path().to_path_buf());
+
+        assert_eq!(app.focused_buffer_id(), first_buffer, "should reuse the same panel, not open a second one");
+        let text = app.open().buffer.text();
+        assert!(!text.contains("first-run"), "the previous run's output should have been cleared, got:\n{text}");
+        assert!(text.contains("second-run"));
+    }
+
+    #[test]
+    fn rerun_last_task_errors_when_nothing_has_run_yet() {
+        let mut app = App::with_file(None);
+        app.rerun_last_task();
+        assert!(app.modeline_pieces().1.contains("no task has been run"));
+    }
+
+    #[test]
+    fn rerun_last_task_reruns_the_same_task_that_was_last_run() {
+        let dir = TempDir::new("rerun_last");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("rerun-marker");
+        app.run_task(fenix_tasks::TaskDef { name: "t".to_string(), command: program, args }, dir.path().to_path_buf());
+
+        // A second run so the panel's content is genuinely fresh, not
+        // just left over from the first `run_task` call above.
+        app.reset_task_output_buffer(app.focused_buffer_id(), "");
+        app.rerun_last_task();
+
+        assert!(app.open().buffer.text().contains("rerun-marker"));
+    }
+
+    #[test]
+    fn kill_running_task_errors_when_nothing_is_running() {
+        let mut app = App::with_file(None);
+        app.kill_running_task();
+        assert!(app.modeline_pieces().1.contains("no task is running"));
+    }
+
+    #[test]
+    fn append_task_output_line_with_a_recognizable_location_feeds_the_quickfix_list() {
+        let dir = TempDir::new("task_quickfix");
+        let mut app = App::with_file(None);
+        app.run_task(fenix_tasks::TaskDef { name: "noop".to_string(), command: "true-noop-placeholder".to_string(), args: Vec::new() }, dir.path().to_path_buf());
+        let buffer = app.task_session.as_ref().unwrap().buffer;
+
+        app.append_task_output_line(buffer, "src/main.rs:5:12: mismatched types".to_string());
+
+        assert_eq!(app.quickfix.len(), 1);
+        match &app.quickfix[0] {
+            QuickfixEntry::Task(m) => {
+                assert_eq!(m.path, dir.path().join("src/main.rs"));
+                assert_eq!(m.line, 5);
+                assert_eq!(m.col, 12);
+            }
+            other => panic!("expected a QuickfixEntry::Task, got {other:?}"),
+        }
+    }
+
+    /// A cross-platform `(program, args)` that echoes `text` to stdout
+    /// and exits successfully -- `echo` isn't a real standalone binary
+    /// on Windows (it's a shell built-in), so this goes through `cmd /c`
+    /// there the same way a real npm-style `.cmd` shim already does
+    /// (see `fenix_lsp::client::resolve_command`'s own doc comment).
+    fn echo_command(text: &str) -> (String, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd".to_string(), vec!["/c".to_string(), "echo".to_string(), text.to_string()])
+        } else {
+            ("echo".to_string(), vec![text.to_string()])
+        }
     }
 
     #[test]
@@ -24256,6 +24832,38 @@ mod tests {
         app.workspaces.switch_to_index(session_workspace_index);
         app.windows_mut().focus(session_pane);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
+    }
+
+    #[test]
+    fn quickfix_jump_does_not_hijack_a_focused_task_output_pane() {
+        // Reproduces a real bug found live-testing the task runner:
+        // `SPC p n` jumping to a diagnostic while the Task Output pane
+        // was focused used to silently replace that pane's content with
+        // the jumped-to file (`open_file_from_picker` -> `open_buffer_
+        // in_focused_pane` had no way to know it was a tracked session,
+        // unlike VNC/Docker/Git/Jira) -- so a later `SPC p r`/`SPC p T`
+        // rerun kept running, just into a buffer no pane displayed
+        // anymore. Exercises the exact path that broke:
+        // `QuickfixEntry::Task` -> `jump_to_grep_match` -> `open_file_
+        // from_picker`, not just the guard function directly.
+        let dir = TempDir::new("task_quickfix_hijack");
+        let target = dir.write("main.rs", "fn main() {}\n");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("noop");
+        app.run_task(fenix_tasks::TaskDef { name: "t".to_string(), command: program, args }, dir.path().to_path_buf());
+        let task_workspace_index = app.task_session.as_ref().unwrap().workspace_index;
+        let task_pane = app.task_session.as_ref().unwrap().pane;
+        let workspace_count_before = app.workspaces.len();
+        app.quickfix = vec![QuickfixEntry::Task(fenix_project::GrepMatch { path: target, line: 1, col: 1, text: "x".to_string() })];
+        app.quickfix_index = None;
+
+        app.quickfix_step(1);
+
+        assert_eq!(app.workspaces.len(), workspace_count_before + 1, "the jumped-to file should land in a new workspace");
+        assert_ne!(app.workspaces.active_index(), task_workspace_index);
+        app.workspaces.switch_to_index(task_workspace_index);
+        app.windows_mut().focus(task_pane);
+        assert_eq!(app.open().kind, BufferKind::TaskOutput, "the Task Output pane must still show task output, not the jumped-to file");
     }
 
     #[test]

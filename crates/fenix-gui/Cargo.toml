@@ -30,6 +30,7 @@ fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-table = { path = "../fenix-table" }
+fenix-tasks = { path = "../fenix-tasks" }
 fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-vnc = { path = "../fenix-vnc" }

@@ -83,6 +83,9 @@ impl CommandRegistry {
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
+        registry.register("task.run", "Fuzzy-pick and run a discovered project task", cmd_task_run);
+        registry.register("task.rerun_last", "Rerun the most recently run task", cmd_task_rerun_last);
+        registry.register("task.kill", "End the currently running task", cmd_task_kill);
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
@@ -335,6 +338,18 @@ fn cmd_project_add(ctx: &mut CommandCtx) {
 
 fn cmd_project_delete(ctx: &mut CommandCtx) {
     ctx.app.picker_delete_project();
+}
+
+fn cmd_task_run(ctx: &mut CommandCtx) {
+    ctx.app.picker_tasks();
+}
+
+fn cmd_task_rerun_last(ctx: &mut CommandCtx) {
+    ctx.app.rerun_last_task();
+}
+
+fn cmd_task_kill(ctx: &mut CommandCtx) {
+    ctx.app.kill_running_task();
 }
 
 fn cmd_dashboard_open(ctx: &mut CommandCtx) {

@@ -77,6 +77,11 @@ pub enum BufferKind {
     /// searched from -- same "real buffer, just tagged" shape as
     /// `PdfOutline`, just a list of matches instead of bookmarks.
     PdfSearchResults,
+    /// The build/task runner's live output panel (`SPC t t`) -- same
+    /// "real buffer, just tagged, host appends to it as output streams
+    /// in" shape as `Docker`'s own Logs pane, just a single pane rather
+    /// than a whole six-pane session (see `fenix-gui`'s `TaskSession`).
+    TaskOutput,
 }
 
 impl BufferKind {
@@ -187,6 +192,15 @@ impl BufferList {
     /// re-renders `text` via `Buffer::replace_range` on refresh.
     pub fn open_docker(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Docker)
+    }
+
+    /// A real buffer seeded with `text` and tagged `TaskOutput` -- `SPC
+    /// t t`. Same "real buffer, just tagged" shape as `open_docker`; the
+    /// host appends each new line as it streams in rather than
+    /// rewriting the whole buffer on every update the way `open_docker`/
+    /// `open_git`/`open_jira`'s panels do.
+    pub fn open_task_output(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::TaskOutput)
     }
 
     /// A real buffer seeded with `text` (a rendered status/files/branches/

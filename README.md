@@ -347,6 +347,25 @@ for anyone curious to poke around or build on it.
   `bash-language-server`, and most other JS-ecosystem tooling) launches
   correctly despite `PATH` resolution quirks Rust's own process-spawning
   otherwise has no answer for.
+- **Build/task runner**: `SPC p t` fuzzy-picks a task discovered from the
+  focused buffer's project root -- built-in defaults for whichever
+  ecosystem markers are present (`cargo build`/`test`/`clippy` for a
+  `Cargo.toml`, `pytest`/`ruff check` for a `pyproject.toml`, CMake
+  configure/build/`ctest` for a `CMakeLists.txt`, `npm run build`/`test`
+  for a `package.json` -- every matching ecosystem contributes its own
+  set, not just the first one found), plus any project-local overrides
+  from `.fenix/project.ini`'s `[tasks]` section (`taskN = NAME|COMMAND`,
+  same numbered-key convention `config.ini`'s own lists already use).
+  Runs in a live-streamed single-pane Task Output panel (`SPC p T`
+  reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
+  `clippy` specifically run with `--message-format=json` so each
+  diagnostic's recovered file/line/column feeds the same quickfix list
+  a project grep or LSP references already populate (`SPC p n`/
+  `SPC p N` steps through them), while the panel itself still shows
+  cargo's own human-readable output (its `rendered` field), not raw
+  JSON -- every other tool's plain `file:line:col: message` convention
+  (gcc/clang/`pytest`/`ctest`) is recovered the same way without
+  needing `--message-format=json` at all.
 - **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -509,6 +528,9 @@ popup shows what keys continue it.
 | `SPC p n` / `SPC p N` | Next / previous match in the last project search (quickfix) |
 | `SPC p p` | Switch project |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
+| `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
+| `SPC p T` | Rerun the most recently run task |
+| `SPC p k` | End the currently running task |
 | `SPC s s` | Fuzzy-find a line in the current buffer |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |

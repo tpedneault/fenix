@@ -140,6 +140,15 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         );
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
+        // `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
+        // so the build/task runner nests under `SPC p` instead --
+        // Doom Emacs' own `SPC p c` ("project compile") convention,
+        // generalized to any discovered task rather than just a build.
+        // `T`/lowercase mirrors `n`/`N`'s existing next-match/prev-match
+        // shift-variant pattern just above, here for run/rerun instead.
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('t')], "run task", "task.run");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('T')], "rerun last task", "task.rerun_last");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('k')], "kill running task", "task.kill");
 
         t.label_group(&[spc, KeyPress::char('s')], "search");
         t.insert(&[spc, KeyPress::char('s'), KeyPress::char('s')], "search buffer", "search.buffer");

@@ -697,6 +697,7 @@ dependencies = [
  "fenix-project",
  "fenix-syntax",
  "fenix-table",
+ "fenix-tasks",
  "fenix-terminal",
  "fenix-vim",
  "fenix-vnc",
@@ -786,6 +787,14 @@ dependencies = [
 [[package]]
 name = "fenix-table"
 version = "0.0.1"
+
+[[package]]
+name = "fenix-tasks"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "fenix-terminal"
