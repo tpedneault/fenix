@@ -4,3 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+
+# Test-only. This crate deliberately has no runtime dependencies -- it
+# shells out to `git` and parses text, nothing more. `apply_patch` takes
+# a patch as a plain string precisely so building one (which is
+# `fenix-diff`'s job) stays the caller's concern; the tests need
+# `fenix-diff` only to produce realistic patches to feed it.
+[dev-dependencies]
+fenix-diff = { path = "../fenix-diff" }

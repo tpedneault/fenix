@@ -1,0 +1,6 @@
+[package]
+name = "fenix-diff"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
