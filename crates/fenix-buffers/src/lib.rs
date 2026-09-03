@@ -88,6 +88,15 @@ pub enum BufferKind {
     /// Docker's six panes all share `BufferKind::Docker` (see `fenix-
     /// gui`'s `DebugSession`/`DebugPaneRole`).
     Debug,
+    /// A rendered diff (`fenix-gui`'s `diff_view`) -- the working
+    /// tree's changes, a commit, a ref-to-ref comparison, or a merge
+    /// request's changes. Its own kind rather than another `Git` buffer
+    /// because the *same* rendered diff is hosted by several different
+    /// panels, and each row carries a much richer payload than a style
+    /// tag (the file/hunk/line it came from, see `diff_view::
+    /// DiffAnchor`) -- so it gets its own per-line metadata map and
+    /// highlight pass, exactly as `Docker`/`Git`/`Jira` each already do.
+    Diff,
     /// The tool status listing (`SPC l m`) -- which LSP servers/DAP
     /// adapters are configured, found on `PATH`, and running, per
     /// language, with an install hint for anything missing (see
@@ -223,6 +232,13 @@ impl BufferList {
     /// Same "real buffer, just tagged" shape as `open_docker`.
     pub fn open_debug(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Debug)
+    }
+
+    /// A real buffer seeded with `text` (a rendered diff) and tagged
+    /// `Diff` -- see `BufferKind::Diff`. Same "real buffer, just tagged"
+    /// shape as `open_git`.
+    pub fn open_diff(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Diff)
     }
 
     /// A real buffer seeded with `text` (a rendered tool status listing)

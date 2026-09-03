@@ -21,6 +21,7 @@ fenix-dap = { path = "../fenix-dap" }
 fenix-docker = { path = "../fenix-docker" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-format = { path = "../fenix-format" }
+fenix-diff = { path = "../fenix-diff" }
 fenix-git = { path = "../fenix-git" }
 fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }

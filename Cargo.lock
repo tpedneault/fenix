@@ -712,6 +712,7 @@ dependencies = [
  "fenix-config",
  "fenix-core",
  "fenix-dap",
+ "fenix-diff",
  "fenix-docker",
  "fenix-explorer",
  "fenix-format",

@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod completion;
 mod dashboard;
+mod diff_view;
 mod docker_panel;
 mod git_panel;
 mod gpu;

@@ -218,7 +218,15 @@ for anyone curious to poke around or build on it.
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
   the left (each its own real, Vim-navigable buffer with a title bar),
   Main on the right showing a diff of whatever's under the cursor in
-  Staged/Unstaged/Commits/Stash. Staged and Unstaged are two independent
+  Staged/Unstaged/Commits/Stash. Main is a real diff *viewer*, not
+  colored text: every row carries the file, hunk and old/new line
+  numbers it came from, shown in two dim line-number columns beside the
+  verbatim patch line. That's what makes hunk-level work possible --
+  `s`/`S` stage/unstage just the hunk under the cursor (a patch built
+  from that one hunk and piped through `git apply`, so the rest of the
+  file stays exactly as it was), `d` discards it (with confirmation),
+  `]`/`[` jump between hunks, `Tab` folds a file down to its header, and
+  `Enter` opens the real file at the line under the cursor. Staged and Unstaged are two independent
   views of the same file list (a file that's both staged *and* further
   modified appears in both, since git tracks the two halves separately)
   -- `s`/`S` stage/unstage the file under the cursor from either pane,
@@ -588,6 +596,11 @@ popup shows what keys continue it.
 | `SPC d q` | Close the Docker panel session |
 | `SPC g g` | Open (or refocus/refresh) the Git panel |
 | `SPC g q` | Close the Git panel session |
+| `s` / `S` (Main pane) | Stage / unstage the hunk under the cursor |
+| `d` (Main pane) | Discard the hunk under the cursor (confirms first) |
+| `]` / `[` (Main pane) | Next / previous hunk |
+| `Tab` (Main pane) | Fold the file under the cursor down to its header |
+| `Enter` (Main pane) | Open the real file at the line under the cursor |
 | `SPC j j` | Open (or refocus) the JIRA dashboard |
 | `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
 | `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |
@@ -1122,6 +1135,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` |
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
+| `fenix-diff` | Unified-diff parsing (files/hunks/lines, both sides' line numbers) and single-hunk patch synthesis — pure, no I/O; what hunk staging and diff rendering are both built on |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) for the terminal panel — no thread/event-loop knowledge of its own |

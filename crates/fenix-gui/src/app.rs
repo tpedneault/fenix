@@ -29,6 +29,7 @@ use fenix_core::{Buffer, Cursor};
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
+use crate::diff_view;
 use crate::docker_panel;
 use crate::git_panel;
 use crate::gpu::{GpuContext, GpuState};
@@ -429,6 +430,34 @@ struct TaskSession {
     /// `Drop` side effect (see `TaskRunner`'s own doc comment) beyond
     /// what `App::kill_running_task` explicitly calls `kill` on.
     runner: Option<TaskRunner>,
+}
+
+/// What a `BufferKind::Diff` buffer is currently showing. Cached
+/// alongside the rendered text so a hunk action can rebuild that exact
+/// hunk's patch (`fenix_diff::hunk_patch`) from the same parse the user
+/// is looking at, rather than re-shelling `git diff` and trusting that
+/// nothing moved in between -- the staleness that would otherwise let a
+/// keypress stage a *different* hunk than the highlighted one.
+struct DiffModel {
+    repo_root: PathBuf,
+    files: Vec<fenix_diff::FileDiff>,
+    /// Display paths of files folded down to their header row.
+    collapsed: HashSet<String>,
+    source: DiffSource,
+}
+
+/// Which diff a `DiffModel` holds, and therefore what a hunk action on
+/// it can mean: an unstaged hunk can be staged or discarded, a staged
+/// one can only be unstaged, and a commit's or comparison's hunks
+/// aren't editable at all (there's no index relationship to change).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffSource {
+    /// `git diff` -- working tree vs. index.
+    Unstaged,
+    /// `git diff --cached` -- index vs. `HEAD`.
+    Staged,
+    /// A commit, a stash, or a ref-to-ref comparison.
+    ReadOnly,
 }
 
 /// The tool status panel's single-pane session (`SPC l m`) -- smaller
@@ -1464,6 +1493,13 @@ struct GitSession {
     /// main` call, since a manual refresh means the underlying content
     /// may have changed even if the selected path/hash/index hasn't.
     last_main_entry: Option<git_panel::GitEntry>,
+    /// What `last_main_entry` resolved to for fetching -- kept so a
+    /// completed background fetch knows which *kind* of diff it just
+    /// produced (`DiffSource::of`), which is what decides whether its
+    /// hunks are stageable. `main_request_id` already guarantees only
+    /// the newest request's result is ever applied, so reading the
+    /// session's current value when it lands is correct by construction.
+    last_main_fetch: MainFetch,
     /// Bumped every time `git_sync_main` issues a real async fetch (a
     /// `File`/`Commit`/`Stash` selection, not `None`/an untracked
     /// placeholder, neither of which need a shell-out) -- `apply_git_
@@ -1553,6 +1589,12 @@ enum GitConfirmAction {
     DiscardDir { path: String },
     DeleteBranch { name: String },
     DropStash { index: usize },
+    /// Throw away one hunk of the working tree (`d` in the diff pane).
+    /// Carries the buffer and anchor rather than a rebuilt patch so the
+    /// patch is regenerated from the model at confirm time -- one less
+    /// thing to hold stale across the keypress the confirmation waits
+    /// for.
+    DiscardHunk { buffer: BufferId, anchor: diff_view::DiffAnchor },
 }
 
 /// Which free-text Git prompt (if any) is capturing the next keystrokes --
@@ -2909,12 +2951,29 @@ fn file_counts(files: &[fenix_git::FileEntry]) -> (usize, usize, usize) {
 /// to show, see `fenix_git::file_diff`'s own doc comment), so it's
 /// handled inline in `git_sync_main` rather than through `fetch_main_
 /// diff`/a spawned thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MainFetch {
     Skip,
     Untracked,
     File { path: String, staged: bool },
     Commit(String),
     Stash(usize),
+}
+
+impl DiffSource {
+    /// What kind of diff a resolved `MainFetch` produces -- which is
+    /// what decides whether a hunk in it can be staged, unstaged, or
+    /// neither. A file's diff is against the index when it's the
+    /// unstaged side and against `HEAD` when it's the staged one; a
+    /// commit's or a stash's is history, with no index relationship to
+    /// change.
+    fn of(fetch: &MainFetch) -> Self {
+        match fetch {
+            MainFetch::File { staged: false, .. } => DiffSource::Unstaged,
+            MainFetch::File { staged: true, .. } => DiffSource::Staged,
+            MainFetch::Commit(_) | MainFetch::Stash(_) | MainFetch::Skip | MainFetch::Untracked => DiffSource::ReadOnly,
+        }
+    }
 }
 
 /// The actual `git diff`/`show`/`stash show` shell-out for a resolved
@@ -3387,12 +3446,9 @@ fn git_badge_color(color: git_panel::GitBadgeColor, theme: &Theme) -> glyphon::C
 
 /// Resolves a real `BufferKind::Git` buffer's per-line syntax-highlight
 /// ranges from its cached `GitLine` metadata -- mirrors
-/// `docker_highlights_for_visible_range` exactly, extended with the
-/// three diff-line colors `render_main`'s unified-diff output needs
-/// (`DiffAdd`/`DiffDel` reuse the same green/red the git-status badges
-/// already use; `DiffHunk` gets the dim gutter color, matching how most
-/// diff viewers de-emphasize hunk headers relative to the actual +/-
-/// lines).
+/// `docker_highlights_for_visible_range` exactly. Diff coloring lives in
+/// `diff_highlights_for_visible_range` instead, against its own richer
+/// per-row metadata.
 fn git_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<git_panel::GitLine>]>,
@@ -3419,9 +3475,6 @@ fn git_highlights_for_visible_range(
                     ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
                 }
             }
-            git_panel::GitLineStyle::DiffAdd => ranges.push((line_start_byte..line_end_byte, theme.git_staged)),
-            git_panel::GitLineStyle::DiffDel => ranges.push((line_start_byte..line_end_byte, theme.git_conflicted)),
-            git_panel::GitLineStyle::DiffHunk => ranges.push((line_start_byte..line_end_byte, theme.gutter_fg)),
             // Dimmed like `Empty`/`Detail`'s own dim portion -- a
             // directory row has no per-row status badge (it aggregates
             // an unknown mix underneath), so the whole row reads as
@@ -3433,6 +3486,56 @@ fn git_highlights_for_visible_range(
             let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
             ranges.push((line_start_byte..badge_end_byte, git_badge_color(color, theme)));
         }
+    }
+    ranges
+}
+
+/// Resolves a real `BufferKind::Diff` buffer's per-line highlight
+/// ranges from its cached `DiffViewLine` metadata -- mirrors
+/// `git_highlights_for_visible_range`, with one addition it doesn't
+/// need: a diff row is *two* colored spans, a dim line-number gutter
+/// and the patch line itself, so the gutter never competes with the
+/// change for attention.
+///
+/// The two ranges are pushed in ascending, non-overlapping order
+/// because `split_line_by_highlights` walks its input with a forward-
+/// only cursor -- ranges out of order would silently drop spans rather
+/// than fail.
+fn diff_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<diff_view::DiffViewLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        // `min(len)` guards a metadata/text mismatch (a row shorter than
+        // its own recorded gutter) from producing an inverted range.
+        let content_start_byte = ob.buffer.char_to_byte(start + meta.content_from.min(len));
+        if meta.content_from > 0 {
+            ranges.push((line_start_byte..content_start_byte, theme.gutter_fg));
+        }
+        let color = match meta.style {
+            // Same roles the Jira panel already established for a page
+            // title vs. a section header.
+            diff_view::DiffStyle::FileHeader => theme.syntax_function,
+            diff_view::DiffStyle::HunkHeader => theme.syntax_keyword,
+            diff_view::DiffStyle::Added => theme.git_staged,
+            diff_view::DiffStyle::Removed => theme.git_conflicted,
+            diff_view::DiffStyle::Meta => theme.gutter_fg,
+            // Unchanged context reads as ordinary text -- no range at
+            // all, so it falls through to the pane's default color.
+            diff_view::DiffStyle::Context => continue,
+        };
+        ranges.push((content_start_byte..line_end_byte, color));
     }
     ranges
 }
@@ -3938,6 +4041,7 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::TaskOutput
             | BufferKind::Debug
             | BufferKind::ToolStatus
+            | BufferKind::Diff
     )
 }
 
@@ -4431,6 +4535,18 @@ pub struct App {
     /// Per-line metadata for every real `BufferKind::Git` buffer
     /// currently open (`SPC g g`) -- mirrors `docker_lines` exactly.
     git_lines: HashMap<BufferId, Vec<Option<git_panel::GitLine>>>,
+    /// Per-line metadata for every real `BufferKind::Diff` buffer
+    /// currently open -- mirrors `git_lines`, with `diff_view`'s own
+    /// richer payload (the file/hunk/line each row came from, which is
+    /// what every hunk-level action resolves against).
+    diff_lines: HashMap<BufferId, Vec<Option<diff_view::DiffViewLine>>>,
+    /// The parsed diff each `BufferKind::Diff` buffer is currently
+    /// showing, alongside the repo it came from -- kept so a hunk action
+    /// can rebuild that exact hunk's patch (`fenix_diff::hunk_patch`)
+    /// without re-shelling `git diff` and hoping nothing moved in
+    /// between. Same "cache what the panes are showing" reasoning as
+    /// `GitSession::files`/`branches`/`commits`.
+    diff_models: HashMap<BufferId, DiffModel>,
     /// Armed by `d` on Files/Branches/Stash until the next keypress
     /// confirms or cancels -- mirrors `docker_confirm_remove`, just over
     /// `GitConfirmAction`'s several destructive-action kinds instead of
@@ -5172,6 +5288,8 @@ impl App {
             breakpoints: HashMap::new(),
             tool_status_session: None,
             git_lines: HashMap::new(),
+            diff_lines: HashMap::new(),
+            diff_models: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
             git_menu_open: false,
@@ -11808,7 +11926,6 @@ impl App {
         let branches_panel = git_panel::render_branches(&branches);
         let commits_panel = git_panel::render_commits(&commits);
         let stash_panel = git_panel::render_stash(&stashes);
-        let main_panel = git_panel::render_main(None);
 
         let status_buffer = self.buffers.open_git(&status_panel.text);
         let staged_buffer = self.buffers.open_git(&staged_panel.text);
@@ -11816,14 +11933,20 @@ impl App {
         let branches_buffer = self.buffers.open_git(&branches_panel.text);
         let commits_buffer = self.buffers.open_git(&commits_panel.text);
         let stash_buffer = self.buffers.open_git(&stash_panel.text);
-        let main_buffer = self.buffers.open_git(&main_panel.text);
+        // The Main pane is a real `BufferKind::Diff` buffer, not another
+        // Git one: it renders through `diff_view` (hunk-aware, with a
+        // line-number gutter and per-row anchors) rather than as
+        // prefix-colored text, which is what makes hunk staging and
+        // "open the file at this line" possible at all.
+        let main_view = diff_view::render(&[], &HashSet::new());
+        let main_buffer = self.buffers.open_diff(&main_view.text);
         self.git_lines.insert(status_buffer, status_panel.lines);
         self.git_lines.insert(staged_buffer, staged_panel.lines);
         self.git_lines.insert(unstaged_buffer, unstaged_panel.lines);
         self.git_lines.insert(branches_buffer, branches_panel.lines);
         self.git_lines.insert(commits_buffer, commits_panel.lines);
         self.git_lines.insert(stash_buffer, stash_panel.lines);
-        self.git_lines.insert(main_buffer, main_panel.lines);
+        self.diff_lines.insert(main_buffer, main_view.lines);
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(status_buffer, cursor);
@@ -11901,6 +12024,7 @@ impl App {
             staged_expanded_dirs: HashSet::new(),
             unstaged_expanded_dirs: HashSet::new(),
             last_main_entry: None,
+            last_main_fetch: MainFetch::Skip,
             main_request_id: 0,
             refresh_request_id: 0,
         });
@@ -11912,6 +12036,210 @@ impl App {
     /// Rewrites `id`'s buffer text from a freshly-rendered `GitPanel`,
     /// resetting every pane currently showing it back to the top --
     /// mirrors `set_docker_buffer` exactly.
+    /// Parses `diff` and renders it into `id` (a `BufferKind::Diff`
+    /// buffer), caching both the per-line metadata and the parsed model
+    /// so hunk actions can resolve the cursor's row back to a real hunk
+    /// without re-shelling `git`. `None`/empty renders the view's own
+    /// "(no changes)" placeholder rather than leaving stale content
+    /// behind.
+    ///
+    /// Any fold state for files still present is carried across, so a
+    /// refresh (or a hunk being staged out from under the view) doesn't
+    /// silently unfold everything the user had collapsed -- same
+    /// reasoning as `GitSession::staged_expanded_dirs` persisting across
+    /// `git_refresh_session`.
+    fn set_diff_buffer(&mut self, id: BufferId, diff: Option<&str>, source: DiffSource, repo_root: &Path) {
+        let files = diff.map(fenix_diff::parse).unwrap_or_default();
+        let collapsed = self.diff_models.get(&id).map(|m| m.collapsed.clone()).unwrap_or_default();
+        let view = diff_view::render(&files, &collapsed);
+        self.diff_lines.insert(id, view.lines);
+        self.diff_models.insert(id, DiffModel { repo_root: repo_root.to_path_buf(), files, collapsed, source });
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &view.text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
+    /// Re-renders a diff buffer from its already-parsed model, keeping
+    /// every pane's cursor on the same line index -- for fold toggles,
+    /// where the content above the cursor is unchanged and resetting to
+    /// the top would lose the user's place. Mirrors `set_git_buffer_
+    /// preserving_line`'s own reasoning for the Files tree.
+    fn rerender_diff_buffer(&mut self, id: BufferId) {
+        let Some(model) = self.diff_models.get(&id) else { return };
+        let view = diff_view::render(&model.files, &model.collapsed);
+        self.diff_lines.insert(id, view.lines);
+
+        let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state(pane);
+                if let Some(ob) = self.buffers.get(id) {
+                    old_lines.push((pane, ob.buffer.line_col(&ps.cursor).0));
+                }
+            }
+        }
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &view.text);
+        }
+        let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
+        for (pane, old_line) in old_lines {
+            let line = old_line.min(line_count.saturating_sub(1));
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let char_idx = ob.buffer.line_start_char(line);
+            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        }
+    }
+
+    /// The diff buffer the focused pane is showing, if it is one.
+    fn focused_diff_buffer(&self) -> Option<BufferId> {
+        let id = self.focused_buffer_id();
+        self.diff_models.contains_key(&id).then_some(id)
+    }
+
+    /// What the cursor's current row in a diff buffer points at -- the
+    /// one lookup every hunk-level action goes through. `None` when the
+    /// focused pane isn't a diff, or the row carries no anchor (a
+    /// placeholder row).
+    fn diff_anchor_at_cursor(&self) -> Option<(BufferId, diff_view::DiffAnchor)> {
+        let id = self.focused_diff_buffer()?;
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let anchor = self.diff_lines.get(&id)?.get(line)?.as_ref()?.anchor?;
+        Some((id, anchor))
+    }
+
+    /// The patch for the one hunk `anchor` names, rebuilt from the same
+    /// cached parse the user is looking at. `None` if the anchor points
+    /// at a file header rather than a hunk, or if the buffer/file/hunk
+    /// is gone because a refresh landed in between -- both of which mean
+    /// "don't apply anything," never "apply something else."
+    fn hunk_patch_for(&self, buffer: BufferId, anchor: diff_view::DiffAnchor) -> Option<String> {
+        let model = self.diff_models.get(&buffer)?;
+        let file = model.files.get(anchor.file)?;
+        let hunk = file.hunks.get(anchor.hunk?)?;
+        Some(fenix_diff::hunk_patch(file, hunk))
+    }
+
+    /// `s`/`S`/`d` on a diff row: stages, unstages, or discards the hunk
+    /// the cursor is inside. Rebuilds that hunk's patch from the same
+    /// parse the user is looking at (`fenix_diff::hunk_patch`) and pipes
+    /// it through `git apply` -- see `fenix_git::apply_patch`.
+    ///
+    /// `target` has to agree with which diff this is: an unstaged hunk
+    /// can be staged or discarded, a staged one can only be unstaged.
+    /// Asking for the wrong one is a message, not a no-op, since from
+    /// the user's side "s did nothing" is indistinguishable from a bug.
+    fn diff_apply_hunk(&mut self, target: fenix_git::ApplyTarget) {
+        let Some((buffer, anchor)) = self.diff_anchor_at_cursor() else {
+            self.set_error("no diff hunk under the cursor".to_string());
+            return;
+        };
+        if anchor.hunk.is_none() {
+            self.set_error("put the cursor inside a hunk, not on the file header".to_string());
+            return;
+        }
+        let Some(model) = self.diff_models.get(&buffer) else { return };
+        let allowed = match (model.source, target) {
+            (DiffSource::Unstaged, fenix_git::ApplyTarget::Stage | fenix_git::ApplyTarget::Discard) => true,
+            (DiffSource::Staged, fenix_git::ApplyTarget::Unstage) => true,
+            _ => false,
+        };
+        if !allowed {
+            let why = match model.source {
+                DiffSource::Unstaged => "this hunk isn't staged yet -- `s` stages it, `d` discards it",
+                DiffSource::Staged => "this hunk is staged -- `S` unstages it",
+                DiffSource::ReadOnly => "this diff isn't editable (a commit, a stash, or a comparison)",
+            };
+            self.set_error(why.to_string());
+            return;
+        }
+        let repo_root = model.repo_root.clone();
+        let Some(patch) = self.hunk_patch_for(buffer, anchor) else {
+            self.set_error("that hunk is no longer in the diff -- refresh with `u`".to_string());
+            return;
+        };
+
+        match fenix_git::apply_patch(&repo_root, &patch, target) {
+            Ok(_) => {
+                let what = match target {
+                    fenix_git::ApplyTarget::Stage => "staged",
+                    fenix_git::ApplyTarget::Unstage => "unstaged",
+                    fenix_git::ApplyTarget::Discard => "discarded",
+                };
+                self.set_message(format!("hunk {what}"));
+                self.git_refresh_session();
+            }
+            // git's own "error: patch does not apply" is far more
+            // useful than anything this could paraphrase.
+            Err(err) => self.set_error(err.trim().to_string()),
+        }
+    }
+
+    /// `Tab` on a diff row: folds the file the cursor is in down to its
+    /// header row, or unfolds it again.
+    fn diff_toggle_fold(&mut self) {
+        let Some((buffer, anchor)) = self.diff_anchor_at_cursor() else { return };
+        let Some(model) = self.diff_models.get_mut(&buffer) else { return };
+        let Some(path) = model.files.get(anchor.file).map(|f| f.display_path().to_string()) else { return };
+        if !model.collapsed.remove(&path) {
+            model.collapsed.insert(path);
+        }
+        self.rerender_diff_buffer(buffer);
+        self.wake_caret();
+    }
+
+    /// `]c`/`[c` on a diff: moves the cursor to the next/previous hunk
+    /// header, the same motion pair Vim's own diff mode uses for exactly
+    /// this. Stops at the ends rather than wrapping -- a wrap would make
+    /// "am I at the last change" impossible to feel.
+    fn diff_jump_hunk(&mut self, forward: bool) {
+        let Some(buffer) = self.focused_diff_buffer() else { return };
+        let Some(lines) = self.diff_lines.get(&buffer) else { return };
+        let current = self.open().buffer.line_col(&self.cursor()).0;
+        let is_hunk = |i: usize| lines.get(i).and_then(|l| l.as_ref()).is_some_and(|l| l.style == diff_view::DiffStyle::HunkHeader);
+        let target = if forward {
+            (current + 1..lines.len()).find(|&i| is_hunk(i))
+        } else {
+            (0..current).rev().find(|&i| is_hunk(i))
+        };
+        let Some(target) = target else {
+            self.set_message(if forward { "no next hunk" } else { "no previous hunk" });
+            return;
+        };
+        let char_idx = self.open().buffer.line_start_char(target);
+        let pane = self.focused_pane_id();
+        self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        self.wake_caret();
+    }
+
+    /// `Enter` on a diff row: opens the real file at the line under the
+    /// cursor. Prefers the new-side line number (where the change landed
+    /// in the file as it is now); a removed line has only an old-side
+    /// number, which still lands in the right neighbourhood, which is
+    /// what someone reading a diff actually wants.
+    fn diff_open_file_at_cursor(&mut self) {
+        let Some((buffer, anchor)) = self.diff_anchor_at_cursor() else { return };
+        let Some(model) = self.diff_models.get(&buffer) else { return };
+        let Some(file) = model.files.get(anchor.file) else { return };
+        let path = model.repo_root.join(file.display_path());
+        if !path.is_file() {
+            self.set_error(format!("{} isn't a file on disk", file.display_path()));
+            return;
+        }
+        let line = anchor.new_line.or(anchor.old_line).unwrap_or(1);
+        self.open_file_from_picker(&path);
+        self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
+    }
+
     fn set_git_buffer(&mut self, id: BufferId, panel: git_panel::GitPanel) {
         self.git_lines.insert(id, panel.lines);
         if let Some(ob) = self.buffers.get_mut(id) {
@@ -12196,13 +12524,13 @@ impl App {
 
         let Some(session) = self.git_session.as_mut() else { return };
         session.last_main_entry = entry;
+        session.last_main_fetch = fetch.clone();
 
         if let MainFetch::Skip = fetch {
             return;
         }
         if let MainFetch::Untracked = fetch {
-            let diff = "(untracked file -- nothing to diff yet; stage it to include it in a commit)";
-            self.set_git_buffer(main_buffer, git_panel::render_main(Some(diff)));
+            self.set_diff_buffer(main_buffer, None, DiffSource::ReadOnly, &repo_root);
             return;
         }
 
@@ -12217,8 +12545,9 @@ impl App {
                 });
             }
             None => {
+                let source = DiffSource::of(&fetch);
                 let diff = fetch_main_diff(&repo_root, &fetch);
-                self.set_git_buffer(main_buffer, git_panel::render_main(diff.as_deref()));
+                self.set_diff_buffer(main_buffer, diff.as_deref(), source, &repo_root);
             }
         }
     }
@@ -12232,7 +12561,8 @@ impl App {
         if session.main_request_id != request_id {
             return;
         }
-        self.set_git_buffer(buffer, git_panel::render_main(diff.as_deref()));
+        let (source, repo_root) = (DiffSource::of(&session.last_main_fetch), session.repo_root.clone());
+        self.set_diff_buffer(buffer, diff.as_deref(), source, &repo_root);
     }
 
     /// `s` on Files: stages the file under the cursor.
@@ -12370,6 +12700,16 @@ impl App {
     /// `d` on Files/Branches/Stash: arms the matching destructive-action
     /// confirmation for whatever's under the cursor.
     fn git_arm_confirm(&mut self) {
+        // In the diff pane the cursor sits on a diff row, not a
+        // `GitEntry` row -- `d` there means "discard this hunk".
+        if let Some((buffer, anchor)) = self.diff_anchor_at_cursor() {
+            if anchor.hunk.is_some() {
+                self.git_confirm = Some(GitConfirmAction::DiscardHunk { buffer, anchor });
+            } else {
+                self.set_error("put the cursor inside a hunk to discard it".to_string());
+            }
+            return;
+        }
         let Some(entry) = self.git_entry_at_cursor() else { return };
         let action = match entry {
             git_panel::GitEntry::File(path) => {
@@ -12399,6 +12739,8 @@ impl App {
         ] {
             self.buffers.close(id);
             self.git_lines.remove(&id);
+            self.diff_lines.remove(&id);
+            self.diff_models.remove(&id);
         }
         for pane in [
             session.status_pane,
@@ -12426,6 +12768,15 @@ impl App {
             GitConfirmAction::DiscardDir { path } => format!("Discard all changes under {path}/? (y/n)"),
             GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
             GitConfirmAction::DropStash { index } => format!("Drop stash@{{{index}}}? (y/n)"),
+            GitConfirmAction::DiscardHunk { buffer, anchor } => {
+                let path = self
+                    .diff_models
+                    .get(buffer)
+                    .and_then(|m| m.files.get(anchor.file))
+                    .map(|f| f.display_path().to_string())
+                    .unwrap_or_else(|| "this file".to_string());
+                format!("Discard this hunk of {path}? (y/n)")
+            }
         })
     }
 
@@ -12441,6 +12792,10 @@ impl App {
                     GitConfirmAction::DiscardDir { path } => fenix_git::discard_dir(&repo_root, &path),
                     GitConfirmAction::DeleteBranch { name } => fenix_git::delete_branch(&repo_root, &name, false),
                     GitConfirmAction::DropStash { index } => fenix_git::stash_drop(&repo_root, index),
+                    GitConfirmAction::DiscardHunk { buffer, anchor } => self.hunk_patch_for(buffer, anchor).map_or_else(
+                        || Err("that hunk is no longer in the diff".to_string()),
+                        |patch| fenix_git::apply_patch(&repo_root, &patch, fenix_git::ApplyTarget::Discard),
+                    ),
                 };
                 if let Err(err) = result {
                     self.set_error(format!("git action failed: {err}"));
@@ -15814,12 +16169,55 @@ impl App {
                     self.wake_caret();
                     return;
                 }
+                // -- the Main pane's own diff-viewer keys ------------
+                // `s`/`S`/`d` mean the same verbs they do on a file row,
+                // one level finer: the hunk under the cursor rather than
+                // the whole file. Which of them is legal depends on
+                // which diff is showing (`DiffSource`), and asking for
+                // the wrong one says so rather than doing nothing.
+                (Main, KeyCode::Char('s')) if keypress.mods == Mods::default() => {
+                    self.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+                    self.wake_caret();
+                    return;
+                }
+                (Main, KeyCode::Char('S')) if keypress.mods == Mods::default() => {
+                    self.diff_apply_hunk(fenix_git::ApplyTarget::Unstage);
+                    self.wake_caret();
+                    return;
+                }
+                (Main, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
+                    self.git_arm_confirm();
+                    self.wake_caret();
+                    return;
+                }
+                // Single `]`/`[` rather than Vim's two-key `]c`/`[c`:
+                // every other action in this panel is one pane-scoped
+                // key (`s`/`S`/`a`/`c`/`u`/`x`/Tab), and `x`'s own menu
+                // is how these get discovered -- a two-key sequence
+                // would need a pending-key mechanism this panel doesn't
+                // otherwise have, for no gain.
+                (Main, KeyCode::Char(']')) if keypress.mods == Mods::default() => {
+                    self.diff_jump_hunk(true);
+                    return;
+                }
+                (Main, KeyCode::Char('[')) if keypress.mods == Mods::default() => {
+                    self.diff_jump_hunk(false);
+                    return;
+                }
+                (Main, KeyCode::Named(FenixNamedKey::Tab)) if keypress.mods == Mods::default() => {
+                    self.diff_toggle_fold();
+                    return;
+                }
+                (Main, KeyCode::Named(FenixNamedKey::Enter)) if keypress.mods == Mods::default() => {
+                    self.diff_open_file_at_cursor();
+                    return;
+                }
                 (_, KeyCode::Char('u')) if keypress.mods == Mods::default() => {
                     self.git_refresh_session();
                     self.wake_caret();
                     return;
                 }
-                (Staged | Unstaged | Branches | Commits | Stash, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                (Staged | Unstaged | Branches | Commits | Stash | Main, KeyCode::Char('x')) if keypress.mods == Mods::default() => {
                     self.git_menu_open = true;
                     self.wake_caret();
                     return;
@@ -16333,6 +16731,8 @@ impl App {
                 "*debug*".to_string()
             } else if ob.kind == BufferKind::ToolStatus {
                 "*tool status*".to_string()
+            } else if ob.kind == BufferKind::Diff {
+                "*diff*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -16794,6 +17194,11 @@ impl App {
             || ob.kind == BufferKind::TaskOutput
             || ob.kind == BufferKind::Debug
             || ob.kind == BufferKind::ToolStatus
+            // The diff view draws its own old/new line-number columns
+            // (see `diff_view::content_row`), which are the real line
+            // numbers here -- a buffer-line gutter next to them would
+            // be a third, meaningless column.
+            || ob.kind == BufferKind::Diff
         {
             return 0;
         }
@@ -16963,6 +17368,7 @@ impl App {
         let docker_lines = self.docker_lines.get(&id).cloned();
         let git_lines = self.git_lines.get(&id).cloned();
         let jira_lines = self.jira_lines.get(&id).cloned();
+        let diff_lines = self.diff_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -16997,6 +17403,9 @@ impl App {
         }
         if ob.kind == BufferKind::Jira {
             return jira_highlights_for_visible_range(ob, jira_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Diff {
+            return diff_highlights_for_visible_range(ob, diff_lines.as_deref(), render_base_line, rows, theme);
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -17411,7 +17820,17 @@ impl App {
             GitPaneRole::Branches => &[("c", "checkout"), ("n", "new branch"), ("d", "delete"), ("u", "refresh")],
             GitPaneRole::Commits => &[("u", "refresh")],
             GitPaneRole::Stash => &[("a", "apply"), ("g", "pop"), ("d", "drop"), ("u", "refresh")],
-            GitPaneRole::Status | GitPaneRole::Main => return None,
+            GitPaneRole::Main => &[
+                ("s", "stage hunk"),
+                ("S", "unstage hunk"),
+                ("d", "discard hunk"),
+                ("]", "next hunk"),
+                ("[", "prev hunk"),
+                ("Tab", "fold file"),
+                ("Enter", "open file here"),
+                ("u", "refresh"),
+            ],
+            GitPaneRole::Status => return None,
         };
 
         let (char_width, line_height) = match &self.text {
@@ -26034,18 +26453,19 @@ mod tests {
         let session = app.git_session.as_mut().unwrap();
         session.main_request_id = 5;
         let main_buffer = session.main_buffer;
-        app.set_git_buffer(main_buffer, git_panel::render_main(None));
+        let stale = "diff --git a/stale.txt b/stale.txt\n--- a/stale.txt\n+++ b/stale.txt\n@@ -1 +1 @@\n-x\n+y\n";
+        let current = "diff --git a/current.txt b/current.txt\n--- a/current.txt\n+++ b/current.txt\n@@ -1 +1 @@\n-x\n+y\n";
 
         // request_id 3 is stale -- request_id 5 already landed (or was
         // issued) after it -- so this result must be dropped, not
         // clobber Main with an out-of-order diff.
-        app.apply_git_main(3, main_buffer, Some("stale diff".to_string()));
+        app.apply_git_main(3, main_buffer, Some(stale.to_string()));
         let text = app.buffers.get(main_buffer).unwrap().buffer.text();
-        assert!(!text.contains("stale diff"));
+        assert!(!text.contains("stale.txt"));
 
-        app.apply_git_main(5, main_buffer, Some("current diff".to_string()));
+        app.apply_git_main(5, main_buffer, Some(current.to_string()));
         let text = app.buffers.get(main_buffer).unwrap().buffer.text();
-        assert!(text.contains("current diff"));
+        assert!(text.contains("current.txt"));
     }
 
     #[test]
@@ -26176,6 +26596,200 @@ mod tests {
 
         let files = fenix_git::list_files(&repo_root);
         assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should now be staged: {files:?}");
+    }
+
+    // -- Diff viewer (the Main pane) ---------------------------------------
+
+    /// Opens the Git panel on a repo whose `sub/a.txt` has two edits far
+    /// enough apart to be two separate hunks, selects that file in
+    /// Unstaged, and leaves the cursor on the Main pane's first hunk
+    /// header. Returns the session's main buffer and the repo root.
+    fn diff_panel_with_two_hunks(app: &mut App, dir: &TempDir) -> (BufferId, PathBuf) {
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        // Commit a long enough baseline that two edits far apart in it
+        // are two *separate* hunks with context between them -- the
+        // helper repo's own one-line file would only ever produce one.
+        dir.write("sub/a.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "baseline"]);
+        dir.write("sub/a.txt", "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\nELEVEN\ntwelve\n");
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        let session = app.git_session.as_ref().unwrap();
+        let (unstaged_buffer, unstaged_pane, main_buffer, main_pane, repo_root) =
+            (session.unstaged_buffer, session.unstaged_pane, session.main_buffer, session.main_pane, session.repo_root.clone());
+
+        let files = fenix_git::list_files(&repo_root);
+        app.git_session.as_mut().unwrap().files = files.clone();
+        // `sub/` renders collapsed unless it's in the expanded set, and a
+        // collapsed directory hides its file rows entirely -- expand it
+        // so there's a file row to put the cursor on at all.
+        let expanded: HashSet<String> = ["sub".to_string()].into_iter().collect();
+        app.git_session.as_mut().unwrap().unstaged_expanded_dirs = expanded.clone();
+        app.set_git_buffer(unstaged_buffer, git_panel::render_unstaged(&files, &expanded));
+        app.windows_mut().focus(unstaged_pane);
+        // Row 1: `sub/` is row 0, the file itself is row 1.
+        let char_idx = app.buffers.get(unstaged_buffer).unwrap().buffer.line_start_char(1);
+        app.test_set_cursor(Cursor { char_idx, sticky_col: 0 });
+        app.git_sync_main(); // no event_proxy in tests -> fetches synchronously
+
+        app.windows_mut().focus(main_pane);
+        (main_buffer, repo_root)
+    }
+
+    /// Moves the focused pane's cursor to the first row matching `style`.
+    fn cursor_to_first_diff_row(app: &mut App, buffer: BufferId, style: diff_view::DiffStyle) {
+        let line = app.diff_lines[&buffer].iter().position(|l| l.as_ref().is_some_and(|l| l.style == style)).expect("row exists");
+        let char_idx = app.buffers.get(buffer).unwrap().buffer.line_start_char(line);
+        app.test_set_cursor(Cursor { char_idx, sticky_col: 0 });
+    }
+
+    #[test]
+    fn the_main_pane_renders_a_parsed_diff_with_line_numbers_not_raw_text() {
+        let dir = fenix_git_test_repo("diff_main_render");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+
+        let text = app.buffers.get(main_buffer).unwrap().buffer.text();
+        assert!(text.starts_with("M  sub/a.txt"), "expected a file header row, got:\n{text}");
+        assert!(text.contains("@@"), "expected hunk headers:\n{text}");
+        // A content row carries both line-number columns before the
+        // verbatim patch line -- the thing raw `git diff` text never had.
+        assert!(text.lines().any(|l| l.contains("  1   1  one")), "expected numbered context rows:\n{text}");
+        assert_eq!(app.buffers.get(main_buffer).unwrap().kind, BufferKind::Diff);
+    }
+
+    #[test]
+    fn every_diff_row_anchors_back_to_its_file_and_hunk() {
+        let dir = fenix_git_test_repo("diff_anchor");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::Added);
+        let (buffer, anchor) = app.diff_anchor_at_cursor().expect("an added row anchors");
+        assert_eq!(buffer, main_buffer);
+        assert_eq!(anchor.file, 0);
+        assert_eq!(anchor.hunk, Some(0));
+        assert!(anchor.new_line.is_some() && anchor.old_line.is_none(), "an added line has only a new-side number");
+    }
+
+    #[test]
+    fn staging_the_hunk_under_the_cursor_stages_only_that_hunk() {
+        let dir = fenix_git_test_repo("diff_stage_hunk");
+        let mut app = App::with_file(None);
+        let (main_buffer, repo_root) = diff_panel_with_two_hunks(&mut app, &dir);
+        assert_eq!(app.diff_models[&main_buffer].files[0].hunks.len(), 2, "test setup should produce two hunks");
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::Added);
+        app.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+
+        let staged = fenix_git::file_diff(&repo_root, "sub/a.txt", true).unwrap();
+        assert!(staged.contains("+TWO"), "the hunk under the cursor should be staged:\n{staged}");
+        assert!(!staged.contains("ELEVEN"), "the other hunk should not be:\n{staged}");
+    }
+
+    #[test]
+    fn staging_a_hunk_of_an_already_staged_diff_says_what_to_press_instead() {
+        let dir = fenix_git_test_repo("diff_stage_wrong_direction");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+        // Pretend Main is showing the *staged* side.
+        app.diff_models.get_mut(&main_buffer).unwrap().source = DiffSource::Staged;
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::Added);
+        app.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+
+        assert!(app.modeline_pieces().1.contains("`S` unstages it"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_hunk_action_on_a_commits_diff_reports_that_it_is_not_editable() {
+        let dir = fenix_git_test_repo("diff_readonly");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+        app.diff_models.get_mut(&main_buffer).unwrap().source = DiffSource::ReadOnly;
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::Added);
+        app.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+
+        assert!(app.modeline_pieces().1.contains("isn't editable"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_hunk_action_on_a_file_header_row_asks_for_a_hunk_instead() {
+        let dir = fenix_git_test_repo("diff_file_header_row");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::FileHeader);
+        app.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+
+        assert!(app.modeline_pieces().1.contains("inside a hunk"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn jumping_between_hunks_moves_to_the_next_and_previous_hunk_header() {
+        let dir = fenix_git_test_repo("diff_jump_hunk");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+
+        let hunk_rows: Vec<usize> = app.diff_lines[&main_buffer]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_ref().is_some_and(|l| l.style == diff_view::DiffStyle::HunkHeader))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hunk_rows.len(), 2);
+
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 }); // top of the buffer
+        app.diff_jump_hunk(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, hunk_rows[0]);
+        app.diff_jump_hunk(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, hunk_rows[1]);
+        // Stops rather than wrapping, so "am I at the last change" is felt.
+        app.diff_jump_hunk(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, hunk_rows[1]);
+        assert!(app.modeline_pieces().1.contains("no next hunk"));
+
+        app.diff_jump_hunk(false);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, hunk_rows[0]);
+    }
+
+    #[test]
+    fn folding_a_file_hides_its_hunks_and_unfolding_brings_them_back() {
+        let dir = fenix_git_test_repo("diff_fold");
+        let mut app = App::with_file(None);
+        let (main_buffer, _) = diff_panel_with_two_hunks(&mut app, &dir);
+        let full = app.buffers.get(main_buffer).unwrap().buffer.visual_line_count();
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::FileHeader);
+        app.diff_toggle_fold();
+        let folded = app.buffers.get(main_buffer).unwrap().buffer.visual_line_count();
+        assert!(folded < full, "folding should hide the hunks: {folded} vs {full}");
+        assert!(!app.buffers.get(main_buffer).unwrap().buffer.text().contains("@@"));
+
+        app.diff_toggle_fold();
+        assert_eq!(app.buffers.get(main_buffer).unwrap().buffer.visual_line_count(), full);
+    }
+
+    #[test]
+    fn discarding_a_hunk_arms_a_confirmation_naming_the_file() {
+        let dir = fenix_git_test_repo("diff_discard_confirm");
+        let mut app = App::with_file(None);
+        let (main_buffer, repo_root) = diff_panel_with_two_hunks(&mut app, &dir);
+
+        cursor_to_first_diff_row(&mut app, main_buffer, diff_view::DiffStyle::Added);
+        app.git_arm_confirm();
+        assert!(app.git_confirm_text().is_some_and(|t| t.contains("Discard this hunk of sub/a.txt")), "got: {:?}", app.git_confirm_text());
+
+        app.git_confirm_key(KeyPress::char('y'));
+        let contents = std::fs::read_to_string(repo_root.join("sub/a.txt")).unwrap();
+        assert!(contents.contains("two"), "the discarded hunk should be back to its committed form:\n{contents}");
+        assert!(contents.contains("ELEVEN"), "the other edit should be untouched:\n{contents}");
     }
 
     #[test]

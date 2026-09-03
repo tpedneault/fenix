@@ -18,9 +18,9 @@ pub enum GitEntry {
 }
 
 /// How one generated line should be colored -- same role as
-/// `docker_panel::DockerLineStyle`, extended with the three diff-line
-/// kinds `render_main` needs (a unified diff's own `+`/`-`/`@@`
-/// convention, colored the same way every other diff viewer does).
+/// `docker_panel::DockerLineStyle`. Diff lines aren't in here: the Main
+/// pane renders through `diff_view` (its own `BufferKind::Diff`, with
+/// hunk-aware metadata) rather than as prefix-colored text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitLineStyle {
     File,
@@ -34,14 +34,6 @@ pub enum GitLineStyle {
     Stash,
     /// A `label: value` row in the Status pane.
     Detail,
-    /// An added line in a unified diff (`+...`, not the `+++` file
-    /// header).
-    DiffAdd,
-    /// A removed line in a unified diff (`-...`, not the `---` file
-    /// header).
-    DiffDel,
-    /// A hunk header (`@@ ... @@`).
-    DiffHunk,
     /// Shown when a list comes back empty, or the Main pane has nothing
     /// selected/no changes to show.
     Empty,
@@ -403,45 +395,6 @@ fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     }
 }
 
-/// The Main pane's own content: whatever diff/detail text is currently
-/// selected in Files/Commits/Stash (`None` while nothing's been
-/// navigated to yet, or the selection has no diff to show, e.g. an
-/// untracked file -- see `fenix_git::diff::file_diff`'s own doc comment
-/// for why that case is handled by the caller, not `fenix-git` itself).
-/// Colors unified-diff `+`/`-`/`@@` lines the same way every other diff
-/// viewer does; every other line (file headers, context lines) renders
-/// in the pane's plain default color.
-pub fn render_main(diff: Option<&str>) -> GitPanel {
-    let mut b = Builder::new();
-    match diff {
-        None => {
-            let (text, meta) = empty_line("Nothing selected");
-            b.push(&text, meta);
-        }
-        Some("") => {
-            let (text, meta) = empty_line("(no changes)");
-            b.push(&text, meta);
-        }
-        Some(text) => {
-            for line in text.lines() {
-                let style = if line.starts_with("+++") || line.starts_with("---") {
-                    GitLineStyle::Empty
-                } else if line.starts_with('+') {
-                    GitLineStyle::DiffAdd
-                } else if line.starts_with('-') {
-                    GitLineStyle::DiffDel
-                } else if line.starts_with("@@") {
-                    GitLineStyle::DiffHunk
-                } else {
-                    GitLineStyle::Empty
-                };
-                b.push(line, Some(GitLine { style, entry: None, dim_from: None, badge: None }));
-            }
-        }
-    }
-    b.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,38 +660,8 @@ mod tests {
         assert!(!panel.text.contains("\nmain\n"), "a short value must not spill onto its own continuation line");
     }
 
-    #[test]
-    fn render_main_none_shows_nothing_selected() {
-        assert!(render_main(None).text.contains("Nothing selected"));
-    }
 
-    #[test]
-    fn render_main_empty_diff_shows_no_changes() {
-        assert!(render_main(Some("")).text.contains("no changes"));
-    }
 
-    #[test]
-    fn render_main_colors_added_and_removed_lines() {
-        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n context\n";
-        let panel = render_main(Some(diff));
-        let styles: Vec<_> = panel.lines.iter().flatten().map(|l| l.style).collect();
-        assert!(styles.contains(&GitLineStyle::DiffHunk));
-        assert!(styles.contains(&GitLineStyle::DiffAdd));
-        assert!(styles.contains(&GitLineStyle::DiffDel));
-    }
 
-    #[test]
-    fn render_main_does_not_color_the_file_header_lines_as_diff_lines() {
-        let diff = "--- a/f\n+++ b/f\n";
-        let panel = render_main(Some(diff));
-        let styles: Vec<_> = panel.lines.iter().flatten().map(|l| l.style).collect();
-        assert!(!styles.contains(&GitLineStyle::DiffAdd));
-        assert!(!styles.contains(&GitLineStyle::DiffDel));
-    }
 
-    #[test]
-    fn render_main_lines_stay_the_same_length_as_text() {
-        let panel = render_main(Some("a\nb\nc"));
-        assert_eq!(panel.text.lines().count(), panel.lines.len());
-    }
 }
