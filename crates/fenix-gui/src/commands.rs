@@ -98,6 +98,7 @@ impl CommandRegistry {
         registry.register("debug.step_out", "Step out of the current function", cmd_debug_step_out);
         registry.register("debug.add_watch", "Watch the identifier before the cursor", cmd_debug_add_watch);
         registry.register("debug.stop", "End the running debug session", cmd_debug_stop);
+        registry.register("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", cmd_tools_status);
         registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
         registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
@@ -405,6 +406,10 @@ fn cmd_debug_add_watch(ctx: &mut CommandCtx) {
 
 fn cmd_debug_stop(ctx: &mut CommandCtx) {
     ctx.app.debug_stop();
+}
+
+fn cmd_tools_status(ctx: &mut CommandCtx) {
+    ctx.app.open_tool_status_panel();
 }
 
 fn cmd_vnc_open(ctx: &mut CommandCtx) {

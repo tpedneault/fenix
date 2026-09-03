@@ -197,6 +197,15 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('u'), KeyPress::char('w')], "add watch", "debug.add_watch");
         t.insert(&[spc, KeyPress::char('u'), KeyPress::char('q')], "stop", "debug.stop");
 
+        // Tool status listing (Milestone E of the LSP/DAP plan) -- `l`
+        // for "lsp", the group the original plan reserved this letter
+        // for. Only `m` ("manager") exists for now; the plan's own
+        // `SPC l i`/`SPC l r` (per-buffer LSP status/restart) were never
+        // wired up, so this group has exactly one entry rather than the
+        // three gaps that would come from stubbing them out unbuilt.
+        t.label_group(&[spc, KeyPress::char('l')], "lsp");
+        t.insert(&[spc, KeyPress::char('l'), KeyPress::char('m')], "tool status", "tools.status");
+
         // Lazygit-style Git panel.
         t.label_group(&[spc, KeyPress::char('g')], "git");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");

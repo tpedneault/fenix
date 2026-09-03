@@ -431,6 +431,20 @@ struct TaskSession {
     runner: Option<TaskRunner>,
 }
 
+/// The tool status panel's single-pane session (`SPC l m`) -- smaller
+/// even than `TaskSession`: no live process at all, since a `PATH` scan
+/// is synchronous and fast enough to just redo outright on every open/
+/// refresh (see `tool_status::is_on_path`'s own doc comment for why it
+/// deliberately never spawns anything). Exists purely so a second
+/// `SPC l m` reuses the same pane/buffer instead of piling up a new
+/// workspace every time, the same "reuse if already open" posture
+/// `run_task` already established for `TaskSession`.
+struct ToolStatusSession {
+    workspace_index: usize,
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+}
+
 /// One running task's child process plus the threads streaming its
 /// output -- shaped like `DockerLogFollower`, with two differences a
 /// task actually needs that a `docker logs -f` follow never did: stdout
@@ -3912,6 +3926,7 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::PdfSearchResults
             | BufferKind::TaskOutput
             | BufferKind::Debug
+            | BufferKind::ToolStatus
     )
 }
 
@@ -4398,6 +4413,10 @@ pub struct App {
     /// call replaces every breakpoint in that file, so this is always
     /// the full source of truth, never a delta).
     breakpoints: HashMap<PathBuf, std::collections::BTreeSet<usize>>,
+    /// The tool status panel's single-pane session (`SPC l m`), if it's
+    /// been opened this session -- see `ToolStatusSession`'s own doc
+    /// comment.
+    tool_status_session: Option<ToolStatusSession>,
     /// Per-line metadata for every real `BufferKind::Git` buffer
     /// currently open (`SPC g g`) -- mirrors `docker_lines` exactly.
     git_lines: HashMap<BufferId, Vec<Option<git_panel::GitLine>>>,
@@ -5140,6 +5159,7 @@ impl App {
             last_task: None,
             debug_session: None,
             breakpoints: HashMap::new(),
+            tool_status_session: None,
             git_lines: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
@@ -5752,6 +5772,7 @@ impl App {
             || self.debug_session.as_ref().is_some_and(|s| {
                 focused == s.call_stack_pane || focused == s.variables_pane || focused == s.watches_pane || focused == s.breakpoints_pane
             })
+            || self.tool_status_session.as_ref().is_some_and(|s| s.pane == focused)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -11586,6 +11607,65 @@ impl App {
         }
     }
 
+    /// `SPC l m`: opens (or, if already open, refreshes and refocuses)
+    /// the single-pane tool status listing -- every `LanguageId` this
+    /// app has a built-in LSP default or DAP default for (plus any
+    /// `[lsp]`-configured override), whether that command is found on
+    /// `PATH`, whether a session for it is running right now, and an
+    /// install hint for anything missing. See `tool_status`'s own doc
+    /// comment for why this is a synchronous, no-subprocess `PATH` scan
+    /// rather than a background poller like `DockerSession`'s.
+    ///
+    /// `dap_running` only ever checks Python: `dap::default_adapter_
+    /// command` is the one DAP adapter this app knows about at all right
+    /// now (see its own doc comment), and `DebugSession` doesn't track
+    /// which language it was launched for since there's never been a
+    /// second one to distinguish from -- revisit this the day a second
+    /// DAP adapter actually exists.
+    pub(crate) fn open_tool_status_panel(&mut self) {
+        let configured = self.config.lsp_servers.clone();
+        let lsp_sessions: std::collections::HashSet<fenix_syntax::LanguageId> = self.lsp_sessions.keys().copied().collect();
+        let dap_running = self.debug_session.is_some();
+        let entries = crate::tool_status::scan(
+            |language| crate::lsp::resolve_server_command(language, &configured),
+            crate::dap::default_adapter_command,
+            |language| lsp_sessions.contains(&language),
+            |language| dap_running && language == fenix_syntax::LanguageId::Python,
+        );
+        let text = crate::tool_status::render(&entries);
+
+        if let Some(session) = &self.tool_status_session {
+            let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(pane);
+            self.set_tool_status_buffer(buffer, &text);
+        } else {
+            let buffer = self.buffers.open_tool_status(&text);
+            let cursor = Cursor::at_start();
+            self.workspaces.new_workspace(buffer, cursor);
+            let workspace_index = self.workspaces.active_index();
+            let pane = self.focused_pane_id();
+            self.pane_titles.insert(pane, "Tool Status".to_string());
+            self.tool_status_session = Some(ToolStatusSession { workspace_index, pane, buffer });
+        }
+        self.wake_caret();
+    }
+
+    /// Same shape as `set_debug_buffer`/`set_docker_buffer`.
+    fn set_tool_status_buffer(&mut self, id: BufferId, text: &str) {
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
     /// `SPC d b`: builds an image from the current project root's
     /// `Dockerfile` (falling back to the process's cwd with no detected
     /// project) -- doesn't need a particular pane focused, unlike the
@@ -16221,6 +16301,8 @@ impl App {
                 "*task output*".to_string()
             } else if ob.kind == BufferKind::Debug {
                 "*debug*".to_string()
+            } else if ob.kind == BufferKind::ToolStatus {
+                "*tool status*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -16681,6 +16763,7 @@ impl App {
             || ob.kind == BufferKind::PdfSearchResults
             || ob.kind == BufferKind::TaskOutput
             || ob.kind == BufferKind::Debug
+            || ob.kind == BufferKind::ToolStatus
         {
             return 0;
         }
@@ -26497,6 +26580,45 @@ mod tests {
         assert!(joined.starts_with("> "));
         assert!(joined.contains("a.txt"));
         assert!(joined.contains("b.txt"));
+    }
+
+    // -- Tool status (`SPC l m`) -------------------------------------------
+
+    #[test]
+    fn open_tool_status_panel_opens_a_tool_status_buffer_in_a_new_workspace() {
+        let mut app = App::with_file(None);
+        let before = app.workspaces.active_index();
+        app.open_tool_status_panel();
+        assert_ne!(app.workspaces.active_index(), before);
+        assert_eq!(app.open().kind, BufferKind::ToolStatus);
+        assert!(app.tool_status_session.is_some());
+    }
+
+    #[test]
+    fn open_tool_status_panel_lists_a_known_language_with_its_found_or_missing_status() {
+        let mut app = App::with_file(None);
+        app.open_tool_status_panel();
+        let text = app.open().buffer.text();
+        assert!(text.contains("Rust"), "expected a Rust row in:\n{text}");
+        assert!(text.contains("rust-analyzer"), "expected the resolved command in:\n{text}");
+    }
+
+    #[test]
+    fn open_tool_status_panel_reuses_the_same_buffer_on_a_second_open() {
+        let mut app = App::with_file(None);
+        app.open_tool_status_panel();
+        let first_buffer = app.tool_status_session.as_ref().unwrap().buffer;
+        app.open_tool_status_panel();
+        assert_eq!(app.tool_status_session.as_ref().unwrap().buffer, first_buffer);
+    }
+
+    #[test]
+    fn a_configured_lsp_override_is_reflected_in_the_tool_status_listing() {
+        let mut app = App::with_file(None);
+        app.config.lsp_servers.push(("rust".to_string(), "my-custom-rust-analyzer".to_string()));
+        app.open_tool_status_panel();
+        let text = app.open().buffer.text();
+        assert!(text.contains("my-custom-rust-analyzer"), "expected the override command in:\n{text}");
     }
 
     // -- Table view (`SPC f t`) --------------------------------------

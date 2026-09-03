@@ -20,6 +20,7 @@ mod rect;
 mod tabstops;
 mod text;
 mod theme;
+mod tool_status;
 mod vnc_texture;
 
 use std::path::Path;

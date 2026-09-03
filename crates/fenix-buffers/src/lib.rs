@@ -88,6 +88,16 @@ pub enum BufferKind {
     /// Docker's six panes all share `BufferKind::Docker` (see `fenix-
     /// gui`'s `DebugSession`/`DebugPaneRole`).
     Debug,
+    /// The tool status listing (`SPC l m`) -- which LSP servers/DAP
+    /// adapters are configured, found on `PATH`, and running, per
+    /// language, with an install hint for anything missing (see
+    /// `fenix-gui`'s `tool_status` module). Same single-pane "real
+    /// buffer, just tagged, host regenerates it on demand" shape as
+    /// `TaskOutput`, minus the live-appending: this one's whole content
+    /// is just recomputed and swapped in fresh each time it's opened or
+    /// refreshed, since a `PATH` scan is fast enough to redo outright
+    /// rather than being worth incrementally patching.
+    ToolStatus,
 }
 
 impl BufferKind {
@@ -213,6 +223,13 @@ impl BufferList {
     /// Same "real buffer, just tagged" shape as `open_docker`.
     pub fn open_debug(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Debug)
+    }
+
+    /// A real buffer seeded with `text` (a rendered tool status listing)
+    /// and tagged `ToolStatus` -- `SPC l m`. Same "real buffer, just
+    /// tagged" shape as `open_docker`/`open_debug`.
+    pub fn open_tool_status(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::ToolStatus)
     }
 
     /// A real buffer seeded with `text` (a rendered status/files/branches/
@@ -502,6 +519,16 @@ mod tests {
         assert_eq!(ob.buffer.text(), "p.  1  the quick brown fox\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::PdfSearchResults);
+    }
+
+    #[test]
+    fn open_tool_status_seeds_the_text_and_tags_the_buffer() {
+        let mut list = BufferList::new();
+        let id = list.open_tool_status("Python  LSP  pyright-langserver  [found]\n");
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.text(), "Python  LSP  pyright-langserver  [found]\n");
+        assert_eq!(ob.buffer.path(), None);
+        assert_eq!(ob.kind, BufferKind::ToolStatus);
     }
 
     #[test]

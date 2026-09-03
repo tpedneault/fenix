@@ -386,6 +386,17 @@ for anyone curious to poke around or build on it.
   script I have open" -- comes from `.fenix/project.ini`'s `[launch]`
   section (`program`/`args`, the same per-project config file `[tasks]`
   above already introduced).
+- **Tool status**: `SPC l m` opens a single-pane listing of every
+  language with a built-in LSP server or DAP adapter -- the exact
+  command that would be launched (a `[lsp]` override if configured,
+  else the built-in default), whether it's found on `PATH`, whether a
+  session for it is running right now, and, for anything missing, the
+  one-line command that installs it (`rustup component add
+  rust-analyzer`, `uv tool install pyright`, `npm install -g
+  typescript-language-server typescript`, ...). Detect and guide only --
+  Fenix never downloads or manages a tool binary itself, the same
+  posture the debugger bullet above already takes for adapters it
+  doesn't have.
 - **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -556,6 +567,7 @@ popup shows what keys continue it.
 | `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |
 | `SPC u w` | Watch the identifier before the cursor |
 | `SPC u q` | End the running debug session |
+| `SPC l m` | Show LSP/DAP tool status (found on PATH, running, install hints) |
 | `SPC s s` | Fuzzy-find a line in the current buffer |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |
