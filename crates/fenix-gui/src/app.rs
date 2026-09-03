@@ -1031,7 +1031,13 @@ struct VncSession {
     #[allow(dead_code)]
     reader: Option<VncReader>,
     workspace_index: usize,
-    pane: fenix_window::WindowId,
+    /// The buffer this session renders into -- the *only* thing tying a
+    /// session to what's on screen. Deliberately not a pane id: a buffer
+    /// can be displayed by any number of panes (a `SPC w v` split of a
+    /// VNC pane, two panes watching one VM), and every "which session is
+    /// this pane showing?" question resolves through the pane's buffer
+    /// instead (`vnc_session_key_for_pane`). A session pinned to one
+    /// pane made every *other* pane showing it render blank.
     buffer: BufferId,
     host: String,
     port: u16,
@@ -6022,8 +6028,17 @@ impl App {
     /// into a buffer no pane displayed anymore).
     fn focused_pane_holds_a_tracked_session(&self) -> bool {
         let focused = self.focused_pane_id();
-        self.vnc_session_key_for_pane(focused).is_some()
-            || self.pdf_session_key_for_pane(focused).is_some()
+        // VNC is deliberately *not* in this list. The bug this guard
+        // exists for -- a session left running with no pane showing it,
+        // and no way back -- doesn't apply to VNC any more: a session is
+        // identified by its buffer (`VncSession::buffer`), not by a pane,
+        // so pointing a pane at something else just hides it, exactly
+        // like navigating away from any other buffer, and `SPC v v` finds
+        // it again (`open_vnc_session` re-opens the buffer if no pane is
+        // currently showing it). Keeping it here instead meant a file
+        // opened while a VNC pane was focused got flung into a whole new
+        // workspace rather than opening where you were looking.
+        self.pdf_session_key_for_pane(focused).is_some()
             || self.docker_focused_role().is_some()
             || self.git_focused_role().is_some()
             || self.jira_focused_role().is_some()
@@ -7728,9 +7743,22 @@ impl App {
     /// takes).
     pub(crate) fn open_vnc_session(&mut self, name: &str) {
         if let Some(session) = self.vnc_sessions.get(name) {
-            let (workspace_index, pane) = (session.workspace_index, session.pane);
+            let (workspace_index, buffer) = (session.workspace_index, session.buffer);
             self.workspaces.switch_to_index(workspace_index);
-            self.windows_mut().focus(pane);
+            // Focus whichever pane is already showing this session, if
+            // any -- there can be several (splits), and after the switch
+            // above there may be none at all, if the pane that used to
+            // show it has since been pointed at something else. Falling
+            // back to opening it in the focused pane is what makes a
+            // second `SPC v v` on the same host reliably get you back to
+            // it rather than landing on a pane showing whatever replaced
+            // it.
+            match self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&buffer)) {
+                Some(pane) => {
+                    self.windows_mut().focus(pane);
+                }
+                None => self.open_buffer_in_focused_pane(buffer),
+            }
             self.sync_vnc_focus();
             self.wake_caret();
             return;
@@ -7891,11 +7919,16 @@ impl App {
         match result {
             Ok((client, receiver)) => {
                 let buffer = self.buffers.open_vnc();
-                let cursor = Cursor::at_start();
-                self.workspaces.new_workspace(buffer, cursor);
+                // Opened where you are, like any other buffer, rather
+                // than always seizing a brand-new workspace -- that's
+                // what made a second session impossible to place beside
+                // the first, so "two VMs side by side" (or a VM beside a
+                // file) couldn't be built at all. `open_buffer_in_
+                // focused_pane` still falls back to a new workspace when
+                // the focused pane is already some *other* tracked
+                // session's, so this can't hijack one.
+                self.open_buffer_in_focused_pane(buffer);
                 let workspace_index = self.workspaces.active_index();
-                let pane = self.focused_pane_id();
-                self.pane_titles.insert(pane, format!("VNC: {name}"));
                 let framebuffer = Arc::new(Mutex::new(fenix_vnc::framebuffer::VncFramebuffer::new()));
                 let reader = self.event_proxy.clone().map(|proxy| {
                     VncReader::spawn(receiver, name.clone(), framebuffer.clone(), move |event| proxy.send_event(event).is_ok())
@@ -7906,7 +7939,6 @@ impl App {
                         client,
                         reader,
                         workspace_index,
-                        pane,
                         buffer,
                         host,
                         port,
@@ -7973,7 +8005,6 @@ impl App {
             self.set_vnc_focused(None);
         }
         self.buffers.close(session.buffer);
-        self.pane_titles.remove(&session.pane);
         self.workspaces.switch_to_index(session.workspace_index);
         self.workspaces.remove_active();
         self.refresh_project_root();
@@ -7988,11 +8019,21 @@ impl App {
         self.vnc_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
     }
 
-    /// Same as `vnc_session_key_for_buffer`, keyed by pane instead --
-    /// used by mouse-hit-testing, which resolves a click to a pane, not
-    /// directly to a buffer.
+    /// Same as `vnc_session_key_for_buffer`, for callers that start from
+    /// a pane (mouse hit-testing, the per-pane render loop) -- resolved
+    /// *through* that pane's buffer rather than by remembering which
+    /// pane a session lives in.
+    ///
+    /// That indirection is the whole point: a buffer can be shown by any
+    /// number of panes (that's what a split is), so a session pinned to
+    /// one pane id silently stops existing for every other pane showing
+    /// the same buffer. It used to be pinned, and a `SPC w v` split of a
+    /// VNC pane drew the new pane completely blank -- the session was
+    /// still running and still had a texture, its `pane` just didn't
+    /// match.
     fn vnc_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<String> {
-        self.vnc_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
+        let buffer = *self.windows().content(pane)?;
+        self.vnc_session_key_for_buffer(buffer)
     }
 
     /// Recomputes `vnc_focused` from whichever pane is actually focused
@@ -17291,7 +17332,13 @@ impl App {
             } else if ob.kind == BufferKind::Jira {
                 "*jira*".to_string()
             } else if ob.kind == BufferKind::Vnc {
-                "*vnc*".to_string()
+                // Named from the session that owns this buffer, so every
+                // pane showing it is titled the same way -- including a
+                // split's second pane, which a per-pane title (what this
+                // used to be) never reached. `*vnc*` only for the window
+                // between the buffer existing and its session being
+                // registered.
+                self.vnc_session_key_for_buffer(buffer_id).map(|name| format!("VNC: {name}")).unwrap_or_else(|| "*vnc*".to_string())
             } else if ob.kind == BufferKind::Pdf {
                 self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
             } else if ob.kind == BufferKind::PdfOutline {
@@ -19264,7 +19311,13 @@ impl App {
         // `gpu`/`vnc_pipeline` are available, well after this CPU-side
         // prep loop (see this function's own later `vnc_pipeline.draw`
         // call site).
-        let mut vnc_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        // Carries each pane's buffer alongside it because that -- not the
+        // pane -- is what identifies the session to upload/draw (see
+        // `VncSession::buffer`). Several entries can share one buffer
+        // when a session is split across panes; the upload loop below is
+        // idempotent for the repeats (`take_dirty` yields once), and the
+        // draw loop deliberately draws the same texture into each.
+        let mut vnc_panes: Vec<(fenix_window::WindowId, BufferId, fenix_window::Rect)> = Vec::new();
         // Same shape as `vnc_panes`, for `BufferKind::Pdf` panes -- also
         // where a resize gets noticed and turned into a fresh `RenderPage`
         // request (see the loop body below), since this is the only place
@@ -19341,7 +19394,15 @@ impl App {
                 // similar -- a split's own share of the window changes
                 // with every other pane's size too, not just the
                 // window's.
-                if let Some(key) = self.vnc_session_key_for_pane(pane) {
+                // Several panes can show one session now (a split of a
+                // VNC pane, two views of one VM), and they won't be the
+                // same size -- so only the focused one gets to drive the
+                // guest's resolution, rather than the two fighting over
+                // it every frame. When none of them is focused, whichever
+                // pane this loop reaches is as good a choice as any and
+                // the debounce in `vnc_resize_tick` settles it.
+                let drives_resize = is_focused || self.windows().content(focused_pane) != Some(&buffer_id);
+                if let Some(key) = self.vnc_session_key_for_pane(pane).filter(|_| drives_resize) {
                     let pane_px = (rect.w.round().max(1.0) as u16, rect.h.round().max(1.0) as u16);
                     if let Some(session) = self.vnc_sessions.get_mut(&key) {
                         let now = Instant::now();
@@ -19369,7 +19430,7 @@ impl App {
                     // Falls through to the Explorer/Picker rendering
                     // further down, exactly as before this block existed.
                 } else {
-                    vnc_panes.push((pane, rect));
+                    vnc_panes.push((pane, buffer_id, rect));
                     panes_render.push(PaneRender {
                         pane,
                         rect,
@@ -19728,7 +19789,10 @@ impl App {
             &mut self.bg_rect,
             &mut self.popup_rect,
             &mut self.caret_rect,
-            &self.vnc_pipeline,
+            // Mutable: quads are accumulated into it before the render
+            // pass and drawn by slot inside it (see `VncPipeline::
+            // push_quad`), rather than written one-at-a-time mid-pass.
+            &mut self.vnc_pipeline,
             &self.pdf_pipeline,
         ) else {
             return;
@@ -20043,13 +20107,13 @@ impl App {
         // than allocated per frame -- a full-screen dirty region is
         // several megabytes.
         let mut upload_scratch = std::mem::take(&mut self.vnc_upload_scratch);
-        for (pane, _) in &vnc_panes {
+        for (_, buffer_id, _) in &vnc_panes {
             // A direct `self.vnc_sessions` field access, not `self.vnc_
             // session_key_for_pane(...)` -- that method takes `&self`
             // for the whole struct, which the borrow checker can't
             // reconcile with `gpu`/`text`/etc. already being borrowed as
             // separate field-only bindings above.
-            let Some(session) = self.vnc_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
+            let Some(session) = self.vnc_sessions.values_mut().find(|s| s.buffer == *buffer_id) else { continue };
             if session.texture.is_none() {
                 let mut fb = session.framebuffer.lock().unwrap();
                 let (w, h) = fb.dimensions();
@@ -20112,6 +20176,49 @@ impl App {
             }
         }
         self.vnc_upload_scratch = upload_scratch;
+
+        // Records every VNC quad this frame will draw -- one per pane,
+        // plus one per visible guest cursor -- and uploads them in a
+        // single write before the render pass opens. Split from the
+        // drawing itself because `queue.write_buffer` is applied ahead of
+        // every draw in the pass, so writing per-draw would leave all of
+        // them using the last quad written (two panes showing one session
+        // is exactly when that becomes visible: the first drew nothing).
+        //
+        // `(buffer, pane slot, cursor slot)` -- resolved back to a
+        // session by buffer inside the pass.
+        let mut vnc_draws: Vec<(BufferId, usize, Option<usize>)> = Vec::with_capacity(vnc_panes.len());
+        vnc_pipeline.clear();
+        for (_, buffer_id, rect) in &vnc_panes {
+            let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
+            if session.texture.is_none() {
+                continue;
+            }
+            let pane_slot = vnc_pipeline.push_quad(gpu, rect.x, rect.y, rect.w, rect.h);
+            // The guest's pointer, placed on top of its own pane. The
+            // server stopped compositing it into the framebuffer when we
+            // asked for `CursorPseudo` -- which is what keeps pointer
+            // movement from generating framebuffer traffic -- so it's
+            // ours to position now. Scaled by the same pane/framebuffer
+            // ratio as the image under it, so it stays the right size
+            // when a pane isn't at the VM's native resolution, and
+            // offset by the hotspot so the tip lands where the guest
+            // thinks the pointer is.
+            let cursor_slot = (|| {
+                let (cursor, (px, py)) = (session.cursor.as_ref()?, session.pointer_pos?);
+                cursor.texture.as_ref()?;
+                let (fb_w, fb_h) = session.texture_dims;
+                if fb_w == 0 || fb_h == 0 {
+                    return None;
+                }
+                let (scale_x, scale_y) = (rect.w / fb_w as f32, rect.h / fb_h as f32);
+                let dest_x = rect.x + (px as f32 - cursor.hotspot_x as f32) * scale_x;
+                let dest_y = rect.y + (py as f32 - cursor.hotspot_y as f32) * scale_y;
+                Some(vnc_pipeline.push_quad(gpu, dest_x, dest_y, cursor.width as f32 * scale_x, cursor.height as f32 * scale_y))
+            })();
+            vnc_draws.push((*buffer_id, pane_slot, cursor_slot));
+        }
+        vnc_pipeline.flush(gpu);
 
         // Unlike the VNC loop just above (whole framebuffer always maps
         // onto the whole pane), a PDF render can be smaller than the pane
@@ -20212,31 +20319,16 @@ impl App {
             // bar is still ordinary glyphon text (from the same `text`
             // pipeline, prepared just above) and needs to stay legible
             // on top of the video frame, not painted over by it.
-            for (pane, rect) in &vnc_panes {
-                let Some(session) = self.vnc_sessions.values().find(|s| s.pane == *pane) else { continue };
-                if let Some(texture) = &session.texture {
-                    vnc_pipeline.draw(gpu, &mut pass, texture, rect.x, rect.y, rect.w, rect.h);
+            // Geometry for all of these was accumulated and uploaded
+            // before the pass opened; this only picks the texture and
+            // the slot to draw it over.
+            for (buffer_id, pane_slot, cursor_slot) in &vnc_draws {
+                let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
+                let Some(texture) = &session.texture else { continue };
+                vnc_pipeline.draw_quad(&mut pass, texture, *pane_slot);
+                if let Some((slot, cursor_texture)) = cursor_slot.zip(session.cursor.as_ref().and_then(|c| c.texture.as_ref())) {
+                    vnc_pipeline.draw_cursor_quad(&mut pass, cursor_texture, slot);
                 }
-                // The guest's pointer, drawn on top of its own pane. The
-                // server stopped compositing this into the framebuffer
-                // when we asked for `CursorPseudo` -- which is what keeps
-                // pointer movement from generating framebuffer traffic --
-                // so it's ours to place now. Scaled by the same
-                // pane/framebuffer ratio as the image under it, so it
-                // stays the right size when a pane isn't at the VM's
-                // native resolution, and offset by the hotspot so the
-                // tip lands where the guest thinks the pointer is.
-                let (Some(cursor), Some((px, py))) = (&session.cursor, session.pointer_pos) else { continue };
-                let Some(cursor_texture) = &cursor.texture else { continue };
-                let (fb_w, fb_h) = session.texture_dims;
-                if fb_w == 0 || fb_h == 0 {
-                    continue;
-                }
-                let scale_x = rect.w / fb_w as f32;
-                let scale_y = rect.h / fb_h as f32;
-                let dest_x = rect.x + (px as f32 - cursor.hotspot_x as f32) * scale_x;
-                let dest_y = rect.y + (py as f32 - cursor.hotspot_y as f32) * scale_y;
-                vnc_pipeline.draw_cursor(gpu, &mut pass, cursor_texture, dest_x, dest_y, cursor.width as f32 * scale_x, cursor.height as f32 * scale_y);
             }
             // Same "before text, so title bars stay legible" reasoning as
             // the VNC loop just above.
@@ -26185,6 +26277,33 @@ mod tests {
         assert!(app.active_picker.is_none());
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.modeline_pieces().1.contains("no VNC host configured"));
+    }
+
+    #[test]
+    fn a_vnc_buffer_with_no_session_yet_still_has_a_display_name() {
+        // `buffer_display_name` names a VNC buffer from the session that
+        // owns it (so every pane showing it, splits included, agrees),
+        // which leaves the gap between `open_vnc` and the session being
+        // registered -- and between a session closing and its buffer
+        // going away. Both must still render a title rather than panic
+        // or come back empty.
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_vnc();
+        assert_eq!(app.buffer_display_name(id), "*vnc*");
+    }
+
+    #[test]
+    fn vnc_session_lookup_by_pane_goes_through_that_panes_buffer() {
+        // The pane -> buffer -> session indirection that lets several
+        // panes show one session. With no sessions registered there's
+        // nothing to find either way, but this pins the *shape*: it
+        // answers from whatever buffer the pane currently holds, so it
+        // can't disagree with `vnc_session_key_for_buffer`.
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_vnc();
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, id);
+        assert_eq!(app.vnc_session_key_for_pane(pane), app.vnc_session_key_for_buffer(id));
     }
 
     #[test]

@@ -9,6 +9,11 @@ struct Vertex {
 
 const VERTICES_PER_QUAD: usize = 6;
 
+/// Quads the vertex buffer starts out able to hold -- a pane and its
+/// cursor for each of the few sessions that can be visible at once.
+/// `flush` grows it if a frame ever needs more.
+const INITIAL_QUADS: usize = 8;
+
 /// One VNC session's live pixel framebuffer as a sampled GPU texture.
 /// Recreated (`VncPipeline::create_texture`) whenever the session's
 /// resolution changes; updated in place otherwise via `VncPipeline::
@@ -39,18 +44,22 @@ pub struct VncPipeline {
     cursor_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Exactly one quad's worth of vertices, rewritten via
-    /// `queue.write_buffer` immediately before every `draw` call -- a
-    /// VNC pane is always exactly one rectangle, so unlike
-    /// `RectRenderer` (many accumulated rects per frame) there's no
-    /// separate per-frame accumulation step.
+    /// Every quad this frame will draw -- one per VNC pane, plus one per
+    /// visible guest cursor -- accumulated by `push_quad` and uploaded
+    /// once by `flush`, then drawn by slot index.
+    ///
+    /// Deliberately not "write one quad immediately before each draw",
+    /// which is what this used to do: `queue.write_buffer` calls are all
+    /// applied before *any* of the pass's draws execute, so every draw
+    /// sharing one buffer ends up using whichever geometry was written
+    /// last. With a single VNC pane that was invisible; the moment two
+    /// panes could show a session at once (a split), the earlier pane
+    /// rendered nothing and the later one was drawn twice. Same
+    /// accumulate-then-flush-then-render shape as `RectRenderer`.
+    vertices: Vec<Vertex>,
     vertex_buffer: wgpu::Buffer,
-    /// The cursor's own quad, kept separate from `vertex_buffer` rather
-    /// than reusing it: `queue.write_buffer` calls are all applied
-    /// before any of the pass's draws execute, so a pane and its cursor
-    /// sharing one buffer would both end up drawn with whichever
-    /// geometry was written last.
-    cursor_vertex_buffer: wgpu::Buffer,
+    /// Quads `vertex_buffer` can currently hold, grown by `flush`.
+    capacity: usize,
 }
 
 impl VncPipeline {
@@ -136,18 +145,48 @@ impl VncPipeline {
             ..Default::default()
         });
 
-        let quad_buffer = |label: &str| {
-            gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: (VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
-        let vertex_buffer = quad_buffer("vnc-vertex-buffer");
-        let cursor_vertex_buffer = quad_buffer("vnc-cursor-vertex-buffer");
+        let capacity = INITIAL_QUADS;
+        let vertex_buffer = Self::new_buffer(gpu, capacity);
 
-        Self { pipeline, cursor_pipeline, bind_group_layout, sampler, vertex_buffer, cursor_vertex_buffer }
+        Self { pipeline, cursor_pipeline, bind_group_layout, sampler, vertices: Vec::new(), vertex_buffer, capacity }
+    }
+
+    fn new_buffer(gpu: &GpuState, quads: usize) -> wgpu::Buffer {
+        gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vnc-vertex-buffer"),
+            size: (quads * VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Drops the previous frame's quads -- call once per frame, before
+    /// any `push_quad`.
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+    }
+
+    /// Records one screen-space quad and returns the slot to draw it
+    /// with (`draw_quad`/`draw_cursor_quad`).
+    pub fn push_quad(&mut self, gpu: &GpuState, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) -> usize {
+        let slot = self.vertices.len() / VERTICES_PER_QUAD;
+        self.vertices.extend_from_slice(&quad_vertices(gpu, dest_x, dest_y, dest_w, dest_h));
+        slot
+    }
+
+    /// Uploads every quad pushed since `clear`, growing the buffer if
+    /// this frame needed more than it could hold. Must run before the
+    /// render pass that draws them.
+    pub fn flush(&mut self, gpu: &GpuState) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        let quads = self.vertices.len() / VERTICES_PER_QUAD;
+        if quads > self.capacity {
+            self.capacity = quads.next_power_of_two();
+            self.vertex_buffer = Self::new_buffer(gpu, self.capacity);
+        }
+        gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
     }
 
     /// Creates (or recreates, on a resolution change) the GPU texture
@@ -200,46 +239,31 @@ impl VncPipeline {
         );
     }
 
-    /// Draws `tex` scaled to exactly fill the pixel rect
-    /// `(dest_x, dest_y, dest_w, dest_h)` -- this project's v1 resize
-    /// strategy (client-side scaling, no server-side `SetDesktopSize`
-    /// request) means the whole framebuffer always maps onto the whole
-    /// pane, whatever its current on-screen size is. Same NDC-space
-    /// quad conversion `RectRenderer::push_rect` uses.
-    pub fn draw<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass VncTexture, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) {
-        let vertices = quad_vertices(gpu, dest_x, dest_y, dest_w, dest_h);
-        gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &tex.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..VERTICES_PER_QUAD as u32, 0..1);
+    /// Draws `tex` over the quad recorded at `slot` by `push_quad` --
+    /// this project's resize strategy means the whole framebuffer always
+    /// maps onto the whole pane, whatever its current on-screen size is.
+    pub fn draw_quad<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass VncTexture, slot: usize) {
+        self.draw_slot(pass, &self.pipeline, tex, slot);
     }
 
     /// Draws the guest's mouse cursor on top of an already-drawn pane,
     /// alpha blended (see `cursor_pipeline`) so its transparent pixels
-    /// let the desktop underneath show through.
-    ///
-    /// Separate from `draw` rather than a flag on it because the two
-    /// must be able to coexist within one render pass, which needs both
-    /// a different pipeline and its own vertex buffer.
-    pub fn draw_cursor<'pass>(
-        &'pass self,
-        gpu: &GpuState,
-        pass: &mut wgpu::RenderPass<'pass>,
-        tex: &'pass VncTexture,
-        dest_x: f32,
-        dest_y: f32,
-        dest_w: f32,
-        dest_h: f32,
-    ) {
-        let vertices = quad_vertices(gpu, dest_x, dest_y, dest_w, dest_h);
-        gpu.queue.write_buffer(&self.cursor_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+    /// let the desktop underneath show through. Separate from
+    /// `draw_quad` only for the pipeline; the geometry comes from the
+    /// same buffer.
+    pub fn draw_cursor_quad<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass VncTexture, slot: usize) {
+        self.draw_slot(pass, &self.cursor_pipeline, tex, slot);
+    }
 
-        pass.set_pipeline(&self.cursor_pipeline);
+    fn draw_slot<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>, pipeline: &'pass wgpu::RenderPipeline, tex: &'pass VncTexture, slot: usize) {
+        let first = (slot * VERTICES_PER_QUAD) as u32;
+        if first as usize >= self.vertices.len() {
+            return; // a slot from a frame whose `flush` never ran
+        }
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &tex.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.cursor_vertex_buffer.slice(..));
-        pass.draw(0..VERTICES_PER_QUAD as u32, 0..1);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(first..first + VERTICES_PER_QUAD as u32, 0..1);
     }
 }
 
