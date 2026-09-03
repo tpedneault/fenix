@@ -5,6 +5,7 @@ mod dashboard;
 mod diff_view;
 mod docker_panel;
 mod git_panel;
+mod graph_view;
 mod gpu;
 mod icon;
 mod ipc;

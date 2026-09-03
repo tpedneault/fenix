@@ -97,6 +97,12 @@ pub enum BufferKind {
     /// DiffAnchor`) -- so it gets its own per-line metadata map and
     /// highlight pass, exactly as `Docker`/`Git`/`Jira` each already do.
     Diff,
+    /// The commit graph (`SPC g l`) -- one row per commit with its rail
+    /// art, hash, ref decorations and subject as separately-colored
+    /// spans, which is why it has its own kind and per-line metadata
+    /// rather than being another `Git` buffer (see `fenix-gui`'s
+    /// `graph_view::GraphLine`).
+    Graph,
     /// The tool status listing (`SPC l m`) -- which LSP servers/DAP
     /// adapters are configured, found on `PATH`, and running, per
     /// language, with an install hint for anything missing (see
@@ -239,6 +245,13 @@ impl BufferList {
     /// shape as `open_git`.
     pub fn open_diff(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Diff)
+    }
+
+    /// A real buffer seeded with `text` (a rendered commit graph) and
+    /// tagged `Graph` -- `SPC g l`. Same "real buffer, just tagged"
+    /// shape as `open_git`.
+    pub fn open_graph(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Graph)
     }
 
     /// A real buffer seeded with `text` (a rendered tool status listing)

@@ -101,6 +101,15 @@ pub struct Config {
     /// session-old) copy, so a hand-edit made after this was loaded
     /// survives the next save instead of being silently erased by it.
     pub documents: Vec<(String, PathBuf)>,
+    /// How many commits the History view's graph loads (`SPC g l`) --
+    /// unset means 200, enough to cover recent work without making
+    /// `git log --all` on a large repo feel slow.
+    pub git_graph_limit: Option<usize>,
+    /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
+    /// `develop` -- unset means `main`. What "how does my branch differ
+    /// from the mainline" means depends on the project's own convention,
+    /// and there's no way to infer it reliably.
+    pub git_base_branch: Option<String>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -187,6 +196,7 @@ impl Config {
         let lsp = sections.get("lsp");
         let mib = sections.get("mib");
         let jira = sections.get("jira");
+        let git = sections.get("git");
         let vnc = sections.get("vnc");
         let documents = sections.get("documents");
         let windows = sections.get("windows");
@@ -210,6 +220,8 @@ impl Config {
             jira_token: jira.and_then(|s| s.get("token")).cloned(),
             jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
+            git_graph_limit: git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok()),
+            git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
@@ -241,6 +253,8 @@ impl Config {
             jira_token: None,
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
+            git_graph_limit: None,
+            git_base_branch: None,
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
             windows: Vec::new(),
@@ -343,6 +357,14 @@ impl Config {
         }
         for (i, (id, name)) in self.jira_users.iter().enumerate() {
             out.push_str(&format!("user{} = {id}|{name}\n", i + 1));
+        }
+        out.push('\n');
+        out.push_str("[git]\n");
+        if let Some(limit) = self.git_graph_limit {
+            out.push_str(&format!("graph_limit = {limit}\n"));
+        }
+        if let Some(base) = &self.git_base_branch {
+            out.push_str(&format!("base_branch = {}\n", ini::quote_if_needed(base)));
         }
         out.push('\n');
         out.push_str("[vnc]\n");
@@ -930,6 +952,27 @@ mod tests {
             ]
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn git_settings_round_trip_through_save_and_load() {
+        let path = temp_path("git_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.git_graph_limit = Some(500);
+        config.git_base_branch = Some("develop".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.git_graph_limit, Some(500));
+        assert_eq!(reloaded.git_base_branch, Some("develop".to_string()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn git_settings_are_none_when_the_section_is_absent() {
+        let config = Config::load(temp_path("git_absent")).unwrap();
+        assert_eq!(config.git_graph_limit, None);
+        assert_eq!(config.git_base_branch, None);
     }
 
     #[test]

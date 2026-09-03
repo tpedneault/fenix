@@ -20,6 +20,20 @@ pub fn list_commits(repo: &Path, limit: usize) -> Vec<Commit> {
     run_lines(repo, &["log", &n, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"]).iter().filter_map(|l| parse_line(l)).collect()
 }
 
+/// The commits `head` has that `base` doesn't (`git log base..head`),
+/// newest first -- "what would this merge bring in", the list that
+/// belongs beside a ref comparison's diff.
+///
+/// Two-dot here even though `diff_refs` defaults to three-dot: for a
+/// *commit list* the two mean the same thing (`base...head` on `git log`
+/// would additionally list base's own commits, which is not what's being
+/// asked), so this is the direct equivalent of three-dot's diff.
+pub fn commits_between(repo: &Path, base: &str, head: &str, limit: usize) -> Vec<Commit> {
+    let n = format!("-n{limit}");
+    let range = format!("{base}..{head}");
+    run_lines(repo, &["log", &n, &range, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"]).iter().filter_map(|l| parse_line(l)).collect()
+}
+
 fn parse_line(line: &str) -> Option<Commit> {
     let mut fields = line.split('\x1f');
     Some(Commit {
@@ -80,6 +94,32 @@ mod tests {
         assert_eq!(commits[0].message, "second commit");
         assert_eq!(commits[1].message, "first commit");
         assert!(commits[0].hash.starts_with(&commits[0].short_hash));
+    }
+
+    #[test]
+    fn commits_between_lists_only_what_the_head_ref_adds() {
+        let dir = TempDir::new("commits_between");
+        init_repo(dir.path());
+        dir.write("a.txt", "v1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        git(dir.path(), &["checkout", "-q", "-b", "side"]);
+        dir.write("b.txt", "side");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "on side"]);
+
+        let commits = commits_between(dir.path(), "main", "side", 50);
+        assert_eq!(commits.len(), 1, "{commits:?}");
+        assert_eq!(commits[0].message, "on side");
+        // ...and nothing in the other direction.
+        assert!(commits_between(dir.path(), "side", "main", 50).is_empty());
+    }
+
+    #[test]
+    fn commits_between_is_empty_for_an_unknown_ref_rather_than_failing() {
+        let dir = TempDir::new("commits_between_unknown");
+        init_repo(dir.path());
+        assert!(commits_between(dir.path(), "main", "no-such-branch", 50).is_empty());
     }
 
     #[test]

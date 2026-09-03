@@ -33,6 +33,7 @@ use crate::diff_view;
 use crate::docker_panel;
 use crate::git_panel;
 use crate::gpu::{GpuContext, GpuState};
+use crate::graph_view;
 use crate::icon;
 use crate::jira_panel;
 use crate::keymap;
@@ -430,6 +431,49 @@ struct TaskSession {
     /// `Drop` side effect (see `TaskRunner`'s own doc comment) beyond
     /// what `App::kill_running_task` explicitly calls `kill` on.
     runner: Option<TaskRunner>,
+}
+
+/// The History view's session (`SPC g l`) -- the commit graph, the refs
+/// tree, and the selected commit's diff, in their own workspace.
+///
+/// Its own session rather than more panes on `GitSession`, per the
+/// overhaul's "separate purpose-built views" shape: the working tree
+/// and the history answer different questions and want different
+/// layouts. Both can be open at once, on their own workspaces.
+struct HistorySession {
+    workspace_index: usize,
+    graph_pane: fenix_window::WindowId,
+    refs_pane: fenix_window::WindowId,
+    detail_pane: fenix_window::WindowId,
+    graph_buffer: BufferId,
+    refs_buffer: BufferId,
+    detail_buffer: BufferId,
+    repo_root: PathBuf,
+    /// Cached so the cursor's row resolves to a commit without
+    /// re-shelling `git log` -- same reasoning as `GitSession::commits`.
+    commits: Vec<fenix_git::GraphCommit>,
+    /// The commit `history_sync_detail` last fetched a diff for, so
+    /// moving the cursor within one commit's rows doesn't re-fetch.
+    last_detail_commit: Option<String>,
+    /// Staleness guard for that fetch -- mirrors `GitSession::
+    /// main_request_id`.
+    detail_request_id: u64,
+}
+
+/// The Compare view's session (`SPC g c`) -- two refs, the commits
+/// between them, and their diff.
+struct CompareSession {
+    workspace_index: usize,
+    commits_pane: fenix_window::WindowId,
+    diff_pane: fenix_window::WindowId,
+    commits_buffer: BufferId,
+    diff_buffer: BufferId,
+    repo_root: PathBuf,
+    base: String,
+    head: String,
+    /// `base...head` (merge-base) vs. `base..head` -- `t` toggles. See
+    /// `fenix_git::diff_refs` for why three-dot is the default.
+    three_dot: bool,
 }
 
 /// What a `BufferKind::Diff` buffer is currently showing. Cached
@@ -1782,6 +1826,13 @@ pub enum FenixUserEvent {
     /// and discarded instead of clobbering Main with a stale diff --
     /// see `GitSession::main_request_id`'s own doc comment.
     GitMainReady { request_id: u64, buffer: BufferId, diff: Option<String> },
+    /// A History-view commit diff finished fetching -- same
+    /// request_id-guarded shape as `GitMainReady`, for the other view.
+    GitHistoryDetailReady { request_id: u64, buffer: BufferId, diff: Option<String> },
+    /// A `SPC g f` fetch finished. Carries git's own message so a
+    /// failure (no remote, auth, offline) surfaces verbatim rather than
+    /// as a generic "fetch failed".
+    GitFetched { result: Result<String, String> },
     /// A completed `git_refresh_session` re-list (files/branches/
     /// commits/stashes/status), from a one-shot background thread it
     /// spawned. Carries the `request_id` the refresh was issued under,
@@ -2193,6 +2244,13 @@ enum ActivePicker {
     /// `.fenix/project.ini` `[tasks]` overrides) -- confirming runs it
     /// (`App::run_task`) in the Task Output panel.
     Task(fenix_picker::PickerState<fenix_tasks::TaskDef>),
+    /// `SPC g c`, step one: pick the ref to compare *against* (the
+    /// base). Confirming chains straight into `CompareHead`, so the two
+    /// halves of "compare A to B" are two pickers rather than a form.
+    CompareBase(fenix_picker::PickerState<String>),
+    /// `SPC g c`, step two: pick the ref being compared. Carries the
+    /// already-chosen base, since confirming needs both.
+    CompareHead { base: String, picker: fenix_picker::PickerState<String> },
     /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
     /// subsystem, confirming opens its detail view (`mib_show_
     /// telecommand`). Same candidate list as `MibTelecommandInsert`,
@@ -2305,6 +2363,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
         ActivePicker::Task(s) => s.push_char(c),
+        ActivePicker::CompareBase(s) => s.push_char(c),
+        ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2339,6 +2399,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
         ActivePicker::Task(s) => s.backspace(),
+        ActivePicker::CompareBase(s) => s.backspace(),
+        ActivePicker::CompareHead { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2373,6 +2435,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
         ActivePicker::Task(s) => s.move_selection(delta),
+        ActivePicker::CompareBase(s) => s.move_selection(delta),
+        ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2410,6 +2474,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
         ActivePicker::Task(s) => s.toggle_mark(),
+        ActivePicker::CompareBase(s) => s.toggle_mark(),
+        ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2444,6 +2510,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
         ActivePicker::Task(s) => s.query(),
+        ActivePicker::CompareBase(s) => s.query(),
+        ActivePicker::CompareHead { picker, .. } => picker.query(),
     }
 }
 
@@ -2478,6 +2546,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
         ActivePicker::Task(s) => s.len(),
+        ActivePicker::CompareBase(s) => s.len(),
+        ActivePicker::CompareHead { picker, .. } => picker.len(),
     }
 }
 
@@ -2512,6 +2582,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
         ActivePicker::Task(s) => s.selected_row(),
+        ActivePicker::CompareBase(s) => s.selected_row(),
+        ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2562,6 +2634,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Task(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -3469,6 +3543,7 @@ fn git_highlights_for_visible_range(
             git_panel::GitLineStyle::Empty => {
                 ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
             }
+            git_panel::GitLineStyle::Header => ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword)),
             git_panel::GitLineStyle::Detail => {
                 if let Some(dim_from) = meta.dim_from {
                     let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
@@ -3536,6 +3611,49 @@ fn diff_highlights_for_visible_range(
             diff_view::DiffStyle::Context => continue,
         };
         ranges.push((content_start_byte..line_end_byte, color));
+    }
+    ranges
+}
+
+/// Resolves a real `BufferKind::Graph` buffer's highlight ranges from
+/// its cached `GraphLine` metadata. Unlike every other panel here, a
+/// graph row is several differently-colored spans rather than one, so
+/// each row walks its own span list -- each span running from its start
+/// column to the next span's start, the last to end of line.
+fn graph_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<graph_view::GraphLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        for (i, (col, span)) in meta.spans.iter().enumerate() {
+            let next = meta.spans.get(i + 1).map(|(c, _)| *c).unwrap_or(len);
+            let (from, to) = ((*col).min(len), next.min(len));
+            if from >= to {
+                continue;
+            }
+            let color = match span {
+                // Rails are structure, not content -- dim, so the
+                // subjects beside them stay the thing you read.
+                graph_view::GraphSpan::Rails => theme.gutter_fg,
+                graph_view::GraphSpan::Hash => theme.syntax_number,
+                // Where each branch actually points: the one thing this
+                // view exists to answer at a glance.
+                graph_view::GraphSpan::Refs => theme.syntax_function,
+                graph_view::GraphSpan::Meta => theme.gutter_fg,
+                // Ordinary text, left at the pane's default color.
+                graph_view::GraphSpan::Subject => continue,
+            };
+            ranges.push((ob.buffer.char_to_byte(start + from)..ob.buffer.char_to_byte(start + to), color));
+        }
     }
     ranges
 }
@@ -4042,6 +4160,7 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::Debug
             | BufferKind::ToolStatus
             | BufferKind::Diff
+            | BufferKind::Graph
     )
 }
 
@@ -4547,11 +4666,19 @@ pub struct App {
     /// between. Same "cache what the panes are showing" reasoning as
     /// `GitSession::files`/`branches`/`commits`.
     diff_models: HashMap<BufferId, DiffModel>,
+    /// Per-line metadata for every real `BufferKind::Graph` buffer --
+    /// mirrors `diff_lines`, carrying each row's colored spans and the
+    /// commit it draws.
+    graph_lines: HashMap<BufferId, Vec<Option<graph_view::GraphLine>>>,
     /// Armed by `d` on Files/Branches/Stash until the next keypress
     /// confirms or cancels -- mirrors `docker_confirm_remove`, just over
     /// `GitConfirmAction`'s several destructive-action kinds instead of
     /// Docker's single "remove."
     git_confirm: Option<GitConfirmAction>,
+    /// The History view (`SPC g l`), if open -- see `HistorySession`.
+    history_session: Option<HistorySession>,
+    /// The Compare view (`SPC g c`), if open -- see `CompareSession`.
+    compare_session: Option<CompareSession>,
     /// Capturing a commit message or new branch name -- mirrors
     /// `explorer_prompt`'s "next keystrokes are text input" shape.
     git_prompt: Option<GitPrompt>,
@@ -5288,8 +5415,11 @@ impl App {
             breakpoints: HashMap::new(),
             tool_status_session: None,
             git_lines: HashMap::new(),
+            history_session: None,
+            compare_session: None,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
+            graph_lines: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
             git_menu_open: false,
@@ -5902,6 +6032,11 @@ impl App {
                 focused == s.call_stack_pane || focused == s.variables_pane || focused == s.watches_pane || focused == s.breakpoints_pane
             })
             || self.tool_status_session.as_ref().is_some_and(|s| s.pane == focused)
+            || self
+                .history_session
+                .as_ref()
+                .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
+            || self.compare_session.as_ref().is_some_and(|s| focused == s.commits_pane || focused == s.diff_pane)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -12724,6 +12859,372 @@ impl App {
         self.git_confirm = Some(action);
     }
 
+    // -- History view (`SPC g l`) ------------------------------------------
+
+    /// `SPC g l`: opens (or refocuses and refreshes) the History view --
+    /// the commit graph across *every* branch, a refs tree showing how
+    /// each local branch stands against its upstream, and the selected
+    /// commit's diff in the shared diff viewer.
+    pub(crate) fn open_history_view(&mut self) {
+        if let Some(session) = &self.history_session {
+            let (workspace_index, graph_pane) = (session.workspace_index, session.graph_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(graph_pane);
+            self.history_refresh();
+            self.wake_caret();
+            return;
+        }
+
+        let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let graph_buffer = self.buffers.open_graph("");
+        let refs_buffer = self.buffers.open_git("");
+        let detail_view = diff_view::render(&[], &HashSet::new());
+        let detail_buffer = self.buffers.open_diff(&detail_view.text);
+        self.diff_lines.insert(detail_buffer, detail_view.lines);
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(graph_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let graph_pane = self.focused_pane_id();
+
+        // Graph on the left, refs above the commit's diff on the right --
+        // the graph is the thing being read, so it keeps the larger
+        // share, same proportions the Docker panel's own list/detail
+        // split already uses.
+        let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
+        self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
+        let refs_pane = self.windows_mut().split(SplitKind::Horizontal, refs_buffer);
+        self.workspaces.active_pane_states_mut().insert(refs_pane, PaneState::seeded_at(cursor));
+        // `split` focuses the new pane, so the refs pane is current here
+        // -- shrink it (a short listing) in favour of the diff below it.
+        self.windows_mut().resize_focused(-0.2);
+        self.windows_mut().focus(graph_pane);
+
+        self.pane_titles.insert(graph_pane, "1. Graph".to_string());
+        self.pane_titles.insert(refs_pane, "2. Refs".to_string());
+        self.pane_titles.insert(detail_pane, "3. Commit".to_string());
+
+        self.history_session = Some(HistorySession {
+            workspace_index,
+            graph_pane,
+            refs_pane,
+            detail_pane,
+            graph_buffer,
+            refs_buffer,
+            detail_buffer,
+            repo_root,
+            commits: Vec::new(),
+            last_detail_commit: None,
+            detail_request_id: 0,
+        });
+        self.history_refresh();
+        self.wake_caret();
+    }
+
+    /// Re-reads the graph and the refs tree from disk. Synchronous: a
+    /// `git log`/`for-each-ref` pair against a local repo is fast, and
+    /// unlike a fetch it never touches the network -- the same reasoning
+    /// `open_git_panel` already applies to its own listings.
+    fn history_refresh(&mut self) {
+        let Some(session) = self.history_session.as_ref() else { return };
+        let (repo_root, graph_buffer, refs_buffer) = (session.repo_root.clone(), session.graph_buffer, session.refs_buffer);
+
+        let commits = fenix_git::commit_graph(&repo_root, self.config.git_graph_limit.unwrap_or(200));
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = graph_view::render_graph(&commits, &rows);
+        self.graph_lines.insert(graph_buffer, panel.lines);
+        self.replace_buffer_text(graph_buffer, &panel.text);
+
+        let branches = fenix_git::list_branches(&repo_root);
+        let remotes = fenix_git::list_remote_branches(&repo_root);
+        let tags = fenix_git::list_tags(&repo_root);
+        let age = fenix_git::seconds_since_fetch(&repo_root);
+        self.set_git_buffer(refs_buffer, graph_view::render_refs(&branches, &remotes, &tags, age));
+
+        if let Some(session) = self.history_session.as_mut() {
+            session.commits = commits;
+            session.last_detail_commit = None; // force the detail pane to re-fetch
+        }
+        self.history_sync_detail();
+    }
+
+    /// The commit the cursor is on in the Graph pane, if that's where it
+    /// is.
+    fn history_commit_at_cursor(&self) -> Option<String> {
+        let session = self.history_session.as_ref()?;
+        if self.focused_pane_id() != session.graph_pane {
+            return None;
+        }
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        self.graph_lines.get(&session.graph_buffer)?.get(line)?.as_ref()?.commit.clone()
+    }
+
+    /// Fetches the selected commit's diff into the detail pane, skipping
+    /// the work when the cursor hasn't moved to a different commit --
+    /// same shape as `git_sync_main`, including its synchronous fallback
+    /// when there's no `event_proxy` (every test).
+    fn history_sync_detail(&mut self) {
+        let Some(session) = self.history_session.as_ref() else { return };
+        // Falls back to the first commit so opening the view shows
+        // something rather than an empty pane.
+        let commit = self.history_commit_at_cursor().or_else(|| session.commits.first().map(|c| c.hash.clone()));
+        if commit == session.last_detail_commit {
+            return;
+        }
+        let (repo_root, detail_buffer) = (session.repo_root.clone(), session.detail_buffer);
+        let Some(session) = self.history_session.as_mut() else { return };
+        session.last_detail_commit = commit.clone();
+        session.detail_request_id += 1;
+        let request_id = session.detail_request_id;
+
+        let Some(hash) = commit else {
+            self.set_diff_buffer(detail_buffer, None, DiffSource::ReadOnly, &repo_root);
+            return;
+        };
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let diff = fenix_git::commit_diff(&repo_root, &hash).ok();
+                    let _ = proxy.send_event(FenixUserEvent::GitHistoryDetailReady { request_id, buffer: detail_buffer, diff });
+                });
+            }
+            None => {
+                let diff = fenix_git::commit_diff(&repo_root, &hash).ok();
+                self.set_diff_buffer(detail_buffer, diff.as_deref(), DiffSource::ReadOnly, &repo_root);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::GitHistoryDetailReady` handling -- drops a result
+    /// a newer request has superseded, exactly as `apply_git_main` does.
+    fn apply_history_detail(&mut self, request_id: u64, buffer: BufferId, diff: Option<String>) {
+        let Some(session) = self.history_session.as_ref() else { return };
+        if session.detail_request_id != request_id {
+            return;
+        }
+        let repo_root = session.repo_root.clone();
+        self.set_diff_buffer(buffer, diff.as_deref(), DiffSource::ReadOnly, &repo_root);
+    }
+
+    /// `SPC g f`: `git fetch --all --prune`, off the input thread since
+    /// it touches the network. Refreshes whichever Git views are open
+    /// once it lands, so the sync badges reflect what was just fetched.
+    pub(crate) fn git_fetch(&mut self) {
+        let repo_root = self
+            .history_session
+            .as_ref()
+            .map(|s| s.repo_root.clone())
+            .or_else(|| self.git_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.project_root.clone())
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                self.set_message("fetching...");
+                std::thread::spawn(move || {
+                    let result = fenix_git::fetch(&repo_root);
+                    let _ = proxy.send_event(FenixUserEvent::GitFetched { result });
+                });
+            }
+            None => {
+                let result = fenix_git::fetch(&repo_root);
+                self.apply_git_fetched(result);
+            }
+        }
+    }
+
+    fn apply_git_fetched(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(_) => self.set_message("fetched"),
+            Err(err) => self.set_error(format!("fetch failed: {}", err.trim())),
+        }
+        if self.history_session.is_some() {
+            self.history_refresh();
+        }
+        if self.git_session.is_some() {
+            self.git_refresh_session();
+        }
+    }
+
+    // -- Compare view (`SPC g c`) ------------------------------------------
+
+    /// Every ref that can be compared: local branches, remote-tracking
+    /// branches, tags. `HEAD` leads the list, since "what does my
+    /// working checkout add" is the overwhelmingly common question.
+    fn compare_ref_candidates(&self, repo_root: &Path) -> Vec<String> {
+        let mut refs = vec!["HEAD".to_string()];
+        refs.extend(fenix_git::list_branches(repo_root).into_iter().map(|b| b.name));
+        refs.extend(fenix_git::list_remote_branches(repo_root));
+        refs.extend(fenix_git::list_tags(repo_root));
+        refs
+    }
+
+    fn compare_repo_root(&self) -> PathBuf {
+        self.compare_session
+            .as_ref()
+            .map(|s| s.repo_root.clone())
+            .or_else(|| self.git_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.project_root.clone())
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// `SPC g c`: pick the ref to compare against, then the ref to
+    /// compare. Two pickers rather than one prompt so both halves get
+    /// fuzzy matching over the repo's real refs.
+    ///
+    /// The base list is ordered with `[git] base_branch` (default
+    /// `main`) first when it exists, since "how does this differ from
+    /// the mainline" is the question being asked most of the time.
+    pub(crate) fn start_compare_picker(&mut self) {
+        let repo_root = self.compare_repo_root();
+        let mut refs = self.compare_ref_candidates(&repo_root);
+        if refs.len() <= 1 {
+            self.set_error("no refs to compare -- is this a git repository?".to_string());
+            return;
+        }
+        let preferred = self.config.git_base_branch.clone().unwrap_or_else(|| "main".to_string());
+        if let Some(i) = refs.iter().position(|r| *r == preferred) {
+            let base = refs.remove(i);
+            refs.insert(0, base);
+        }
+        let candidates = refs.into_iter().map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
+        self.enter_picker(ActivePicker::CompareBase(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `CompareBase`'s confirm: remembers the base and asks for the head.
+    fn compare_pick_head(&mut self, base: String) {
+        let repo_root = self.compare_repo_root();
+        let candidates = self.compare_ref_candidates(&repo_root).into_iter().map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
+        self.enter_picker(ActivePicker::CompareHead { base, picker: fenix_picker::PickerState::new(candidates) });
+    }
+
+    /// Opens (or retargets) the Compare view for `base` vs `head`.
+    pub(crate) fn open_compare_view(&mut self, base: String, head: String) {
+        let repo_root = self.compare_repo_root();
+        if let Some(session) = self.compare_session.as_mut() {
+            session.base = base;
+            session.head = head;
+            let (workspace_index, commits_pane) = (session.workspace_index, session.commits_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(commits_pane);
+            self.compare_refresh();
+            self.wake_caret();
+            return;
+        }
+
+        let commits_buffer = self.buffers.open_git("");
+        let empty = diff_view::render(&[], &HashSet::new());
+        let diff_buffer = self.buffers.open_diff(&empty.text);
+        self.diff_lines.insert(diff_buffer, empty.lines);
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(commits_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let commits_pane = self.focused_pane_id();
+        let diff_pane = self.windows_mut().split(SplitKind::Vertical, diff_buffer);
+        self.workspaces.active_pane_states_mut().insert(diff_pane, PaneState::seeded_at(cursor));
+        // The commit list is narrow; the diff is what's being read.
+        self.windows_mut().resize_focused(0.15);
+        self.windows_mut().focus(commits_pane);
+
+        self.pane_titles.insert(commits_pane, "1. Commits".to_string());
+        self.pane_titles.insert(diff_pane, "2. Changes".to_string());
+
+        self.compare_session =
+            Some(CompareSession { workspace_index, commits_pane, diff_pane, commits_buffer, diff_buffer, repo_root, base, head, three_dot: true });
+        self.compare_refresh();
+        self.wake_caret();
+    }
+
+    /// Re-runs the comparison and re-renders both panes.
+    fn compare_refresh(&mut self) {
+        let Some(session) = self.compare_session.as_ref() else { return };
+        let (repo_root, base, head, three_dot) = (session.repo_root.clone(), session.base.clone(), session.head.clone(), session.three_dot);
+        let (commits_buffer, diff_buffer) = (session.commits_buffer, session.diff_buffer);
+
+        let commits = fenix_git::commits_between(&repo_root, &base, &head, 200);
+        let dots = if three_dot { "..." } else { ".." };
+        self.set_git_buffer(commits_buffer, git_panel::render_compare(&format!("{base}{dots}{head}"), &commits));
+
+        // A comparison against a ref git doesn't know is the one case
+        // worth surfacing loudly -- otherwise it just looks like an
+        // empty diff, which is a real and very different answer.
+        match fenix_git::diff_refs(&repo_root, &base, &head, three_dot) {
+            Ok(diff) => self.set_diff_buffer(diff_buffer, Some(&diff), DiffSource::ReadOnly, &repo_root),
+            Err(err) => {
+                self.set_diff_buffer(diff_buffer, None, DiffSource::ReadOnly, &repo_root);
+                self.set_error(err.trim().to_string());
+            }
+        }
+    }
+
+    /// `t` in the Compare view: three-dot (what `head` added since it
+    /// diverged) vs two-dot (every difference between the two trees).
+    pub(crate) fn compare_toggle_dots(&mut self) {
+        let Some(session) = self.compare_session.as_mut() else { return };
+        session.three_dot = !session.three_dot;
+        let now = if session.three_dot { "base...head (since diverging)" } else { "base..head (full difference)" };
+        self.set_message(now);
+        self.compare_refresh();
+        self.wake_caret();
+    }
+
+    /// `SPC g C`: closes the Compare view.
+    pub(crate) fn compare_close(&mut self) {
+        let Some(session) = self.compare_session.take() else { return };
+        for id in [session.commits_buffer, session.diff_buffer] {
+            self.buffers.close(id);
+            self.git_lines.remove(&id);
+            self.diff_lines.remove(&id);
+            self.diff_models.remove(&id);
+        }
+        for pane in [session.commits_pane, session.diff_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// `SPC g L`: closes the History view.
+    pub(crate) fn history_close(&mut self) {
+        let Some(session) = self.history_session.take() else { return };
+        for id in [session.graph_buffer, session.refs_buffer, session.detail_buffer] {
+            self.buffers.close(id);
+            self.git_lines.remove(&id);
+            self.graph_lines.remove(&id);
+            self.diff_lines.remove(&id);
+            self.diff_models.remove(&id);
+        }
+        for pane in [session.graph_pane, session.refs_pane, session.detail_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// Replaces a generated buffer's whole text, resetting every pane
+    /// showing it to the top -- the shared half of `set_git_buffer`/
+    /// `set_diff_buffer`, for buffers whose metadata was already stored
+    /// by the caller.
+    fn replace_buffer_text(&mut self, id: BufferId, text: &str) {
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, text);
+        }
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state_mut(pane);
+                *ps = PaneState::seeded_at(Cursor::at_start());
+            }
+        }
+    }
+
     /// `SPC g q`: closes the whole Git session -- mirrors
     /// `docker_session_close` exactly.
     pub(crate) fn git_session_close(&mut self) {
@@ -13921,6 +14422,21 @@ impl App {
                 self.main_view = MainView::Editor;
                 let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
+            }
+            Some(ActivePicker::CompareBase(state)) => {
+                let Some(base) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                // Straight into picking the other side -- `enter_picker`
+                // keeps `main_view` on the picker, so this reads as one
+                // two-step interaction rather than two separate ones.
+                self.compare_pick_head(base);
+            }
+            Some(ActivePicker::CompareHead { base, picker }) => {
+                let Some(head) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let base = base.clone();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_compare_view(base, head);
             }
             Some(ActivePicker::MibTelecommandLookup(state)) => {
                 let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -15306,6 +15822,10 @@ impl App {
             FenixUserEvent::Dap(event) => self.apply_dap_event(event),
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
+            FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
+                self.apply_history_detail(request_id, buffer, diff)
+            }
+            FenixUserEvent::GitFetched { result } => self.apply_git_fetched(result),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(bytes) => self.apply_terminal_output(bytes),
             FenixUserEvent::TerminalSpawned(result) => self.apply_terminal_spawned(result.0),
@@ -16083,6 +16603,54 @@ impl App {
             }
         }
 
+        // The History and Compare views claim their own small key sets
+        // the same way, ahead of the working-tree panel's block below --
+        // they're separate workspaces, so there's no ambiguity about
+        // which one a keypress is meant for.
+        if self.history_session.as_ref().is_some_and(|s| {
+            let focused = self.focused_pane_id();
+            focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane
+        }) && keypress.mods == Mods::default()
+        {
+            match keypress.code {
+                KeyCode::Char('u') => {
+                    self.history_refresh();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('f') => {
+                    self.git_fetch();
+                    self.wake_caret();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.compare_session.as_ref().is_some_and(|s| {
+            let focused = self.focused_pane_id();
+            focused == s.commits_pane || focused == s.diff_pane
+        }) && keypress.mods == Mods::default()
+        {
+            match keypress.code {
+                KeyCode::Char('t') => {
+                    self.compare_toggle_dots();
+                    return;
+                }
+                KeyCode::Char('u') => {
+                    self.compare_refresh();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('r') => {
+                    // Re-target without closing: the same two-step ref
+                    // picker `SPC g c` opens, reusing this workspace.
+                    self.start_compare_picker();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Lazygit-style multi-pane panel -- same "claim a small, pane-
         // scoped action-key set, everything else falls through to Vim"
         // shape as the Docker block above. Real lazygit's own `<space>`
@@ -16380,6 +16948,11 @@ impl App {
         // own to show -- see `git_sync_main`'s own doc comment).
         if matches!(self.git_focused_role(), Some(GitPaneRole::Staged | GitPaneRole::Unstaged | GitPaneRole::Commits | GitPaneRole::Stash)) {
             self.git_sync_main();
+        }
+        // Same again for the History view: moving down the graph shows
+        // whichever commit the cursor lands on.
+        if self.history_session.as_ref().is_some_and(|s| s.graph_pane == self.focused_pane_id()) {
+            self.history_sync_detail();
         }
         // Same re-sync for the Jira dashboard: ordinary movement in
         // Users re-fetches Issues, ordinary movement in Issues re-
@@ -16733,6 +17306,8 @@ impl App {
                 "*tool status*".to_string()
             } else if ob.kind == BufferKind::Diff {
                 "*diff*".to_string()
+            } else if ob.kind == BufferKind::Graph {
+                "*graph*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -16851,6 +17426,8 @@ impl App {
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
+                Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE AGAINST", picker_len(picker)),
+                Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             return (label, format!("│ {count} matches "));
@@ -17199,6 +17776,7 @@ impl App {
             // numbers here -- a buffer-line gutter next to them would
             // be a third, meaningless column.
             || ob.kind == BufferKind::Diff
+            || ob.kind == BufferKind::Graph
         {
             return 0;
         }
@@ -17369,6 +17947,7 @@ impl App {
         let git_lines = self.git_lines.get(&id).cloned();
         let jira_lines = self.jira_lines.get(&id).cloned();
         let diff_lines = self.diff_lines.get(&id).cloned();
+        let graph_lines = self.graph_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -17406,6 +17985,9 @@ impl App {
         }
         if ob.kind == BufferKind::Diff {
             return diff_highlights_for_visible_range(ob, diff_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Graph {
+            return graph_highlights_for_visible_range(ob, graph_lines.as_deref(), render_base_line, rows, theme);
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -26596,6 +27178,249 @@ mod tests {
 
         let files = fenix_git::list_files(&repo_root);
         assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should now be staged: {files:?}");
+    }
+
+    // -- History view (`SPC g l`) and Compare view (`SPC g c`) -------------
+
+    /// A repo with two branches that have diverged: `main` gained
+    /// `from_main.txt`, `side` gained `from_side.txt`, both after a
+    /// shared initial commit. Enough for a graph with a real second
+    /// lane and for three-dot vs two-dot comparison to differ.
+    fn diverged_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("shared.txt", "base\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "initial"]);
+        git(&["checkout", "-q", "-b", "side"]);
+        dir.write("from_side.txt", "side work\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "on side"]);
+        git(&["checkout", "-q", "main"]);
+        dir.write("from_main.txt", "main work\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "on main"]);
+        dir
+    }
+
+    #[test]
+    fn the_history_view_opens_a_three_pane_workspace_with_graph_refs_and_detail() {
+        let dir = diverged_repo("history_open");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_history_view();
+
+        let session = app.history_session.as_ref().expect("a session");
+        assert_eq!(app.pane_titles.get(&session.graph_pane).map(String::as_str), Some("1. Graph"));
+        assert_eq!(app.pane_titles.get(&session.refs_pane).map(String::as_str), Some("2. Refs"));
+        assert_eq!(app.pane_titles.get(&session.detail_pane).map(String::as_str), Some("3. Commit"));
+        assert_eq!(app.buffers.get(session.graph_buffer).unwrap().kind, BufferKind::Graph);
+        assert_eq!(app.buffers.get(session.detail_buffer).unwrap().kind, BufferKind::Diff);
+    }
+
+    #[test]
+    fn the_graph_shows_commits_from_every_branch_not_just_the_checked_out_one() {
+        let dir = diverged_repo("history_graph_all");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+
+        let graph = app.buffers.get(app.history_session.as_ref().unwrap().graph_buffer).unwrap().buffer.text();
+        assert!(graph.contains("on main"), "{graph}");
+        assert!(graph.contains("on side"), "the other branch's work is the point of --all:\n{graph}");
+        assert!(graph.contains("initial"));
+        // Two tips means a second lane, so at least one row draws a rail
+        // beside a node.
+        assert!(graph.lines().any(|l| l.starts_with("│●")), "expected a second lane:\n{graph}");
+    }
+
+    #[test]
+    fn the_refs_pane_shows_local_branches_with_their_sync_state() {
+        let dir = diverged_repo("history_refs");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+
+        let refs = app.buffers.get(app.history_session.as_ref().unwrap().refs_buffer).unwrap().buffer.text();
+        assert!(refs.contains("Local"));
+        assert!(refs.contains("main"));
+        assert!(refs.contains("side"));
+        // No remote in this repo, so neither branch has an upstream.
+        assert!(refs.contains("[--]"), "a branch with no upstream reads differently from an in-sync one:\n{refs}");
+        assert!(refs.contains("never fetched"));
+    }
+
+    #[test]
+    fn moving_down_the_graph_shows_that_commits_diff() {
+        let dir = diverged_repo("history_detail");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let session = app.history_session.as_ref().unwrap();
+        let (graph_pane, graph_buffer, detail_buffer) = (session.graph_pane, session.graph_buffer, session.detail_buffer);
+
+        // The newest commit's diff is shown without moving at all.
+        assert!(app.buffers.get(detail_buffer).unwrap().buffer.text().contains("from_main.txt"));
+
+        // Move to the row for the *other* branch's commit.
+        app.windows_mut().focus(graph_pane);
+        let graph_text = app.buffers.get(graph_buffer).unwrap().buffer.text();
+        let target = graph_text.lines().position(|l| l.contains("on side")).expect("a row for the side branch's commit");
+        let char_idx = app.buffers.get(graph_buffer).unwrap().buffer.line_start_char(target);
+        app.test_set_cursor(Cursor { char_idx, sticky_col: 0 });
+        app.history_sync_detail();
+
+        let detail = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        assert!(detail.contains("from_side.txt"), "expected the side commit's diff:\n{detail}");
+    }
+
+    #[test]
+    fn closing_the_history_view_removes_its_buffers_and_workspace() {
+        let dir = diverged_repo("history_close");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let workspaces_before = app.workspaces.len();
+        let session_buffers = {
+            let s = app.history_session.as_ref().unwrap();
+            [s.graph_buffer, s.refs_buffer, s.detail_buffer]
+        };
+
+        app.history_close();
+
+        assert!(app.history_session.is_none());
+        assert_eq!(app.workspaces.len(), workspaces_before - 1);
+        for id in session_buffers {
+            assert!(app.buffers.get(id).is_none(), "every session buffer should be closed");
+        }
+    }
+
+    #[test]
+    fn reopening_the_history_view_refocuses_the_existing_session() {
+        let dir = diverged_repo("history_reopen");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let first = app.history_session.as_ref().unwrap().graph_buffer;
+        let workspaces = app.workspaces.len();
+
+        app.open_history_view();
+
+        assert_eq!(app.history_session.as_ref().unwrap().graph_buffer, first, "no second session");
+        assert_eq!(app.workspaces.len(), workspaces);
+    }
+
+    #[test]
+    fn comparing_two_branches_lists_the_commits_and_diff_the_head_branch_adds() {
+        let dir = diverged_repo("compare_open");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_compare_view("main".to_string(), "side".to_string());
+
+        let session = app.compare_session.as_ref().expect("a session");
+        let commits = app.buffers.get(session.commits_buffer).unwrap().buffer.text();
+        assert!(commits.contains("main...side"), "the header names the comparison:\n{commits}");
+        assert!(commits.contains("on side"));
+        assert!(!commits.contains("on main"), "main's own commits aren't what side adds:\n{commits}");
+
+        let diff = app.buffers.get(session.diff_buffer).unwrap().buffer.text();
+        assert!(diff.contains("from_side.txt"), "{diff}");
+        assert!(!diff.contains("from_main.txt"), "three-dot excludes the base's later work:\n{diff}");
+    }
+
+    #[test]
+    fn toggling_to_two_dot_brings_in_what_the_base_gained_since_diverging() {
+        let dir = diverged_repo("compare_two_dot");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_compare_view("main".to_string(), "side".to_string());
+
+        app.compare_toggle_dots();
+
+        assert!(!app.compare_session.as_ref().unwrap().three_dot);
+        let diff = app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text();
+        assert!(diff.contains("from_main.txt"), "two-dot sees the base's own newer work:\n{diff}");
+        let commits = app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text();
+        assert!(commits.contains("main..side"), "the header reflects the mode:\n{commits}");
+    }
+
+    #[test]
+    fn comparing_a_ref_against_itself_shows_no_changes_rather_than_an_error() {
+        let dir = diverged_repo("compare_same");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_compare_view("main".to_string(), "main".to_string());
+
+        assert!(app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text().contains("(no changes)"));
+        assert!(app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text().contains("No commits between"));
+    }
+
+    #[test]
+    fn the_compare_picker_offers_head_and_every_ref_with_the_base_branch_first() {
+        let dir = diverged_repo("compare_picker");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.git_base_branch = Some("side".to_string());
+
+        app.start_compare_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::CompareBase(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
+                assert_eq!(labels[0], "side", "the configured base branch leads: {labels:?}");
+                assert!(labels.contains(&"HEAD".to_string()));
+                assert!(labels.contains(&"main".to_string()));
+            }
+            _ => panic!("expected the compare-base picker"),
+        }
+    }
+
+    #[test]
+    fn confirming_the_base_chains_into_picking_the_head() {
+        let dir = diverged_repo("compare_chain");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.start_compare_picker();
+
+        app.picker_key(KeyPress::named(FenixNamedKey::Enter));
+
+        match &app.active_picker {
+            Some(ActivePicker::CompareHead { base, .. }) => assert!(!base.is_empty()),
+            _ => panic!("expected the compare-head picker to follow"),
+        }
+    }
+
+    #[test]
+    fn a_history_pane_is_a_tracked_session_so_a_jump_never_hijacks_it() {
+        let dir = diverged_repo("history_guard");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let pane = app.history_session.as_ref().unwrap().graph_pane;
+        app.windows_mut().focus(pane);
+
+        assert!(app.focused_pane_holds_a_tracked_session());
+    }
+
+    #[test]
+    fn a_compare_pane_is_a_tracked_session_too() {
+        let dir = diverged_repo("compare_guard");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_compare_view("main".to_string(), "side".to_string());
+        let pane = app.compare_session.as_ref().unwrap().diff_pane;
+        app.windows_mut().focus(pane);
+
+        assert!(app.focused_pane_holds_a_tracked_session());
     }
 
     // -- Diff viewer (the Main pane) ---------------------------------------

@@ -24,6 +24,20 @@ pub fn commit_diff(repo: &Path, hash: &str) -> Result<String, String> {
     run_action(repo, &["show".to_string(), "--no-color".to_string(), hash.to_string()])
 }
 
+/// The diff between two refs.
+///
+/// `three_dot` selects `base...head` -- everything `head` added *since
+/// it diverged from* `base`, measured from their merge base -- rather
+/// than `base..head`, which also reports as "removed" every change
+/// `base` gained in the meantime. Three-dot is what people mean by "what
+/// does my branch do", and what every code-review tool shows, so it's
+/// the default; two-dot stays available for the genuine "what is
+/// literally different between these two trees" question.
+pub fn diff_refs(repo: &Path, base: &str, head: &str, three_dot: bool) -> Result<String, String> {
+    let range = if three_dot { format!("{base}...{head}") } else { format!("{base}..{head}") };
+    run_action(repo, &["diff".to_string(), "--no-color".to_string(), range])
+}
+
 pub fn stash_diff(repo: &Path, index: usize) -> Result<String, String> {
     run_action(repo, &["stash".to_string(), "show".to_string(), "-p".to_string(), "--no-color".to_string(), format!("stash@{{{index}}}")])
 }
@@ -71,6 +85,56 @@ mod tests {
         let out = commit_diff(dir.path(), "HEAD").unwrap();
         assert!(out.contains("add hello"));
         assert!(out.contains("hello"));
+    }
+
+    /// A repo whose `side` branch and `main` have each moved on since
+    /// they diverged -- the only shape where three-dot and two-dot
+    /// actually differ, which is the whole point of having both.
+    fn diverged_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        init_repo(dir.path());
+        dir.write("shared.txt", "base\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        git(dir.path(), &["checkout", "-q", "-b", "side"]);
+        dir.write("from_side.txt", "side work\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "on side"]);
+        git(dir.path(), &["checkout", "-q", "main"]);
+        dir.write("from_main.txt", "main work\n");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "on main"]);
+        dir
+    }
+
+    #[test]
+    fn diff_refs_three_dot_shows_only_what_the_head_branch_added() {
+        let dir = diverged_repo("diff_refs_three_dot");
+        let diff = diff_refs(dir.path(), "main", "side", true).unwrap();
+        assert!(diff.contains("from_side.txt"), "side's own work is the point of the comparison:\n{diff}");
+        assert!(!diff.contains("from_main.txt"), "main's later work is not side's doing:\n{diff}");
+    }
+
+    #[test]
+    fn diff_refs_two_dot_also_reports_what_the_base_gained_since_diverging() {
+        let dir = diverged_repo("diff_refs_two_dot");
+        let diff = diff_refs(dir.path(), "main", "side", false).unwrap();
+        assert!(diff.contains("from_side.txt"));
+        // Present as a *deletion*, because two-dot compares the trees
+        // directly: `side` doesn't have main's newer file.
+        assert!(diff.contains("from_main.txt"), "two-dot sees the base's own newer work too:\n{diff}");
+    }
+
+    #[test]
+    fn diff_refs_between_identical_refs_is_empty() {
+        let dir = diverged_repo("diff_refs_same");
+        assert!(diff_refs(dir.path(), "main", "main", true).unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn diff_refs_reports_gits_own_error_for_an_unknown_ref() {
+        let dir = diverged_repo("diff_refs_unknown");
+        assert!(diff_refs(dir.path(), "main", "no-such-branch", true).is_err());
     }
 
     #[test]

@@ -34,6 +34,10 @@ pub enum GitLineStyle {
     Stash,
     /// A `label: value` row in the Status pane.
     Detail,
+    /// A section title in a listing that has several ("Local",
+    /// "Remotes", "Tags" in the History view's refs tree) -- the same
+    /// role `jira_panel::JiraLineStyle::SectionHeader` already plays.
+    Header,
     /// Shown when a list comes back empty, or the Main pane has nothing
     /// selected/no changes to show.
     Empty,
@@ -395,6 +399,34 @@ fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     }
 }
 
+/// The Compare view's commit list: which comparison is being shown,
+/// then one row per commit `head` has that `base` doesn't. Reuses the
+/// Commits pane's own row shape (`[short hash] subject`) so the two
+/// listings read identically.
+pub fn render_compare(range: &str, commits: &[Commit]) -> GitPanel {
+    let mut b = Builder::new();
+    b.push(&format!("  {range}"), Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }));
+    if commits.is_empty() {
+        let (text, meta) = empty_line("No commits between these refs");
+        b.push(&text, meta);
+        return b.finish();
+    }
+    for commit in commits {
+        let prefix = format!("  [{}] ", commit.short_hash);
+        let badge_len = prefix.chars().count();
+        b.push(
+            &format!("{prefix}{}", commit.message),
+            Some(GitLine {
+                style: GitLineStyle::Commit,
+                entry: Some(GitEntry::Commit(commit.hash.clone())),
+                dim_from: None,
+                badge: Some((badge_len, GitBadgeColor::Neutral)),
+            }),
+        );
+    }
+    b.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,7 +436,7 @@ mod tests {
     }
 
     fn branch(name: &str, current: bool) -> Branch {
-        Branch { name: name.to_string(), current, upstream: None, ahead: 0, behind: 0 }
+        Branch { name: name.to_string(), current, upstream: None, ahead: 0, behind: 0, upstream_gone: false }
     }
 
     fn commit(hash: &str, short: &str, message: &str) -> Commit {
@@ -608,6 +640,22 @@ mod tests {
     #[test]
     fn render_stash_empty_list_shows_a_placeholder() {
         assert!(render_stash(&[]).text.contains("No stash entries"));
+    }
+
+    #[test]
+    fn render_compare_heads_the_list_with_the_range_and_lists_each_commit() {
+        let panel = render_compare("main...side", &[commit("abcdef123", "abcdef1", "on side")]);
+        assert!(panel.text.starts_with("  main...side"));
+        assert!(panel.text.contains("[abcdef1] on side"));
+        let entries: Vec<_> = panel.lines.iter().flatten().filter_map(|l| l.entry.as_ref()).collect();
+        assert_eq!(entries[0], &GitEntry::Commit("abcdef123".to_string()));
+        assert_eq!(panel.text.lines().count(), panel.lines.len());
+    }
+
+    #[test]
+    fn render_compare_with_nothing_between_the_refs_says_so() {
+        let panel = render_compare("main...main", &[]);
+        assert!(panel.text.contains("No commits between these refs"));
     }
 
     #[test]

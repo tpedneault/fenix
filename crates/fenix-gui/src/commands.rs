@@ -116,6 +116,11 @@ impl CommandRegistry {
         registry.register("pdf.search", "Search the focused PDF session's text for a word or phrase", cmd_pdf_search);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
+        registry.register("git.history", "Show the commit graph, refs and commit detail", cmd_git_history);
+        registry.register("git.history_close", "Close the History view", cmd_git_history_close);
+        registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
+        registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
+        registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
         registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
         registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
@@ -721,4 +726,24 @@ fn cmd_decrease_font_size(ctx: &mut CommandCtx) {
 
 fn cmd_reset_font_size(ctx: &mut CommandCtx) {
     ctx.app.reset_font_size();
+}
+
+fn cmd_git_history(ctx: &mut CommandCtx) {
+    ctx.app.open_history_view();
+}
+
+fn cmd_git_history_close(ctx: &mut CommandCtx) {
+    ctx.app.history_close();
+}
+
+fn cmd_git_fetch(ctx: &mut CommandCtx) {
+    ctx.app.git_fetch();
+}
+
+fn cmd_git_compare(ctx: &mut CommandCtx) {
+    ctx.app.start_compare_picker();
+}
+
+fn cmd_git_compare_close(ctx: &mut CommandCtx) {
+    ctx.app.compare_close();
 }

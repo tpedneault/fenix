@@ -83,6 +83,37 @@ pub fn pull(repo: &Path) -> Result<String, String> {
     run_action(repo, &["pull".to_string()])
 }
 
+/// `git fetch --all --prune` -- refreshes every remote's tracking refs
+/// and drops the ones whose remote branch is gone.
+///
+/// `--prune` is the whole point of doing this from an editor rather than
+/// leaving it to a background `git fetch`: without it, branches deleted
+/// after a merge request landed linger in `refs/remotes` forever and the
+/// refs list slowly fills with things that no longer exist. Pruning is
+/// what makes a local branch's upstream correctly report `[gone]` (see
+/// `Branch::upstream_gone`) instead of looking merely up to date.
+///
+/// Touches the network, so callers run it off the input thread -- it's
+/// the one operation in this crate that can take seconds.
+pub fn fetch(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["fetch".to_string(), "--all".to_string(), "--prune".to_string()])
+}
+
+/// How long ago this repo last fetched, in seconds -- the mtime of
+/// `.git/FETCH_HEAD`, which git rewrites on every fetch (including one
+/// that turned out to have nothing to download).
+///
+/// `None` when the repo has never fetched, when `.git` is a *file*
+/// rather than a directory (a worktree or submodule, where the real git
+/// dir lives elsewhere -- resolving that is more machinery than a
+/// staleness hint is worth), or when the clock says the file is from the
+/// future. Purely informational: it answers "is what I'm looking at
+/// current?", and answering "unknown" is fine.
+pub fn seconds_since_fetch(repo: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(repo.join(".git").join("FETCH_HEAD")).ok()?.modified().ok()?;
+    std::time::SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
+}
+
 pub fn checkout_branch(repo: &Path, name: &str) -> Result<String, String> {
     run_action(repo, &["checkout".to_string(), name.to_string()])
 }
@@ -273,6 +304,33 @@ mod tests {
         stash_pop(dir.path(), 0).unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "popped change\n");
         assert!(crate::stash::list_stashes(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn fetch_never_panics_without_a_configured_remote() {
+        let dir = TempDir::new("fetch_no_remote");
+        init_repo(dir.path());
+        // No remote configured: `git fetch --all` succeeds with nothing
+        // to do rather than failing, but either way this must not panic.
+        let _ = fetch(dir.path());
+    }
+
+    #[test]
+    fn seconds_since_fetch_is_none_before_any_fetch_and_some_after_one() {
+        let remote = TempDir::new("fetch_age_remote");
+        git(remote.path(), &["init", "-q", "--bare"]);
+        let dir = TempDir::new("fetch_age_clone");
+        init_repo(dir.path());
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        dir.write("a.txt", "v1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "first"]);
+        git(dir.path(), &["push", "-q", "-u", "origin", "main"]);
+
+        assert_eq!(seconds_since_fetch(dir.path()), None, "nothing fetched yet");
+        fetch(dir.path()).expect("fetching a real remote should succeed");
+        let age = seconds_since_fetch(dir.path()).expect("FETCH_HEAD exists after a fetch");
+        assert!(age < 60, "a fetch that just happened should read as seconds old, got {age}");
     }
 
     #[test]

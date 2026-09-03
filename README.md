@@ -255,6 +255,31 @@ for anyone curious to poke around or build on it.
   selection already superseded) so scrolling through many files never
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
+- **History / commit graph** (`SPC g l`): a real commit DAG across
+  *every* branch (`git log --all`), drawn with coloured rails -- `●`
+  for a commit, `◆` for a merge, with the lanes a branch opens and
+  closes shown as they happen. Each row carries its short hash, the refs
+  pointing at it (`(HEAD -> develop)`, `(origin/main)`, tags), and its
+  subject; moving down the graph shows that commit's full diff in the
+  shared diff viewer. Beside it, a refs tree of Local / Remotes / Tags,
+  where every local branch is badged with how it stands against its
+  upstream -- `[=]` in sync, `[^2]` ahead, `[v3]` behind, `[^2 v3]`
+  diverged, `[gone]` when the remote branch was deleted, `[--]` when
+  there's no upstream at all -- led by how long ago you last fetched,
+  since every one of those badges is only as current as that. `SPC g f`
+  fetches (`--all --prune`, so deleted remote branches actually
+  disappear and `[gone]` becomes true); `u` refreshes; `SPC g L` closes.
+- **Compare refs** (`SPC g c`): pick any two refs -- branches, remote
+  branches or tags -- and see what one adds over the other: the commits
+  between them beside the full diff, hunk-navigable like every other
+  diff here. Defaults to three-dot (`base...head`, measured from the
+  merge base: "what does this branch actually do", the same thing a
+  merge request shows), with `t` toggling two-dot (`base..head`, every
+  difference between the two trees, including what the base gained
+  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g C`
+  closes. The base picker leads with `[git] base_branch` from
+  `config.ini` (default `main`), so "how does this differ from develop"
+  is two keys and an Enter.
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
@@ -596,6 +621,13 @@ popup shows what keys continue it.
 | `SPC d q` | Close the Docker panel session |
 | `SPC g g` | Open (or refocus/refresh) the Git panel |
 | `SPC g q` | Close the Git panel session |
+| `SPC g l` | Open the History view (commit graph, refs, commit diff) |
+| `SPC g L` | Close the History view |
+| `SPC g f` | Fetch all remotes and prune deleted branches |
+| `SPC g c` | Compare two refs (pick base, then head) |
+| `SPC g C` | Close the Compare view |
+| `u` / `f` (History) | Refresh / fetch |
+| `t` / `r` / `u` (Compare) | Toggle three-dot vs two-dot / re-target refs / refresh |
 | `s` / `S` (Main pane) | Stage / unstage the hunk under the cursor |
 | `d` (Main pane) | Discard the hunk under the cursor (confirms first) |
 | `]` / `[` (Main pane) | Next / previous hunk |
@@ -1043,6 +1075,10 @@ token = your-personal-access-token
 project1 = PROJ|My Project
 user1 = jo1111111|John Doe
 
+[git]
+graph_limit = 200
+base_branch = develop
+
 [vnc]
 host1 = build-vm|10.0.0.5|5900
 host2 = test-vm|10.0.0.6|5900
@@ -1087,6 +1123,8 @@ window2 = 4480,0,1920,1040|true
 | `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
+| `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
+| `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset means `main` |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
 | `windows` | `window1`, `window2`, ... | One remembered OS window, as `X,Y,WIDTH,HEIGHT\|MAXIMIZED`. Written by Fenix on exit, not hand-authored -- `X,Y` is the outer frame's desktop position and `WIDTH,HEIGHT` the client area, which is the pair a window can actually be restored from. A window whose saved rectangle no longer lands on a connected monitor is placed by the window manager instead of opening off-screen |
@@ -1136,6 +1174,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-diff` | Unified-diff parsing (files/hunks/lines, both sides' line numbers) and single-hunk patch synthesis — pure, no I/O; what hunk staging and diff rendering are both built on |
+| `fenix-git` | Shells out to `git`: status/files/branches/remotes/tags, commit graph topology and lane assignment, diffs (working tree, commit, ref-to-ref), fetch, and applying a patch to stage/unstage/discard one hunk |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
 | `fenix-config` | The unified `config.ini` reader/writer |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) for the terminal panel — no thread/event-loop knowledge of its own |

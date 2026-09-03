@@ -210,6 +210,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('g')], "git");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
+        // Purpose-built views rather than more panes on one panel: the
+        // working tree and the history answer different questions.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "history/graph", "git.history");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('L')], "close history", "git.history_close");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch (--all --prune)", "git.fetch");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('C')], "close compare", "git.compare_close");
 
         // Jira dashboard -- read-only browsing this phase (see the Jira
         // dashboard plan's own scope notes). `p`/`u` add/delete letters
