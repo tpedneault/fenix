@@ -6,10 +6,10 @@
 //! find-file/switch-project from `fenix-project` data.
 //!
 //! A language with a real language server plugs in as a sibling
-//! `CompletionKind` variant later (LSP is explicitly out of scope for
-//! this pass) -- this crate deliberately stays two concrete sources
-//! (`Keyword`, `Tag`) rather than a speculative source-plugin trait, since
-//! those are the only two anything here actually implements.
+//! `CompletionKind` variant (`Lsp`, added once `fenix-gui` actually
+//! wired up an LSP client) -- this crate deliberately stays a fixed set
+//! of concrete sources rather than a speculative source-plugin trait,
+//! since those are the only ones anything here actually implements.
 
 pub mod ctags;
 pub mod custom;
@@ -31,6 +31,12 @@ pub enum CompletionKind {
     /// for legibility against the completion popup's background --
     /// see `fenix-gui`'s `completion_popup`).
     Tag,
+    /// A real language server's own `textDocument/completion` result --
+    /// shares `Tag`'s color rather than getting a third calibrated one
+    /// (same reasoning `Tag`'s own doc comment gives: both represent
+    /// "a name specific to this codebase," just from a more capable
+    /// source).
+    Lsp,
 }
 
 #[derive(Debug, Clone)]

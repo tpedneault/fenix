@@ -231,10 +231,24 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
+        // `SPC c r` used to be ctags refresh -- moved to `SPC c T`
+        // ("Tags") to free `r` up for the far more frequently reached-
+        // for LSP rename, mirroring the letter Neovim/most LSP configs
+        // already use for it.
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('r')],
+            "rename (LSP)",
+            "code.lsp_rename",
+        );
+        t.insert(
+            &[spc, KeyPress::char('c'), KeyPress::char('T')],
             "refresh tags",
             "completion.refresh_tags",
+        );
+        t.insert(
+            &[spc, KeyPress::char('c'), KeyPress::char('a')],
+            "code action",
+            "code.lsp_code_action",
         );
         t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('f')],
@@ -691,13 +705,36 @@ mod tests {
 
     #[test]
     fn leader_trie_resolves_completion_refresh_tags() {
+        // Moved from `SPC c r` to `SPC c T` to free `r` up for LSP
+        // rename -- see `code.lsp_rename`'s own keymap comment.
         let trie = leader_trie();
         let mut m = trie.matcher();
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('c'));
-        match m.feed(KeyPress::char('r')) {
+        match m.feed(KeyPress::char('T')) {
             fenix_keymap::Step::Matched(&"completion.refresh_tags") => {}
-            _ => panic!("expected SPC c r to resolve to completion.refresh_tags"),
+            _ => panic!("expected SPC c T to resolve to completion.refresh_tags"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_lsp_rename_and_code_action() {
+        let trie = leader_trie();
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('r')) {
+            fenix_keymap::Step::Matched(&"code.lsp_rename") => {}
+            _ => panic!("expected SPC c r to resolve to code.lsp_rename"),
+        }
+
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('c'));
+        match m.feed(KeyPress::char('a')) {
+            fenix_keymap::Step::Matched(&"code.lsp_code_action") => {}
+            _ => panic!("expected SPC c a to resolve to code.lsp_code_action"),
         }
     }
 

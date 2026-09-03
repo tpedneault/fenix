@@ -156,6 +156,16 @@ impl CommandRegistry {
             cmd_completion_refresh_tags,
         );
         registry.register(
+            "code.lsp_rename",
+            "Rename the symbol under the cursor across the project (LSP)",
+            cmd_lsp_rename,
+        );
+        registry.register(
+            "code.lsp_code_action",
+            "Request and apply the first available code action from the attached language server (LSP)",
+            cmd_lsp_code_action,
+        );
+        registry.register(
             "code.format_selection",
             "Reindent the active Visual selection structurally, language-independent (Emacs' indent-region)",
             cmd_format_selection,
@@ -575,11 +585,22 @@ fn cmd_completion_refresh_tags(ctx: &mut CommandCtx) {
     ctx.app.refresh_completion_tags();
 }
 
+fn cmd_lsp_rename(ctx: &mut CommandCtx) {
+    ctx.app.open_lsp_rename_prompt();
+}
+
+fn cmd_lsp_code_action(ctx: &mut CommandCtx) {
+    ctx.app.request_code_action();
+}
+
 fn cmd_format_selection(ctx: &mut CommandCtx) {
     ctx.app.format_selection();
 }
 
 fn cmd_format_buffer(ctx: &mut CommandCtx) {
+    if ctx.app.request_lsp_format() {
+        return;
+    }
     ctx.app.format_buffer();
 }
 

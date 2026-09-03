@@ -50,6 +50,13 @@ pub enum PopupId {
     /// cleared at the very top of `route_keypress`, before any prompt-
     /// capturing check runs.
     Prompt,
+    /// The LSP hover popup (`K` in Normal mode), anchored `BelowPoint`
+    /// like `Completion` -- never coexists with it in practice, since
+    /// `K` only runs in Normal mode and `Completion` only shows in
+    /// Insert mode, and is cleared unconditionally on every keypress
+    /// (`route_keypress`) the same way `DockerMenu`/`GitMenu`/`JiraMenu`
+    /// are.
+    Hover,
 }
 
 /// Where a popup wants to appear, before clamping to the window.

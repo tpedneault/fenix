@@ -121,6 +121,22 @@ pub enum VimEvent {
     /// knows the buffer's language-specific comment token; `fenix-vim`
     /// only computed *which lines* the motion/text-object touched.
     ToggleComment { start_line: usize, end_line: usize },
+    /// `gd`/`gr`/`K` -- asks the host to send the matching LSP request
+    /// for the cursor's current position. `fenix-vim` has no notion of
+    /// buffers/paths/servers at all; this is purely "the user pressed
+    /// one of the three keys that mean this," left entirely to the host
+    /// to act on (or silently ignore, if no server is attached).
+    RequestLsp(LspRequestKind),
+}
+
+/// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::
+/// RequestLsp`'s own doc comment for why this crate carries the
+/// distinction without knowing what any of them actually do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspRequestKind {
+    GoToDefinition,
+    References,
+    Hover,
 }
 
 struct Register {
@@ -314,6 +330,12 @@ pub struct VimState {
     /// Set once `pending_comment` resolves to a line range; consumed by
     /// `handle_key` and turned into `VimEvent::ToggleComment`.
     pending_comment_lines: Option<(usize, usize)>,
+    /// Set by `gd`/`gr`/`K`; consumed by `handle_key` and turned into
+    /// `VimEvent::RequestLsp` -- this crate has no idea what "LSP" even
+    /// is, just that the host should react to one of these the same way
+    /// it already reacts to `ToggleComment`/`JumpToMark`/etc: something
+    /// outside this crate's own buffer/cursor model needs to happen.
+    pending_lsp_request: Option<LspRequestKind>,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -371,6 +393,7 @@ impl VimState {
             pending_comment: false,
             pending_comment_count: 1,
             pending_comment_lines: None,
+            pending_lsp_request: None,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
@@ -674,6 +697,7 @@ impl VimState {
         let scroll = self.pending_scroll.take();
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         let comment_lines = self.pending_comment_lines.take();
+        let lsp_request = self.pending_lsp_request.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
@@ -695,6 +719,7 @@ impl VimState {
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
+            .or_else(|| lsp_request.map(VimEvent::RequestLsp))
             .unwrap_or(event)
     }
 
@@ -1362,6 +1387,7 @@ impl VimState {
                 self.pending_comment = true;
                 self.pending_comment_count = count;
             }
+            VimAction::RequestLsp(kind) => self.pending_lsp_request = Some(kind),
         }
     }
 

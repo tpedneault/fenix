@@ -81,6 +81,27 @@ pub fn resolve_server_command(language: LanguageId, configured: &[(String, Strin
     default_server_command(language)
 }
 
+/// Flattens an LSP `HoverContents` (a single markup/plain string, a
+/// bare string, or an array of either) into one block of plain text for
+/// the hover popup to render -- markdown syntax is left as-is rather
+/// than actually rendered (no markdown-to-styled-text pipeline for a
+/// popup this small), which is legible enough for the short
+/// signatures/docstrings servers typically send.
+pub fn hover_contents_text(contents: lsp_types::HoverContents) -> String {
+    match contents {
+        lsp_types::HoverContents::Scalar(marked) => marked_string_text(marked),
+        lsp_types::HoverContents::Array(items) => items.into_iter().map(marked_string_text).collect::<Vec<_>>().join("\n\n"),
+        lsp_types::HoverContents::Markup(content) => content.value,
+    }
+}
+
+fn marked_string_text(marked: lsp_types::MarkedString) -> String {
+    match marked {
+        lsp_types::MarkedString::String(s) => s,
+        lsp_types::MarkedString::LanguageString(ls) => ls.value,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

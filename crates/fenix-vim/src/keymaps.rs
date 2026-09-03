@@ -94,6 +94,11 @@ pub enum VimAction {
     /// Resolved into `VimEvent::ToggleComment` since only the host knows
     /// the buffer's language-specific comment token.
     ToggleCommentPrompt,
+    /// `gd`/`gr`/`K` -- this crate has no idea what "go to definition"/
+    /// "references"/"hover" actually mean (that's all LSP, entirely a
+    /// host concern), just that one of these three keys asks the host
+    /// to go find out. Resolved into `VimEvent::RequestLsp`.
+    RequestLsp(crate::state::LspRequestKind),
 }
 
 /// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
@@ -207,6 +212,9 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 
     t.insert(&[KeyPress::char('g'), KeyPress::char('v')], "reselect visual", VimAction::ReselectVisual);
     t.insert(&[KeyPress::char('g'), KeyPress::char('c')], "toggle comment...", VimAction::ToggleCommentPrompt);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
+    t.insert(&[KeyPress::char('K')], "hover", VimAction::RequestLsp(crate::state::LspRequestKind::Hover));
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);

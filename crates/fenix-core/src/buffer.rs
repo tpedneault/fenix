@@ -184,6 +184,14 @@ impl Buffer {
         self.rope.len_chars()
     }
 
+    /// The underlying rope, for a caller that needs ropey's own richer
+    /// position/line arithmetic directly (e.g. `fenix-lsp`'s char-offset
+    /// <-> UTF-16 `Position` conversion) rather than one of this type's
+    /// own narrower accessors (`line_col`, `text`, ...).
+    pub fn rope(&self) -> &Rope {
+        &self.rope
+    }
+
     pub fn text(&self) -> String {
         self.rope.to_string()
     }

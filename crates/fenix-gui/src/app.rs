@@ -945,6 +945,31 @@ struct LspSession {
     /// buffer for the same path doesn't double-open it, and `didClose`
     /// only fires for a path this server actually knows about.
     open_documents: HashMap<PathBuf, (u64, i32)>,
+    /// What each still-outstanding request this app sent is actually
+    /// *for*, keyed by the id `LspClient::request` returned -- a
+    /// response arrives bearing only that id (per JSON-RPC), so this is
+    /// what lets `apply_lsp_event`'s `Response` arm route it to the
+    /// right handling instead of every request needing its own bespoke
+    /// "remember what I asked" side channel. Removed once answered
+    /// (or once the connection that would have answered it is gone).
+    pending: HashMap<i64, PendingLspRequest>,
+}
+
+/// What an in-flight LSP request was for -- see `LspSession::pending`'s
+/// own doc comment. One variant per request kind this app actually
+/// sends; each carries whatever its own response handling needs beyond
+/// the response body itself (which buffer to act on, mainly, since a
+/// slow response can outlast the focus having moved elsewhere).
+#[derive(Debug, Clone)]
+enum PendingLspRequest {
+    Initialize,
+    Hover { buffer: BufferId },
+    Definition { buffer: BufferId },
+    References { buffer: BufferId },
+    Rename { buffer: BufferId },
+    CodeAction { buffer: BufferId },
+    Format { buffer: BufferId },
+    Completion { buffer: BufferId, prefix_start: usize },
 }
 
 /// Background reader for one `LspSession` -- drains `fenix_lsp::
@@ -1529,6 +1554,21 @@ enum ExplorerPurpose {
 struct JumpEntry {
     buffer: BufferId,
     char_idx: usize,
+}
+
+/// One entry in the generalized "list of places, step next/prev"
+/// `App::quickfix` holds -- kept as two variants (one per real source)
+/// rather than converted to one shared position representation at
+/// construction time, since LSP's `Position` (0-indexed, UTF-16
+/// columns) and `rg --vimgrep`'s own convention (1-indexed, char
+/// columns, via `fenix_project::GrepMatch`) need the target file's
+/// actual content to convert between correctly, which isn't
+/// necessarily available (or worth reading off disk) until the entry
+/// is actually jumped to -- see `App::quickfix_step`'s own dispatch.
+#[derive(Debug, Clone, PartialEq)]
+enum QuickfixEntry {
+    Grep(fenix_project::GrepMatch),
+    Lsp { path: PathBuf, position: lsp_types::Position },
 }
 
 /// One active `CDF_GRPSIZE` repeating group -- the SCOS-2000 MIB's own
@@ -3824,14 +3864,16 @@ pub struct App {
     /// already made for the same reason (simpler, and arguably more
     /// useful, than replicating Vim's split exactly).
     marks: HashMap<char, JumpEntry>,
-    /// The full match list from the most recent `SPC p s` (`run_grep`) --
-    /// kept around after the `Grep` picker itself closes so `SPC p n`/
-    /// `SPC p N` (`quickfix_next`/`quickfix_prev`) can keep sweeping
-    /// through it without reopening the picker or re-running the search.
-    /// Real Vim's quickfix list, cut down to just this one source (no
-    /// `:make`/build-error integration -- out of scope, nothing to parse
-    /// that from).
-    quickfix: Vec<fenix_project::GrepMatch>,
+    /// The full match/location list from whichever of `SPC p s`
+    /// (`run_grep`) or an LSP `gr`/multi-result `gd` most recently ran --
+    /// kept around after the picker (grep) or the jump itself (LSP)
+    /// closes/lands so `SPC p n`/`SPC p N` (`quickfix_next`/`quickfix_
+    /// prev`) can keep sweeping through it without reopening a picker or
+    /// re-running the search/request. Real Vim's quickfix list,
+    /// generalized just far enough to cover the two sources this app
+    /// actually has (no `:make`/build-error integration yet -- that's
+    /// the build/task-runner milestone).
+    quickfix: Vec<QuickfixEntry>,
     /// Index into `quickfix` of wherever `quickfix_next`/`quickfix_prev`/
     /// confirming a `Grep` picker entry last landed -- `None` before
     /// any match in the current list has been visited.
@@ -3854,6 +3896,13 @@ pub struct App {
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
+    /// `SPC c r`'s new-name prompt (LSP rename), when in progress --
+    /// pre-seeded with the identifier under the cursor, same capturing-
+    /// prompt shape as `rename_file_prompt` (Enter sends the actual
+    /// `textDocument/rename` request rather than applying anything
+    /// synchronously -- the edit only lands once the server answers,
+    /// see `PendingLspRequest::Rename`).
+    lsp_rename_prompt: Option<String>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
     /// shape as `rename_file_prompt`. Lives on `App` rather than per
@@ -3998,6 +4047,13 @@ pub struct App {
     /// empty list for it (which means "no more diagnostics," not "no
     /// change") or when that path's buffer closes.
     diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// `K`'s hover popup text, flattened from whatever `textDocument/
+    /// hover` last answered (`hover_contents_text`) -- `Some` shows the
+    /// popup (`hover_popup`), cleared on the next keypress `route_
+    /// keypress` sees (a transient popup, same posture as the which-key
+    /// menu) or if a newer hover request superseded it before this one's
+    /// answer arrived (`apply_lsp_response`'s own `buffer` check).
+    lsp_hover: Option<String>,
     /// The VM name whose session currently owns raw keyboard input, if
     /// any -- same "this pane eats every key, Vim doesn't apply" role as
     /// `terminal_focused`, generalized to name *which* of up to several
@@ -4678,6 +4734,7 @@ impl App {
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             diagnostics: HashMap::new(),
+            lsp_hover: None,
             vnc_upload_scratch: Vec::new(),
             vnc_focused: None,
             vnc_hidden_cursor: None,
@@ -4713,6 +4770,7 @@ impl App {
             pdf_goto_page_prompt: None,
             pdf_search_prompt: None,
             rename_file_prompt: None,
+            lsp_rename_prompt: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,
             vim,
@@ -5395,7 +5453,7 @@ impl App {
         match fenix_lsp::LspClient::spawn(&program, &args, cwd) {
             Ok((client, receiver)) => {
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, language, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(language, LspSession { client, reader, capabilities: None, open_documents: HashMap::new() });
+                self.lsp_sessions.insert(language, LspSession { client, reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
                 self.send_lsp_initialize(language, cwd);
             }
             Err(err) => {
@@ -5414,7 +5472,7 @@ impl App {
     /// `apply_lsp_event` instead of a general pending-request map, which
     /// nothing else needs yet.
     fn send_lsp_initialize(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
-        let Some(session) = self.lsp_sessions.get(&language) else { return };
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
@@ -5424,35 +5482,18 @@ impl App {
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
-        let _ = session.client.request::<lsp_types::request::Initialize>(params);
+        if let Ok(id) = session.client.request::<lsp_types::request::Initialize>(params) {
+            session.pending.insert(id, PendingLspRequest::Initialize);
+        }
     }
 
     /// Dispatches one decoded event from a language server's connection.
     fn apply_lsp_event(&mut self, language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent) {
         match event {
             fenix_lsp::LspEvent::Response { id, result } => {
-                // `initialize`'s response is always id 1 -- see `send_
-                // lsp_initialize`'s own doc comment. No other request
-                // is sent yet, so no other id is possible here.
-                if id == 1 {
-                    match result {
-                        Ok(value) => {
-                            let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
-                            if let Some(session) = self.lsp_sessions.get_mut(&language) {
-                                session.capabilities = capabilities;
-                                let _ = session.client.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
-                            }
-                            // Now that the session is actually
-                            // initialized, send `didOpen` for the
-                            // focused buffer if it's this language (the
-                            // request that triggered spawning this
-                            // session in the first place couldn't send
-                            // it yet -- capabilities weren't known).
-                            self.sync_lsp_for_focused_buffer();
-                        }
-                        Err(err) => self.set_error(format!("{language:?} language server failed to initialize: {}", err.message)),
-                    }
-                }
+                let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+                let Some(pending) = session.pending.remove(&id) else { return };
+                self.apply_lsp_response(language, pending, result);
             }
             fenix_lsp::LspEvent::Notification { method, params } => {
                 if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
@@ -5478,6 +5519,82 @@ impl App {
         }
     }
 
+    /// Routes one arrived response to whatever `pending` says the
+    /// original request was for -- the single dispatch point every
+    /// request-sending method's eventual answer passes through.
+    fn apply_lsp_response(&mut self, language: fenix_syntax::LanguageId, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
+        match pending {
+            PendingLspRequest::Initialize => match result {
+                Ok(value) => {
+                    let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
+                    if let Some(session) = self.lsp_sessions.get_mut(&language) {
+                        session.capabilities = capabilities;
+                        let _ = session.client.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
+                    }
+                    // Now that the session is actually initialized,
+                    // send `didOpen` for the focused buffer if it's this
+                    // language (the request that triggered spawning
+                    // this session in the first place couldn't send it
+                    // yet -- capabilities weren't known).
+                    self.sync_lsp_for_focused_buffer();
+                }
+                Err(err) => self.set_error(format!("{language:?} language server failed to initialize: {}", err.message)),
+            },
+            PendingLspRequest::Hover { buffer } => {
+                self.lsp_hover = None;
+                if let Ok(Some(hover)) = result.map(|v| serde_json::from_value::<Option<lsp_types::Hover>>(v).ok().flatten()) {
+                    if buffer == self.focused_buffer_id() {
+                        self.lsp_hover = Some(crate::lsp::hover_contents_text(hover.contents));
+                        self.wake_caret();
+                    }
+                }
+            }
+            PendingLspRequest::Definition { buffer } => {
+                if let Ok(Some(response)) = result.map(|v| serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(v).ok().flatten()) {
+                    if buffer == self.focused_buffer_id() {
+                        self.goto_lsp_location_response(response);
+                    }
+                }
+            }
+            PendingLspRequest::References { buffer } => {
+                if let Ok(Some(locations)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::Location>>>(v).ok().flatten()) {
+                    if buffer == self.focused_buffer_id() {
+                        self.apply_lsp_references(locations);
+                    }
+                }
+            }
+            PendingLspRequest::Rename { buffer } => match result {
+                Ok(value) => {
+                    if let Some(edit) = serde_json::from_value::<Option<lsp_types::WorkspaceEdit>>(value).ok().flatten() {
+                        if buffer == self.focused_buffer_id() {
+                            self.apply_lsp_workspace_edit(edit);
+                        }
+                    }
+                }
+                Err(err) => self.set_error(format!("rename failed: {}", err.message)),
+            },
+            PendingLspRequest::CodeAction { buffer } => {
+                if let Ok(Some(actions)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::CodeActionOrCommand>>>(v).ok().flatten()) {
+                    if buffer == self.focused_buffer_id() {
+                        self.apply_lsp_code_actions(language, actions);
+                    }
+                }
+            }
+            PendingLspRequest::Format { buffer } => {
+                if let Ok(Some(edits)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::TextEdit>>>(v).ok().flatten()) {
+                    if buffer == self.focused_buffer_id() {
+                        self.apply_lsp_text_edits(buffer, edits);
+                    }
+                }
+            }
+            PendingLspRequest::Completion { buffer, prefix_start } => {
+                if let Ok(value) = result {
+                    self.apply_lsp_completion(buffer, prefix_start, value);
+                }
+            }
+        }
+    }
+
     /// Records (or clears) one file's diagnostics -- `textDocument/
     /// publishDiagnostics` is keyed by URI regardless of whether a
     /// buffer for it is currently open, and an *empty* list is the
@@ -5491,6 +5608,443 @@ impl App {
         } else {
             self.diagnostics.insert(path, params.diagnostics);
         }
+    }
+
+    /// The language, session, and current-cursor-as-LSP-`Position` for
+    /// the focused buffer -- `None` unless a fully initialized language
+    /// server is actually attached to it (checked via `open_documents`,
+    /// not just `capabilities.is_some()`: a session can be initialized
+    /// for a *different* buffer's `didOpen` before this one's has landed).
+    /// The shared precondition every LSP request this app sends starts
+    /// from (`gd`/`gr`/`K`/rename/code actions/format all begin here).
+    fn focused_lsp_context(&self) -> Option<(fenix_syntax::LanguageId, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+        let ob = self.open();
+        let path = ob.buffer.path()?;
+        let language = fenix_syntax::detect_language_from_path(path)?;
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        let session = self.lsp_sessions.get(&language)?;
+        session.capabilities.as_ref()?;
+        if !session.open_documents.contains_key(&canonical) {
+            return None;
+        }
+        let uri = fenix_lsp::path_to_uri(&canonical)?;
+        let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), self.cursor().char_idx);
+        Some((language, lsp_types::TextDocumentIdentifier { uri }, position))
+    }
+
+    /// Finds the already-open buffer (if any) for a path that came from
+    /// an LSP URI -- tries an exact `BufferList::id_for_path` match
+    /// first (works whenever the buffer's own stored path is already
+    /// exactly this), then falls back to comparing the *focused*
+    /// buffer's own canonicalized path (the common case this exists
+    /// for: a rename/code action/format response for whatever's
+    /// currently being edited, where the stored path may be a
+    /// differently-spelled-but-equivalent representation of the same
+    /// file -- see `fenix_lsp::normalize`'s own doc comment). Doesn't
+    /// open anything -- see `apply_lsp_workspace_edit`'s own doc comment
+    /// for why a path with no open buffer is simply skipped rather than
+    /// opened invisibly.
+    fn buffer_id_for_lsp_path(&self, path: &Path) -> Option<BufferId> {
+        if let Some(id) = self.buffers.id_for_path(path) {
+            return Some(id);
+        }
+        let focused = self.focused_buffer_id();
+        let focused_path = self.buffers.get(focused)?.buffer.path()?;
+        let focused_canonical = fenix_lsp::normalize(std::fs::canonicalize(focused_path).unwrap_or_else(|_| focused_path.to_path_buf()));
+        (focused_canonical == path).then_some(focused)
+    }
+
+    /// Moves the focused pane's cursor to an LSP `Position` within
+    /// whatever buffer is focused *right now* -- callers that need to
+    /// land in a *different* file open it first (`open_file_from_
+    /// picker`, which this deliberately doesn't do itself, so it stays
+    /// usable both for "jump to a different file" and "jump within the
+    /// one already focused," e.g. a same-file `gd`).
+    fn goto_lsp_position(&mut self, position: lsp_types::Position) {
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        cursor.char_idx = fenix_lsp::position_to_char_offset(buffer.rope(), position).min(buffer.len_chars());
+        let (_, sticky) = buffer.line_col(cursor);
+        cursor.sticky_col = sticky;
+    }
+
+    /// Opens (or switches to) `location`'s file via `open_file_from_
+    /// picker` -- reusing it rather than a bespoke "just point the
+    /// focused pane at this path" means a `gd` into a live VNC/Docker/
+    /// Git/Jira/PDF session's pane gets the same hijack protection any
+    /// other "open this wherever I'm looking" action already has (see
+    /// `open_buffer_in_focused_pane`) -- then moves the cursor to its
+    /// range's start.
+    fn goto_lsp_location(&mut self, location: &lsp_types::Location) {
+        let Some(path) = fenix_lsp::uri_to_path(&location.uri) else { return };
+        self.open_file_from_picker(&path);
+        self.goto_lsp_position(location.range.start);
+    }
+
+    /// `textDocument/definition`'s response: a single location jumps
+    /// straight there (recorded on the jumplist first, so `Ctrl-O` gets
+    /// back); a list (rare -- an overloaded/ambiguous declaration) or a
+    /// `LocationLink` list (newer servers' richer shape) instead
+    /// populates the same generalized `quickfix` list `gr` uses, so
+    /// `SPC p n`/`SPC p N` step through them exactly the same way
+    /// regardless of which populated it.
+    fn goto_lsp_location_response(&mut self, response: lsp_types::GotoDefinitionResponse) {
+        let locations: Vec<lsp_types::Location> = match response {
+            lsp_types::GotoDefinitionResponse::Scalar(loc) => vec![loc],
+            lsp_types::GotoDefinitionResponse::Array(locs) => locs,
+            lsp_types::GotoDefinitionResponse::Link(links) => {
+                links.into_iter().map(|link| lsp_types::Location { uri: link.target_uri, range: link.target_selection_range }).collect()
+            }
+        };
+        match locations.len() {
+            0 => self.set_error("no definition found".to_string()),
+            1 => {
+                let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
+                self.goto_lsp_location(&locations[0]);
+                self.record_jump(from);
+            }
+            _ => self.apply_lsp_references(locations),
+        }
+    }
+
+    /// Turns `textDocument/references`' response (or `goto_lsp_location_
+    /// response`'s multi-location fallback) into the generalized
+    /// `quickfix` list, then jumps to the first entry immediately --
+    /// matching real Vim's own `:grep`/tag-list auto-jump-to-first
+    /// convention, and `run_grep`'s own precedent in this codebase.
+    fn apply_lsp_references(&mut self, locations: Vec<lsp_types::Location>) {
+        self.quickfix = locations
+            .into_iter()
+            .filter_map(|loc| fenix_lsp::uri_to_path(&loc.uri).map(|path| QuickfixEntry::Lsp { path, position: loc.range.start }))
+            .collect();
+        self.quickfix_index = None;
+        if self.quickfix.is_empty() {
+            self.set_error("no references found".to_string());
+        } else {
+            self.quickfix_step(1);
+        }
+    }
+
+    /// Applies a server's `TextEdit`s to `buffer_id`'s content -- each
+    /// edit's range refers to the document as it stood *before any of
+    /// this batch was applied* (not progressively renumbered edit by
+    /// edit, per spec), which is why this applies them back-to-front by
+    /// position: an edit earlier in the document never shifts the
+    /// position of one later in it as long as the later one is applied
+    /// first.
+    fn apply_lsp_text_edits(&mut self, buffer_id: BufferId, mut edits: Vec<lsp_types::TextEdit>) {
+        edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+        let Some(ob) = self.buffers.get_mut(buffer_id) else { return };
+        for edit in edits {
+            let start = fenix_lsp::position_to_char_offset(ob.buffer.rope(), edit.range.start);
+            let end = fenix_lsp::position_to_char_offset(ob.buffer.rope(), edit.range.end);
+            ob.buffer.replace_range(&mut ob.cursor, start, end, &edit.new_text);
+        }
+    }
+
+    /// Applies a server's `WorkspaceEdit` (rename's result, or a code
+    /// action's) -- limited to buffers *already open*
+    /// (`buffer_id_for_lsp_path`): opening every file a multi-file edit
+    /// touches, applying it, and saving automatically is real scope
+    /// beyond what this needs yet (most renames pyright/rust-analyzer
+    /// produce for a local symbol stay within one file anyway). A path
+    /// with no open buffer is silently skipped rather than edited
+    /// invisibly on disk behind a file the user never asked to have
+    /// touched without seeing it happen.
+    ///
+    /// Reads both shapes a `WorkspaceEdit` can arrive in: the plain
+    /// `changes` map this client's own capabilities ask for (`lsp::
+    /// client_capabilities` declares no `workspace.workspaceEdit`
+    /// block at all, which per spec should keep a server on this
+    /// simpler shape), and `document_changes`' `TextDocumentEdit` list,
+    /// which pyright sends regardless in practice -- confirmed live
+    /// against a real pyright rename, which came back empty-handed
+    /// (`changes: None`) until this fallback was added. A resource
+    /// operation entry (`document_changes`' `Operations` variant --
+    /// create/rename/delete a whole file) is skipped for the same
+    /// reason cross-file edits already are: nothing here opens or
+    /// creates files on a server's say-so.
+    fn apply_lsp_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit) {
+        let per_file: Vec<(lsp_types::Uri, Vec<lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
+            changes.into_iter().collect()
+        } else {
+            match edit.document_changes {
+                Some(lsp_types::DocumentChanges::Edits(edits)) => edits
+                    .into_iter()
+                    .map(|e| {
+                        let edits = e.edits.into_iter().map(|oe| match oe {
+                            lsp_types::OneOf::Left(edit) => edit,
+                            lsp_types::OneOf::Right(annotated) => annotated.text_edit,
+                        });
+                        (e.text_document.uri, edits.collect())
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        for (uri, edits) in per_file {
+            let Some(path) = fenix_lsp::uri_to_path(&uri) else { continue };
+            let Some(buffer_id) = self.buffer_id_for_lsp_path(&path) else { continue };
+            self.apply_lsp_text_edits(buffer_id, edits);
+        }
+    }
+
+    /// `textDocument/codeAction`'s response: a `Command` entry (a
+    /// server-side action with no client-applicable edit of its own,
+    /// e.g. "organize imports" some servers implement as a command
+    /// rather than a `WorkspaceEdit`) is skipped -- executing an
+    /// arbitrary server-defined command is real scope beyond applying
+    /// an edit this app already knows how to interpret. Only one action
+    /// exists today: whichever's `WorkspaceEdit` is present is applied
+    /// immediately, no picker -- `SPC c a` becomes a real chooser once
+    /// more than one meaningfully-different action is common enough to
+    /// justify it.
+    fn apply_lsp_code_actions(&mut self, _language: fenix_syntax::LanguageId, actions: Vec<lsp_types::CodeActionOrCommand>) {
+        let edit = actions.into_iter().find_map(|action| match action {
+            lsp_types::CodeActionOrCommand::CodeAction(action) => action.edit,
+            lsp_types::CodeActionOrCommand::Command(_) => None,
+        });
+        match edit {
+            Some(edit) => self.apply_lsp_workspace_edit(edit),
+            None => self.set_error("no applicable code action".to_string()),
+        }
+    }
+
+    /// `textDocument/completion`'s response merged into whatever
+    /// completion popup is already open -- see `sync_completion`'s own
+    /// call site for how `CompletionKind::Lsp` items reach the same
+    /// picker buffer-word/ctags candidates already do. A no-op if the
+    /// popup closed (moved on to something else) before this arrived,
+    /// or if `buffer` isn't focused any more.
+    fn apply_lsp_completion(&mut self, buffer: BufferId, prefix_start: usize, value: serde_json::Value) {
+        if buffer != self.focused_buffer_id() {
+            return;
+        }
+        // `PickerState` has no "add candidates to what's already there"
+        // method (every other picker in this app is built once, up
+        // front, from a source that's already fully known -- this is
+        // the first one whose candidate pool can grow *after* it opens,
+        // since an LSP response is inherently async relative to the
+        // keystroke that triggered it). Rebuilt from scratch instead,
+        // combining the always-available local candidates
+        // (`completion_candidates`) with these LSP ones, then
+        // re-applying whatever query was already typed -- cheap enough
+        // (a handful of candidates, not thousands) that rebuilding isn't
+        // worth avoiding.
+        let Some((query, current_prefix_start)) = self.completion.as_ref().map(|s| (s.picker.query().to_string(), s.prefix_start)) else {
+            return;
+        };
+        if current_prefix_start != prefix_start {
+            return; // superseded by a newer prefix since this request was sent
+        }
+        let items: Vec<lsp_types::CompletionItem> = serde_json::from_value::<lsp_types::CompletionResponse>(value)
+            .map(|r| match r {
+                lsp_types::CompletionResponse::Array(items) => items,
+                lsp_types::CompletionResponse::List(list) => list.items,
+            })
+            .unwrap_or_default();
+        if items.is_empty() {
+            return;
+        }
+        let mut candidates = self.completion_candidates();
+        candidates.extend(items.into_iter().map(|item| {
+            let label = item.label;
+            fenix_picker::Candidate::new(label.clone(), fenix_completion::CompletionItem { label, kind: fenix_completion::CompletionKind::Lsp })
+        }));
+        let mut picker = fenix_picker::PickerState::new(candidates);
+        picker.set_query(&query);
+        if let Some(state) = &mut self.completion {
+            state.picker = picker;
+        }
+    }
+
+    /// `K` -- requests `textDocument/hover` for the cursor's current
+    /// position. A no-op (no error message; this fires on every `K`
+    /// press, including ones with genuinely nothing to say) if no
+    /// server is attached to the focused buffer.
+    pub(crate) fn request_hover(&mut self) {
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let params = lsp_types::HoverParams { text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position }, work_done_progress_params: Default::default() };
+        if let Ok(id) = session.client.request::<lsp_types::request::HoverRequest>(params) {
+            session.pending.insert(id, PendingLspRequest::Hover { buffer });
+        }
+    }
+
+    /// `gd` -- requests `textDocument/definition`.
+    pub(crate) fn request_goto_definition(&mut self) {
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let params = lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        if let Ok(id) = session.client.request::<lsp_types::request::GotoDefinition>(params) {
+            session.pending.insert(id, PendingLspRequest::Definition { buffer });
+        }
+    }
+
+    /// `gr` -- requests `textDocument/references` (including the
+    /// declaration itself in the results, matching what most editors'
+    /// own "find references" shows by default).
+    pub(crate) fn request_references(&mut self) {
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let params = lsp_types::ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams { text_document, position },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext { include_declaration: true },
+        };
+        if let Ok(id) = session.client.request::<lsp_types::request::References>(params) {
+            session.pending.insert(id, PendingLspRequest::References { buffer });
+        }
+    }
+
+    /// `SPC c a` -- requests `textDocument/codeAction` for the focused
+    /// buffer's current line (a single-line range, matching what most
+    /// editors send when the caller isn't a Visual selection -- Fenix
+    /// has no separate "code action for this selection" entry point yet).
+    pub(crate) fn request_code_action(&mut self) {
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let diagnostics = self.open().buffer.path().and_then(|p| std::fs::canonicalize(p).ok()).and_then(|p| self.diagnostics.get(&fenix_lsp::normalize(p)).cloned()).unwrap_or_default();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let line_range = lsp_types::Range { start: lsp_types::Position { line: position.line, character: 0 }, end: lsp_types::Position { line: position.line, character: u32::MAX } };
+        let params = lsp_types::CodeActionParams {
+            text_document,
+            range: line_range,
+            context: lsp_types::CodeActionContext { diagnostics, only: None, trigger_kind: None },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        if let Ok(id) = session.client.request::<lsp_types::request::CodeActionRequest>(params) {
+            session.pending.insert(id, PendingLspRequest::CodeAction { buffer });
+        }
+    }
+
+    /// `SPC c f`/`SPC c F` -- requests `textDocument/formatting` when a
+    /// server capable of it is attached; the caller (`format_selection`/
+    /// `format_buffer`) falls back to `fenix-format`'s generic bracket-
+    /// depth reindenter when this returns `false` (no server, or the
+    /// attached one never advertised formatting support), same
+    /// graceful-degradation posture as VNC's remote-resize falling back
+    /// to client-side scaling. Always requests the *whole document* --
+    /// LSP's `rangeFormatting` is a separate, optional capability this
+    /// doesn't use yet, so a selection-scoped format still asks for and
+    /// gets the whole file reformatted.
+    pub(crate) fn request_lsp_format(&mut self) -> bool {
+        let Some((language, text_document, _)) = self.focused_lsp_context() else { return false };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return false };
+        if !session.capabilities.as_ref().is_some_and(|c| matches!(c.document_formatting_provider, Some(lsp_types::OneOf::Left(true)) | Some(lsp_types::OneOf::Right(_)))) {
+            return false;
+        }
+        let params = lsp_types::DocumentFormattingParams {
+            text_document,
+            options: lsp_types::FormattingOptions { tab_size: 4, insert_spaces: true, ..Default::default() },
+            work_done_progress_params: Default::default(),
+        };
+        match session.client.request::<lsp_types::request::Formatting>(params) {
+            Ok(id) => {
+                session.pending.insert(id, PendingLspRequest::Format { buffer });
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Sends `textDocument/completion` for the popup's current prefix --
+    /// called from `sync_completion`/`force_open_completion` right after
+    /// they open/update the popup with local candidates, so the LSP
+    /// items (once the response arrives, `apply_lsp_completion`) merge
+    /// into whatever's already showing instead of racing to replace it.
+    /// A no-op if no server is attached -- the popup still works from
+    /// local candidates alone, same as it always has for a language
+    /// with none configured.
+    fn request_lsp_completion(&mut self, prefix_start: usize) {
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let params = lsp_types::CompletionParams {
+            text_document_position: lsp_types::TextDocumentPositionParams { text_document, position },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: None,
+        };
+        if let Ok(id) = session.client.request::<lsp_types::request::Completion>(params) {
+            session.pending.insert(id, PendingLspRequest::Completion { buffer, prefix_start });
+        }
+    }
+
+    /// `SPC c r` -- opens the rename prompt, pre-filled with whatever
+    /// identifier-prefix precedes the cursor (real editors' own
+    /// convention: rename almost always starts from "call this
+    /// something else," not a blank field), same capturing-prompt shape
+    /// as `start_rename_file_prompt`. A no-op (with a message) if no
+    /// server is attached to the focused buffer -- there's nothing to
+    /// send a rename request to.
+    pub(crate) fn open_lsp_rename_prompt(&mut self) {
+        if self.focused_lsp_context().is_none() {
+            self.set_error("no language server attached to this buffer".to_string());
+            return;
+        }
+        let cursor = self.cursor();
+        let ob = self.open();
+        let current = completion::prefix_at_cursor(&ob.buffer, &cursor).map(|(_, prefix)| prefix).unwrap_or_default();
+        self.lsp_rename_prompt = Some(current);
+    }
+
+    /// Routes one keypress to the in-progress `lsp_rename_prompt` --
+    /// same shape as `rename_file_prompt_key`, except `Enter` sends the
+    /// `textDocument/rename` request rather than applying anything
+    /// synchronously (the edit only lands once the server answers).
+    fn lsp_rename_prompt_key(&mut self, key: KeyPress) {
+        if key == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(input), Some(text)) = (&mut self.lsp_rename_prompt, pasted) {
+                input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some(input) = &mut self.lsp_rename_prompt else { return };
+        match key.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.lsp_rename_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let new_name = self.lsp_rename_prompt.take().unwrap_or_default();
+                self.send_lsp_rename(&new_name);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                input.pop();
+            }
+            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    fn send_lsp_rename(&mut self, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return;
+        }
+        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let params = lsp_types::RenameParams { text_document_position: lsp_types::TextDocumentPositionParams { text_document, position }, new_name: new_name.to_string(), work_done_progress_params: Default::default() };
+        if let Ok(id) = session.client.request::<lsp_types::request::Rename>(params) {
+            session.pending.insert(id, PendingLspRequest::Rename { buffer });
+        }
+    }
+
+    /// What to show in place of the modeline while `lsp_rename_prompt`
+    /// is capturing keys -- same shape as `rename_file_prompt_text`.
+    fn lsp_rename_prompt_text(&self) -> Option<String> {
+        self.lsp_rename_prompt.as_ref().map(|input| format!("rename to: {input}"))
     }
 
     /// Records `path` as recently-opened for the dashboard's "Recent
@@ -5680,7 +6234,16 @@ impl App {
                 self.completion = Some(CompletionState { prefix_start: start, picker });
             }
         }
-        if self.completion.as_ref().is_some_and(|state| state.picker.is_empty()) {
+        // A server attached to this buffer may still fill the popup
+        // once its (async) response lands (`apply_lsp_completion`),
+        // even if the locally-known candidates are empty right now --
+        // so an empty popup isn't closed out from under that pending
+        // request the way it is when there's no server to wait on.
+        let lsp_attached = self.focused_lsp_context().is_some();
+        if lsp_attached {
+            self.request_lsp_completion(start);
+        }
+        if !lsp_attached && self.completion.as_ref().is_some_and(|state| state.picker.is_empty()) {
             self.completion = None;
         }
         self.completion_scroll = 0;
@@ -5698,7 +6261,12 @@ impl App {
         let candidates = self.completion_candidates();
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
-        self.completion = if picker.is_empty() { None } else { Some(CompletionState { prefix_start, picker }) };
+        let lsp_attached = self.focused_lsp_context().is_some();
+        self.completion =
+            if picker.is_empty() && !lsp_attached { None } else { Some(CompletionState { prefix_start, picker }) };
+        if lsp_attached {
+            self.request_lsp_completion(prefix_start);
+        }
         self.completion_scroll = 0;
     }
 
@@ -5902,6 +6470,18 @@ impl App {
     /// rectangle -- so this is a no-op outside Visual mode or on a
     /// Visual-Block selection.
     pub(crate) fn format_selection(&mut self) {
+        // See `request_lsp_format`'s own doc comment: a server-backed
+        // format is always whole-document, so this deliberately
+        // reformats more than just the selection when one's attached --
+        // accepted rather than building a separate `rangeFormatting`
+        // path for what's otherwise a rare, capability-gated case.
+        if self.request_lsp_format() {
+            let pane = self.focused_pane_id();
+            if let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
+                self.vim.exit_visual_mode(&pane_state.cursor);
+            }
+            return;
+        }
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let indent_width = self.vim.indent_width();
@@ -8017,7 +8597,7 @@ impl App {
                 // search (even a zero-result one), left alone on a
                 // failed one -- a transient `rg` failure shouldn't wipe
                 // out the ability to keep navigating the previous sweep.
-                self.quickfix = matches.clone();
+                self.quickfix = matches.iter().cloned().map(QuickfixEntry::Grep).collect();
                 self.quickfix_index = None;
                 let candidates = matches
                     .into_iter()
@@ -8067,10 +8647,18 @@ impl App {
                 n as usize
             }
         };
-        let m = self.quickfix[target].clone();
+        let entry = self.quickfix[target].clone();
         let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-        self.open_file_from_picker(&m.path);
-        self.jump_to_grep_match(&m);
+        match entry {
+            QuickfixEntry::Grep(m) => {
+                self.open_file_from_picker(&m.path);
+                self.jump_to_grep_match(&m);
+            }
+            QuickfixEntry::Lsp { path, position } => {
+                self.open_file_from_picker(&path);
+                self.goto_lsp_position(position);
+            }
+        }
         self.record_jump(from);
         self.quickfix_index = Some(target);
     }
@@ -11573,7 +12161,7 @@ impl App {
                 // may not be `quickfix[0]` -- the picker's own fuzzy
                 // filter can reorder/narrow what's shown), not always
                 // restart from the top of the list.
-                self.quickfix_index = self.quickfix.iter().position(|entry| entry == &m);
+                self.quickfix_index = self.quickfix.iter().position(|entry| matches!(entry, QuickfixEntry::Grep(gm) if gm == &m));
             }
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let Some(id) = state.selected().map(|c| c.payload) else { return };
@@ -13192,6 +13780,10 @@ impl App {
         self.git_menu_open = false;
         // Same reasoning, for the Jira panel's own `x` which-key menu.
         self.jira_menu_open = false;
+        // Same reasoning, for the LSP hover popup (`K`) -- purely
+        // informational, dismissed by whatever key comes next rather
+        // than needing its own dedicated close key.
+        self.lsp_hover = None;
 
         // The terminal panel, when focused, owns *every* key -- checked
         // before even the capturing prompts/confirms below, since a
@@ -13298,6 +13890,11 @@ impl App {
         }
         if self.rename_file_prompt.is_some() {
             self.rename_file_prompt_key(keypress);
+            return;
+        }
+        // `SPC c r` -- same capturing-prompt tier.
+        if self.lsp_rename_prompt.is_some() {
+            self.lsp_rename_prompt_key(keypress);
             return;
         }
         // `SPC TAB r` -- same capturing-prompt tier.
@@ -14169,6 +14766,11 @@ impl App {
             VimEvent::MacroPlay { register, count } => {
                 self.play_macro(register, count, event_loop);
             }
+            VimEvent::RequestLsp(kind) => match kind {
+                fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
+                fenix_vim::LspRequestKind::References => self.request_references(),
+                fenix_vim::LspRequestKind::Hover => self.request_hover(),
+            },
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -14649,6 +15251,7 @@ impl App {
             .or_else(|| self.pdf_goto_page_prompt_text())
             .or_else(|| self.pdf_search_prompt_text())
             .or_else(|| self.rename_file_prompt_text())
+            .or_else(|| self.lsp_rename_prompt_text())
             .or_else(|| self.workspace_rename_prompt_text())
             .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
@@ -15652,7 +16255,7 @@ impl App {
             // guaranteed legible against `bg_modeline` in every theme.
             let color = match candidate.payload.kind {
                 fenix_completion::CompletionKind::Keyword => theme.caret_text,
-                fenix_completion::CompletionKind::Tag => theme.fg_modeline,
+                fenix_completion::CompletionKind::Tag | fenix_completion::CompletionKind::Lsp => theme.fg_modeline,
             };
             spans.push((candidate.label.clone(), color, false));
         }
@@ -15665,6 +16268,55 @@ impl App {
         let rect =
             popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
         Some((rect, spans, selected_row))
+    }
+
+    /// Builds the `K` hover popup -- same `BelowPoint`-anchored-under-
+    /// the-caret shape as `completion_popup`, just rendering `self.lsp_
+    /// hover`'s plain-text lines instead of a candidate list (no
+    /// selection, no scrolling: hover text is short enough in practice
+    /// that truncating to `COMPLETION_MAX_ROWS` is enough, matching
+    /// `hover_contents_text`'s own "legible enough, not actually
+    /// rendered markdown" posture).
+    fn hover_popup(
+        &self,
+        window_width: f32,
+        modeline_top: f32,
+        focused_rect: fenix_window::Rect,
+        focused_caret: Option<(usize, usize)>,
+        gutter_px: f32,
+        content_frac: f32,
+    ) -> Option<(fenix_window::Rect, RowSpans)> {
+        let text = self.lsp_hover.as_ref()?;
+        let (row, col) = focused_caret?;
+        let (char_width, line_height) = match &self.text {
+            Some(t) => (t.char_width(), t.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+        let (caret_x, caret_y) = caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height);
+
+        let shown_rows = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING).min(COMPLETION_MAX_ROWS);
+        let lines: Vec<&str> = text.lines().take(shown_rows).collect();
+        if lines.is_empty() {
+            return None;
+        }
+
+        let theme = self.theme;
+        let mut spans = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            spans.push((line.to_string(), theme.fg_modeline, false));
+        }
+
+        let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
+        let width = (longest as f32 * char_width + COMPLETION_PADDING)
+            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+        let height = lines.len() as f32 * line_height + COMPLETION_PADDING;
+        let rect =
+            popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
+        Some((rect, spans))
     }
 
     /// Builds the visible rows of a directory listing as rich-text spans
@@ -16741,6 +17393,12 @@ impl App {
         let completion_popup = overlays_here.then_some(()).and_then(|()| panes_render.iter().find(|p| p.pane == focused_pane)).and_then(|focused| {
             self.completion_popup(window_width, modeline_top, focused.rect, focused.caret, focused.gutter_px, focused.content_frac)
         });
+        // Same "focused pane only" shape as `completion_popup` above --
+        // see `PopupId::Hover`'s own doc comment for why this never
+        // coexists with it in practice.
+        let hover_popup = overlays_here.then_some(()).and_then(|()| panes_render.iter().find(|p| p.pane == focused_pane)).and_then(|focused| {
+            self.hover_popup(window_width, modeline_top, focused.rect, focused.caret, focused.gutter_px, focused.content_frac)
+        });
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
@@ -16871,6 +17529,11 @@ impl App {
             text.set_popup_rich(popup::PopupId::Completion, rect.w, &refs);
             popup_rects.push((popup::PopupId::Completion, *rect));
             popup_selected_row = *selected_row;
+        }
+        if let Some((rect, spans)) = &hover_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::Hover, rect.w, &refs);
+            popup_rects.push((popup::PopupId::Hover, *rect));
         }
         if let Some((rect, spans)) = &prompt_popup {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -22101,8 +22764,8 @@ mod tests {
         let b = dir.write("b.txt", "four\nfive\n");
         let mut app = App::with_file(None);
         app.quickfix = vec![
-            fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() },
-            fenix_project::GrepMatch { path: b.clone(), line: 1, col: 1, text: "four".to_string() },
+            QuickfixEntry::Grep(fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() }),
+            QuickfixEntry::Grep(fenix_project::GrepMatch { path: b.clone(), line: 1, col: 1, text: "four".to_string() }),
         ];
 
         app.quickfix_next(); // nothing visited yet -- lands on the first
@@ -22122,7 +22785,7 @@ mod tests {
         let dir = TempDir::new("quickfix_clamp_end");
         let a = dir.write("a.txt", "only line\n");
         let mut app = App::with_file(None);
-        app.quickfix = vec![fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "only line".to_string() }];
+        app.quickfix = vec![QuickfixEntry::Grep(fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "only line".to_string() })];
 
         app.quickfix_next();
         let after_first = app.quickfix_index;
@@ -22136,8 +22799,8 @@ mod tests {
         let a = dir.write("a.txt", "l1\nl2\n");
         let mut app = App::with_file(None);
         app.quickfix = vec![
-            fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "l1".to_string() },
-            fenix_project::GrepMatch { path: a, line: 2, col: 1, text: "l2".to_string() },
+            QuickfixEntry::Grep(fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "l1".to_string() }),
+            QuickfixEntry::Grep(fenix_project::GrepMatch { path: a, line: 2, col: 1, text: "l2".to_string() }),
         ];
 
         app.quickfix_next(); // index 0
@@ -22161,8 +22824,10 @@ mod tests {
         let a = dir.write("a.txt", "one\ntwo\n");
         let mut app = App::with_file(None);
         let second = fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() };
-        app.quickfix =
-            vec![fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "one".to_string() }, second.clone()];
+        app.quickfix = vec![
+            QuickfixEntry::Grep(fenix_project::GrepMatch { path: a.clone(), line: 1, col: 1, text: "one".to_string() }),
+            QuickfixEntry::Grep(second.clone()),
+        ];
         let candidates = vec![fenix_picker::Candidate::new("a.txt:2: two", second)];
         app.enter_picker(ActivePicker::Grep(fenix_picker::PickerState::new(candidates)));
 
@@ -22177,7 +22842,7 @@ mod tests {
         let a = dir.write("a.txt", "one\ntwo\n");
         let origin = dir.write("origin.txt", "start\n");
         let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
-        app.quickfix = vec![fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() }];
+        app.quickfix = vec![QuickfixEntry::Grep(fenix_project::GrepMatch { path: a.clone(), line: 2, col: 1, text: "two".to_string() })];
 
         app.quickfix_next();
         assert_eq!(app.open().buffer.path(), Some(a.as_path()));
@@ -22191,7 +22856,7 @@ mod tests {
         let dir = TempDir::new("quickfix_docker_guard");
         let a = dir.write("a.txt", "one\n");
         let mut app = App::with_file(None);
-        app.quickfix = vec![fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "one".to_string() }];
+        app.quickfix = vec![QuickfixEntry::Grep(fenix_project::GrepMatch { path: a, line: 1, col: 1, text: "one".to_string() })];
         app.open_docker_panel();
 
         let focused_before = app.focused_buffer_id();

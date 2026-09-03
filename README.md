@@ -320,15 +320,34 @@ for anyone curious to poke around or build on it.
   [Configuration](#configuration)). Namespaced procs show their fully-
   qualified path (`myns::subns::proc`, no leading `::`), not just the
   bare proc name.
+- **Language servers (LSP)**: a real `lsp-types`/JSON-RPC client, spawned
+  per-language on demand for whichever buffer you open (Python via
+  [`pyright`](https://github.com/microsoft/pyright)'s
+  `pyright-langserver` by default, anything else via a `[lsp]` command
+  you configure -- see [Configuration](#configuration)). Live
+  diagnostics (inline severity-colored markup, modeline error/warning
+  counts), `gd` go-to-definition, `gr` find-references (populates the
+  quickfix list -- `SPC p n`/`SPC p N` steps through it the same way a
+  project grep does), `K` hover, `SPC c r` rename, `SPC c a` code
+  actions, and `SPC c f`/`SPC c F` reach for the server's own formatter
+  before falling back to the structural reindenter below. Completion
+  candidates from the server merge straight into the same popup
+  autocompletion already opens (`CompletionKind::Lsp`), rather than
+  being a separate mechanism. Every one of these degrades gracefully to
+  "not available" (not a hard error) when no server is attached, or the
+  attached one doesn't advertise that capability.
 - **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
   autocompletion draws on -- confirming a selection opens the file it's
   defined in (if not already open) and jumps straight to that line.
 - **Indent region**: `SPC c f` reindents the active Visual selection,
-  `SPC c F` the whole buffer -- structurally, from `{`/`(`/`[` nesting
-  depth (Emacs' own `indent-region`, real Vim's `=` operator), not by
-  shelling out to a per-language external tool. Works on any buffer
+  `SPC c F` the whole buffer -- a language server's own formatter first,
+  if one's attached and advertises formatting support (see the LSP
+  bullet above), falling back to a structural reindent from `{`/`(`/`[`
+  nesting depth (Emacs' own `indent-region`, real Vim's `=` operator)
+  otherwise, not by shelling out to a per-language external tool. Works
+  on any buffer
   regardless of detected language; when one *is* detected, a fresh
   syntax parse excludes every string/comment span from the bracket scan
   so a stray brace inside a string or comment can't throw off the
@@ -412,7 +431,7 @@ and degrade gracefully (never a hard error) if they're not:
   search (`SPC p s`).
 - [`git`](https://git-scm.com/) — git-status badges in the file explorer.
 - [`Universal Ctags`](https://ctags.io/) (`ctags`) — project-definition
-  completion for Tcl (`SPC c s`, `SPC c r`). If it's missing, exits
+  completion for Tcl (`SPC c s`, `SPC c T`). If it's missing, exits
   non-zero, or produces output this parser doesn't recognize, the
   reason is logged to stderr rather than just silently yielding no
   definitions — check the terminal Fenix was launched from.
@@ -515,9 +534,14 @@ popup shows what keys continue it.
 | `Home` / `End`, `g` / `G` | First / last page (PDF panes only) |
 | `h` / `l`, `Left` / `Right` | Pan sideways while the page is wider than the pane (PDF panes only) |
 | `+` / `-` / `0` / `w` / `/` | Zoom in / out, fit page, fit width, search (PDF panes only) |
-| `SPC c r` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
-| `SPC c f` | Indent region -- reindent the active Visual selection structurally |
-| `SPC c F` | Indent region -- reindent the whole focused buffer structurally |
+| `gd` | Go to definition (LSP) |
+| `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
+| `K` | Show hover information for the symbol under the cursor (LSP) |
+| `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
+| `SPC c a` | Request and apply the first available code action (LSP) |
+| `SPC c T` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
+| `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |
+| `SPC c F` | Indent region -- reindent the whole focused buffer structurally, or (with an attached language server) reformat it (LSP) |
 | `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC c x` | Toggle the GFM task checkbox (`- [ ]`/`- [x]`) on the current line |
 | `SPC c o` | Fuzzy-find a Markdown heading and jump to it |
@@ -909,6 +933,10 @@ animations = true
 [completion]
 symbols_file = /home/you/tcl-symbols.txt
 
+[lsp]
+server1 = python|C:\Users\you\.local\bin\pyright-langserver.exe --stdio
+server2 = rust|rust-analyzer
+
 [mib]
 root1 = MIB-A|C:\data\mib-a
 root2 = MIB-B|C:\data\mib-b
@@ -954,6 +982,7 @@ window2 = 4480,0,1920,1040|true
 | `editor` | `tab_width` | Visual columns a literal tab character expands to when rendered (real Vim's own `:set tabstop`) -- distinct from `indent_width`, which governs what Tab/`>>`/`<<` actually insert (always spaces) |
 | `editor` | `animations` | `true`/`false` -- whether caret-fade, scroll-ease, and yank/paste-pulse animations play at all; unset defaults to `true`. `SPC t a` toggles and persists this live |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
+| `lsp` | `server1`, `server2`, ... | A language server to launch, as `LANGUAGE\|COMMAND` (numbered, same reason as `mib`'s roots) -- `LANGUAGE` is one of `python`, `rust`, `c`, `bash`, `javascript`, `typescript`, `tsx`, ...; `COMMAND` is the program plus arguments, split on whitespace (no shell-quoting support). Overrides the built-in default for that language if one exists (currently just `python` → `pyright-langserver --stdio`); required for every other language |
 | `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
 | `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
