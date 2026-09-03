@@ -256,12 +256,18 @@ for anyone curious to poke around or build on it.
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
 - **History / commit graph** (`SPC g l`): a real commit DAG across
-  *every* branch (`git log --all`), drawn with coloured rails -- `●`
-  for a commit, `◆` for a merge, with the lanes a branch opens and
-  closes shown as they happen. Each row carries its short hash, the refs
-  pointing at it (`(HEAD -> develop)`, `(origin/main)`, tags), and its
-  subject; moving down the graph shows that commit's full diff in the
-  shared diff viewer. Beside it, a refs tree of Local / Remotes / Tags,
+  *every* branch (`git log --all`), drawn the way `git log --graph`
+  draws it -- two columns per lane, with a connector row below a merge
+  (`|\`) and above the commit that branches converge on (`|/`), so the
+  shape of the history is legible instead of crammed onto one line per
+  commit. Each row carries its short hash (padded to a common width, as
+  git abbreviates hashes to differing lengths), the refs pointing at it
+  (`(HEAD -> develop)`, `(origin/main)`, tags), and its subject; moving
+  down the graph shows that commit's author, date, full message and
+  diff in the shared diff viewer. Rails are ASCII by default because the
+  box-drawing alternatives are missing from many monospace fonts, and
+  the fallback font's different character width knocks every row out of
+  alignment -- `[git] graph_style = unicode` opts in if yours has them. Beside it, a refs tree of Local / Remotes / Tags,
   where every local branch is badged with how it stands against its
   upstream -- `[=]` in sync, `[^2]` ahead, `[v3]` behind, `[^2 v3]`
   diverged, `[gone]` when the remote branch was deleted, `[--]` when
@@ -1078,6 +1084,7 @@ user1 = jo1111111|John Doe
 [git]
 graph_limit = 200
 base_branch = develop
+graph_style = ascii
 
 [vnc]
 host1 = build-vm|10.0.0.5|5900
@@ -1125,6 +1132,7 @@ window2 = 4480,0,1920,1040|true
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 | `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset means `main` |
+| `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
 | `windows` | `window1`, `window2`, ... | One remembered OS window, as `X,Y,WIDTH,HEIGHT\|MAXIMIZED`. Written by Fenix on exit, not hand-authored -- `X,Y` is the outer frame's desktop position and `WIDTH,HEIGHT` the client area, which is the pair a window can actually be restored from. A window whose saved rectangle no longer lands on a connected monitor is placed by the window manager instead of opening off-screen |

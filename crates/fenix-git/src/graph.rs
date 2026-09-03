@@ -34,20 +34,31 @@ pub struct GraphCommit {
     pub subject: String,
 }
 
-/// Where one commit sits in the drawn graph, and which rails pass
-/// through its row.
+/// Where one commit sits in the drawn graph, and which lanes are live
+/// around it.
+///
+/// `live_before`/`live_after` are given rather than a single "rails on
+/// this row" list because a renderer that draws connector rows (the
+/// `|\` under a merge, the `|/` above a shared ancestor -- the same
+/// shape `git log --graph` uses) needs both sides: the connector above a
+/// commit is drawn against the lanes that existed before it, the one
+/// below against the lanes that exist after.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRow {
-    /// The column this commit's node is drawn in.
+    /// The lane this commit's node sits in.
     pub lane: usize,
-    /// Lanes that are drawn as a plain vertical rail on this row --
-    /// other branches passing by, unrelated to this commit.
-    pub through: Vec<usize>,
-    /// Lanes that ended at this commit: other lanes that were also
-    /// waiting for this exact hash, i.e. branches converging here. Drawn
-    /// as connectors into `lane`, not as rails.
+    /// Lanes occupied immediately before this commit -- including any
+    /// converging here (`closing`), and excluding this commit's own lane
+    /// when it's a branch tip nothing was heading toward yet.
+    pub live_before: Vec<usize>,
+    /// Lanes occupied immediately after -- including `lane` (unless this
+    /// is a root commit, whose lane goes free) and any this commit
+    /// opened.
+    pub live_after: Vec<usize>,
+    /// Lanes that ended at this commit: others that were also waiting
+    /// for this exact hash, i.e. branches converging here.
     pub closing: Vec<usize>,
-    /// Lanes opened by this commit's second and later parents -- the
+    /// Lanes carrying this commit's second and later parents -- the
     /// visual "this merge brought in another line of history".
     pub branching: Vec<usize>,
     pub is_merge: bool,
@@ -115,6 +126,7 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
+        let live_before = occupied(&lanes);
         let waiting: Vec<usize> =
             lanes.iter().enumerate().filter(|(_, l)| l.as_deref() == Some(commit.hash.as_str())).map(|(i, _)| i).collect();
 
@@ -146,16 +158,21 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
             }
         }
 
-        let through: Vec<usize> = lanes
-            .iter()
-            .enumerate()
-            .filter(|(i, l)| l.is_some() && *i != lane && !branching.contains(i))
-            .map(|(i, _)| i)
-            .collect();
-
-        rows.push(GraphRow { lane, through, closing, branching, is_merge: commit.parents.len() > 1 });
+        rows.push(GraphRow {
+            lane,
+            live_before,
+            live_after: occupied(&lanes),
+            closing,
+            branching,
+            is_merge: commit.parents.len() > 1,
+        });
     }
     rows
+}
+
+/// The indices of every lane currently heading toward something.
+fn occupied(lanes: &[Option<String>]) -> Vec<usize> {
+    lanes.iter().enumerate().filter(|(_, l)| l.is_some()).map(|(i, _)| i).collect()
 }
 
 /// The leftmost free lane, growing the set only when every existing lane
@@ -194,8 +211,11 @@ mod tests {
     fn a_linear_history_stays_in_one_lane() {
         let rows = assign_lanes(&[c("c", &["b"]), c("b", &["a"]), c("a", &[])]);
         assert!(rows.iter().all(|r| r.lane == 0), "{rows:?}");
-        assert!(rows.iter().all(|r| r.through.is_empty() && r.branching.is_empty() && r.closing.is_empty()));
+        assert!(rows.iter().all(|r| r.branching.is_empty() && r.closing.is_empty()));
         assert!(rows.iter().all(|r| !r.is_merge));
+        // Only lane 0 is ever live, and the root frees it again.
+        assert_eq!(rows[1].live_before, vec![0]);
+        assert!(rows[2].live_after.is_empty(), "a root commit's lane goes free: {:?}", rows[2]);
     }
 
     #[test]
@@ -204,8 +224,9 @@ mod tests {
         let rows = assign_lanes(&[c("x", &["a"]), c("y", &["a"]), c("a", &[])]);
         assert_eq!(rows[0].lane, 0);
         assert_eq!(rows[1].lane, 1);
-        // While `y` is drawn, lane 0 (heading toward `a`) passes by.
-        assert_eq!(rows[1].through, vec![0]);
+        // While `y` is drawn, lane 0 (heading toward `a`) is still live
+        // and gets a rail beside it.
+        assert_eq!(rows[1].live_before, vec![0]);
     }
 
     #[test]
@@ -215,7 +236,9 @@ mod tests {
         // the second, rather than being drawn twice.
         assert_eq!(rows[2].lane, 0);
         assert_eq!(rows[2].closing, vec![1]);
-        assert!(rows[2].through.is_empty(), "the closed lane is a connector, not a rail: {:?}", rows[2]);
+        // Both lanes were live coming in; only lane 0 survives.
+        assert_eq!(rows[2].live_before, vec![0, 1]);
+        assert!(rows[2].live_after.is_empty(), "`a` is a root, so nothing is left heading anywhere");
     }
 
     #[test]

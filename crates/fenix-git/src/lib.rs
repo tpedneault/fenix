@@ -18,7 +18,7 @@ pub use actions::{
 };
 pub use apply::{apply_patch, ApplyTarget};
 pub use branch::{list_branches, list_remote_branches, list_tags, Branch};
-pub use commit::{commits_between, list_commits, Commit};
+pub use commit::{commit_meta, commits_between, list_commits, Commit, CommitMeta};
 pub use diff::{commit_diff, diff_refs, file_diff, stash_diff};
 pub use files::{list_files, FileEntry};
 pub use graph::{assign_lanes, commit_graph, GraphCommit, GraphRow};

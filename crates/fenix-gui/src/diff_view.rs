@@ -131,11 +131,31 @@ fn content_row(width: usize, old: Option<usize>, new: Option<usize>, raw: &str) 
 /// `git_panel::render_unstaged` already uses for its directory tree, so
 /// folding survives a refresh without this module holding state.
 pub fn render(files: &[FileDiff], collapsed: &HashSet<String>) -> DiffView {
+    render_with_header(&[], files, collapsed)
+}
+
+/// `render`, preceded by caller-supplied rows.
+///
+/// The header is what makes a *commit* readable rather than just its
+/// changes: `git show` puts the author, date and message above the diff,
+/// but `fenix_diff::parse` deliberately keeps only the `diff --git`
+/// sections, so without this the commit pane showed a diff with no
+/// indication of whose commit it was or what it claimed to do. Merge
+/// request detail (author, source -> target, pipeline status) will want
+/// the same slot.
+///
+/// Header rows carry no anchor: there's no hunk or line under them to
+/// act on, so `diff_apply_hunk` and friends correctly decline on them.
+pub fn render_with_header(header: &[(String, DiffStyle)], files: &[FileDiff], collapsed: &HashSet<String>) -> DiffView {
     let mut b = Builder::new();
+    for (text, style) in header {
+        b.push(text, Some(DiffViewLine { style: *style, content_from: 0, anchor: None }));
+    }
     if files.is_empty() {
         b.push("    (no changes)", Some(DiffViewLine { style: DiffStyle::Meta, content_from: 0, anchor: None }));
         return b.finish();
     }
+
 
     let width = gutter_width(files);
     for (file_index, file) in files.iter().enumerate() {
@@ -317,6 +337,30 @@ mod tests {
         let meta = view.lines.iter().flatten().find(|l| l.style == DiffStyle::Meta).unwrap();
         assert_eq!(meta.anchor.unwrap().old_line, None);
         assert!(view.text.contains("\\ No newline at end of file"));
+    }
+
+    #[test]
+    fn a_header_is_rendered_above_the_diff_and_carries_no_anchor() {
+        let header = vec![
+            ("abc1234  Jane Doe  2026-09-03 14:22".to_string(), DiffStyle::FileHeader),
+            ("Fix the thing".to_string(), DiffStyle::Meta),
+        ];
+        let view = render_with_header(&header, &fenix_diff::parse(SIMPLE), &HashSet::new());
+        let lines: Vec<&str> = view.text.lines().collect();
+        assert_eq!(lines[0], "abc1234  Jane Doe  2026-09-03 14:22");
+        assert_eq!(lines[1], "Fix the thing");
+        assert!(lines[2].starts_with("M  foo.txt"), "the diff still follows: {:?}", lines[2]);
+        // Nothing to stage or open on a header row.
+        assert!(view.lines[0].as_ref().unwrap().anchor.is_none());
+        assert_eq!(view.text.lines().count(), view.lines.len());
+    }
+
+    #[test]
+    fn a_header_still_shows_when_the_commit_changed_nothing() {
+        let header = vec![("abc1234  an empty commit".to_string(), DiffStyle::FileHeader)];
+        let view = render_with_header(&header, &[], &HashSet::new());
+        assert!(view.text.starts_with("abc1234"), "got: {:?}", view.text);
+        assert!(view.text.contains("(no changes)"));
     }
 
     #[test]

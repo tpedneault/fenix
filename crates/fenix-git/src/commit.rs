@@ -34,6 +34,48 @@ pub fn commits_between(repo: &Path, base: &str, head: &str, limit: usize) -> Vec
     run_lines(repo, &["log", &n, &range, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"]).iter().filter_map(|l| parse_line(l)).collect()
 }
 
+/// One commit's own metadata, for showing above its diff.
+///
+/// `git show`'s output starts with exactly this (author, date, message)
+/// before the diff, but a *diff parser* has no reason to keep any of it
+/// -- `fenix_diff::parse` looks for `diff --git` and drops everything
+/// else. So it's fetched separately rather than scraped back out of
+/// text that was never meant to survive parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMeta {
+    pub short_hash: String,
+    pub author: String,
+    pub email: String,
+    /// Author date, ISO-like and already local (`%ad` with
+    /// `--date=format:`), e.g. `2026-09-03 14:22`.
+    pub date: String,
+    pub subject: String,
+    /// The message body below the subject line, empty for the common
+    /// single-line message.
+    pub body: String,
+}
+
+/// `git show -s` for one commit -- `-s` suppresses the diff, which the
+/// caller fetches separately via `diff::commit_diff` when it wants it.
+pub fn commit_meta(repo: &Path, hash: &str) -> Option<CommitMeta> {
+    // `%x1f` is git's own escape for the unit separator, so the format
+    // string itself stays plain ASCII.
+    let format = "--format=%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b";
+    let lines = run_lines(repo, &["show", "-s", "--date=format:%Y-%m-%d %H:%M", format, hash]);
+    // A body spans lines, so the record is the whole output rejoined,
+    // not just the first line.
+    let joined = lines.join("\n");
+    let mut fields = joined.split('\x1f');
+    Some(CommitMeta {
+        short_hash: fields.next()?.to_string(),
+        author: fields.next()?.to_string(),
+        email: fields.next()?.to_string(),
+        date: fields.next()?.to_string(),
+        subject: fields.next()?.to_string(),
+        body: fields.next().unwrap_or("").trim().to_string(),
+    })
+}
+
 fn parse_line(line: &str) -> Option<Commit> {
     let mut fields = line.split('\x1f');
     Some(Commit {
@@ -94,6 +136,47 @@ mod tests {
         assert_eq!(commits[0].message, "second commit");
         assert_eq!(commits[1].message, "first commit");
         assert!(commits[0].hash.starts_with(&commits[0].short_hash));
+    }
+
+    #[test]
+    fn commit_meta_reads_the_author_date_and_message() {
+        let dir = TempDir::new("commit_meta");
+        init_repo(dir.path());
+        dir.write("a.txt", "v1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "Fix the thing", "-m", "With a longer explanation
+over two lines."]);
+
+        let meta = commit_meta(dir.path(), "HEAD").expect("a commit exists");
+        assert_eq!(meta.author, "Test");
+        assert_eq!(meta.email, "test@example.com");
+        assert_eq!(meta.subject, "Fix the thing");
+        assert!(meta.body.contains("longer explanation"), "the body should survive: {:?}", meta.body);
+        assert!(meta.body.contains("over two lines."), "including its later lines: {:?}", meta.body);
+        // `--date=format:` gives a fixed, sortable shape rather than
+        // git's default locale-ish one.
+        assert!(meta.date.starts_with("20"), "expected an ISO-like date, got {:?}", meta.date);
+        assert!(!meta.short_hash.is_empty());
+    }
+
+    #[test]
+    fn commit_meta_of_a_single_line_message_has_an_empty_body() {
+        let dir = TempDir::new("commit_meta_no_body");
+        init_repo(dir.path());
+        dir.write("a.txt", "v1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "Just the subject"]);
+
+        let meta = commit_meta(dir.path(), "HEAD").unwrap();
+        assert_eq!(meta.subject, "Just the subject");
+        assert_eq!(meta.body, "");
+    }
+
+    #[test]
+    fn commit_meta_is_none_for_an_unknown_revision() {
+        let dir = TempDir::new("commit_meta_unknown");
+        init_repo(dir.path());
+        assert_eq!(commit_meta(dir.path(), "no-such-commit"), None);
     }
 
     #[test]

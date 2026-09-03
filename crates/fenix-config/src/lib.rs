@@ -110,6 +110,12 @@ pub struct Config {
     /// from the mainline" means depends on the project's own convention,
     /// and there's no way to infer it reliably.
     pub git_base_branch: Option<String>,
+    /// How the History view draws its commit graph: `ascii` (default)
+    /// or `unicode`. Unicode looks better *if* the configured font has
+    /// the box-drawing glyphs; when it doesn't, the fallback font's
+    /// different advance width knocks every row out of alignment, which
+    /// is why it isn't the default (see `graph_view::GraphStyle`).
+    pub git_graph_style: Option<String>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -222,6 +228,7 @@ impl Config {
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
             git_graph_limit: git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok()),
             git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
+            git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
@@ -255,6 +262,7 @@ impl Config {
             jira_users: Vec::new(),
             git_graph_limit: None,
             git_base_branch: None,
+            git_graph_style: None,
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
             windows: Vec::new(),

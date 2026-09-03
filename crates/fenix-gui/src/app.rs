@@ -1832,9 +1832,10 @@ pub enum FenixUserEvent {
     /// and discarded instead of clobbering Main with a stale diff --
     /// see `GitSession::main_request_id`'s own doc comment.
     GitMainReady { request_id: u64, buffer: BufferId, diff: Option<String> },
-    /// A History-view commit diff finished fetching -- same
-    /// request_id-guarded shape as `GitMainReady`, for the other view.
-    GitHistoryDetailReady { request_id: u64, buffer: BufferId, diff: Option<String> },
+    /// A History-view commit's metadata and diff finished fetching --
+    /// same request_id-guarded shape as `GitMainReady`, for the other
+    /// view. `None` when the commit couldn't be read at all.
+    GitHistoryDetailReady { request_id: u64, buffer: BufferId, diff: Option<CommitDetail> },
     /// A `SPC g f` fetch finished. Carries git's own message so a
     /// failure (no remote, auth, offline) surfaces verbatim rather than
     /// as a generic "fetch failed".
@@ -3054,6 +3055,46 @@ impl DiffSource {
             MainFetch::Commit(_) | MainFetch::Stash(_) | MainFetch::Skip | MainFetch::Untracked => DiffSource::ReadOnly,
         }
     }
+}
+
+/// One commit's metadata and its diff, fetched together so the History
+/// view's detail pane can show who wrote it and what it says above what
+/// it changed.
+#[derive(Debug, Clone)]
+pub(crate) struct CommitDetail {
+    meta: fenix_git::CommitMeta,
+    diff: String,
+}
+
+/// Both halves of a commit, off the input thread. Two `git` calls
+/// rather than one parsed apart, because `git show`'s header is dropped
+/// by `fenix_diff::parse` on principle -- see `fenix_git::commit_meta`.
+fn commit_detail(repo_root: &Path, hash: &str) -> Option<CommitDetail> {
+    let meta = fenix_git::commit_meta(repo_root, hash)?;
+    let diff = fenix_git::commit_diff(repo_root, hash).unwrap_or_default();
+    Some(CommitDetail { meta, diff })
+}
+
+/// A commit's metadata as diff-view header rows: an identity line, the
+/// subject, then any message body, then a blank spacer before the diff.
+fn commit_header_rows(meta: &fenix_git::CommitMeta) -> Vec<(String, diff_view::DiffStyle)> {
+    let mut rows = vec![
+        (format!("commit {}", meta.short_hash), diff_view::DiffStyle::FileHeader),
+        (format!("  {} <{}>  {}", meta.author, meta.email, meta.date), diff_view::DiffStyle::Meta),
+        (String::new(), diff_view::DiffStyle::Meta),
+        (format!("  {}", meta.subject), diff_view::DiffStyle::HunkHeader),
+    ];
+    if !meta.body.is_empty() {
+        // Wrapped the same way the Jira panel wraps a description, so a
+        // long body reads as prose instead of running off the pane.
+        for line in meta.body.lines() {
+            for wrapped in crate::wrap::wrap_text(line, crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(2).max(20)) {
+                rows.push((format!("  {wrapped}"), diff_view::DiffStyle::Context));
+            }
+        }
+    }
+    rows.push((String::new(), diff_view::DiffStyle::Meta));
+    rows
 }
 
 /// The actual `git diff`/`show`/`stash show` shell-out for a resolved
@@ -12225,9 +12266,24 @@ impl App {
     /// reasoning as `GitSession::staged_expanded_dirs` persisting across
     /// `git_refresh_session`.
     fn set_diff_buffer(&mut self, id: BufferId, diff: Option<&str>, source: DiffSource, repo_root: &Path) {
+        self.set_diff_buffer_with_header(id, &[], diff, source, repo_root);
+    }
+
+    /// `set_diff_buffer`, with rows above the diff -- a commit's author,
+    /// date and message, which `git show`'s own output carries but a
+    /// diff parser has no reason to keep (see `diff_view::
+    /// render_with_header`).
+    fn set_diff_buffer_with_header(
+        &mut self,
+        id: BufferId,
+        header: &[(String, diff_view::DiffStyle)],
+        diff: Option<&str>,
+        source: DiffSource,
+        repo_root: &Path,
+    ) {
         let files = diff.map(fenix_diff::parse).unwrap_or_default();
         let collapsed = self.diff_models.get(&id).map(|m| m.collapsed.clone()).unwrap_or_default();
-        let view = diff_view::render(&files, &collapsed);
+        let view = diff_view::render_with_header(header, &files, &collapsed);
         self.diff_lines.insert(id, view.lines);
         self.diff_models.insert(id, DiffModel { repo_root: repo_root.to_path_buf(), files, collapsed, source });
         if let Some(ob) = self.buffers.get_mut(id) {
@@ -12934,6 +12990,9 @@ impl App {
         // split already uses.
         let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
         self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
+        // The graph is what's being read here, and its rows are long
+        // (rails, hash, refs, subject) -- give it the larger share.
+        self.windows_mut().resize_focused(-0.1);
         let refs_pane = self.windows_mut().split(SplitKind::Horizontal, refs_buffer);
         self.workspaces.active_pane_states_mut().insert(refs_pane, PaneState::seeded_at(cursor));
         // `split` focuses the new pane, so the refs pane is current here
@@ -12972,7 +13031,8 @@ impl App {
 
         let commits = fenix_git::commit_graph(&repo_root, self.config.git_graph_limit.unwrap_or(200));
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = graph_view::render_graph(&commits, &rows);
+        let style = graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
+        let panel = graph_view::render_graph(&commits, &rows, style);
         self.graph_lines.insert(graph_buffer, panel.lines);
         self.replace_buffer_text(graph_buffer, &panel.text);
 
@@ -13006,9 +13066,17 @@ impl App {
     /// when there's no `event_proxy` (every test).
     fn history_sync_detail(&mut self) {
         let Some(session) = self.history_session.as_ref() else { return };
-        // Falls back to the first commit so opening the view shows
-        // something rather than an empty pane.
-        let commit = self.history_commit_at_cursor().or_else(|| session.commits.first().map(|c| c.hash.clone()));
+        let commit = match self.history_commit_at_cursor() {
+            Some(hash) => Some(hash),
+            // The graph's connector rows (`|\`, `|/`) draw no commit of
+            // their own. Scrolling across one must not yank the detail
+            // pane back to the newest commit -- keep showing whatever
+            // was selected.
+            None if session.last_detail_commit.is_some() => return,
+            // Nothing selected yet (the view just opened): show the
+            // newest commit rather than an empty pane.
+            None => session.commits.first().map(|c| c.hash.clone()),
+        };
         if commit == session.last_detail_commit {
             return;
         }
@@ -13026,26 +13094,30 @@ impl App {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let diff = fenix_git::commit_diff(&repo_root, &hash).ok();
-                    let _ = proxy.send_event(FenixUserEvent::GitHistoryDetailReady { request_id, buffer: detail_buffer, diff });
+                    let detail = commit_detail(&repo_root, &hash);
+                    let _ = proxy.send_event(FenixUserEvent::GitHistoryDetailReady { request_id, buffer: detail_buffer, diff: detail });
                 });
             }
             None => {
-                let diff = fenix_git::commit_diff(&repo_root, &hash).ok();
-                self.set_diff_buffer(detail_buffer, diff.as_deref(), DiffSource::ReadOnly, &repo_root);
+                let detail = commit_detail(&repo_root, &hash);
+                self.apply_history_detail(request_id, detail_buffer, detail);
             }
         }
     }
 
     /// `FenixUserEvent::GitHistoryDetailReady` handling -- drops a result
     /// a newer request has superseded, exactly as `apply_git_main` does.
-    fn apply_history_detail(&mut self, request_id: u64, buffer: BufferId, diff: Option<String>) {
+    fn apply_history_detail(&mut self, request_id: u64, buffer: BufferId, diff: Option<CommitDetail>) {
         let Some(session) = self.history_session.as_ref() else { return };
         if session.detail_request_id != request_id {
             return;
         }
         let repo_root = session.repo_root.clone();
-        self.set_diff_buffer(buffer, diff.as_deref(), DiffSource::ReadOnly, &repo_root);
+        let (header, diff) = match diff {
+            Some(detail) => (commit_header_rows(&detail.meta), Some(detail.diff)),
+            None => (Vec::new(), None),
+        };
+        self.set_diff_buffer_with_header(buffer, &header, diff.as_deref(), DiffSource::ReadOnly, &repo_root);
     }
 
     /// `SPC g f`: `git fetch --all --prune`, off the input thread since
@@ -27357,7 +27429,7 @@ mod tests {
         assert!(graph.contains("initial"));
         // Two tips means a second lane, so at least one row draws a rail
         // beside a node.
-        assert!(graph.lines().any(|l| l.starts_with("│●")), "expected a second lane:\n{graph}");
+        assert!(graph.lines().any(|l| l.starts_with("| *")), "expected a second lane:\n{graph}");
     }
 
     #[test]
@@ -27398,6 +27470,55 @@ mod tests {
 
         let detail = app.buffers.get(detail_buffer).unwrap().buffer.text();
         assert!(detail.contains("from_side.txt"), "expected the side commit's diff:\n{detail}");
+    }
+
+    #[test]
+    fn the_commit_pane_shows_who_wrote_it_and_what_it_says_above_the_diff() {
+        // The gap this closes: `git show`'s header is dropped by the
+        // diff parser, so the pane used to show a diff with no author,
+        // date or message at all.
+        let dir = diverged_repo("history_commit_header");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+
+        let detail = app.buffers.get(app.history_session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
+        assert!(detail.starts_with("commit "), "expected a commit header first:\n{detail}");
+        assert!(detail.contains("Test <test@example.com>"), "expected the author:\n{detail}");
+        assert!(detail.contains("on main"), "expected the subject:\n{detail}");
+        assert!(detail.contains("from_main.txt"), "and the diff below it:\n{detail}");
+    }
+
+    #[test]
+    fn scrolling_onto_a_graph_connector_row_keeps_the_commit_already_shown() {
+        // Connector rows (`|\`, `|/`) draw no commit; landing on one
+        // must not yank the detail pane back to the newest commit.
+        let dir = diverged_repo("history_connector_row");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        // A merge makes the graph emit connector rows at all.
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        app.open_history_view();
+
+        let session = app.history_session.as_ref().unwrap();
+        let (graph_pane, graph_buffer, detail_buffer) = (session.graph_pane, session.graph_buffer, session.detail_buffer);
+        app.windows_mut().focus(graph_pane);
+
+        // Select a specific commit, then step onto a connector row.
+        let connector = app.graph_lines[&graph_buffer]
+            .iter()
+            .position(|l| l.as_ref().is_some_and(|l| l.commit.is_none()))
+            .expect("a merge produces at least one connector row");
+        let before = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        let char_idx = app.buffers.get(graph_buffer).unwrap().buffer.line_start_char(connector);
+        app.test_set_cursor(Cursor { char_idx, sticky_col: 0 });
+        app.history_sync_detail();
+
+        assert_eq!(app.buffers.get(detail_buffer).unwrap().buffer.text(), before, "the detail pane should be unchanged");
     }
 
     #[test]

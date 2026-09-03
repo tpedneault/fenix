@@ -42,48 +42,99 @@ pub struct GraphPanel {
     pub lines: Vec<Option<GraphLine>>,
 }
 
-/// Rail glyphs for one row, `width` columns wide.
+/// Which characters the rails are drawn with.
 ///
-/// Built in a deliberate order -- horizontals first, then the connector
-/// endpoints, then the node -- so that later, more specific marks
-/// overwrite earlier, more general ones rather than the reverse. A
-/// horizontal crossing a rail that's just passing through becomes `┼`
-/// instead of erasing it, which is what keeps an unrelated branch's line
-/// continuous behind a merge.
-fn rails(row: &GraphRow, width: usize) -> String {
-    let mut cells = vec![' '; width.max(row.lane + 1)];
-    for &c in &row.through {
-        if c < cells.len() {
-            cells[c] = '│';
-        }
-    }
-    for &end in row.closing.iter().chain(row.branching.iter()) {
-        let (lo, hi) = if end > row.lane { (row.lane + 1, end) } else { (end + 1, row.lane) };
-        for cell in cells.iter_mut().take(hi).skip(lo) {
-            *cell = if *cell == '│' { '┼' } else { '─' };
-        }
-    }
-    for &c in &row.closing {
-        if c < cells.len() {
-            cells[c] = if c > row.lane { '╯' } else { '╰' };
-        }
-    }
-    for &c in &row.branching {
-        if c < cells.len() {
-            cells[c] = if c > row.lane { '╮' } else { '╭' };
-        }
-    }
-    cells[row.lane] = if row.is_merge { '◆' } else { '●' };
-    cells.into_iter().collect()
+/// ASCII is the default, and not for nostalgia: the box-drawing glyphs
+/// are frequently missing from a monospace font, and when they are, the
+/// renderer silently falls back to some *other* font whose advance width
+/// doesn't match -- so every row shifts by a different amount depending
+/// on how many rails it happens to contain, and the graph stops lining
+/// up. ASCII cannot do that, and it's what `git log --graph` itself
+/// draws. `unicode` is there for anyone whose font does have the glyphs
+/// (`[git] graph_style = unicode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphStyle {
+    Ascii,
+    Unicode,
 }
 
-/// The commit graph: one row per commit, `{rails} {short hash}
-/// {(refs)} {subject}`.
+impl GraphStyle {
+    /// `(commit, merge, rail, branch-out, close-in)`.
+    fn glyphs(self) -> (char, char, char, char, char) {
+        match self {
+            GraphStyle::Ascii => ('*', '*', '|', '\\', '/'),
+            GraphStyle::Unicode => ('●', '◆', '│', '╲', '╱'),
+        }
+    }
+
+    /// Parses `[git] graph_style`; anything unrecognized (including
+    /// nothing configured) is ASCII, since that's the option that can't
+    /// render wrong.
+    pub fn from_config(name: Option<&str>) -> Self {
+        match name.map(str::trim) {
+            Some("unicode") => GraphStyle::Unicode,
+            _ => GraphStyle::Ascii,
+        }
+    }
+}
+
+/// Two screen columns per lane, matching `git log --graph`.
 ///
-/// Rail width is fixed for the whole view (the widest row's lane count),
-/// so columns line up vertically and a branch's rail reads as one
-/// continuous line rather than shifting as you scroll.
-pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow]) -> GraphPanel {
+/// One column per lane looked tighter but left no room between rails for
+/// a diagonal, so every merge connector had to be crammed onto the
+/// commit's own row (`◆┼╮`) where it read as noise. With two, a
+/// connector gets its own column and the graph is legible.
+fn lane_col(lane: usize) -> usize {
+    lane * 2
+}
+
+/// A row of rail cells, `lanes` wide, trimmed of trailing blanks.
+struct Rails {
+    cells: Vec<char>,
+}
+
+impl Rails {
+    fn new(lanes: usize) -> Self {
+        Self { cells: vec![' '; lanes * 2] }
+    }
+
+    fn set(&mut self, col: usize, ch: char) {
+        if col < self.cells.len() {
+            self.cells[col] = ch;
+        }
+    }
+
+    /// Vertical rails for every lane in `live`.
+    fn rails_at(&mut self, live: impl IntoIterator<Item = usize>, rail: char) {
+        for lane in live {
+            self.set(lane_col(lane), rail);
+        }
+    }
+
+    fn finish(self, width: usize) -> String {
+        let mut out: String = self.cells.into_iter().collect();
+        // Padded rather than trimmed: every row has to occupy the same
+        // width or the hash column after it wanders.
+        while out.chars().count() < width {
+            out.push(' ');
+        }
+        out
+    }
+}
+
+/// The commit graph, in `git log --graph`'s own shape: a row per commit,
+/// plus a connector row above a commit that branches converge on (`|/`)
+/// and below one that opens a branch (`|\`).
+///
+/// Those connector rows are what make a merge readable. Drawing every
+/// edge on the commit's own row instead packs three meanings into one
+/// line of glyphs; giving each edge its own row is both what git does
+/// and what makes the shape of the history obvious at a glance.
+///
+/// Short hashes are padded to a common width. Git abbreviates them to
+/// whatever length keeps each one unambiguous, so in a big repo they are
+/// *not* all the same length, and an unpadded column visibly staggers.
+pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyle) -> GraphPanel {
     let mut text = String::new();
     let mut lines = Vec::new();
     if commits.is_empty() {
@@ -92,27 +143,70 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow]) -> GraphPanel {
         return GraphPanel { text, lines };
     }
 
-    let width = rows
+    let (node_g, merge_g, rail_g, branch_g, close_g) = style.glyphs();
+    let lane_count = rows
         .iter()
-        .map(|r| r.lane.max(r.through.iter().chain(r.closing.iter()).chain(r.branching.iter()).copied().max().unwrap_or(0)) + 1)
+        .map(|r| {
+            let widest = r.live_before.iter().chain(r.live_after.iter()).copied().max().unwrap_or(0);
+            r.lane.max(widest) + 1
+        })
         .max()
         .unwrap_or(1);
+    let rail_width = lane_count * 2;
+    let hash_width = commits.iter().map(|c| c.short_hash.chars().count()).max().unwrap_or(7);
+
+    let mut push_edge = |text: &mut String, lines: &mut Vec<Option<GraphLine>>, rails: Rails| {
+        let row = rails.finish(rail_width);
+        // Trailing blanks carry no information on a connector row, but
+        // the leading rails must keep their columns.
+        text.push_str(row.trim_end());
+        text.push('\n');
+        lines.push(Some(GraphLine { spans: vec![(0, GraphSpan::Rails)], commit: None }));
+    };
 
     for (commit, row) in commits.iter().zip(rows) {
-        let rail = rails(row, width);
-        let mut line = format!("{rail} {} ", commit.short_hash);
-        let mut spans = vec![(0, GraphSpan::Rails), (rail.chars().count() + 1, GraphSpan::Hash)];
+        // Above the commit: lanes converging into it, drawn collapsing
+        // toward its own lane.
+        if !row.closing.is_empty() {
+            let mut rails = Rails::new(lane_count);
+            rails.rails_at(row.live_before.iter().copied().filter(|l| !row.closing.contains(l)), rail_g);
+            rails.set(lane_col(row.lane), rail_g);
+            for &c in &row.closing {
+                let (col, glyph) = if c > row.lane { (lane_col(c) - 1, close_g) } else { (lane_col(c) + 1, branch_g) };
+                rails.set(col, glyph);
+            }
+            push_edge(&mut text, &mut lines, rails);
+        }
 
+        // The commit itself: a rail for every lane that was already live
+        // and isn't converging here, and the node in its own lane.
+        let mut rails = Rails::new(lane_count);
+        rails.rails_at(row.live_before.iter().copied().filter(|l| !row.closing.contains(l) && *l != row.lane), rail_g);
+        rails.set(lane_col(row.lane), if row.is_merge { merge_g } else { node_g });
+
+        let rail = rails.finish(rail_width);
+        let mut line = format!("{rail} {:<hash_width$} ", commit.short_hash);
+        let mut spans = vec![(0, GraphSpan::Rails), (rail_width + 1, GraphSpan::Hash)];
         if !commit.refs.is_empty() {
             spans.push((line.chars().count(), GraphSpan::Refs));
             line.push_str(&format!("({}) ", commit.refs.join(", ")));
         }
         spans.push((line.chars().count(), GraphSpan::Subject));
         line.push_str(&commit.subject);
-
         text.push_str(&line);
         text.push('\n');
         lines.push(Some(GraphLine { spans, commit: Some(commit.hash.clone()) }));
+
+        // Below the commit: the lane(s) a merge opened, fanning out.
+        if !row.branching.is_empty() {
+            let mut rails = Rails::new(lane_count);
+            rails.rails_at(row.live_after.iter().copied().filter(|l| !row.branching.contains(l)), rail_g);
+            for &b in &row.branching {
+                let (col, glyph) = if b > row.lane { (lane_col(b) - 1, branch_g) } else { (lane_col(b) + 1, close_g) };
+                rails.set(col, glyph);
+            }
+            push_edge(&mut text, &mut lines, rails);
+        }
     }
     GraphPanel { text, lines }
 }
@@ -263,20 +357,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_linear_history_draws_one_rail_of_nodes() {
-        let commits =
-            vec![commit("aaa1111", "third", &[], &["bbb2222"]), commit("bbb2222", "second", &[], &["ccc3333"]), commit("ccc3333", "first", &[], &[])];
-        let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
-        for line in panel.text.lines() {
-            assert!(line.starts_with('●'), "every row is a node on the single rail: {line:?}");
-        }
-        assert_eq!(panel.text.lines().count(), 3);
+    /// Only the rows that draw a commit -- connector rows have no
+    /// commit of their own.
+    fn commit_rows(panel: &GraphPanel) -> Vec<String> {
+        panel
+            .text
+            .lines()
+            .zip(&panel.lines)
+            .filter(|(_, meta)| meta.as_ref().is_some_and(|m| m.commit.is_some()))
+            .map(|(text, _)| text.to_string())
+            .collect()
     }
 
     #[test]
-    fn a_merge_row_is_marked_and_opens_a_rail_to_the_side_it_merged() {
+    fn a_linear_history_draws_one_rail_of_nodes_and_no_connector_rows() {
+        let commits =
+            vec![commit("aaa1111", "third", &[], &["bbb2222"]), commit("bbb2222", "second", &[], &["ccc3333"]), commit("ccc3333", "first", &[], &[])];
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+        assert_eq!(panel.text.lines().count(), 3, "nothing branches, so there is nothing to connect");
+        for line in panel.text.lines() {
+            assert!(line.starts_with('*'), "every row is a node on the single rail: {line:?}");
+        }
+    }
+
+    /// The defect this rendering was rebuilt to fix: with one column per
+    /// lane and no connector rows, merge edges were crammed onto the
+    /// commit's own row and the hash column wandered from row to row.
+    #[test]
+    fn every_commit_row_starts_its_hash_in_the_same_column() {
         let commits = vec![
             commit("mmm1111", "merge side", &[], &["ppp2222", "sss3333"]),
             commit("ppp2222", "on main", &[], &["aaa4444"]),
@@ -284,13 +393,63 @@ mod tests {
             commit("aaa4444", "initial", &[], &[]),
         ];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
-        let merge_row = panel.text.lines().next().unwrap();
-        assert!(merge_row.starts_with("◆"), "a merge reads differently from a plain commit: {merge_row:?}");
-        assert!(merge_row.contains('╮'), "and opens a rail toward the branch it merged: {merge_row:?}");
-        // The two sides converge again at the root.
-        let root_row = panel.text.lines().nth(3).unwrap();
-        assert!(root_row.contains('╯'), "the side rail closes back in: {root_row:?}");
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+
+        let hash_columns: Vec<usize> =
+            commit_rows(&panel).iter().zip(&commits).map(|(line, c)| line.find(c.short_hash.as_str()).unwrap()).collect();
+        assert!(hash_columns.windows(2).all(|w| w[0] == w[1]), "hash columns must all match: {hash_columns:?}
+{}", panel.text);
+    }
+
+    #[test]
+    fn hashes_of_differing_abbreviated_length_are_padded_to_one_column() {
+        // Git abbreviates each hash to whatever keeps it unambiguous, so
+        // in a real repo they are not all the same length.
+        let mut short = commit("abc1234", "short hash", &[], &["dddddddddd"]);
+        short.short_hash = "abc1234".to_string();
+        let mut long = commit("dddddddddd", "longer hash", &[], &[]);
+        long.short_hash = "dddddddddd".to_string();
+        let commits = vec![short, long];
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+
+        let subject_columns: Vec<usize> =
+            commit_rows(&panel).iter().zip(&commits).map(|(line, c)| line.find(c.subject.as_str()).unwrap()).collect();
+        assert_eq!(subject_columns[0], subject_columns[1], "subjects must line up despite differing hash lengths:
+{}", panel.text);
+    }
+
+    #[test]
+    fn a_merge_gets_a_connector_row_below_it_opening_the_merged_lane() {
+        let commits = vec![
+            commit("mmm1111", "merge side", &[], &["ppp2222", "sss3333"]),
+            commit("ppp2222", "on main", &[], &["aaa4444"]),
+            commit("sss3333", "on side", &[], &["aaa4444"]),
+            commit("aaa4444", "initial", &[], &[]),
+        ];
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+        let lines: Vec<&str> = panel.text.lines().collect();
+
+        assert!(lines[0].starts_with('*'), "the merge commit's own row: {:?}", lines[0]);
+        assert_eq!(lines[1], "|\\", "a connector row fans the merged branch out, exactly as git draws it");
+        assert!(panel.lines[1].as_ref().unwrap().commit.is_none(), "a connector row draws no commit");
+    }
+
+    #[test]
+    fn converging_branches_get_a_connector_row_above_the_commit_they_meet_at() {
+        let commits = vec![
+            commit("mmm1111", "merge side", &[], &["ppp2222", "sss3333"]),
+            commit("ppp2222", "on main", &[], &["aaa4444"]),
+            commit("sss3333", "on side", &[], &["aaa4444"]),
+            commit("aaa4444", "initial", &[], &[]),
+        ];
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+        let lines: Vec<&str> = panel.text.lines().collect();
+        let root = lines.iter().position(|l| l.contains("initial")).unwrap();
+
+        assert_eq!(lines[root - 1], "|/", "the side lane collapses in just above the shared ancestor");
     }
 
     #[test]
@@ -298,16 +457,60 @@ mod tests {
         let commits =
             vec![commit("xxx1111", "tip x", &[], &["aaa3333"]), commit("yyy2222", "tip y", &[], &["aaa3333"]), commit("aaa3333", "root", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
-        let second = panel.text.lines().nth(1).unwrap();
-        assert!(second.starts_with("│●"), "lane 0 passes by while `y` is drawn: {second:?}");
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+        let second = commit_rows(&panel)[1].clone();
+        assert!(second.starts_with("| *"), "lane 0 passes by while `y` is drawn: {second:?}");
+    }
+
+    #[test]
+    fn each_lane_gets_two_columns_so_connectors_have_room() {
+        let commits = vec![
+            commit("mmm1111", "merge side", &[], &["ppp2222", "sss3333"]),
+            commit("ppp2222", "on main", &[], &["aaa4444"]),
+            commit("sss3333", "on side", &[], &["aaa4444"]),
+            commit("aaa4444", "initial", &[], &[]),
+        ];
+        let rows = fenix_git::assign_lanes(&commits);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
+        // Two lanes -> four rail columns, then a space, so the hash
+        // starts at column 5 on every commit row.
+        for (line, commit) in commit_rows(&panel).iter().zip(&commits) {
+            assert_eq!(line.find(commit.short_hash.as_str()), Some(5), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_unicode_style_swaps_the_glyphs_without_changing_the_layout() {
+        let commits = vec![commit("mmm1111", "merge", &[], &["ppp2222", "sss3333"]), commit("ppp2222", "a", &[], &[]), commit("sss3333", "b", &[], &[])];
+        let rows = fenix_git::assign_lanes(&commits);
+        let ascii = render_graph(&commits, &rows, GraphStyle::Ascii);
+        let unicode = render_graph(&commits, &rows, GraphStyle::Unicode);
+        assert!(unicode.text.contains('◆'), "a merge reads differently in unicode:
+{}", unicode.text);
+        assert_eq!(
+            ascii.text.lines().count(),
+            unicode.text.lines().count(),
+            "the styles differ only in glyphs, never in structure"
+        );
+        assert_eq!(
+            ascii.text.lines().map(|l| l.chars().count()).collect::<Vec<_>>(),
+            unicode.text.lines().map(|l| l.chars().count()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_graph_style_defaults_to_ascii_for_anything_unconfigured_or_unknown() {
+        assert_eq!(GraphStyle::from_config(None), GraphStyle::Ascii);
+        assert_eq!(GraphStyle::from_config(Some("nonsense")), GraphStyle::Ascii);
+        assert_eq!(GraphStyle::from_config(Some("unicode")), GraphStyle::Unicode);
+        assert_eq!(GraphStyle::from_config(Some(" unicode ")), GraphStyle::Unicode);
     }
 
     #[test]
     fn a_row_shows_its_hash_ref_decorations_and_subject_in_that_order() {
         let commits = vec![commit("abc1234", "Fix the thing", &["HEAD -> main", "origin/main"], &[])];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let row = panel.text.lines().next().unwrap();
         assert!(row.contains("abc1234"));
         assert!(row.contains("(HEAD -> main, origin/main)"));
@@ -318,7 +521,7 @@ mod tests {
     fn every_graph_row_anchors_to_its_commit_and_spans_ascend() {
         let commits = vec![commit("abc1234", "Fix the thing", &["main"], &[])];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let meta = panel.lines[0].as_ref().unwrap();
         assert_eq!(meta.commit.as_deref(), Some("abc1234"));
         let kinds: Vec<GraphSpan> = meta.spans.iter().map(|(_, k)| *k).collect();
@@ -330,14 +533,14 @@ mod tests {
     fn a_row_with_no_refs_has_no_refs_span() {
         let commits = vec![commit("abc1234", "plain", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let kinds: Vec<GraphSpan> = panel.lines[0].as_ref().unwrap().spans.iter().map(|(_, k)| *k).collect();
         assert_eq!(kinds, vec![GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Subject]);
     }
 
     #[test]
     fn an_empty_history_says_so() {
-        let panel = render_graph(&[], &[]);
+        let panel = render_graph(&[], &[], GraphStyle::Ascii);
         assert!(panel.text.contains("(no commits)"));
         assert_eq!(panel.lines.len(), 1);
     }
@@ -346,7 +549,7 @@ mod tests {
     fn text_and_lines_stay_the_same_length() {
         let commits = vec![commit("aaa1111", "a", &[], &["bbb2222"]), commit("bbb2222", "b", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
-        let panel = render_graph(&commits, &rows);
+        let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         assert_eq!(panel.text.lines().count(), panel.lines.len());
     }
 
@@ -411,3 +614,4 @@ mod tests {
         assert_eq!(fetch_age_text(Some(200_000)), "fetched 2d ago");
     }
 }
+

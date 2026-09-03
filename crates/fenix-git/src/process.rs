@@ -9,6 +9,19 @@ use std::process::Command;
 fn git_command(repo: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo).args(args);
+    // Fenix has no terminal for git to hand an interactive prompt to, so
+    // anything that would open one has to be defused up front or the
+    // command hangs forever with no way to answer it and no sign of why:
+    //
+    // - `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR`: `rebase --continue`, `merge`,
+    //   `revert` and `cherry-pick` all launch an editor for a commit or
+    //   todo message. `true` exits 0 immediately, which git reads as
+    //   "accept the prepared message unchanged" -- exactly what an
+    //   editor-less client wants.
+    // - `GIT_TERMINAL_PROMPT=0`: makes `fetch`/`push` against a repo
+    //   needing credentials fail with a real error instead of blocking
+    //   on a username prompt nobody can see.
+    cmd.env("GIT_EDITOR", "true").env("GIT_SEQUENCE_EDITOR", "true").env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

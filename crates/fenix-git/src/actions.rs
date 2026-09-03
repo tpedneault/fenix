@@ -129,6 +129,117 @@ pub fn delete_branch(repo: &Path, name: &str, force: bool) -> Result<String, Str
     run_action(repo, &delete_branch_args(name, force))
 }
 
+/// How far back a `reset` unwinds: `--soft` keeps the index and working
+/// tree, `--mixed` keeps only the working tree, `--hard` discards both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+impl ResetMode {
+    fn flag(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        }
+    }
+}
+
+/// Replays the current branch on top of `onto`.
+///
+/// A conflict makes this return `Err` with git's own message *and* leave
+/// the rebase in progress -- which is not a failure to recover from but
+/// the normal middle of the operation. Callers check `state::in_progress`
+/// rather than treating `Err` as "nothing happened"; `rebase_continue`
+/// or `rebase_abort` is how it ends either way.
+pub fn rebase(repo: &Path, onto: &str) -> Result<String, String> {
+    run_action(repo, &["rebase".to_string(), onto.to_string()])
+}
+
+pub fn rebase_continue(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["rebase".to_string(), "--continue".to_string()])
+}
+
+pub fn rebase_abort(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["rebase".to_string(), "--abort".to_string()])
+}
+
+/// Drops the commit the rebase is stuck on and moves to the next -- for
+/// when a conflicted commit turns out to be redundant (its change is
+/// already upstream), which is common when rebasing a long-lived branch.
+pub fn rebase_skip(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["rebase".to_string(), "--skip".to_string()])
+}
+
+/// `--no-edit` so the default merge message is taken as-is rather than
+/// relying on `GIT_EDITOR` being defused (it is -- see `process::
+/// git_command` -- but being explicit here means the intent survives
+/// even if that ever changes).
+pub fn merge(repo: &Path, branch: &str) -> Result<String, String> {
+    run_action(repo, &["merge".to_string(), "--no-edit".to_string(), branch.to_string()])
+}
+
+pub fn merge_abort(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["merge".to_string(), "--abort".to_string()])
+}
+
+/// `git pull --rebase` -- replays local commits on top of what was
+/// fetched instead of adding a merge commit for every sync.
+pub fn pull_rebase(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["pull".to_string(), "--rebase".to_string()])
+}
+
+/// `--force-with-lease`, never a bare `--force`.
+///
+/// The difference matters after every rebase: with-lease refuses the
+/// push if the remote branch moved since it was last fetched, so it
+/// can't silently discard someone else's commits. A bare force can, and
+/// this crate deliberately offers no way to do that.
+pub fn push_force_with_lease(repo: &Path) -> Result<String, String> {
+    run_action(repo, &["push".to_string(), "--force-with-lease".to_string()])
+}
+
+/// Pushes a branch that has no upstream yet, setting one -- what a
+/// freshly created local branch needs before a plain `push` will work.
+pub fn push_set_upstream(repo: &Path, remote: &str, branch: &str) -> Result<String, String> {
+    run_action(repo, &["push".to_string(), "-u".to_string(), remote.to_string(), branch.to_string()])
+}
+
+/// Rewrites the last commit. `message` `None` keeps the existing one
+/// (`--no-edit`), which is the "I forgot to stage a file" case.
+pub fn amend_commit(repo: &Path, message: Option<&str>) -> Result<String, String> {
+    let mut args = vec!["commit".to_string(), "--amend".to_string()];
+    match message {
+        Some(m) => {
+            args.push("-m".to_string());
+            args.push(m.to_string());
+        }
+        None => args.push("--no-edit".to_string()),
+    }
+    run_action(repo, &args)
+}
+
+/// Creates a commit undoing `hash`. Like `rebase`, a conflict leaves the
+/// revert in progress rather than failing outright.
+pub fn revert(repo: &Path, hash: &str) -> Result<String, String> {
+    run_action(repo, &["revert".to_string(), "--no-edit".to_string(), hash.to_string()])
+}
+
+pub fn cherry_pick(repo: &Path, hash: &str) -> Result<String, String> {
+    run_action(repo, &["cherry-pick".to_string(), hash.to_string()])
+}
+
+/// Moves the current branch to `target`. Destructive in `Hard` mode
+/// (working-tree changes are gone, with no reflog entry to recover them
+/// from) -- callers gate it behind a confirmation, the same way
+/// `discard_file` is gated.
+pub fn reset(repo: &Path, target: &str, mode: ResetMode) -> Result<String, String> {
+    run_action(repo, &["reset".to_string(), mode.flag().to_string(), target.to_string()])
+}
+
 pub fn stash_push(repo: &Path) -> Result<String, String> {
     run_action(repo, &["stash".to_string(), "push".to_string()])
 }
