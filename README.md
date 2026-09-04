@@ -659,19 +659,49 @@ for anyone curious to poke around or build on it.
   (invisible as a distinct thing) or comment-colored (actively
   de-emphasized) depending on the theme, which is most of why a
   brace-and-bracket language like Tcl looked flat.
-- **Terminal panel**: `SPC o t` toggles a real, interactive terminal --
-  `powershell.exe` on Windows, `$SHELL` (falling back to `/bin/sh`)
-  elsewhere -- as a full-width strip along the bottom of the window,
-  under every existing split, with full ANSI color support (16-color,
-  256-color, and RGB foreground/background). Toggling it off only hides
-  it: the shell process, and anything running in it, keeps running in
-  the background, and reopening shows it caught up to wherever it got
-  to. `Ctrl-\` unfocuses the terminal without hiding it (mirrors
-  Neovim's own `:terminal` convention), so normal Vim window navigation
-  (`SPC w ...`) can move focus elsewhere while it stays visible. v1
-  limitations: no mouse reporting, no bracketed paste, no F-keys, no
+- **Terminals**, in two shapes, because they answer two different
+  questions. `SPC o t` is the **popup panel**: one shell for the whole
+  application, a full-width strip along the bottom of the window under
+  every existing split, that drops down over whatever you were looking
+  at and follows you from workspace to workspace -- for the build you
+  start, glance at, and dismiss. `SPC o T` puts a **shell in the focused
+  pane** instead: it lives in that pane, in that workspace, beside the
+  code it goes with, splits and resizes like any other pane, and is
+  still there when you switch away and back. Open as many as you like
+  (`*terminal 1*`, `*terminal 2*`, ... in `SPC b b`); numbers are never
+  reused, since a recycled one would point at a different shell than the
+  one you remembered.
+
+  Both run `powershell.exe` on Windows, `$SHELL` (falling back to
+  `/bin/sh`) elsewhere, with full ANSI color support (16-color,
+  256-color, and RGB foreground/background). Neither is killed by
+  looking away: hiding the panel, or pointing a pane at another buffer,
+  leaves the shell and anything running in it going, and coming back
+  shows it caught up to wherever it got to. Closing a terminal *buffer*
+  (`:q`, `SPC b k`) is the one gesture that ends its shell -- that is
+  the point at which nothing could show it again.
+
+  `Ctrl-\` hands the keyboard back to the editor without closing or
+  hiding anything (Neovim's own `:terminal` convention), so `SPC w ...`
+  can move focus elsewhere while the shell stays on screen; `SPC o T`
+  (or a click into the pane) takes it back, and running `exit` hands it
+  back on its own. A pane terminal only receives what you type while its
+  own pane is focused, so a keystroke meant for the file next door never
+  lands in a shell.
+
+  A terminal buffer holds no text of its own -- what you see is the
+  shell's screen grid, rendered directly -- so there is nothing there
+  for `:w` to write to a file and nothing Vim's editing commands can
+  corrupt.
+
+  v1 limitations: no mouse reporting, no bracketed paste, no F-keys, no
   application-cursor-mode variants -- covers ordinary shell/REPL/pager
-  use, not a full terminfo-correct implementation.
+  use, not a full terminfo-correct implementation. Terminal *queries*
+  are answered, though (cursor position, device attributes), which is
+  not optional on Windows: ConPTY opens every session by asking where
+  the cursor is and produces no further output at all until it is told
+  -- an emulator that only listens sits looking at a live shell and an
+  empty screen forever.
 - **Table/spreadsheet view**: `SPC f t` toggles the focused buffer
   between plain text and an elastic-column table view of its own,
   genuinely tab-separated content -- real elastic tabstops, not a
@@ -794,6 +824,7 @@ popup shows what keys continue it.
 | `SPC s p` | Search and replace across the project |
 | `SPC o d` | Open the startup dashboard |
 | `SPC o t` | Toggle the terminal panel |
+| `SPC o T` | Open a shell in the focused pane |
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
@@ -1380,7 +1411,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-git` | Shells out to `git`: status/files/branches/remotes/tags, commit graph topology and lane assignment, diffs (working tree, commit, ref-to-ref), fetch, and applying a patch to stage/unstage/discard one hunk |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
 | `fenix-config` | The unified `config.ini` reader/writer |
-| `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) for the terminal panel — no thread/event-loop knowledge of its own |
+| `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) and terminal-query replies for both terminal surfaces — no thread/event-loop knowledge of its own |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 
 ## License

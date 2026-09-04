@@ -91,6 +91,7 @@ impl CommandRegistry {
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
+        registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
@@ -402,6 +403,10 @@ fn cmd_dashboard_open(ctx: &mut CommandCtx) {
 
 fn cmd_toggle_terminal(ctx: &mut CommandCtx) {
     ctx.app.toggle_terminal();
+}
+
+fn cmd_open_terminal_buffer(ctx: &mut CommandCtx) {
+    ctx.app.open_terminal_buffer();
 }
 
 fn cmd_docker_open(ctx: &mut CommandCtx) {

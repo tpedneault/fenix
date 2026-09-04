@@ -169,6 +169,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('o')], "open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('t')], "toggle terminal", "terminal.toggle");
+        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('T')], "terminal in this pane", "terminal.open_buffer");
 
         // Reserved entirely for Docker (Lazydocker-style) -- the
         // dashboard used to live at `SPC d d` but moved to `SPC o d`
@@ -637,6 +638,21 @@ mod tests {
         match m.feed(KeyPress::char('t')) {
             fenix_keymap::Step::Matched(&"terminal.toggle") => {}
             _ => panic!("expected SPC o t to resolve to terminal.toggle"),
+        }
+    }
+
+    #[test]
+    fn leader_trie_resolves_the_pane_terminal() {
+        // A capital `T` beside the panel's own `t` -- the two shells
+        // answer different questions (see `TerminalTarget`), so they get
+        // adjacent keys rather than one overloaded one.
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('o'));
+        match m.feed(KeyPress::char('T')) {
+            fenix_keymap::Step::Matched(&"terminal.open_buffer") => {}
+            _ => panic!("expected SPC o T to resolve to terminal.open_buffer"),
         }
     }
 

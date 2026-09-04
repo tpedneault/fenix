@@ -1056,7 +1056,35 @@ fn render_breakpoints_text(breakpoints: &HashMap<PathBuf, std::collections::BTre
     out
 }
 
-/// Streams raw PTY output bytes for the terminal panel's shell into
+/// Which of Fenix's shells a chunk of PTY output, or a finished spawn,
+/// belongs to.
+///
+/// There are two kinds, deliberately, because they answer two different
+/// questions. The **panel** is the one shell you keep around: a strip
+/// that drops down over whatever you are looking at, follows you from
+/// workspace to workspace, and keeps running while hidden -- for the
+/// `cargo build` you start, glance at, and dismiss. A **buffer**
+/// terminal is a shell that belongs *somewhere*: it lives in a pane, in
+/// one workspace, beside the code it goes with, and stays there while
+/// you switch away and back. Neither substitutes for the other, and a
+/// single shared session could not be both places at once.
+///
+/// Everything downstream of the PTY is common to the two -- the same
+/// `fenix_terminal::Terminal`, the same reader thread, the same
+/// `vt100` screen rendering -- so the split is carried as this tag on
+/// the events rather than as two parallel sets of plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TerminalTarget {
+    /// The popup panel (`SPC o t`) -- one per application, shared by
+    /// every workspace and every frame.
+    Panel,
+    /// One pane-resident shell (`SPC o T`), identified by its own
+    /// buffer exactly as a `VncSession` is -- see `BufferKind::
+    /// Terminal` for why a buffer, and not a pane, is the identity.
+    Buffer(BufferId),
+}
+
+/// Streams raw PTY output bytes for one shell into
 /// `FenixUserEvent::TerminalOutput` -- same "background thread, stopped
 /// via a kill that unblocks its blocking read" shape as `DockerLog
 /// Follower`, just forwarding raw bytes instead of pre-split lines
@@ -1072,7 +1100,11 @@ struct TerminalReader {
 }
 
 impl TerminalReader {
-    fn spawn(mut reader: Box<dyn std::io::Read + Send>, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+    fn spawn(
+        target: TerminalTarget,
+        mut reader: Box<dyn std::io::Read + Send>,
+        send: impl Fn(FenixUserEvent) -> bool + Send + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = std::thread::spawn(move || {
@@ -1087,7 +1119,7 @@ impl TerminalReader {
                         if thread_stop.load(Ordering::Relaxed) {
                             return;
                         }
-                        if !send(FenixUserEvent::TerminalOutput(buf[..n].to_vec())) {
+                        if !send(FenixUserEvent::TerminalOutput(target, buf[..n].to_vec())) {
                             return;
                         }
                     }
@@ -1112,12 +1144,20 @@ impl Drop for TerminalReader {
     }
 }
 
-/// The terminal panel's live session -- created once, on the first
-/// `SPC o t`, and never dropped just by toggling visibility off
-/// (`App::terminal_open` is purely a rendering/layout concern; this is
-/// what actually persists the shell process, per the user's own
-/// explicit ask). Only replaced (dropping the old one, per `Drop`
-/// below) when the shell has exited and the panel is opened again.
+/// One live shell -- the PTY, its parsed screen, and the reader thread
+/// feeding it -- with no opinion about which kind of terminal owns it.
+/// The popup panel keeps one of these in `App::terminal`; each pane-
+/// resident terminal keeps its own in `App::terminal_buffers`, keyed by
+/// its buffer.
+///
+/// Never dropped just because the thing showing it went away: hiding
+/// the panel (`App::terminal_open` is purely a rendering/layout
+/// concern) and pointing a pane at another buffer both leave the shell
+/// running, which is the entire point -- a build you started keeps
+/// building. The panel's session is only replaced when the shell has
+/// exited and the panel is opened again; a buffer's is dropped when its
+/// buffer is closed, which is the one gesture that says the shell has
+/// no owner left.
 struct TerminalState {
     session: fenix_terminal::Terminal,
     /// `None` when opened without a real `event_proxy` (every test, per
@@ -2131,7 +2171,7 @@ pub enum FenixUserEvent {
     /// `vt100::Parser` living in `App::terminal` on the main thread
     /// (kept single-threaded on purpose, see `TerminalReader`'s own doc
     /// comment).
-    TerminalOutput(Vec<u8>),
+    TerminalOutput(TerminalTarget, Vec<u8>),
     /// The result of `fenix_terminal::Terminal::spawn`, from the one-
     /// shot background thread `toggle_terminal` spawns it on -- see
     /// that function's own doc comment for why spawning can't happen
@@ -2139,7 +2179,7 @@ pub enum FenixUserEvent {
     /// purely so this enum can keep deriving `Debug`: `fenix_terminal::
     /// Terminal` (holding `Box<dyn Child>` et al.) has no `Debug` impl
     /// of its own, and doesn't need one anywhere else.
-    TerminalSpawned(TerminalSpawnResult),
+    TerminalSpawned(TerminalTarget, TerminalSpawnResult),
     /// A completed Jira issue search, from the one-shot background
     /// thread `jira_sync_issues` spawned. Carries the `request_id` the
     /// fetch was issued under, same stale-result guard as `GitMainReady`
@@ -4707,6 +4747,10 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::Diff
             | BufferKind::Graph
             | BufferKind::Merge
+            // Not because a shell is read-only -- because its buffer is
+            // not where its text lives. Vim edits here would change a
+            // rope nobody renders while leaving the shell untouched.
+            | BufferKind::Terminal
     )
 }
 
@@ -5000,6 +5044,40 @@ pub struct App {
     /// long that takes (see `toggle_terminal`'s own doc comment for why
     /// it can take a while on Windows specifically).
     terminal_spawning: bool,
+    /// Every pane-resident shell (`SPC o T`), keyed by its own buffer --
+    /// the workspace-bound counterpart to `terminal`'s one shared popup
+    /// (see `TerminalTarget` for why both exist).
+    ///
+    /// Keyed by buffer, not by pane, for the reason `vnc_sessions`
+    /// settled on the hard way: a buffer can be shown by any number of
+    /// panes at once (that is what a split *is*), so a session pinned to
+    /// one pane silently stops existing for every other pane showing the
+    /// same thing.
+    terminal_buffers: HashMap<BufferId, TerminalState>,
+    /// Which pane-resident terminal is currently swallowing keystrokes,
+    /// if any -- the buffer counterpart to `terminal_focused`, and
+    /// released by the same reserved `Ctrl-\` chord.
+    ///
+    /// Deliberately *not* derived from which pane happens to be focused.
+    /// A terminal that grabs the keyboard back every time focus lands on
+    /// it would make `Ctrl-\` useless -- the release would last exactly
+    /// until the next pane switch and back. Capture is engaged by asking
+    /// for it (`SPC o T`, or a click into the pane), the same bargain
+    /// `vnc_focused` already strikes.
+    terminal_buffer_focused: Option<BufferId>,
+    /// Buffers whose shell is still being spawned -- same "show an
+    /// honest placeholder rather than an unexplained blank" job as
+    /// `terminal_spawning`, per terminal rather than for the one panel.
+    terminal_buffers_spawning: HashSet<BufferId>,
+    /// Display names for pane-resident terminals (`*terminal 2*`), so
+    /// several open at once are tellable apart in the pane title bar and
+    /// in `SPC b b`. Numbered on creation and never reused, because a
+    /// number that got recycled would point at a different shell than
+    /// the one you remembered.
+    terminal_buffer_labels: HashMap<BufferId, String>,
+    /// How many pane-resident terminals have ever been opened -- the
+    /// source of the numbers in `terminal_buffer_labels`.
+    terminal_buffers_opened: usize,
     /// Latest known cursor position, in physical window pixels -- `None`
     /// until the first `CursorMoved`. `MouseWheel`/`MouseInput` carry no
     /// position of their own in `winit`, so this is what click-to-focus
@@ -5971,6 +6049,11 @@ impl App {
             terminal_open: false,
             terminal_focused: false,
             terminal_spawning: false,
+            terminal_buffers: HashMap::new(),
+            terminal_buffer_focused: None,
+            terminal_buffers_spawning: HashSet::new(),
+            terminal_buffer_labels: HashMap::new(),
+            terminal_buffers_opened: 0,
             cursor_pos: None,
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
@@ -8309,7 +8392,7 @@ impl App {
                 Some(proxy) => {
                     std::thread::spawn(move || {
                         let result = fenix_terminal::Terminal::spawn(rows, cols);
-                        let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalSpawnResult(result)));
+                        let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, TerminalSpawnResult(result)));
                     });
                 }
                 None => {
@@ -8340,8 +8423,9 @@ impl App {
         self.terminal_spawning = false;
         match result {
             Ok((session, reader)) => {
-                let terminal_reader =
-                    self.event_proxy.clone().map(|proxy| TerminalReader::spawn(reader, move |event| proxy.send_event(event).is_ok()));
+                let terminal_reader = self.event_proxy.clone().map(|proxy| {
+                    TerminalReader::spawn(TerminalTarget::Panel, reader, move |event| proxy.send_event(event).is_ok())
+                });
                 self.terminal = Some(TerminalState { session, reader: terminal_reader });
                 if self.terminal_open {
                     self.terminal_focused = true;
@@ -8413,10 +8497,207 @@ impl App {
     /// the way `GitMainReady`/`GitRefreshReady` need one, since output
     /// only ever comes from whichever session is *currently* `self.
     /// terminal`, never a concurrently-in-flight alternate request).
-    fn apply_terminal_output(&mut self, bytes: Vec<u8>) {
-        let Some(state) = self.terminal.as_mut() else { return };
+    fn apply_terminal_output(&mut self, target: TerminalTarget, bytes: Vec<u8>) {
+        let state = match target {
+            TerminalTarget::Panel => self.terminal.as_mut(),
+            TerminalTarget::Buffer(id) => self.terminal_buffers.get_mut(&id),
+        };
+        let Some(state) = state else { return };
         state.session.process(&bytes);
         self.wake_caret();
+    }
+
+    // -- Pane-resident terminals ---------------------------------------
+
+    /// `SPC o T`: a shell in the focused pane, staying in this
+    /// workspace -- see `TerminalTarget` for how this differs from the
+    /// popup panel, and why both exist.
+    ///
+    /// Pressing it while looking at a terminal you already opened takes
+    /// the keyboard back rather than making a second one. That is the
+    /// common case by far: `SPC o T` is both "give me a shell" and "let
+    /// me type in it again after `Ctrl-\`", and a key that quietly
+    /// accumulated shells every time you meant the second thing would
+    /// leave processes running behind panes you never look at.
+    pub(crate) fn open_terminal_buffer(&mut self) {
+        let focused_buffer = self.focused_buffer_id();
+        if self.terminal_buffers_spawning.contains(&focused_buffer) {
+            self.focus_terminal_buffer(focused_buffer);
+            self.wake_caret();
+            return;
+        }
+        if let Some(state) = self.terminal_buffers.get_mut(&focused_buffer) {
+            if state.session.is_alive() {
+                self.focus_terminal_buffer(focused_buffer);
+                self.wake_caret();
+                return;
+            }
+            // The shell exited (`exit`, or something killed it) and its
+            // last screen is still sitting there. Start a fresh one in
+            // the same buffer rather than making a new one: the pane,
+            // the workspace and the name are all still the ones the user
+            // arranged, and only the process behind them is gone.
+            self.terminal_buffers.remove(&focused_buffer);
+            self.spawn_terminal_for(focused_buffer);
+            self.wake_caret();
+            return;
+        }
+        let id = self.buffers.open_terminal();
+        self.terminal_buffers_opened += 1;
+        self.terminal_buffer_labels.insert(id, format!("*terminal {}*", self.terminal_buffers_opened));
+        self.open_buffer_in_focused_pane(id);
+        self.spawn_terminal_for(id);
+        self.wake_caret();
+    }
+
+    /// Starts a shell for one terminal buffer, sized to the pane
+    /// currently showing it. Backgrounded for the same reason the
+    /// panel's spawn is (see `toggle_terminal`): process creation is not
+    /// something to block a redraw on.
+    fn spawn_terminal_for(&mut self, id: BufferId) {
+        let pane = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&id)).unwrap_or(self.focused_pane_id());
+        let (rows, cols) = self.terminal_pane_size(pane);
+        self.terminal_buffers_spawning.insert(id);
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = fenix_terminal::Terminal::spawn(rows, cols);
+                    let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), TerminalSpawnResult(result)));
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // run synchronously, same posture as `toggle_terminal`.
+                let result = fenix_terminal::Terminal::spawn(rows, cols);
+                self.apply_terminal_buffer_spawned(id, result);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::TerminalSpawned` for a pane-resident shell.
+    /// Grabs the keyboard only if the buffer is still open -- the user
+    /// can close a pane while its shell is still starting, and a
+    /// terminal that captured keys on the way out would swallow
+    /// everything typed next with nothing on screen to explain it.
+    fn apply_terminal_buffer_spawned(
+        &mut self,
+        id: BufferId,
+        result: std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)>,
+    ) {
+        self.terminal_buffers_spawning.remove(&id);
+        if self.buffers.get(id).is_none() {
+            // Closed while the spawn was in flight. `session`/`reader`
+            // drop here, which kills the shell -- there is nothing left
+            // that could ever show it.
+            return;
+        }
+        match result {
+            Ok((session, reader)) => {
+                let terminal_reader = self.event_proxy.clone().map(|proxy| {
+                    TerminalReader::spawn(TerminalTarget::Buffer(id), reader, move |event| proxy.send_event(event).is_ok())
+                });
+                self.terminal_buffers.insert(id, TerminalState { session, reader: terminal_reader });
+                self.focus_terminal_buffer(id);
+            }
+            Err(err) => {
+                self.terminal_buffer_labels.remove(&id);
+                self.set_error(format!("couldn't start a terminal: {err}"));
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// Hands the keyboard to one pane-resident terminal, and says so --
+    /// `Ctrl-\` is the only way back out, and nothing else on screen
+    /// would tell you that.
+    fn focus_terminal_buffer(&mut self, id: BufferId) {
+        self.terminal_buffer_focused = Some(id);
+        // A terminal owns every key while it has them, so no other
+        // capturing surface may hold them at the same time.
+        self.terminal_focused = false;
+        self.sidebar_focused = false;
+        let name = self.buffer_display_name(id);
+        self.set_message(format!("{name} -- Ctrl-\\ to leave the terminal"));
+    }
+
+    /// Releases keyboard capture without closing anything -- the pane
+    /// stays where it is and the shell keeps running, exactly as
+    /// `Ctrl-\` does for the popup panel and for a VNC pane.
+    fn unfocus_terminal_buffer(&mut self) {
+        self.terminal_buffer_focused = None;
+    }
+
+    /// The pane-resident terminal that should receive a keystroke right
+    /// now -- `Some` only when one has capture, the focused pane is
+    /// still showing it, and its shell is still running.
+    ///
+    /// The pane check matters because capture survives a pane switch
+    /// (see `terminal_buffer_focused`): without it, moving to another
+    /// pane and typing would go on feeding the shell you walked away
+    /// from. The liveness check is what gets you *out* of a terminal
+    /// whose shell you just exited -- capture is released here, on the
+    /// next keystroke, so the keyboard goes back to Vim on its own
+    /// rather than disappearing into a dead process until you remember
+    /// the release chord.
+    fn active_terminal_buffer(&mut self) -> Option<BufferId> {
+        let id = self.terminal_buffer_focused?;
+        if self.windows().content(self.focused_pane_id()) != Some(&id) {
+            return None;
+        }
+        if self.terminal_buffers.get_mut(&id).is_none_or(|state| !state.session.is_alive()) {
+            self.unfocus_terminal_buffer();
+            self.set_message("the shell exited -- SPC o T starts a new one");
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Writes one keypress to a pane-resident terminal, encoded exactly
+    /// as the panel encodes its own (`encode_terminal_key`) -- a key
+    /// with no terminal meaning is dropped rather than guessed at.
+    fn write_terminal_buffer_input(&mut self, id: BufferId, keypress: KeyPress) {
+        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let Some(state) = self.terminal_buffers.get_mut(&id) else { return };
+        let _ = state.session.write_input(&bytes);
+    }
+
+    /// How many rows and columns of shell fit in `pane`, from the same
+    /// geometry the render loop lays that pane out with. Falls back to a
+    /// plain default with no GPU/text pipeline (every headless test),
+    /// same posture as `terminal_cols`.
+    fn terminal_pane_size(&self, pane: fenix_window::WindowId) -> (u16, u16) {
+        let cols = (self.pane_cols_or(pane, 80) as u16).max(1);
+        let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else {
+            return (text::TERMINAL_ROWS as u16, cols);
+        };
+        let (window_width, window_height) = (gpu.size.width as f32, gpu.size.height as f32);
+        let line_height = text.line_height();
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else {
+            return (text::TERMINAL_ROWS as u16, cols);
+        };
+        // Every pane reserves its top line for a title bar, so the shell
+        // gets what is left -- measured the same way `redraw` does, or
+        // the last row would render underneath the pane below it.
+        let content = pane_content_rect(*rect, line_height, true);
+        let rows = (text::lines_that_fit(content.h, line_height).max(1)) as u16;
+        (rows, cols)
+    }
+
+    /// Drops one pane-resident terminal and kills its shell. Called
+    /// when its buffer is closed -- the one gesture that says the shell
+    /// has no owner left, since pointing a pane elsewhere deliberately
+    /// leaves it running (see `TerminalState`).
+    fn close_terminal_buffer(&mut self, id: BufferId) {
+        // `TerminalState::drop` kills the shell, which is also what
+        // unblocks its reader thread's blocking read.
+        self.terminal_buffers.remove(&id);
+        self.terminal_buffers_spawning.remove(&id);
+        self.terminal_buffer_labels.remove(&id);
+        if self.terminal_buffer_focused == Some(id) {
+            self.terminal_buffer_focused = None;
+        }
     }
 
     /// `SPC v v`: opens (or, if already open, switches straight to) the
@@ -11345,6 +11626,10 @@ impl App {
                 return;
             }
         }
+        // A pane-resident terminal's shell dies with its buffer -- see
+        // `close_terminal_buffer` for why this, and not navigating away
+        // from the pane, is what ends it.
+        self.close_terminal_buffer(id);
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -18386,8 +18671,9 @@ impl App {
             }
             FenixUserEvent::GitFetched { result } => self.apply_git_fetched(result),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
-            FenixUserEvent::TerminalOutput(bytes) => self.apply_terminal_output(bytes),
-            FenixUserEvent::TerminalSpawned(result) => self.apply_terminal_spawned(result.0),
+            FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
+            FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
+            FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::JiraIssuesReady { request_id, issues } => self.apply_jira_issues(request_id, issues),
             FenixUserEvent::JiraDetailReady { request_id, detail } => self.apply_jira_detail(request_id, detail),
             FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
@@ -18528,6 +18814,22 @@ impl App {
                 self.terminal_focused = false;
             } else {
                 self.write_terminal_input(keypress);
+            }
+            self.wake_caret();
+            return;
+        }
+
+        // A pane-resident terminal owns every key on exactly the same
+        // terms as the panel above, and is checked in the same tier --
+        // the two can never both hold the keyboard (`focus_terminal_
+        // buffer` clears the other), so their order here is arbitrary.
+        // `active_terminal_buffer`, rather than the field, is what makes
+        // typing follow the pane you are actually looking at.
+        if let Some(id) = self.active_terminal_buffer() {
+            if keypress == KeyPress::char('\\').with_ctrl() {
+                self.unfocus_terminal_buffer();
+            } else {
+                self.write_terminal_buffer_input(id, keypress);
             }
             self.wake_caret();
             return;
@@ -20076,6 +20378,12 @@ impl App {
                 "*graph*".to_string()
             } else if ob.kind == BufferKind::Merge {
                 "*merge*".to_string()
+            } else if ob.kind == BufferKind::Terminal {
+                // Numbered on creation (`terminal_buffer_labels`) so
+                // several open at once are tellable apart here and in
+                // `SPC b b`; the bare fallback only covers the instant
+                // between the buffer existing and being labelled.
+                self.terminal_buffer_labels.get(&buffer_id).cloned().unwrap_or_else(|| "*terminal*".to_string())
             } else {
                 "[No Name]".to_string()
             }
@@ -20571,6 +20879,10 @@ impl App {
             // gutter beside them would shift one column and not the
             // other, which is exactly the alignment it exists to keep.
             || ob.kind == BufferKind::Merge
+            // A terminal's columns are the shell's own; a gutter would
+            // shift every one of them out from under what the shell
+            // thinks it drew.
+            || ob.kind == BufferKind::Terminal
         {
             return 0;
         }
@@ -21853,6 +22165,14 @@ impl App {
                 // clicking anything else releases capture if some other
                 // VNC session had it.
                 self.sync_vnc_focus();
+                // Same convention for a terminal pane: clicking into a
+                // shell means you intend to type in it. Clicking any
+                // other pane releases the capture, so a click is also
+                // the way out, not just `Ctrl-\`.
+                match self.windows().content(id).copied().filter(|b| self.terminal_buffers.contains_key(b)) {
+                    Some(buffer) => self.focus_terminal_buffer(buffer),
+                    None => self.unfocus_terminal_buffer(),
+                }
             }
             None => return,
         }
@@ -21956,6 +22276,14 @@ impl App {
                             session.client.send_pointer(fb_x, fb_y, held | bit);
                             session.client.send_pointer(fb_x, fb_y, held);
                         }
+                    }
+                } else if self.windows().content(pane).is_some_and(|b| self.terminal_buffers.contains_key(b)) {
+                    // A terminal pane's history lives in the `vt100`
+                    // parser's own scrollback, not in the buffer's rope
+                    // (which is empty), so the wheel moves that instead
+                    // -- the same thing it does over the popup panel.
+                    if let Some(state) = self.windows().content(pane).copied().and_then(|b| self.terminal_buffers.get_mut(&b)) {
+                        state.session.scroll(lines);
                     }
                 } else if self.pdf_session_key_for_pane(pane).is_some() {
                     // A PDF pane has no text to scroll either -- the
@@ -22178,6 +22506,12 @@ impl App {
             /// applies.
             hl_row_strong: bool,
             marked_rows: Vec<usize>,
+            /// Per-cell background colours, as `(row, start_col,
+            /// end_col, rgba)` runs. Empty for every pane but a
+            /// terminal's: ordinary buffers get their backgrounds from
+            /// the theme, while a shell paints its own, and `RowSpans`
+            /// carries only foreground colour.
+            colored_bg_segments: Vec<(usize, usize, usize, [f32; 4])>,
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
             bracket_match_segments: Segments,
@@ -22256,6 +22590,65 @@ impl App {
             // in both blocks' own conditions.
             let overlay_covers_pane = is_focused && matches!(main_view, MainView::Explorer | MainView::Picker);
 
+            // A terminal pane's content is a `vt100` screen grid owned
+            // by `terminal_buffers`, not the buffer's own (always empty)
+            // rope -- so it renders from that grid, exactly as the popup
+            // panel does, rather than through the ordinary buffer path
+            // below. Unlike VNC/PDF this is still *text*, so it goes out
+            // as an ordinary `PaneRender` with spans; only the
+            // background colours need somewhere new to live.
+            if self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Terminal)
+                && self.terminal_buffers.contains_key(&buffer_id)
+                && !overlay_covers_pane
+            {
+                // This is the only place a pane's real pixel size is
+                // known, so it is also where the shell finds out how big
+                // it is: a resize that never reached the PTY would leave
+                // the shell wrapping its own output to a width nothing
+                // on screen has (see `Terminal::resize`).
+                let (want_rows, want_cols) = self.terminal_pane_size(pane);
+                if let Some(state) = self.terminal_buffers.get_mut(&buffer_id) {
+                    if state.session.screen().size() != (want_rows, want_cols) {
+                        let _ = state.session.resize(want_rows, want_cols);
+                    }
+                }
+                let screen_spans = self.terminal_buffers.get(&buffer_id).map(|state| self.terminal_row_spans(state.session.screen()));
+                let (spans, colored_bg_segments) = screen_spans.unwrap_or_default();
+                // The caret is the shell's own cursor, and is drawn only
+                // while this terminal actually has the keyboard -- an
+                // idle blinking block in a pane that ignores your typing
+                // is a lie about where input is going.
+                let has_keyboard = self.terminal_buffer_focused == Some(buffer_id) && is_focused;
+                let caret = self
+                    .terminal_buffers
+                    .get(&buffer_id)
+                    .filter(|_| has_keyboard)
+                    .map(|state| state.session.screen())
+                    .filter(|screen| !screen.hide_cursor())
+                    .map(|screen| {
+                        let (row, col) = screen.cursor_position();
+                        (row as usize, col as usize)
+                    });
+                panes_render.push(PaneRender {
+                    pane,
+                    rect,
+                    title: pane_title,
+                    spans,
+                    hl_row: None,
+                    hl_row_strong: false,
+                    marked_rows: Vec::new(),
+                    colored_bg_segments,
+                    selection_segments: Segments::new(),
+                    pulse_overlay: None,
+                    bracket_match_segments: Segments::new(),
+                    hlsearch_segments: Segments::new(),
+                    caret,
+                    content_frac: 0.0,
+                    gutter_px: 0.0,
+                });
+                continue;
+            }
+
             // A VNC pane's content is a live pixel framebuffer, not
             // text -- rendered as a separate textured-quad layer (see
             // `vnc_panes`/`vnc_pipeline.draw`'s call site below, after
@@ -22321,6 +22714,7 @@ impl App {
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
+                        colored_bg_segments: Vec::new(),
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
                         bracket_match_segments: Segments::new(),
@@ -22385,6 +22779,7 @@ impl App {
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
+                        colored_bg_segments: Vec::new(),
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
                         bracket_match_segments: Segments::new(),
@@ -22414,6 +22809,7 @@ impl App {
                     hl_row: selected_row,
                     hl_row_strong: true,
                     marked_rows: marks,
+                    colored_bg_segments: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
@@ -22441,6 +22837,7 @@ impl App {
                     hl_row: selected_row,
                     hl_row_strong: true,
                     marked_rows: Vec::new(),
+                    colored_bg_segments: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
@@ -22608,6 +23005,7 @@ impl App {
                 hl_row,
                 hl_row_strong: is_dashboard,
                 marked_rows: Vec::new(),
+                colored_bg_segments: Vec::new(),
                 selection_segments,
                 pulse_overlay,
                 bracket_match_segments,
@@ -22821,6 +23219,15 @@ impl App {
             // prepare`'s `TextArea` for this pane actually renders the
             // text, or these rects drift out of alignment with it.
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            // Drawn before selection/search/pulse so those still read as
+            // overlays on top of whatever the shell painted, rather than
+            // being covered by it.
+            for &(row, col_start, col_end, color) in &pane.colored_bg_segments {
+                let x = content_x + col_start as f32 * char_width;
+                let y = row_y(row);
+                let w = (col_end - col_start) as f32 * char_width;
+                bg_rect.push_rect(gpu, x, y, w, line_height, color);
+            }
             for &(row, col_start, col_end) in &pane.selection_segments {
                 let x = content_x + col_start as f32 * char_width;
                 let y = row_y(row);
@@ -27011,6 +27418,250 @@ configure_board stm32
         assert!(app.terminal.is_some(), "the session should still be kept, just not shown/focused");
     }
 
+    // -- Pane-resident terminals (`SPC o T`) ---------------------------
+    //
+    // These spawn real shells, the same way the panel's own tests above
+    // do (and `fenix-git`/`fenix-docker`'s tests spawn real `git`/
+    // `docker`) -- with no `event_proxy` the spawn runs synchronously
+    // through `apply_terminal_buffer_spawned`, so there is a live
+    // process to assert against by the time each call returns.
+
+    #[test]
+    fn opening_a_terminal_buffer_puts_a_live_shell_in_the_focused_pane() {
+        let mut app = App::with_file(None);
+
+        app.open_terminal_buffer();
+
+        let id = app.focused_buffer_id();
+        assert_eq!(app.buffers.get(id).map(|ob| ob.kind), Some(BufferKind::Terminal));
+        assert!(app.terminal_buffers.contains_key(&id), "expected a real shell for this buffer");
+        assert_eq!(app.terminal_buffer_focused, Some(id), "a shell you just asked for should take the keyboard");
+        assert_eq!(app.active_terminal_buffer(), Some(id));
+    }
+
+    #[test]
+    fn the_popup_panel_and_a_pane_terminal_are_separate_shells() {
+        // The whole reason both exist: one follows you around, one stays
+        // put. Sharing a session would make them the same feature twice.
+        let mut app = App::with_file(None);
+
+        app.toggle_terminal();
+        app.open_terminal_buffer();
+
+        assert!(app.terminal.is_some(), "the panel keeps its own shell");
+        assert_eq!(app.terminal_buffers.len(), 1, "and the pane has one of its own");
+    }
+
+    #[test]
+    fn output_reaches_the_shell_it_came_from_and_no_other() {
+        let mut app = App::with_file(None);
+        app.toggle_terminal();
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+
+        app.apply_terminal_output(TerminalTarget::Buffer(id), b"in the pane".to_vec());
+        app.apply_terminal_output(TerminalTarget::Panel, b"in the panel".to_vec());
+
+        assert!(screen_text(app.terminal_buffers[&id].session.screen()).contains("in the pane"));
+        assert!(!screen_text(app.terminal_buffers[&id].session.screen()).contains("in the panel"));
+        assert!(screen_text(app.terminal.as_ref().unwrap().session.screen()).contains("in the panel"));
+    }
+
+    #[test]
+    fn a_second_press_takes_the_keyboard_back_rather_than_opening_another_shell() {
+        // `SPC o T` is both "give me a shell" and "let me type in it
+        // again" -- see `open_terminal_buffer`. Accumulating shells for
+        // the second meaning would leave processes running behind panes
+        // nobody looks at.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+        app.unfocus_terminal_buffer();
+
+        app.open_terminal_buffer();
+
+        assert_eq!(app.focused_buffer_id(), id, "same buffer");
+        assert_eq!(app.terminal_buffers.len(), 1, "same shell");
+        assert_eq!(app.terminal_buffer_focused, Some(id));
+    }
+
+    #[test]
+    fn releasing_the_keyboard_leaves_the_shell_running_and_the_pane_alone() {
+        // `Ctrl-\` unfocuses; it does not close. Killing the shell here
+        // would lose whatever it was in the middle of.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+
+        app.unfocus_terminal_buffer();
+
+        assert_eq!(app.active_terminal_buffer(), None, "keys go back to Vim");
+        assert!(app.terminal_buffers.contains_key(&id), "the shell is still running");
+        assert_eq!(app.focused_buffer_id(), id, "and the pane still shows it");
+    }
+
+    #[test]
+    fn typing_only_reaches_the_terminal_while_its_own_pane_is_focused() {
+        // Capture deliberately survives a pane switch, so this is the
+        // check that stops keystrokes meant for a file from being typed
+        // into a shell in the pane next door.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let terminal_pane = app.focused_pane_id();
+        app.split_vertical();
+        let other = app.windows().windows().into_iter().find(|&p| p != terminal_pane).expect("split makes a second pane");
+        app.windows_mut().focus(other);
+        app.new_scratch_buffer();
+
+        assert_eq!(app.active_terminal_buffer(), None, "this pane is not the terminal");
+
+        app.windows_mut().focus(terminal_pane);
+        assert!(app.active_terminal_buffer().is_some(), "back in the terminal's own pane");
+    }
+
+    #[test]
+    fn a_terminal_buffer_survives_its_pane_being_pointed_at_something_else() {
+        // Keyed by buffer, not by pane (`BufferKind::Terminal`), so
+        // navigating away hides it exactly like any other buffer and
+        // `SPC b b` brings it back -- with whatever was running still
+        // running.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+
+        app.new_scratch_buffer();
+
+        assert_ne!(app.focused_buffer_id(), id);
+        assert!(app.terminal_buffers.contains_key(&id), "the shell keeps going while out of sight");
+        assert!(app.buffers.get(id).is_some(), "and the buffer is still there to switch back to");
+    }
+
+    #[test]
+    fn closing_the_buffer_ends_the_shell() {
+        // The one gesture that means the shell has no owner left.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+
+        app.kill_buffer();
+
+        assert!(!app.terminal_buffers.contains_key(&id));
+        assert!(app.buffers.get(id).is_none());
+        assert_eq!(app.terminal_buffer_focused, None, "and it can't still be holding the keyboard");
+    }
+
+    #[test]
+    fn several_terminals_are_named_apart() {
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let first = app.focused_buffer_id();
+        app.new_scratch_buffer();
+        app.open_terminal_buffer();
+        let second = app.focused_buffer_id();
+
+        assert_eq!(app.buffer_display_name(first), "*terminal 1*");
+        assert_eq!(app.buffer_display_name(second), "*terminal 2*");
+    }
+
+    #[test]
+    fn a_terminals_numbering_is_never_reused() {
+        // A recycled number would point at a different shell than the
+        // one you remembered.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        app.kill_buffer();
+
+        app.open_terminal_buffer();
+
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*terminal 2*");
+    }
+
+    #[test]
+    fn nothing_the_shell_prints_is_written_into_the_buffers_own_text() {
+        // The screen is a grid the host owns; a rope kept alongside it
+        // would be a second, always-slightly-wrong copy that `:w` could
+        // then write to a file.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+
+        app.apply_terminal_output(TerminalTarget::Buffer(id), b"lots of output\r\n".to_vec());
+
+        assert_eq!(app.open().buffer.text(), "");
+        assert!(!app.open().buffer.is_dirty(), "and nothing here is unsaved work");
+    }
+
+    #[test]
+    fn a_shell_that_exited_hands_the_keyboard_back_on_the_next_keystroke() {
+        // Otherwise everything typed after `exit` would vanish into a
+        // dead process, with the release chord the only way out and
+        // nothing on screen to suggest it.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+        app.terminal_buffers.get_mut(&id).unwrap().session.kill();
+
+        assert_eq!(app.active_terminal_buffer(), None);
+        assert_eq!(app.terminal_buffer_focused, None);
+        assert!(app.modeline_pieces().1.contains("the shell exited"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn reopening_on_a_dead_terminal_restarts_it_in_the_same_buffer() {
+        // The pane, the workspace and the name are all still the ones
+        // the user arranged; only the process behind them is gone.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+        app.terminal_buffers.get_mut(&id).unwrap().session.kill();
+
+        app.open_terminal_buffer();
+
+        assert_eq!(app.focused_buffer_id(), id, "same buffer");
+        assert_eq!(app.buffer_display_name(id), "*terminal 1*", "same name");
+        assert!(app.terminal_buffers.get_mut(&id).unwrap().session.is_alive(), "with a live shell again");
+    }
+
+    #[test]
+    fn a_spawn_that_lands_after_its_buffer_was_closed_is_dropped() {
+        // The user can close a pane while its shell is still starting; a
+        // terminal that captured the keyboard on the way out would
+        // swallow everything typed next with nothing to explain it.
+        let mut app = App::with_file(None);
+        let ghost = app.buffers.open_terminal();
+        app.buffers.close(ghost);
+
+        let spawned = fenix_terminal::Terminal::spawn(24, 80).expect("failed to spawn a real shell");
+        app.apply_terminal_buffer_spawned(ghost, Ok(spawned));
+
+        assert!(!app.terminal_buffers.contains_key(&ghost));
+        assert_eq!(app.terminal_buffer_focused, None);
+    }
+
+    #[test]
+    fn a_failed_spawn_says_so_instead_of_leaving_an_inert_pane() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_terminal();
+        app.open_buffer_in_focused_pane(id);
+        app.terminal_buffer_labels.insert(id, "*terminal 1*".to_string());
+
+        app.apply_terminal_buffer_spawned(id, Err(std::io::Error::other("no shell for you")));
+
+        assert!(!app.terminal_buffers.contains_key(&id));
+        assert_eq!(app.terminal_buffer_focused, None);
+        assert!(app.modeline_pieces().1.contains("couldn't start a terminal"));
+    }
+
+    #[test]
+    fn a_terminal_pane_gets_no_line_number_gutter() {
+        // A gutter would shift every column out from under what the
+        // shell thinks it drew.
+        let mut app = App::with_file(None);
+        app.open_terminal_buffer();
+        let ob = app.buffers.get(app.focused_buffer_id()).unwrap();
+        assert_eq!(app.gutter_chars(ob), 0);
+    }
+
     #[test]
     fn write_terminal_input_is_a_no_op_without_a_live_session() {
         let mut app = App::with_file(None);
@@ -27018,6 +27669,130 @@ configure_board stm32
         // confirms this doesn't panic; there's nothing to assert on
         // beyond that (no session to have received anything).
         app.write_terminal_input(KeyPress::char('a'));
+    }
+
+    /// Drives one real shell all the way through the app: spawn it,
+    /// type at it with the same `KeyPress` encoding the keyboard uses,
+    /// pump its real output through `apply_terminal_output`, and read
+    /// the result back out of the renderer. Returns the rendered text
+    /// once `marker` shows up in it, or `Err` with whatever *was* on
+    /// screen when it gave up.
+    ///
+    /// This is the shape of the bug this whole path exists to have
+    /// fixed. Windows' ConPTY opens a session by asking where the
+    /// cursor is and says nothing further until it is answered, so
+    /// before `fenix_terminal::query` existed the screen here stayed
+    /// permanently, silently blank while the shell sat alive and
+    /// waiting -- exactly what the panel showed. No unit test on the
+    /// app's own logic could have caught that; only running a real
+    /// shell through the real renderer does.
+    ///
+    /// The reading has to happen on its own thread: `Read::read` on a
+    /// PTY blocks until something arrives with no way to bound the call
+    /// itself, so only a channel's `recv_timeout` can enforce a real
+    /// deadline (see `fenix-terminal`'s own round-trip test).
+    fn pump_until(
+        app: &mut App,
+        target: TerminalTarget,
+        mut reader: Box<dyn std::io::Read + Send>,
+        marker: &str,
+        render: impl Fn(&App) -> String,
+    ) -> Result<String, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    return;
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut last = String::new();
+        while Instant::now() < deadline {
+            let Ok(chunk) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) else { break };
+            app.apply_terminal_output(target, chunk);
+            last = render(app);
+            if last.contains(marker) {
+                return Ok(last);
+            }
+        }
+        Err(last)
+    }
+
+    /// Types `text` at a shell one keypress at a time, through the same
+    /// encoding a real keystroke takes, and presses Enter.
+    fn type_line(mut send: impl FnMut(KeyPress), text: &str) {
+        for c in text.chars() {
+            send(KeyPress::char(c));
+        }
+        send(KeyPress::named(FenixNamedKey::Enter));
+    }
+
+    #[test]
+    fn the_panel_renders_what_a_real_shell_actually_prints() {
+        // End-to-end over everything but the GPU: a real PTY, the real
+        // ConPTY handshake, the real parser, the app's own output
+        // routing, and the real span builder the renderer draws from.
+        let mut app = App::with_file(None);
+        let (session, reader) = fenix_terminal::Terminal::spawn(text::TERMINAL_ROWS as u16, 80).expect("failed to spawn a real shell");
+        app.terminal = Some(TerminalState { session, reader: None });
+        app.terminal_open = true;
+        app.terminal_focused = true;
+
+        type_line(|key| app.write_terminal_input(key), "echo fenix-panel-marker");
+
+        let render = |app: &App| {
+            app.terminal_panel_render().map(|(spans, _)| spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()).unwrap_or_default()
+        };
+        match pump_until(&mut app, TerminalTarget::Panel, reader, "fenix-panel-marker", render) {
+            Ok(_) => {}
+            Err(last) => panic!("the shell's own output never reached the panel. Last rendered screen:\n{last}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_terminal_renders_what_a_real_shell_actually_prints() {
+        // The same end-to-end for the other surface, down to the
+        // per-cell background colours the pane renderer needs and the
+        // panel's own `RowSpans` has nowhere to put.
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_terminal();
+        app.open_buffer_in_focused_pane(id);
+        app.terminal_buffer_labels.insert(id, "*terminal 1*".to_string());
+        let (session, reader) = fenix_terminal::Terminal::spawn(24, 80).expect("failed to spawn a real shell");
+        app.terminal_buffers.insert(id, TerminalState { session, reader: None });
+        app.focus_terminal_buffer(id);
+
+        type_line(|key| app.write_terminal_buffer_input(id, key), "echo fenix-pane-marker");
+
+        let render = move |app: &App| match app.terminal_buffers.get(&id) {
+            Some(state) => {
+                let (spans, _) = app.terminal_row_spans(state.session.screen());
+                spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()
+            }
+            None => String::new(),
+        };
+        match pump_until(&mut app, TerminalTarget::Buffer(id), reader, "fenix-pane-marker", render) {
+            Ok(_) => {}
+            Err(last) => panic!("the shell's own output never reached the pane. Last rendered screen:\n{last}"),
+        }
+    }
+
+    /// Everything currently on a parsed terminal screen, as one string
+    /// -- enough to assert that a given chunk of output landed on the
+    /// screen it was addressed to.
+    fn screen_text(screen: &vt100::Screen) -> String {
+        let (rows, cols) = screen.size();
+        let mut out = String::new();
+        for row in 0..rows {
+            for col in 0..cols {
+                if let Some(cell) = screen.cell(row, col) {
+                    out.push_str(cell.contents());
+                }
+            }
+        }
+        out
     }
 
     #[test]

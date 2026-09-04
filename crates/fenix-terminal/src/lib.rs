@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+mod query;
+
 /// How many rows of scrollback `vt100` keeps beyond the live screen --
 /// mouse-wheel scrolling (`Terminal::scroll`) has nothing to scroll
 /// into without this.
@@ -21,7 +23,7 @@ pub struct Terminal {
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<query::QueryReplies>,
 }
 
 impl Terminal {
@@ -44,14 +46,29 @@ impl Terminal {
         drop(pair.slave);
         let reader = pair.master.try_clone_reader().map_err(|err| std::io::Error::other(err.to_string()))?;
         let writer = pair.master.take_writer().map_err(|err| std::io::Error::other(err.to_string()))?;
-        let parser = vt100::Parser::new(rows, cols, SCROLLBACK_LINES);
+        let parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
         Ok((Terminal { child, writer, master: pair.master, parser }, reader))
     }
 
     /// Feeds raw PTY output bytes (from the caller's own reader thread)
-    /// into the `vt100` parser.
+    /// into the `vt100` parser, and immediately types back whatever
+    /// that output *asked for* -- see the `query` module for why a
+    /// terminal that only ever listens is a terminal that hangs.
+    ///
+    /// Answering here, rather than handing the replies to the caller,
+    /// is what makes this impossible to forget: on Windows the session
+    /// produces nothing at all until the very first query is answered,
+    /// so a host that skipped the step would see an empty panel and a
+    /// live shell with no hint of why.
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
+        let replies = self.parser.callbacks_mut().take();
+        if !replies.is_empty() {
+            // A failed write means the shell is gone, which `is_alive`
+            // is already the place to notice -- there is nothing useful
+            // to do about it from inside a render-path call.
+            let _ = self.write_input(&replies);
+        }
     }
 
     /// Writes raw input bytes (already encoded, e.g. by a caller's own
@@ -151,31 +168,26 @@ mod tests {
     /// parsed screen -- consistent with this project's own established
     /// "test against the real thing" posture for external-process code
     /// (`fenix-git`/`fenix-docker`'s own tests spawn real `git`/`docker`
-    /// rather than mocking). `Read::read` on a PTY blocks until *some*
-    /// data arrives, with no way to attach a timeout to the call itself
-    /// -- so the actual reading happens on its own thread, forwarding
-    /// each chunk through a channel, and only the channel's `recv_
-    /// timeout` enforces a real bound; a naive "loop read() until a
-    /// deadline" doesn't actually bound anything, since a single call
-    /// that never returns would hang the loop regardless of the
-    /// deadline check around it.
+    /// rather than mocking).
     ///
-    /// `#[ignore]`d by default: confirmed correct end-to-end (the shell
-    /// spawns, `write_input` reaches it, and its real output does show
-    /// up in the parsed screen) against a real `powershell.exe`, but
-    /// with wildly variable latency in a heavily-sandboxed/monitored dev
-    /// environment specifically -- one confirmed run took over 60
-    /// seconds between the PTY's very first few bytes and the shell's
-    /// actual `echo` output reaching the pipe, almost certainly
-    /// antivirus/EDR-style scanning overhead on the freshly spawned
-    /// child process (the same class of issue already diagnosed this
-    /// session for `git.exe`/`docker.exe` spawns), not a bug in this
-    /// crate's PTY plumbing. That's not representative of a normal
-    /// desktop and not something a hard test bound should chase. Run
-    /// manually with `cargo test -p fenix-terminal -- --ignored` to
-    /// confirm the real round trip on a given machine.
+    /// This is the test that pins the bug in `query`. It used to be
+    /// `#[ignore]`d, on the theory that a shell taking 90 seconds to
+    /// print its first prompt was antivirus scanning a freshly spawned
+    /// child. It was not: the session emitted its four-byte cursor-
+    /// position query and then waited, forever, for an answer nobody
+    /// was giving it. No timeout would ever have been long enough.
+    /// Un-ignored now that the answer is sent -- a real `powershell.exe`
+    /// gets from spawn to echoed output in a few seconds here, most of
+    /// it the user's own profile loading.
+    ///
+    /// `Read::read` on a PTY blocks until *some* data arrives, with no
+    /// way to attach a timeout to the call itself -- so the actual
+    /// reading happens on its own thread, forwarding each chunk through
+    /// a channel, and only the channel's `recv_timeout` enforces a real
+    /// bound; a naive "loop read() until a deadline" doesn't actually
+    /// bound anything, since a single call that never returns would
+    /// hang the loop regardless of the deadline check around it.
     #[test]
-    #[ignore = "PTY/console I/O latency varies wildly by environment (see doc comment) -- run manually"]
     fn spawn_write_and_read_a_real_shell_round_trip() {
         let (mut term, mut reader) = Terminal::spawn(24, 80).expect("failed to spawn a shell");
         term.write_input(b"echo fenix-terminal-test-marker\r").expect("failed to write input");

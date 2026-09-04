@@ -121,6 +121,25 @@ pub enum BufferKind {
     /// `merge_view::MergeViewLine`), and the two columns are colored
     /// independently within a single row.
     Merge,
+    /// A live shell running in a pane (`SPC o T`) -- the workspace-
+    /// resident counterpart to the popup terminal panel, for the shell
+    /// you want sitting *next to* the code rather than covering it.
+    ///
+    /// Same "real pane slot, nothing meaningful in the buffer's own
+    /// text" shape as `Vnc`: what you see is a `vt100` screen grid
+    /// owned by the host (`fenix-gui`'s `terminal_buffers`, keyed by
+    /// this buffer's id, exactly as `VncSession` is keyed by its own),
+    /// re-rendered from that grid every frame rather than mirrored into
+    /// the rope. Mirroring it in would be worse than redundant: the
+    /// grid is addressed by cell and rewritten in place, so a rope kept
+    /// alongside would be a second, always-slightly-wrong copy that
+    /// `:w` could then write to a file.
+    ///
+    /// Keyed by buffer rather than by pane so that a terminal survives
+    /// its pane being pointed at something else, stays put in its own
+    /// workspace, and comes back through the ordinary buffer switcher
+    /// (`SPC b b`) -- the same reasoning `Vnc` settled on.
+    Terminal,
 }
 
 impl BufferKind {
@@ -300,6 +319,14 @@ impl BufferList {
     /// window tree; its own (always-empty) text is never shown.
     pub fn open_vnc(&mut self) -> BufferId {
         self.insert(Buffer::empty(), None, BufferKind::Vnc)
+    }
+
+    /// An empty, pathless buffer tagged `Terminal` -- `SPC o T`. Same
+    /// reasoning as `open_vnc`: the shell's screen is a grid the host
+    /// owns and renders directly, so there is nothing to seed here and
+    /// nothing a path could usefully point at.
+    pub fn open_terminal(&mut self) -> BufferId {
+        self.insert(Buffer::empty(), None, BufferKind::Terminal)
     }
 
     /// An empty, pathless buffer tagged `Pdf` -- `SPC r o`. Same reasoning
