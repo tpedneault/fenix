@@ -236,6 +236,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('o')], "keep ours", "git.keep_ours");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('t')], "keep theirs", "git.keep_theirs");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('b')], "keep both", "git.keep_both");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('s')], "stage resolved", "git.stage_resolved");
+
+        // The Merge view -- the conflicted files, and whichever one is
+        // selected shown as two columns under the names of the branches
+        // they actually came from.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x')], "resolve conflicts", "git.merge_view");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('X')], "close conflicts", "git.merge_close");
 
         // Jira dashboard -- read-only browsing this phase (see the Jira
         // dashboard plan's own scope notes). `p`/`u` add/delete letters

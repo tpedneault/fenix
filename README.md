@@ -311,6 +311,27 @@ for anyone curious to poke around or build on it.
   written it straight back over git's conflict markers. A file with
   unsaved edits is left alone and counted in a message instead: your own
   work always outranks the refresh.
+- **Resolving conflicts** (`SPC g x`): the conflicted files on the
+  left, the selected one shown as **two aligned columns** on the right
+  -- your side and the incoming side on the same row, with shared text
+  spanning the full width so it still reads as one file. `o` keeps the
+  left, `t` the right, `b` both, `n`/`p` walk the conflicts, `s` stages
+  the file once nothing is left (and refuses while markers remain, so
+  they can't be committed), and `u` puts the conflict back if a choice
+  went the wrong way. On the file list, `o`/`t` take a whole file from
+  one side and stage it in one step.
+
+  The reason this is a view and not just the raw markers: **both
+  columns are labelled with the branch they actually came from**.
+  During a rebase git replays your commits onto the target, so at every
+  step `HEAD` -- what git calls "ours" -- is the branch you're rebasing
+  *onto*, and "theirs" is your own work. Reading `<<<<<<< HEAD` as "my
+  version" and keeping it deletes the commit you were rebasing. So
+  nothing here says "ours" or "theirs": the columns, the keys, the
+  status banner and the message after each choice all name the branch
+  (`kept develop`, `o = keep myfeature`) and spell out its role. Opening
+  a conflicted file directly still works, and its markers are colored
+  with the same two colors the columns use.
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
@@ -662,6 +683,11 @@ popup shows what keys continue it.
 | `SPC g R` / `SPC g A` | Continue / abort the suspended operation |
 | `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
 | `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
+| `SPC g x` / `SPC g X` | Open / close the Merge view (conflicts side by side) |
+| `SPC g s` | Stage the selected conflicted file as resolved |
+| `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
+| `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
+| `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
 | `1` / `2` / `3` (History) | Jump to the Graph / Refs / Commit pane |
 | `u` / `f` (History) | Refresh / fetch |
 | `1` / `2` (Compare) | Jump to the Commits / Changes pane |

@@ -26,28 +26,69 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
     let mut new_remaining = 0usize;
     let mut old_line = 0usize;
     let mut new_line = 0usize;
+    // How many marker columns the combined hunk currently being read
+    // has (one per parent), or 0 when the hunk isn't a combined one.
+    let mut combined_width = 0usize;
 
     for line in split_lines(text) {
         // A new file's header always ends whatever came before, however
-        // incomplete it was.
-        if line.starts_with("diff --git ") {
+        // incomplete it was. `diff --cc`/`diff --combined` open a
+        // *combined* diff -- what git emits for a merge commit and for a
+        // file with unresolved conflicts, i.e. exactly the two things
+        // the History view and a conflicted working tree are made of.
+        // Treating them as unrecognized (which is what happened before)
+        // meant both rendered as "(no changes)".
+        let combined = line.starts_with("diff --cc ") || line.starts_with("diff --combined ");
+        if combined || line.starts_with("diff --git ") {
             files.push(FileDiff {
                 old_path: String::new(),
                 new_path: String::new(),
                 status: FileStatus::Modified,
                 is_binary: false,
+                is_combined: combined,
                 header: vec![line.to_string()],
                 hunks: Vec::new(),
             });
             old_remaining = 0;
             new_remaining = 0;
+            combined_width = 0;
+            // `diff --cc <path>` names the file once and has no
+            // `---`/`+++` pair of its own in some git versions, so take
+            // the path from the header line itself; a later `+++` still
+            // overwrites it with the authoritative value.
+            if combined {
+                let path = line.split_once(char::is_whitespace).map(|(_, r)| r.trim_start_matches("--cc ").trim_start_matches("--combined ")).unwrap_or("");
+                let path = path.trim();
+                if let Some(file) = files.last_mut() {
+                    file.old_path = path.to_string();
+                    file.new_path = path.to_string();
+                }
+            }
             continue;
         }
 
         let Some(file) = files.last_mut() else { continue };
-        let in_hunk = old_remaining > 0 || new_remaining > 0;
+        // A combined hunk can't be counted down the way a two-sided one
+        // is: its `-a,b` ranges are per-parent, and a line removed
+        // relative to one parent consumes none of the result's own
+        // range. So it ends at the first line that isn't N marker
+        // columns -- which is exactly what a following `@@@`, a
+        // `diff --cc`, or `git show`'s trailer all are.
+        if combined_width > 0 && !is_combined_body(line, combined_width) {
+            combined_width = 0;
+        }
+        let in_hunk = combined_width > 0 || old_remaining > 0 || new_remaining > 0;
 
         if !in_hunk {
+            if let Some((parents, new_start, new_len)) = parse_combined_hunk_header(line) {
+                // `old_*` describe the first parent only; nothing reads
+                // them for a combined file (it's never staged), but they
+                // are the least misleading thing to put there.
+                file.hunks.push(Hunk { old_start: new_start, old_len: 0, new_start, new_len, header: line.to_string(), lines: Vec::new() });
+                combined_width = parents;
+                new_line = new_start;
+                continue;
+            }
             if let Some((old_start, old_len, new_start, new_len)) = parse_hunk_header(line) {
                 file.hunks.push(Hunk { old_start, old_len, new_start, new_len, header: line.to_string(), lines: Vec::new() });
                 old_remaining = old_len;
@@ -108,6 +149,41 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
 
         // Inside a hunk: classify by the one marker character.
         let Some(hunk) = file.hunks.last_mut() else { continue };
+
+        if combined_width > 0 {
+            // One column per parent. A line the result gained relative
+            // to *any* parent reads as an addition, one it lost relative
+            // to any parent as a removal, and the rest is context --
+            // which is what makes a conflicted file's diff say the
+            // useful thing ("these lines came in, these went out")
+            // rather than trying to show N independent old sides at
+            // once. Only new-side numbers are meaningful here.
+            let (kind, text) = if let Some(rest) = line.strip_prefix('\\') {
+                (LineKind::NoNewline, rest)
+            } else {
+                // Markers are ASCII, so column count is byte count.
+                let (markers, rest) = line.split_at(combined_width.min(line.len()));
+                let kind = if markers.contains('+') {
+                    LineKind::Added
+                } else if markers.contains('-') {
+                    LineKind::Removed
+                } else {
+                    LineKind::Context
+                };
+                (kind, rest)
+            };
+            let new_no = match kind {
+                LineKind::Added | LineKind::Context => {
+                    let n = Some(new_line);
+                    new_line += 1;
+                    n
+                }
+                LineKind::Removed | LineKind::NoNewline => None,
+            };
+            hunk.lines.push(DiffLine { kind, old_line: None, new_line: new_no, text: text.to_string() });
+            continue;
+        }
+
         let (kind, text) = match line.chars().next() {
             Some(' ') => (LineKind::Context, &line[1..]),
             Some('+') => (LineKind::Added, &line[1..]),
@@ -201,6 +277,38 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
     Some((old_start, old_len, new_start, new_len))
 }
 
+/// `@@@ -a,b -c,d +e,f @@@` -> `(parents, new_start, new_len)`.
+///
+/// The number of leading `@`s is one more than the number of parents,
+/// and that count is also the number of marker columns each body line
+/// carries -- so the header is the only thing that says how to read the
+/// hunk. Only the last range (the result's) is returned: the others
+/// describe parents, and a combined diff has no single old side.
+fn parse_combined_hunk_header(line: &str) -> Option<(usize, usize, usize)> {
+    let ats = line.chars().take_while(|&c| c == '@').count();
+    // `@@` is an ordinary hunk header, not a combined one; three or more
+    // means two or more parents.
+    if ats < 3 {
+        return None;
+    }
+    let rest = line.get(ats..)?.strip_prefix(' ')?;
+    let closing = format!(" {}", "@".repeat(ats));
+    let (ranges, _) = rest.split_once(closing.as_str())?;
+    let new = ranges.split(' ').next_back()?;
+    let (new_start, new_len) = parse_range(new.strip_prefix('+')?)?;
+    Some((ats - 1, new_start, new_len))
+}
+
+/// Whether `line` is a body line of a combined hunk `width` columns
+/// wide: `width` leading marker characters, or a `\ No newline` marker
+/// (which carries no columns of its own but still belongs to the hunk).
+fn is_combined_body(line: &str, width: usize) -> bool {
+    if line.starts_with('\\') {
+        return true;
+    }
+    line.len() >= width && line.chars().take(width).all(|c| matches!(c, ' ' | '+' | '-'))
+}
+
 fn parse_range(range: &str) -> Option<(usize, usize)> {
     match range.split_once(',') {
         Some((start, len)) => Some((start.parse().ok()?, len.parse().ok()?)),
@@ -211,6 +319,94 @@ fn parse_range(range: &str) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `git show` of a merge commit, and a real `git diff` of a
+    /// file with unresolved conflicts, both look like this -- two
+    /// marker columns and a `@@@` header. Before combined diffs were
+    /// understood, both rendered as "(no changes)": the History view
+    /// showed nothing for every merge commit, and the working-tree view
+    /// showed nothing for exactly the file you were trying to resolve.
+    const COMBINED: &str = "diff --cc a.txt
+index 0f76a0f,3220423..35c5ba7
+--- a/a.txt
++++ b/a.txt
+@@@ -1,2 -1,2 +1,2 @@@
+  shared
+- value = MAIN
+ -value = SIDE
+++value = MERGED
+";
+
+    #[test]
+    fn a_combined_diff_is_recognized_and_named() {
+        let files = parse(COMBINED);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_combined, "so callers know not to offer staging");
+        assert_eq!(files[0].new_path, "a.txt");
+        assert_eq!(files[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn combined_columns_collapse_to_one_added_removed_context_reading() {
+        let files = parse(COMBINED);
+        let got: Vec<(LineKind, Option<usize>, &str)> =
+            files[0].hunks[0].lines.iter().map(|l| (l.kind, l.new_line, l.text.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (LineKind::Context, Some(1), "shared"),
+                // Gone from the result, whichever parent it came from.
+                (LineKind::Removed, None, "value = MAIN"),
+                (LineKind::Removed, None, "value = SIDE"),
+                (LineKind::Added, Some(2), "value = MERGED"),
+            ]
+        );
+        // No old-side numbers: with several parents there is no single
+        // old file for them to number into.
+        assert!(files[0].hunks[0].lines.iter().all(|l| l.old_line.is_none()));
+    }
+
+    #[test]
+    fn a_combined_hunk_ends_at_the_first_line_that_is_not_body() {
+        // `git show` puts the next file's header straight after the
+        // last body line, with no blank line and no count to stop on.
+        let text = format!("{COMBINED}diff --git a/b.txt b/b.txt
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-x
++y
+");
+        let files = parse(&text);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].hunks[0].lines.len(), 4, "the trailer must not be swallowed into the combined hunk");
+        assert!(!files[1].is_combined);
+        assert_eq!(files[1].hunks[0].lines.len(), 2);
+    }
+
+    #[test]
+    fn three_parents_mean_three_marker_columns() {
+        // An octopus merge. The column count comes from the `@`s, so a
+        // line of content starting with a space or a dash can't be
+        // mistaken for a marker.
+        let text = "diff --cc a.txt
+@@@@ -1,1 -1,1 -1,1 +1,2 @@@@
+   kept
++++-added with a leading dash
+";
+        let files = parse(text);
+        assert_eq!(files[0].hunks.len(), 1);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!((lines[0].kind, lines[0].text.as_str()), (LineKind::Context, "kept"));
+        assert_eq!((lines[1].kind, lines[1].text.as_str()), (LineKind::Added, "-added with a leading dash"));
+    }
+
+    #[test]
+    fn an_ordinary_hunk_header_is_not_read_as_a_combined_one() {
+        assert_eq!(parse_combined_hunk_header("@@ -1,2 +1,2 @@"), None);
+        assert_eq!(parse_combined_hunk_header("@@@ -1,2 -1,2 +1,3 @@@"), Some((2, 1, 3)));
+        assert_eq!(parse_combined_hunk_header("@@@@ -1 -1 -1 +5,9 @@@@"), Some((3, 5, 9)));
+    }
 
     const SIMPLE: &str = "diff --git a/foo.txt b/foo.txt\nindex 83db48f..bf269f4 100644\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1,3 +1,4 @@\n first\n-second\n+two\n+extra\n third\n";
 

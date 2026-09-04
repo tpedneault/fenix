@@ -15,7 +15,8 @@ mod status;
 mod test_util;
 
 pub use actions::{
-    amend_commit, checkout_branch, cherry_pick, commit, create_branch, delete_branch, discard_dir, discard_file, fetch, merge,
+    amend_commit, checkout_branch, checkout_side, cherry_pick, commit, create_branch, delete_branch, discard_dir, discard_file,
+    fetch, merge, restore_conflict,
     merge_abort, pull, pull_rebase, push, push_force_with_lease, push_set_upstream, rebase, rebase_abort, rebase_continue,
     rebase_skip, reset, revert, seconds_since_fetch, stage_all, stage_file, stash_apply, stash_drop, stash_pop, stash_push,
     unstage_all, unstage_file, ResetMode,
@@ -28,5 +29,5 @@ pub use diff::{commit_diff, diff_refs, file_diff, stash_diff};
 pub use files::{list_files, FileEntry};
 pub use graph::{assign_lanes, commit_graph, GraphCommit, GraphRow};
 pub use stash::{list_stashes, Stash};
-pub use state::{in_progress, InProgress};
+pub use state::{conflict_sides, in_progress, ConflictSides, InProgress};
 pub use status::{status, status_and_files, RepoStatus};

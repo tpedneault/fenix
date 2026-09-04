@@ -366,6 +366,7 @@ pub fn render_status(
     untracked: usize,
     in_progress: Option<&fenix_git::InProgress>,
     conflicts: usize,
+    sides: Option<&fenix_git::ConflictSides>,
 ) -> GitPanel {
     let mut b = Builder::new();
     // A suspended rebase/merge leads, before anything else. Being
@@ -381,9 +382,18 @@ pub fn render_status(
     if conflicts > 0 {
         let (badge, color) = (format!("  [{conflicts}] "), GitBadgeColor::Bad);
         b.push(
-            &format!("{badge}conflicted file{}", if conflicts == 1 { "" } else { "s" }),
+            &format!("{badge}conflicted file{}  --  SPC g x to resolve", if conflicts == 1 { "" } else { "s" }),
             Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: None, badge: Some((badge.chars().count(), color)) }),
         );
+        // Which branch each side of the markers actually is. During a
+        // rebase git's own "ours" is the branch being rebased *onto*,
+        // so anyone reading `<<<<<<< HEAD` as "my version" and keeping
+        // it deletes their own work. Saying it here, where the conflict
+        // count already is, is the cheapest possible place to stop that.
+        if let Some(sides) = sides {
+            push_detail_line(&mut b, "ours", &format!("{} ({})", sides.ours, sides.ours_role));
+            push_detail_line(&mut b, "theirs", &format!("{} ({})", sides.theirs, sides.theirs_role));
+        }
     }
     match status {
         None => {
@@ -452,6 +462,49 @@ pub fn render_compare(range: &str, commits: &[Commit], truncated: bool) -> GitPa
                 entry: Some(GitEntry::Commit(commit.hash.clone())),
                 dim_from: None,
                 badge: Some((badge_len, GitBadgeColor::Neutral)),
+            }),
+        );
+    }
+    b.finish()
+}
+
+/// The Merge view's file list: every path git still considers
+/// unmerged, under a heading naming what the two sides are.
+///
+/// The heading is doing real work. "Take ours" is meaningless until you
+/// know which branch "ours" is -- and during a rebase it is *not* the
+/// branch you were on, which is the single most common way to resolve a
+/// conflict backwards.
+pub fn render_conflicts(files: &[String], ours: &str, theirs: &str, ours_role: &str, theirs_role: &str) -> GitPanel {
+    let mut b = Builder::new();
+    let header = |b: &mut Builder, text: &str| {
+        b.push(text, Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }));
+    };
+    let note = |b: &mut Builder, text: &str| {
+        b.push(text, Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }));
+    };
+    header(&mut b, &format!("  {} conflicted file{}", files.len(), if files.len() == 1 { "" } else { "s" }));
+    note(&mut b, &format!("    o = keep {ours}"));
+    note(&mut b, &format!("        ({ours_role})"));
+    note(&mut b, &format!("    t = keep {theirs}"));
+    note(&mut b, &format!("        ({theirs_role})"));
+    note(&mut b, "    Enter = resolve it line by line");
+    b.push("", None);
+    if files.is_empty() {
+        let (text, meta) = empty_line("Nothing left to resolve");
+        b.push(&text, meta);
+        return b.finish();
+    }
+    for path in files {
+        let prefix = "  [!] ".to_string();
+        let badge_len = prefix.chars().count();
+        b.push(
+            &format!("{prefix}{path}"),
+            Some(GitLine {
+                style: GitLineStyle::File,
+                entry: Some(GitEntry::File(path.clone())),
+                dim_from: None,
+                badge: Some((badge_len, GitBadgeColor::Bad)),
             }),
         );
     }
@@ -702,13 +755,13 @@ mod tests {
 
     #[test]
     fn render_status_none_shows_not_a_repo() {
-        assert!(render_status(None, 0, 0, 0, None, 0).text.contains("Not a git repository"));
+        assert!(render_status(None, 0, 0, 0, None, 0, None).text.contains("Not a git repository"));
     }
 
     #[test]
     fn render_status_shows_branch_and_file_counts() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 2, 1, 3, None, 0);
+        let panel = render_status(Some(&s), 2, 1, 3, None, 0, None);
         assert!(panel.text.contains("Branch: main"));
         assert!(panel.text.contains("Staged: 2"));
         assert!(panel.text.contains("Unstaged: 1"));
@@ -719,7 +772,7 @@ mod tests {
     #[test]
     fn render_status_shows_upstream_and_ahead_behind_when_tracking() {
         let s = RepoStatus { branch: "main".to_string(), upstream: Some("origin/main".to_string()), ahead: 2, behind: 1 };
-        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         assert!(panel.text.contains("Upstream: origin/main"));
         assert!(panel.text.contains("Ahead/Behind: +2 -1"));
     }
@@ -728,7 +781,7 @@ mod tests {
     fn a_suspended_operation_leads_the_status_pane_with_the_keys_that_end_it() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
         let op = fenix_git::InProgress::Rebase { step: Some((2, 5)) };
-        let panel = render_status(Some(&s), 0, 0, 0, Some(&op), 0);
+        let panel = render_status(Some(&s), 0, 0, 0, Some(&op), 0, None);
         let first = panel.text.lines().next().unwrap();
         assert!(first.contains("REBASING 2/5"), "got: {first:?}");
         assert!(first.contains("continue") && first.contains("abort"), "the way out has to be on screen: {first:?}");
@@ -737,20 +790,24 @@ mod tests {
     #[test]
     fn conflicted_files_are_counted_where_they_cannot_be_missed() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 3);
+        let panel = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 3, None);
         assert!(panel.text.contains("[3] conflicted files"), "got:
 {}", panel.text);
         // Singular reads properly too.
-        let one = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 1);
-        assert!(one.text.contains("[1] conflicted file
-"), "got:
+        let one = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 1, None);
+        assert!(one.text.contains("[1] conflicted file "), "got:
+{}", one.text);
+        assert!(!one.text.contains("conflicted files"), "got:
+{}", one.text);
+        // And the row says where to go do something about it.
+        assert!(one.text.contains("SPC g x to resolve"), "got:
 {}", one.text);
     }
 
     #[test]
     fn a_clean_repo_gets_no_banner_and_no_conflict_row() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         assert!(panel.text.starts_with("    Branch:"), "got:
 {}", panel.text);
         assert!(!panel.text.contains("conflicted"));
@@ -760,7 +817,7 @@ mod tests {
     fn a_long_status_detail_value_word_wraps_onto_continuation_lines() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
         let s = RepoStatus { branch: long_branch.clone(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).count();
         assert!(detail_rows > 4, "expected the long branch name to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
         assert_eq!(panel.text.lines().count(), panel.lines.len(), "text and lines must stay in lockstep after wrapping");
@@ -770,7 +827,7 @@ mod tests {
     fn a_wrapped_status_continuation_line_is_dimmed_in_full() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
         let s = RepoStatus { branch: long_branch, upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         let detail_lines: Vec<&GitLine> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).collect();
         assert!(detail_lines.iter().any(|l| l.dim_from == Some(0)), "expected a continuation line dimmed from column 0");
     }
@@ -778,7 +835,7 @@ mod tests {
     #[test]
     fn a_short_status_detail_value_never_wraps() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         assert!(!panel.text.contains("\nmain\n"), "a short value must not spill onto its own continuation line");
     }
 

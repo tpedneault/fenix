@@ -113,6 +113,14 @@ pub enum BufferKind {
     /// refreshed, since a `PATH` scan is fast enough to redo outright
     /// rather than being worth incrementally patching.
     ToolStatus,
+    /// A conflicted file shown as two aligned columns, ours beside
+    /// theirs (`SPC g x`). Its own kind rather than another `Diff`
+    /// buffer because the per-line metadata is different in kind: a
+    /// diff row names a file/hunk/line, a merge row names a *conflict*
+    /// and which column the text came from (see `fenix-gui`'s
+    /// `merge_view::MergeViewLine`), and the two columns are colored
+    /// independently within a single row.
+    Merge,
 }
 
 impl BufferKind {
@@ -252,6 +260,13 @@ impl BufferList {
     /// shape as `open_git`.
     pub fn open_graph(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Graph)
+    }
+
+    /// A real buffer seeded with `text` (a conflicted file rendered as
+    /// two columns) and tagged `Merge` -- `SPC g x`. Same "real buffer,
+    /// just tagged" shape as `open_diff`.
+    pub fn open_merge(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Merge)
     }
 
     /// A real buffer seeded with `text` (a rendered tool status listing)

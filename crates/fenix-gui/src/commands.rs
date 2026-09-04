@@ -132,6 +132,9 @@ impl CommandRegistry {
         registry.register("git.keep_ours", "Resolve the conflict under the cursor, keeping ours", cmd_git_keep_ours);
         registry.register("git.keep_theirs", "Resolve the conflict under the cursor, keeping theirs", cmd_git_keep_theirs);
         registry.register("git.keep_both", "Resolve the conflict under the cursor, keeping both sides", cmd_git_keep_both);
+        registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
+        registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
+        registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
         registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
         registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
@@ -801,4 +804,16 @@ fn cmd_git_keep_theirs(ctx: &mut CommandCtx) {
 
 fn cmd_git_keep_both(ctx: &mut CommandCtx) {
     ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
+}
+
+fn cmd_git_merge_view(ctx: &mut CommandCtx) {
+    ctx.app.open_merge_view();
+}
+
+fn cmd_git_merge_close(ctx: &mut CommandCtx) {
+    ctx.app.merge_close();
+}
+
+fn cmd_git_stage_resolved(ctx: &mut CommandCtx) {
+    ctx.app.merge_stage_resolved();
 }

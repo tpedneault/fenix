@@ -111,6 +111,15 @@ pub struct FileDiff {
     /// instead (the same posture the Git panel already takes for an
     /// untracked file, which has no diff either).
     pub is_binary: bool,
+    /// A *combined* diff (`diff --cc`/`diff --combined`), which git
+    /// emits for the two things that matter most here: a merge commit,
+    /// and a file with unresolved conflicts. It compares the result
+    /// against *several* parents at once, one marker column per parent,
+    /// so there is no single "old side" -- which is why the lines it
+    /// produces carry new-side numbers only, and why a hunk from one can
+    /// never be staged: `git apply` has no combined-diff input format to
+    /// feed it back into. Callers show these read-only.
+    pub is_combined: bool,
     /// Every line from `diff --git ...` up to (not including) the first
     /// `@@`, verbatim -- the `index`/`new file mode`/`rename from`/
     /// `---`/`+++` preamble. Kept whole so `hunk_patch` can re-emit

@@ -35,6 +35,7 @@ use crate::git_panel;
 use crate::gpu::{GpuContext, GpuState};
 use crate::graph_view;
 use crate::icon;
+use crate::merge_view;
 use crate::jira_panel;
 use crate::keymap;
 use crate::markdown;
@@ -474,6 +475,30 @@ struct CompareSession {
     /// `base...head` (merge-base) vs. `base..head` -- `t` toggles. See
     /// `fenix_git::diff_refs` for why three-dot is the default.
     three_dot: bool,
+}
+
+/// The Merge view (`SPC g x`): the conflicted files on the left, the
+/// selected one shown as two aligned columns on the right.
+///
+/// Separate from `GitSession` for the same reason History and Compare
+/// are: resolving conflicts is a whole task with its own keys, not a
+/// mode of the working-tree view, and it wants the full width for two
+/// columns of file text.
+struct MergeSession {
+    workspace_index: usize,
+    files_pane: fenix_window::WindowId,
+    merge_pane: fenix_window::WindowId,
+    files_buffer: BufferId,
+    merge_buffer: BufferId,
+    repo_root: PathBuf,
+    /// Repo-relative paths git still reports as unmerged.
+    files: Vec<String>,
+    /// Which of them the right pane is showing.
+    selected: Option<String>,
+    /// The two sides as branches, resolved once per refresh --
+    /// re-resolving per row would shell out to `git name-rev` for every
+    /// keypress, and the answer can't change without a refresh anyway.
+    labels: merge_view::SideLabels,
 }
 
 /// What a `BufferKind::Diff` buffer is currently showing. Cached
@@ -1527,6 +1552,9 @@ struct GitSession {
     /// what the Status pane's banner reports and what `SPC g R`/`SPC g A`
     /// act on.
     in_progress: Option<fenix_git::InProgress>,
+    /// Which branch each side of a conflict's markers actually is,
+    /// resolved once per refresh -- see `fenix_git::conflict_sides`.
+    sides: Option<fenix_git::ConflictSides>,
     /// Same "held only for its `Drop` side effect" RAII shape as
     /// `DockerSession::stats_poller`.
     #[allow(dead_code)]
@@ -3170,6 +3198,7 @@ pub(crate) struct GitRefreshData {
     /// same pass as everything else so the Status banner can never
     /// disagree with the file list beside it.
     in_progress: Option<fenix_git::InProgress>,
+    sides: Option<fenix_git::ConflictSides>,
 }
 
 /// The actual four `git` shell-outs `git_refresh_session` needs -- called
@@ -3181,7 +3210,8 @@ fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
     let commits = fenix_git::list_commits(repo_root, 50);
     let stashes = fenix_git::list_stashes(repo_root);
     let in_progress = fenix_git::in_progress(repo_root);
-    GitRefreshData { status, files, branches, commits, stashes, in_progress }
+    let sides = fenix_git::conflict_sides(repo_root);
+    GitRefreshData { status, files, branches, commits, stashes, in_progress, sides }
 }
 
 /// Resolves a `vt100` cell color to a real theme color -- `Default`
@@ -3705,6 +3735,115 @@ fn diff_highlights_for_visible_range(
             diff_view::DiffStyle::Context => continue,
         };
         ranges.push((content_start_byte..line_end_byte, color));
+    }
+    ranges
+}
+
+/// Highlight ranges for git's conflict markers in an ordinary text
+/// buffer: the marker lines themselves, and each side's content colored
+/// the way the merge view colors it, so the same two colors mean the
+/// same two things whichever surface you're reading the conflict on.
+///
+/// Empty for a file with no markers at all, which is how the caller
+/// decides whether to use this instead of syntax highlighting -- so
+/// this walks the *whole* buffer for an opening marker rather than only
+/// the visible rows: scrolling into a conflict from a clean part of the
+/// file has to light it up too.
+fn conflict_marker_highlights(
+    ob: &OpenBuffer,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    if ob.kind != BufferKind::Text {
+        return Vec::new();
+    }
+    let text = ob.buffer.text();
+    if !text.contains("<<<<<<<") {
+        return Vec::new();
+    }
+    let conflicts = fenix_git::find_conflicts(&text);
+    if conflicts.is_empty() {
+        return Vec::new();
+    }
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(conflict) = conflicts.iter().find(|c| c.contains(line)) else { continue };
+        let color = if line == conflict.start || line == conflict.end || conflict.ours.end == line || conflict.base.as_ref().is_some_and(|b| b.start == line + 1)
+        {
+            // The `<<<<<<<`, `=======`, `|||||||` and `>>>>>>>` lines:
+            // structure, not content.
+            theme.syntax_keyword
+        } else if conflict.ours.contains(&line) {
+            theme.git_conflicted
+        } else if conflict.base.as_ref().is_some_and(|b| b.contains(&line)) {
+            theme.syntax_comment
+        } else {
+            theme.git_staged
+        };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        ranges.push((ob.buffer.char_to_byte(start)..ob.buffer.char_to_byte(start + len), color));
+    }
+    ranges
+}
+
+/// Resolves a real `BufferKind::Merge` buffer's highlight ranges from
+/// its cached `MergeViewLine` metadata.
+///
+/// A conflict row is genuinely two-colored: the left column is one
+/// branch's version and the right column the other's, and telling them
+/// apart at a glance is the entire point of the view. So a row with a
+/// `gutter` gets three spans -- ours, the dim divider, theirs -- rather
+/// than the single span every other panel here uses.
+fn merge_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<merge_view::MergeViewLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let byte = |col: usize| ob.buffer.char_to_byte(start + col.min(len));
+        let (line_start, line_end) = (byte(0), byte(len));
+
+        // Ours and theirs read as removed/added would in a diff: the
+        // same two colors, meaning the same two things (what's there
+        // now vs. what's coming in), so there's one palette to learn
+        // rather than two.
+        let (ours, theirs) = (theme.git_conflicted, theme.git_staged);
+        match (meta.style, meta.gutter) {
+            (merge_view::MergeStyle::Header, Some(gutter)) => {
+                ranges.push((line_start..byte(gutter), ours));
+                ranges.push((byte(gutter)..byte(gutter + 1), theme.gutter_fg));
+                ranges.push((byte(gutter + 1)..line_end, theirs));
+            }
+            (merge_view::MergeStyle::Header, None) => ranges.push((line_start..line_end, theme.syntax_function)),
+            (merge_view::MergeStyle::Separator, _) => ranges.push((line_start..line_end, theme.syntax_keyword)),
+            (merge_view::MergeStyle::Meta, Some(gutter)) => {
+                // The role line under the heading: dim, but still split,
+                // so each explanation sits under the branch it explains.
+                ranges.push((line_start..byte(gutter), theme.gutter_fg));
+                ranges.push((byte(gutter)..line_end, theme.gutter_fg));
+            }
+            (merge_view::MergeStyle::Meta, None) => ranges.push((line_start..line_end, theme.gutter_fg)),
+            (merge_view::MergeStyle::Base, _) => ranges.push((line_start..line_end, theme.syntax_comment)),
+            (merge_view::MergeStyle::Context, Some(gutter)) => {
+                ranges.push((line_start..byte(gutter), ours));
+                ranges.push((byte(gutter)..byte(gutter + 1), theme.gutter_fg));
+                ranges.push((byte(gutter + 1)..line_end, theirs));
+            }
+            // Shared text outside any conflict: ordinary file content,
+            // so no range at all and the pane's own color applies.
+            (merge_view::MergeStyle::Context, None) => continue,
+        }
     }
     ranges
 }
@@ -4255,6 +4394,7 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::ToolStatus
             | BufferKind::Diff
             | BufferKind::Graph
+            | BufferKind::Merge
     )
 }
 
@@ -4764,6 +4904,10 @@ pub struct App {
     /// mirrors `diff_lines`, carrying each row's colored spans and the
     /// commit it draws.
     graph_lines: HashMap<BufferId, Vec<Option<graph_view::GraphLine>>>,
+    /// Per-line metadata for every real `BufferKind::Merge` buffer --
+    /// which conflict each row belongs to, which side its text came
+    /// from, and where its two columns split.
+    merge_lines: HashMap<BufferId, Vec<Option<merge_view::MergeViewLine>>>,
     /// Armed by `d` on Files/Branches/Stash until the next keypress
     /// confirms or cancels -- mirrors `docker_confirm_remove`, just over
     /// `GitConfirmAction`'s several destructive-action kinds instead of
@@ -4773,6 +4917,7 @@ pub struct App {
     history_session: Option<HistorySession>,
     /// The Compare view (`SPC g c`), if open -- see `CompareSession`.
     compare_session: Option<CompareSession>,
+    merge_session: Option<MergeSession>,
     /// Capturing a commit message or new branch name -- mirrors
     /// `explorer_prompt`'s "next keystrokes are text input" shape.
     git_prompt: Option<GitPrompt>,
@@ -5511,9 +5656,11 @@ impl App {
             git_lines: HashMap::new(),
             history_session: None,
             compare_session: None,
+            merge_session: None,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
             graph_lines: HashMap::new(),
+            merge_lines: HashMap::new(),
             git_confirm: None,
             git_prompt: None,
             git_menu_open: false,
@@ -6140,6 +6287,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
             || self.compare_session.as_ref().is_some_and(|s| focused == s.commits_pane || focused == s.diff_pane)
+            || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -12180,13 +12328,14 @@ impl App {
 
         let (status, files) = fenix_git::status_and_files(&repo_root);
         let in_progress = fenix_git::in_progress(&repo_root);
+        let sides = fenix_git::conflict_sides(&repo_root);
         let branches = fenix_git::list_branches(&repo_root);
         let commits = fenix_git::list_commits(&repo_root, 50);
         let stashes = fenix_git::list_stashes(&repo_root);
 
         let (staged, unstaged, untracked) = file_counts(&files);
         let status_panel =
-            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflict_count(&files));
+            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflict_count(&files), sides.as_ref());
         let staged_panel = git_panel::render_staged(&files, &HashSet::new());
         let unstaged_panel = git_panel::render_unstaged(&files, &HashSet::new());
         let branches_panel = git_panel::render_branches(&branches);
@@ -12287,6 +12436,7 @@ impl App {
             stashes,
             status,
             in_progress,
+            sides,
             status_poller,
             staged_expanded_dirs: HashSet::new(),
             unstaged_expanded_dirs: HashSet::new(),
@@ -12474,6 +12624,15 @@ impl App {
             return;
         }
         let Some(model) = self.diff_models.get(&buffer) else { return };
+        // A conflicted file's diff is a *combined* one, comparing the
+        // working tree against both sides at once. There's no combined
+        // patch format to feed back to `git apply`, so a hunk from one
+        // can't be staged at all -- resolving the conflict is what
+        // stages it.
+        if model.files.get(anchor.file).is_some_and(|f| f.is_combined) {
+            self.set_error("this file is conflicted -- resolve it (SPC g o/t/b) rather than staging a hunk".to_string());
+            return;
+        }
         let allowed = match (model.source, target) {
             (DiffSource::Unstaged, fenix_git::ApplyTarget::Stage | fenix_git::ApplyTarget::Discard) => true,
             (DiffSource::Staged, fenix_git::ApplyTarget::Unstage) => true,
@@ -12670,9 +12829,10 @@ impl App {
         let (staged, unstaged, untracked) = file_counts(&session.files);
         let (status_buffer, conflicts) = (session.status_buffer, conflict_count(&session.files));
         let in_progress = session.in_progress.clone();
+        let sides = session.sides.clone();
         self.set_git_buffer(
             status_buffer,
-            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflicts),
+            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflicts, sides.as_ref()),
         );
     }
 
@@ -12743,6 +12903,7 @@ impl App {
             untracked,
             data.in_progress.as_ref(),
             conflict_count(&data.files),
+            data.sides.as_ref(),
         );
         let staged_panel = git_panel::render_staged(&data.files, &staged_expanded);
         let unstaged_panel = git_panel::render_unstaged(&data.files, &unstaged_expanded);
@@ -12757,6 +12918,7 @@ impl App {
         session.commits = data.commits;
         session.stashes = data.stashes;
         session.in_progress = data.in_progress;
+        session.sides = data.sides;
         session.last_main_entry = None;
 
         self.set_git_buffer(status_buffer, status_panel);
@@ -13184,6 +13346,306 @@ impl App {
         if self.compare_session.is_some() {
             self.compare_refresh();
         }
+        if self.merge_session.is_some() {
+            self.merge_refresh();
+        }
+    }
+
+    // -- Merge view (`SPC g x`) --------------------------------------------
+
+    /// `SPC g x`: opens (or refocuses and refreshes) the Merge view --
+    /// every conflicted file on the left, the selected one shown as two
+    /// aligned columns on the right.
+    pub(crate) fn open_merge_view(&mut self) {
+        if let Some(session) = &self.merge_session {
+            let (workspace_index, files_pane) = (session.workspace_index, session.files_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(files_pane);
+            self.merge_refresh();
+            self.wake_caret();
+            return;
+        }
+        let repo_root = self.compare_repo_root();
+        if fenix_git::status(&repo_root).is_none() {
+            self.set_error(format!("{} isn't a git repository", repo_root.display()));
+            return;
+        }
+
+        let files_buffer = self.buffers.open_git("");
+        let merge_buffer = self.buffers.open_merge("");
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(files_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let files_pane = self.focused_pane_id();
+        let merge_pane = self.windows_mut().split(SplitKind::Vertical, merge_buffer);
+        self.workspaces.active_pane_states_mut().insert(merge_pane, PaneState::seeded_at(cursor));
+        // The file list is a short index; the columns need everything
+        // else, and they're what's actually being read.
+        self.windows_mut().resize_focused(0.22);
+        self.windows_mut().focus(files_pane);
+
+        self.pane_titles.insert(files_pane, "1. Conflicts".to_string());
+        self.pane_titles.insert(merge_pane, "2. Merge".to_string());
+
+        self.merge_session = Some(MergeSession {
+            workspace_index,
+            files_pane,
+            merge_pane,
+            files_buffer,
+            merge_buffer,
+            repo_root,
+            files: Vec::new(),
+            selected: None,
+            labels: merge_view::SideLabels::unknown(),
+        });
+        self.merge_refresh();
+        self.wake_caret();
+    }
+
+    /// Re-lists the conflicted files and re-renders both panes.
+    fn merge_refresh(&mut self) {
+        let Some(session) = self.merge_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let (files_buffer, merge_buffer) = (session.files_buffer, session.merge_buffer);
+
+        // `u` entries are exactly git's own unmerged paths -- the same
+        // ones `git status` calls "Unmerged", and the same list
+        // `git rebase --continue` refuses to move past.
+        let files: Vec<String> =
+            fenix_git::list_files(&repo_root).into_iter().filter(|f| f.index_status == 'U' || f.worktree_status == 'U').map(|f| f.path).collect();
+        let labels = fenix_git::conflict_sides(&repo_root).as_ref().map(merge_view::SideLabels::from).unwrap_or_else(merge_view::SideLabels::unknown);
+
+        // Keep showing whatever was selected as long as it's still a
+        // real path -- a file that has just been resolved should show
+        // "nothing left to resolve" rather than silently jumping to a
+        // different file the user wasn't looking at.
+        let selected = session.selected.clone().filter(|p| files.contains(p) || repo_root.join(p).exists()).or_else(|| files.first().cloned());
+
+        if let Some(session) = self.merge_session.as_mut() {
+            session.files = files.clone();
+            session.labels = labels.clone();
+            session.selected = selected.clone();
+        }
+        self.set_git_buffer_preserving_line(files_buffer, git_panel::render_conflicts(&files, &labels.ours, &labels.theirs, &labels.ours_role, &labels.theirs_role));
+
+        let view = match &selected {
+            Some(path) => {
+                let full = repo_root.join(path);
+                match std::fs::read_to_string(&full) {
+                    Ok(text) => {
+                        let conflicts = fenix_git::find_conflicts(&text);
+                        merge_view::render(path, &text, &conflicts, &labels)
+                    }
+                    Err(err) => merge_view::render(path, &format!("couldn't read {}: {err}\n", full.display()), &[], &labels),
+                }
+            }
+            None => merge_view::render("", "", &[], &labels),
+        };
+        self.set_merge_buffer(merge_buffer, view);
+    }
+
+    /// Swaps a Merge buffer's content, keeping every pane showing it on
+    /// the same line index -- resolving one conflict re-renders the
+    /// whole file, and snapping back to the top after each choice would
+    /// make a file with several conflicts miserable to work through.
+    fn set_merge_buffer(&mut self, id: BufferId, view: merge_view::MergeView) {
+        self.merge_lines.insert(id, view.lines);
+        let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) == Some(&id) {
+                let ps = self.pane_state(pane);
+                if let Some(ob) = self.buffers.get(id) {
+                    old_lines.push((pane, ob.buffer.line_col(&ps.cursor).0));
+                }
+            }
+        }
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch, 0, end, &view.text);
+        }
+        let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
+        for (pane, old_line) in old_lines {
+            let clamped = old_line.min(line_count.saturating_sub(1));
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let char_idx = ob.buffer.line_start_char(clamped);
+            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        }
+    }
+
+    /// `Enter` on the Conflicts pane: show that file in the right pane.
+    pub(crate) fn merge_select_at_cursor(&mut self) {
+        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+            self.set_message("put the cursor on a conflicted file");
+            return;
+        };
+        if let Some(session) = self.merge_session.as_mut() {
+            session.selected = Some(path);
+        }
+        let merge_pane = self.merge_session.as_ref().map(|s| s.merge_pane);
+        self.merge_refresh();
+        if let Some(pane) = merge_pane {
+            self.windows_mut().focus(pane);
+        }
+        self.wake_caret();
+    }
+
+    /// `o`/`t` on the Conflicts pane: resolve a whole file by taking one
+    /// side, then stage it -- the "I already know which version wins"
+    /// path.
+    pub(crate) fn merge_take_whole_file(&mut self, side: fenix_git::Resolution) {
+        let Some(session) = self.merge_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let labels = session.labels.clone();
+        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+            self.set_message("put the cursor on a conflicted file");
+            return;
+        };
+        let kept = match side {
+            fenix_git::Resolution::Ours => labels.ours.clone(),
+            fenix_git::Resolution::Theirs => labels.theirs.clone(),
+            fenix_git::Resolution::Both => {
+                self.set_error("keeping both is a per-conflict choice -- open the file with Enter".to_string());
+                return;
+            }
+        };
+        match fenix_git::checkout_side(&repo_root, &path, side) {
+            // Named by branch, not by "ours"/"theirs": the point of
+            // saying it back is to confirm the *right* version survived.
+            Ok(_) => self.set_message(format!("{path}: kept {kept}'s version, staged")),
+            Err(err) => self.set_error(format!("couldn't take that side: {err}")),
+        }
+        self.merge_refresh();
+        self.reload_buffers_changed_on_disk();
+        self.wake_caret();
+    }
+
+    /// `u`: puts the selected file back the way git first wrote it,
+    /// markers and all -- the undo for a resolution that went the wrong
+    /// way.
+    pub(crate) fn merge_restore_conflict(&mut self) {
+        let Some(session) = self.merge_session.as_ref() else { return };
+        let (repo_root, selected) = (session.repo_root.clone(), session.selected.clone());
+        let Some(path) = selected else {
+            self.set_message("no file selected");
+            return;
+        };
+        match fenix_git::restore_conflict(&repo_root, &path) {
+            Ok(_) => self.set_message(format!("{path}: conflict restored")),
+            Err(err) => self.set_error(err),
+        }
+        self.merge_refresh();
+        self.reload_buffers_changed_on_disk();
+        self.wake_caret();
+    }
+
+    /// `s`: stages the selected file as resolved. Refuses while markers
+    /// are still in it -- staging a file with `<<<<<<<` in it is how
+    /// conflict markers end up committed.
+    pub(crate) fn merge_stage_resolved(&mut self) {
+        let Some(session) = self.merge_session.as_ref() else {
+            self.set_message("no Merge view open -- SPC g x opens it");
+            return;
+        };
+        let (repo_root, selected) = (session.repo_root.clone(), session.selected.clone());
+        let Some(path) = selected else {
+            self.set_message("no file selected");
+            return;
+        };
+        let full = repo_root.join(&path);
+        if let Ok(text) = std::fs::read_to_string(&full) {
+            let left = fenix_git::find_conflicts(&text).len();
+            if left > 0 {
+                self.set_error(format!("{path} still has {left} unresolved conflict(s)"));
+                return;
+            }
+        }
+        match fenix_git::stage_file(&repo_root, &path) {
+            Ok(_) => self.set_message(format!("{path}: staged as resolved")),
+            Err(err) => self.set_error(format!("couldn't stage {path}: {err}")),
+        }
+        self.merge_refresh();
+        self.wake_caret();
+    }
+
+    /// The conflict the cursor is on in the Merge pane, if it's there.
+    fn merge_conflict_at_cursor(&self) -> Option<usize> {
+        let session = self.merge_session.as_ref()?;
+        if self.focused_pane_id() != session.merge_pane {
+            return None;
+        }
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let lines = self.merge_lines.get(&session.merge_buffer)?;
+        // A row between conflicts belongs to none, so fall forward to
+        // the next one -- the same "act on the next one down" rule
+        // `resolve_conflict_at_cursor` uses in a plain buffer.
+        lines
+            .get(line)
+            .and_then(|l| l.as_ref())
+            .and_then(|l| l.conflict)
+            .or_else(|| lines.iter().skip(line).flatten().find_map(|l| l.conflict))
+    }
+
+    /// `SPC g o`/`t`/`b` inside the Merge view: resolve the conflict
+    /// under the cursor, on disk, and re-render.
+    ///
+    /// Writes the file rather than a buffer because the Merge pane isn't
+    /// the file -- it's a rendering of it. `u` restores the conflict if
+    /// this was the wrong call.
+    fn merge_resolve_at_cursor(&mut self, resolution: fenix_git::Resolution) -> bool {
+        let Some(index) = self.merge_conflict_at_cursor() else { return false };
+        let Some(session) = self.merge_session.as_ref() else { return false };
+        let (repo_root, selected, labels) = (session.repo_root.clone(), session.selected.clone(), session.labels.clone());
+        let Some(path) = selected else { return false };
+        let full = repo_root.join(&path);
+        let Ok(text) = std::fs::read_to_string(&full) else {
+            self.set_error(format!("couldn't read {}", full.display()));
+            return true;
+        };
+        let conflicts = fenix_git::find_conflicts(&text);
+        let Some(conflict) = conflicts.get(index) else {
+            self.set_error("that conflict is gone -- the file changed underneath this view".to_string());
+            self.merge_refresh();
+            return true;
+        };
+        let resolved = fenix_git::resolve_conflict(&text, conflict, resolution);
+        if let Err(err) = std::fs::write(&full, &resolved) {
+            self.set_error(format!("couldn't write {}: {err}", full.display()));
+            return true;
+        }
+        let kept = match resolution {
+            fenix_git::Resolution::Ours => labels.ours.clone(),
+            fenix_git::Resolution::Theirs => labels.theirs.clone(),
+            fenix_git::Resolution::Both => "both sides".to_string(),
+        };
+        let left = fenix_git::find_conflicts(&resolved).len();
+        self.set_message(if left == 0 {
+            format!("kept {kept} -- {path} is resolved, SPC g s stages it")
+        } else {
+            format!("kept {kept} -- {left} conflict(s) left in {path}")
+        });
+        self.merge_refresh();
+        self.reload_buffers_changed_on_disk();
+        self.wake_caret();
+        true
+    }
+
+    /// `SPC g X`: closes the Merge view.
+    pub(crate) fn merge_close(&mut self) {
+        let Some(session) = self.merge_session.take() else { return };
+        for id in [session.files_buffer, session.merge_buffer] {
+            self.buffers.close(id);
+            self.git_lines.remove(&id);
+            self.merge_lines.remove(&id);
+        }
+        for pane in [session.files_pane, session.merge_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
     }
 
     /// `SPC g r`: pick a ref to replay the current branch onto.
@@ -13303,6 +13765,9 @@ impl App {
     /// `SPC g j`/`SPC g k`: move to the next/previous conflict in the
     /// focused file.
     pub(crate) fn goto_conflict(&mut self, forward: bool) {
+        if self.merge_goto_conflict(forward) {
+            return;
+        }
         let conflicts = self.focused_conflicts();
         if conflicts.is_empty() {
             self.set_message("no conflict markers in this file");
@@ -13321,6 +13786,42 @@ impl App {
         self.wake_caret();
     }
 
+    /// `SPC g j`/`SPC g k` inside the Merge view: jump to the next or
+    /// previous conflict's separator row. Returns whether it applied,
+    /// so the plain-buffer path can take over when it didn't.
+    fn merge_goto_conflict(&mut self, forward: bool) -> bool {
+        let Some(session) = self.merge_session.as_ref() else { return false };
+        if self.focused_pane_id() != session.merge_pane {
+            return false;
+        }
+        let Some(lines) = self.merge_lines.get(&session.merge_buffer) else { return true };
+        // The separator row is the one to land on: it names the conflict
+        // ("conflict 2 of 3") and sits directly above both columns.
+        let starts: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_ref().is_some_and(|l| l.style == merge_view::MergeStyle::Separator))
+            .map(|(i, _)| i)
+            .collect();
+        if starts.is_empty() {
+            self.set_message("no conflicts left in this file");
+            return true;
+        }
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        // Wraps, like the plain-buffer path: there are only ever a
+        // handful, and cycling beats being stuck at the last one.
+        let target = if forward {
+            starts.iter().find(|&&s| s > line).copied().unwrap_or(starts[0])
+        } else {
+            starts.iter().rev().find(|&&s| s < line).copied().unwrap_or(*starts.last().unwrap())
+        };
+        let char_idx = self.open().buffer.line_start_char(target);
+        let pane = self.focused_pane_id();
+        self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        self.wake_caret();
+        true
+    }
+
     /// `SPC g o`/`SPC g t`/`SPC g b`: resolve the conflict under the
     /// cursor by keeping ours, theirs, or both.
     ///
@@ -13328,6 +13829,13 @@ impl App {
     /// undo history like any other edit and isn't written until the
     /// buffer is saved -- a mistaken choice is one `u` away.
     pub(crate) fn resolve_conflict_at_cursor(&mut self, resolution: fenix_git::Resolution) {
+        // Same keys in the Merge view, where the "buffer" is a rendering
+        // of the file rather than the file, so the edit goes to disk.
+        // One pair of keys for one decision, wherever you happen to be
+        // looking at the conflict from.
+        if self.merge_resolve_at_cursor(resolution) {
+            return;
+        }
         let conflicts = self.focused_conflicts();
         let line = self.open().buffer.line_col(&self.cursor()).0;
         let Some(conflict) = conflicts.iter().find(|c| c.contains(line)).or_else(|| conflicts.iter().find(|c| c.start > line)) else {
@@ -13466,6 +13974,15 @@ impl App {
     }
 
     /// `1`/`2` in the Compare view.
+    fn merge_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.merge_session.as_ref()?;
+        match n {
+            1 => Some(session.files_pane),
+            2 => Some(session.merge_pane),
+            _ => None,
+        }
+    }
+
     fn compare_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
         let session = self.compare_session.as_ref()?;
         match n {
@@ -17303,6 +17820,80 @@ impl App {
             }
         }
 
+        // The Merge view's own keys. `o`/`t` mean the same thing in both
+        // its panes -- keep the left side, keep the right side -- and
+        // differ only in scope: on the file list it's the whole file, in
+        // the columns it's the conflict under the cursor. That's the one
+        // thing worth learning here, so it's the one thing that's
+        // consistent.
+        if let Some((on_files, on_merge)) = self.merge_session.as_ref().map(|s| {
+            let focused = self.focused_pane_id();
+            (focused == s.files_pane, focused == s.merge_pane)
+        }) {
+            if (on_files || on_merge) && keypress.mods == Mods::default() {
+                match keypress.code {
+                    KeyCode::Char('o') if on_files => {
+                        self.merge_take_whole_file(fenix_git::Resolution::Ours);
+                        return;
+                    }
+                    KeyCode::Char('t') if on_files => {
+                        self.merge_take_whole_file(fenix_git::Resolution::Theirs);
+                        return;
+                    }
+                    KeyCode::Char('o') if on_merge => {
+                        self.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+                        return;
+                    }
+                    KeyCode::Char('t') if on_merge => {
+                        self.resolve_conflict_at_cursor(fenix_git::Resolution::Theirs);
+                        return;
+                    }
+                    KeyCode::Char('b') if on_merge => {
+                        self.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
+                        return;
+                    }
+                    KeyCode::Char('n') if on_merge => {
+                        self.goto_conflict(true);
+                        return;
+                    }
+                    KeyCode::Char('p') if on_merge => {
+                        self.goto_conflict(false);
+                        return;
+                    }
+                    KeyCode::Named(fenix_keymap::NamedKey::Enter) if on_files => {
+                        self.merge_select_at_cursor();
+                        return;
+                    }
+                    KeyCode::Char('s') => {
+                        self.merge_stage_resolved();
+                        return;
+                    }
+                    KeyCode::Char('u') => {
+                        self.merge_restore_conflict();
+                        return;
+                    }
+                    KeyCode::Char('r') => {
+                        self.merge_refresh();
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Char('x') => {
+                        self.git_menu_open = true;
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        if let Some(pane) = self.merge_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                            self.windows_mut().focus(pane);
+                            self.wake_caret();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Lazygit-style multi-pane panel -- same "claim a small, pane-
         // scoped action-key set, everything else falls through to Vim"
         // shape as the Docker block above. Real lazygit's own `<space>`
@@ -17927,6 +18518,8 @@ impl App {
                 "*diff*".to_string()
             } else if ob.kind == BufferKind::Graph {
                 "*graph*".to_string()
+            } else if ob.kind == BufferKind::Merge {
+                "*merge*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -18411,6 +19004,10 @@ impl App {
             // be a third, meaningless column.
             || ob.kind == BufferKind::Diff
             || ob.kind == BufferKind::Graph
+            // The merge view's own two columns are the layout; a line
+            // gutter beside them would shift one column and not the
+            // other, which is exactly the alignment it exists to keep.
+            || ob.kind == BufferKind::Merge
         {
             return 0;
         }
@@ -18582,6 +19179,7 @@ impl App {
         let jira_lines = self.jira_lines.get(&id).cloned();
         let diff_lines = self.diff_lines.get(&id).cloned();
         let graph_lines = self.graph_lines.get(&id).cloned();
+        let merge_lines = self.merge_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -18622,6 +19220,21 @@ impl App {
         }
         if ob.kind == BufferKind::Graph {
             return graph_highlights_for_visible_range(ob, graph_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Merge {
+            return merge_highlights_for_visible_range(ob, merge_lines.as_deref(), render_base_line, rows, theme);
+        }
+
+        // Conflict markers, in an ordinary file. A conflicted file opens
+        // as plain text -- the markers are just lines, and tree-sitter
+        // sees them as broken syntax, so the three regions it matters
+        // most to tell apart render identically to everything else.
+        // Colored ahead of syntax rather than merged with it because the
+        // two are answering different questions, and while a file has
+        // `<<<<<<<` in it the conflict is the only one worth answering.
+        let conflict_ranges = conflict_marker_highlights(ob, render_base_line, rows, theme);
+        if !conflict_ranges.is_empty() {
+            return conflict_ranges;
         }
 
         let Some(syntax) = &mut ob.syntax else { return Vec::new() };
@@ -19039,6 +19652,42 @@ impl App {
                     ("u", "refresh"),
                 ];
                 return self.git_menu_popup_at(bindings, window_width, modeline_top);
+            }
+        }
+        if let Some(session) = &self.merge_session {
+            let focused = self.focused_pane_id();
+            // The labels name the branches rather than saying "ours" and
+            // "theirs" -- the popup is for someone who isn't sure which
+            // key does what, so it's the wrong place to make them
+            // translate git's own vocabulary.
+            let (ours, theirs) = (session.labels.ours.as_str(), session.labels.theirs.as_str());
+            let keep_ours = format!("keep {ours}");
+            let keep_theirs = format!("keep {theirs}");
+            let bindings: Option<Vec<(&str, &str)>> = if focused == session.files_pane {
+                Some(vec![
+                    ("1/2", "go to pane"),
+                    ("Enter", "resolve line by line"),
+                    ("o", keep_ours.as_str()),
+                    ("t", keep_theirs.as_str()),
+                    ("s", "stage as resolved"),
+                    ("u", "put the conflict back"),
+                    ("r", "refresh"),
+                ])
+            } else if focused == session.merge_pane {
+                Some(vec![
+                    ("1/2", "go to pane"),
+                    ("n/p", "next/prev conflict"),
+                    ("o", keep_ours.as_str()),
+                    ("t", keep_theirs.as_str()),
+                    ("b", "keep both"),
+                    ("s", "stage as resolved"),
+                    ("u", "put the conflict back"),
+                ])
+            } else {
+                None
+            };
+            if let Some(bindings) = bindings {
+                return self.git_menu_popup_at(&bindings, window_width, modeline_top);
             }
         }
         let bindings: &[(&str, &str)] = match self.git_focused_role()? {
@@ -27813,13 +28462,13 @@ mod tests {
 
         // request_id 3 is stale -- must not overwrite the session's
         // cached file list at all.
-        let stale = GitRefreshData { status: None, files: Vec::new(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None };
+        let stale = GitRefreshData { status: None, files: Vec::new(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None, sides: None };
         app.apply_git_refresh(3, stale);
         assert_eq!(app.git_session.as_ref().unwrap().files, sentinel);
 
         // request_id 5 (current) applies normally.
         let fresh = vec![fenix_git::FileEntry { path: "fresh.txt".to_string(), index_status: 'A', worktree_status: '.' }];
-        let current = GitRefreshData { status: None, files: fresh.clone(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None };
+        let current = GitRefreshData { status: None, files: fresh.clone(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None, sides: None };
         app.apply_git_refresh(5, current);
         assert_eq!(app.git_session.as_ref().unwrap().files, fresh);
     }
@@ -28092,6 +28741,199 @@ mod tests {
         let shown = app.buffers.get(id).unwrap().buffer.text();
         assert_eq!(shown, edited, "unsaved work outranks the reload");
         assert!(app.modeline_pieces().1.contains("unsaved changes"), "and it says so: {}", app.modeline_pieces().1);
+    }
+
+    // -- Merge view (`SPC g x`) --------------------------------------
+
+    /// A repo where rebasing `myfeature` onto `develop` conflicts, so
+    /// the sides are genuinely the counter-intuitive way round: git's
+    /// `HEAD` is `develop`, not the branch you were standing on.
+    fn rebase_conflict_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("app.conf", "shared\nvalue = base\nfooter\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["checkout", "-q", "-b", "develop"]);
+        dir.write("app.conf", "shared\nvalue = DEVELOP\nfooter\n");
+        git(&["commit", "-q", "-am", "develop change"]);
+        git(&["checkout", "-q", "-b", "myfeature", "HEAD~1"]);
+        dir.write("app.conf", "shared\nvalue = FEATURE\nfooter\n");
+        git(&["commit", "-q", "-am", "feature change"]);
+        dir
+    }
+
+    fn merge_view_text(app: &App) -> String {
+        let session = app.merge_session.as_ref().expect("a merge session");
+        app.buffers.get(session.merge_buffer).unwrap().buffer.text()
+    }
+
+    fn conflicts_pane_text(app: &App) -> String {
+        let session = app.merge_session.as_ref().expect("a merge session");
+        app.buffers.get(session.files_buffer).unwrap().buffer.text()
+    }
+
+    #[test]
+    fn the_merge_view_names_the_branches_rather_than_ours_and_theirs() {
+        let dir = rebase_conflict_repo("merge_view_names");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+
+        app.open_merge_view();
+
+        let merge = merge_view_text(&app);
+        assert!(merge.contains("<<< develop"), "the left column is the rebase target:\n{merge}");
+        assert!(merge.contains(">>> myfeature"), "the right column is your own branch:\n{merge}");
+        // And it says which is which in words, because "ours" during a
+        // rebase means the opposite of what it sounds like.
+        assert!(merge.contains("the branch you are rebasing onto"), "got:\n{merge}");
+        assert!(merge.contains("your own commit being replayed"), "got:\n{merge}");
+        // Both versions on one row, so they can actually be compared.
+        let row = merge.lines().find(|l| l.contains("value = DEVELOP")).expect("ours is shown");
+        assert!(row.contains("value = FEATURE"), "the two versions share a row:\n{row}");
+    }
+
+    #[test]
+    fn the_conflicts_pane_lists_the_files_and_what_each_key_would_keep() {
+        let dir = rebase_conflict_repo("merge_view_list");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+
+        app.open_merge_view();
+
+        let files = conflicts_pane_text(&app);
+        assert!(files.contains("1 conflicted file"), "got:\n{files}");
+        assert!(files.contains("app.conf"), "got:\n{files}");
+        // The keys are labelled by branch, not by "ours"/"theirs".
+        assert!(files.contains("o = keep develop"), "got:\n{files}");
+        assert!(files.contains("t = keep myfeature"), "got:\n{files}");
+    }
+
+    #[test]
+    fn resolving_in_the_merge_view_writes_the_file_and_says_which_branch_won() {
+        let dir = rebase_conflict_repo("merge_view_resolve");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+
+        // Cursor into the merge pane, on the conflict.
+        let merge_pane = app.merge_session.as_ref().unwrap().merge_pane;
+        app.windows_mut().focus(merge_pane);
+        app.goto_conflict(true);
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Theirs);
+
+        let on_disk = std::fs::read_to_string(dir.path().join("app.conf")).unwrap().replace("\r\n", "\n");
+        assert_eq!(on_disk, "shared\nvalue = FEATURE\nfooter\n", "the file itself is resolved");
+        // Named by branch: "kept theirs" would be exactly the wording
+        // that makes people resolve a rebase backwards.
+        assert!(app.modeline_pieces().1.contains("kept myfeature"), "got: {}", app.modeline_pieces().1);
+        assert!(merge_view_text(&app).contains("No conflict markers left"), "got:\n{}", merge_view_text(&app));
+    }
+
+    #[test]
+    fn taking_a_whole_file_stages_it_and_names_the_branch_that_won() {
+        let dir = rebase_conflict_repo("merge_view_whole_file");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+
+        // On the file row in the Conflicts pane.
+        let session = app.merge_session.as_ref().unwrap();
+        let (files_pane, files_buffer) = (session.files_pane, session.files_buffer);
+        app.windows_mut().focus(files_pane);
+        let row = app.buffers.get(files_buffer).unwrap().buffer.text().lines().position(|l| l.contains("app.conf")).expect("the file row");
+        let char_idx = app.buffers.get(files_buffer).unwrap().buffer.line_start_char(row);
+        app.pane_state_mut(files_pane).cursor = Cursor { char_idx, sticky_col: 0 };
+
+        app.merge_take_whole_file(fenix_git::Resolution::Ours);
+
+        let on_disk = std::fs::read_to_string(dir.path().join("app.conf")).unwrap().replace("\r\n", "\n");
+        assert_eq!(on_disk, "shared\nvalue = DEVELOP\nfooter\n", "ours during a rebase is develop's version");
+        assert!(app.modeline_pieces().1.contains("kept develop"), "got: {}", app.modeline_pieces().1);
+        assert_eq!(fenix_git::list_files(dir.path()).iter().filter(|f| f.index_status == 'U').count(), 0, "and it's staged");
+    }
+
+    #[test]
+    fn a_resolution_can_be_put_back_before_it_is_staged() {
+        let dir = rebase_conflict_repo("merge_view_restore");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+        let merge_pane = app.merge_session.as_ref().unwrap().merge_pane;
+        app.windows_mut().focus(merge_pane);
+        app.goto_conflict(true);
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        assert!(!std::fs::read_to_string(dir.path().join("app.conf")).unwrap().contains("<<<<<<<"));
+
+        app.merge_restore_conflict();
+
+        assert!(
+            std::fs::read_to_string(dir.path().join("app.conf")).unwrap().contains("<<<<<<<"),
+            "the markers come back, so a wrong choice isn't final"
+        );
+    }
+
+    #[test]
+    fn staging_is_refused_while_markers_are_still_in_the_file() {
+        // Committing conflict markers is the failure this prevents.
+        let dir = rebase_conflict_repo("merge_view_stage_guard");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+
+        app.merge_stage_resolved();
+
+        assert!(app.modeline_pieces().1.contains("still has 1 unresolved conflict"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn the_status_banner_says_which_branch_each_side_of_a_conflict_is() {
+        let dir = rebase_conflict_repo("merge_banner_sides");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_rebase_onto("develop");
+
+        let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
+        assert!(status.contains("SPC g x to resolve"), "the banner points at the view that explains it:\n{status}");
+        assert!(status.contains("ours: develop"), "got:\n{status}");
+        assert!(status.contains("theirs: myfeature"), "got:\n{status}");
+    }
+
+    #[test]
+    fn a_conflicted_files_diff_is_shown_rather_than_claiming_no_changes() {
+        // `git diff` of an unmerged path is a *combined* diff. Before
+        // those parsed, the one file you were trying to look at was the
+        // one that rendered as "(no changes)".
+        let dir = rebase_conflict_repo("merge_combined_diff");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+
+        let diff = fenix_git::file_diff(dir.path(), "app.conf", false).expect("git diff runs on an unmerged path");
+        let files = fenix_diff::parse(&diff);
+        assert_eq!(files.len(), 1, "the conflicted file has a diff:\n{diff}");
+        assert!(files[0].is_combined);
+        assert!(files[0].hunks.iter().any(|h| !h.lines.is_empty()), "with content in it:\n{diff}");
     }
 
     #[test]

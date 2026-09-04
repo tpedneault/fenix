@@ -43,6 +43,45 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<String, String> {
     run_action(repo, &unstage_args(path))
 }
 
+/// Resolves a whole conflicted file by taking one side wholesale, then
+/// stages it -- the "I know which version wins, don't make me read it"
+/// path, and the one thing a conflict list should always offer.
+///
+/// `Resolution::Both` isn't meaningful at file level (there's no way to
+/// concatenate two versions of a file and get something sensible), so
+/// it's rejected here rather than silently doing something surprising;
+/// keeping both is a per-conflict decision, made in the merge view.
+///
+/// Note that `--ours`/`--theirs` mean what git means by them, which
+/// during a rebase is the reverse of what most people expect --
+/// `state::conflict_sides` is what turns those into branch names the
+/// caller can actually show.
+pub fn checkout_side(repo: &Path, path: &str, side: crate::Resolution) -> Result<String, String> {
+    let flag = match side {
+        crate::Resolution::Ours => "--ours",
+        crate::Resolution::Theirs => "--theirs",
+        crate::Resolution::Both => return Err("keeping both sides is a per-conflict choice, not a whole-file one".to_string()),
+    };
+    run_action(repo, &["checkout".to_string(), flag.to_string(), "--".to_string(), path.to_string()])?;
+    // `checkout --ours` leaves the path still unmerged in the index;
+    // without the `add` the file would look resolved on disk while git
+    // still refuses to continue the rebase.
+    run_action(repo, &stage_args(path))
+}
+
+/// Puts a conflicted file back the way git first wrote it, markers and
+/// all, discarding whatever resolution was made.
+///
+/// This is the undo for a resolution that turned out wrong. It works
+/// because git keeps all three stages of an unmerged path in the index
+/// until the file is staged -- so this is only possible *before* the
+/// resolution has been staged, and says so rather than appearing to
+/// succeed when it can't.
+pub fn restore_conflict(repo: &Path, path: &str) -> Result<String, String> {
+    run_action(repo, &["checkout".to_string(), "--merge".to_string(), "--".to_string(), path.to_string()])
+        .map_err(|e| format!("{e} (a conflict can only be restored before it's staged)"))
+}
+
 pub fn stage_all(repo: &Path) -> Result<String, String> {
     run_action(repo, &["add".to_string(), "-A".to_string()])
 }
