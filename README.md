@@ -292,6 +292,25 @@ for anyone curious to poke around or build on it.
   actually has, so "how does this differ from the mainline" is two keys
   and an Enter; each step says which side it's asking for, and the
   second echoes the base you already chose (`master...?`).
+- **Rebase, merge and conflicts**: `SPC g r` rebases the current branch
+  onto a ref you pick, `SPC g m` merges one in, `SPC g p` pulls with
+  `--rebase`, and `SPC g F` force-pushes -- always
+  `--force-with-lease`, never a bare `--force`, so a rebase-and-push
+  can't silently discard what someone else pushed in between. When one
+  of those stops, the Status pane leads with a banner naming what's
+  suspended and how far it got (`REBASING 3/7 -- SPC g R continue,
+  SPC g A abort`), and lists the conflicted files as their own section;
+  `SPC g R` and `SPC g A` finish or undo whichever operation it is --
+  rebase, merge, cherry-pick or revert -- so there's one pair of keys to
+  remember rather than one per operation. In a conflicted file, `SPC g j`
+  and `SPC g k` walk the markers and `SPC g o`/`SPC g t`/`SPC g b` keep
+  ours, theirs, or both for the conflict under the cursor, markers
+  removed. Anything that rewrites the working tree also re-reads the
+  files you already have open, so a buffer never keeps showing what a
+  file said before the rebase -- saving that stale text would have
+  written it straight back over git's conflict markers. A file with
+  unsaved edits is left alone and counted in a message instead: your own
+  work always outranks the refresh.
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
@@ -638,6 +657,11 @@ popup shows what keys continue it.
 | `SPC g f` | Fetch all remotes and prune deleted branches |
 | `SPC g c` | Compare two refs (pick base, then head) |
 | `SPC g C` | Close the Compare view |
+| `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
+| `SPC g p` / `SPC g F` | Pull with `--rebase` / push `--force-with-lease` |
+| `SPC g R` / `SPC g A` | Continue / abort the suspended operation |
+| `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
+| `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
 | `1` / `2` / `3` (History) | Jump to the Graph / Refs / Commit pane |
 | `u` / `f` (History) | Refresh / fetch |
 | `1` / `2` (Compare) | Jump to the Commits / Changes pane |

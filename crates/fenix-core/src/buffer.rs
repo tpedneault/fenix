@@ -148,6 +148,17 @@ impl Buffer {
         self.dirty
     }
 
+    /// Declares the buffer's contents to match what's on disk without
+    /// writing anything -- for when the *file* changed and the buffer
+    /// was re-read from it, rather than the other way round (a git
+    /// checkout/rebase rewriting an open file; see `fenix-gui`'s
+    /// `App::reload_buffers_changed_on_disk`). Replacing the text marks
+    /// the buffer dirty like any other edit would, which would then
+    /// misreport a freshly-reloaded file as having unsaved work.
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+    }
+
     /// Monotonic edit counter -- see the `edit_count` field's own doc
     /// comment. Callers detect "did an edit happen" by snapshotting this
     /// before and comparing after, not by consuming anything.

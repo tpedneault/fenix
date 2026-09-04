@@ -1523,6 +1523,10 @@ struct GitSession {
     /// `git_panel::render_status`'s own doc comment for why that's the
     /// real Lazygit-accurate behavior, not a simplification).
     status: Option<fenix_git::RepoStatus>,
+    /// A suspended rebase/merge/cherry-pick, if the repo is in one --
+    /// what the Status pane's banner reports and what `SPC g R`/`SPC g A`
+    /// act on.
+    in_progress: Option<fenix_git::InProgress>,
     /// Same "held only for its `Drop` side effect" RAII shape as
     /// `DockerSession::stats_poller`.
     #[allow(dead_code)]
@@ -1644,6 +1648,10 @@ enum GitConfirmAction {
     DiscardDir { path: String },
     DeleteBranch { name: String },
     DropStash { index: usize },
+    /// Rewrite a published branch (`SPC g F`). Always
+    /// `--force-with-lease`, but still confirmed: it changes history
+    /// someone else may already have.
+    ForcePush,
     /// Throw away one hunk of the working tree (`d` in the diff pane).
     /// Carries the buffer and anchor rather than a rebuilt patch so the
     /// patch is regenerated from the model at confirm time -- one less
@@ -2263,6 +2271,10 @@ enum ActivePicker {
     /// `SPC g c`, step two: pick the ref being compared. Carries the
     /// already-chosen base, since confirming needs both.
     CompareHead { base: String, picker: fenix_picker::PickerState<String> },
+    /// `SPC g r`: pick the ref to replay the current branch onto.
+    RebaseOnto(fenix_picker::PickerState<String>),
+    /// `SPC g m`: pick the ref to merge into the current branch.
+    MergeFrom(fenix_picker::PickerState<String>),
     /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
     /// subsystem, confirming opens its detail view (`mib_show_
     /// telecommand`). Same candidate list as `MibTelecommandInsert`,
@@ -2376,6 +2388,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Outline(s) => s.push_char(c),
         ActivePicker::Task(s) => s.push_char(c),
         ActivePicker::CompareBase(s) => s.push_char(c),
+        ActivePicker::RebaseOnto(s) => s.push_char(c),
+        ActivePicker::MergeFrom(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
     }
 }
@@ -2412,6 +2426,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Outline(s) => s.backspace(),
         ActivePicker::Task(s) => s.backspace(),
         ActivePicker::CompareBase(s) => s.backspace(),
+        ActivePicker::RebaseOnto(s) => s.backspace(),
+        ActivePicker::MergeFrom(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
     }
 }
@@ -2448,6 +2464,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Outline(s) => s.move_selection(delta),
         ActivePicker::Task(s) => s.move_selection(delta),
         ActivePicker::CompareBase(s) => s.move_selection(delta),
+        ActivePicker::RebaseOnto(s) => s.move_selection(delta),
+        ActivePicker::MergeFrom(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
     }
 }
@@ -2487,6 +2505,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Outline(s) => s.toggle_mark(),
         ActivePicker::Task(s) => s.toggle_mark(),
         ActivePicker::CompareBase(s) => s.toggle_mark(),
+        ActivePicker::RebaseOnto(s) => s.toggle_mark(),
+        ActivePicker::MergeFrom(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
     }
 }
@@ -2523,6 +2543,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Outline(s) => s.query(),
         ActivePicker::Task(s) => s.query(),
         ActivePicker::CompareBase(s) => s.query(),
+        ActivePicker::RebaseOnto(s) => s.query(),
+        ActivePicker::MergeFrom(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
     }
 }
@@ -2559,6 +2581,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Outline(s) => s.len(),
         ActivePicker::Task(s) => s.len(),
         ActivePicker::CompareBase(s) => s.len(),
+        ActivePicker::RebaseOnto(s) => s.len(),
+        ActivePicker::MergeFrom(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
     }
 }
@@ -2595,6 +2619,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Outline(s) => s.selected_row(),
         ActivePicker::Task(s) => s.selected_row(),
         ActivePicker::CompareBase(s) => s.selected_row(),
+        ActivePicker::RebaseOnto(s) => s.selected_row(),
+        ActivePicker::MergeFrom(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
     }
 }
@@ -2647,6 +2673,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Task(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
@@ -3026,6 +3054,15 @@ fn file_counts(files: &[fenix_git::FileEntry]) -> (usize, usize, usize) {
     (staged, unstaged, untracked)
 }
 
+/// How many files are in an unmerged (conflicted) state -- git's own
+/// `U` porcelain status on either side, which `fenix_git::files` already
+/// parses. Counted rather than listed here: the Status pane reports the
+/// number, and the files themselves are already in the Unstaged list
+/// with their `UU` badge.
+fn conflict_count(files: &[fenix_git::FileEntry]) -> usize {
+    files.iter().filter(|f| f.index_status == 'U' || f.worktree_status == 'U').count()
+}
+
 /// What `git_sync_main` needs to fetch for Main, resolved from a
 /// `GitEntry` (plus, for a `File`, a lookup into the session's own
 /// cached `files`) *before* any thread is spawned -- every variant here
@@ -3129,6 +3166,10 @@ pub(crate) struct GitRefreshData {
     branches: Vec<fenix_git::Branch>,
     commits: Vec<fenix_git::Commit>,
     stashes: Vec<fenix_git::Stash>,
+    /// A rebase/merge/cherry-pick left suspended, if any -- read in the
+    /// same pass as everything else so the Status banner can never
+    /// disagree with the file list beside it.
+    in_progress: Option<fenix_git::InProgress>,
 }
 
 /// The actual four `git` shell-outs `git_refresh_session` needs -- called
@@ -3139,7 +3180,8 @@ fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
     let branches = fenix_git::list_branches(repo_root);
     let commits = fenix_git::list_commits(repo_root, 50);
     let stashes = fenix_git::list_stashes(repo_root);
-    GitRefreshData { status, files, branches, commits, stashes }
+    let in_progress = fenix_git::in_progress(repo_root);
+    GitRefreshData { status, files, branches, commits, stashes, in_progress }
 }
 
 /// Resolves a `vt100` cell color to a real theme color -- `Default`
@@ -12137,12 +12179,14 @@ impl App {
         let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let (status, files) = fenix_git::status_and_files(&repo_root);
+        let in_progress = fenix_git::in_progress(&repo_root);
         let branches = fenix_git::list_branches(&repo_root);
         let commits = fenix_git::list_commits(&repo_root, 50);
         let stashes = fenix_git::list_stashes(&repo_root);
 
         let (staged, unstaged, untracked) = file_counts(&files);
-        let status_panel = git_panel::render_status(status.as_ref(), staged, unstaged, untracked);
+        let status_panel =
+            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflict_count(&files));
         let staged_panel = git_panel::render_staged(&files, &HashSet::new());
         let unstaged_panel = git_panel::render_unstaged(&files, &HashSet::new());
         let branches_panel = git_panel::render_branches(&branches);
@@ -12242,6 +12286,7 @@ impl App {
             commits,
             stashes,
             status,
+            in_progress,
             status_poller,
             staged_expanded_dirs: HashSet::new(),
             unstaged_expanded_dirs: HashSet::new(),
@@ -12623,8 +12668,12 @@ impl App {
         let Some(session) = self.git_session.as_mut() else { return };
         session.status = status.clone();
         let (staged, unstaged, untracked) = file_counts(&session.files);
-        let status_buffer = session.status_buffer;
-        self.set_git_buffer(status_buffer, git_panel::render_status(status.as_ref(), staged, unstaged, untracked));
+        let (status_buffer, conflicts) = (session.status_buffer, conflict_count(&session.files));
+        let in_progress = session.in_progress.clone();
+        self.set_git_buffer(
+            status_buffer,
+            git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflicts),
+        );
     }
 
     /// `u` (on any pane), and after every mutating action (stage/unstage/
@@ -12687,7 +12736,14 @@ impl App {
         let (staged_expanded, unstaged_expanded) = (session.staged_expanded_dirs.clone(), session.unstaged_expanded_dirs.clone());
 
         let (staged, unstaged, untracked) = file_counts(&data.files);
-        let status_panel = git_panel::render_status(data.status.as_ref(), staged, unstaged, untracked);
+        let status_panel = git_panel::render_status(
+            data.status.as_ref(),
+            staged,
+            unstaged,
+            untracked,
+            data.in_progress.as_ref(),
+            conflict_count(&data.files),
+        );
         let staged_panel = git_panel::render_staged(&data.files, &staged_expanded);
         let unstaged_panel = git_panel::render_unstaged(&data.files, &unstaged_expanded);
         let branches_panel = git_panel::render_branches(&data.branches);
@@ -12700,6 +12756,7 @@ impl App {
         session.branches = data.branches;
         session.commits = data.commits;
         session.stashes = data.stashes;
+        session.in_progress = data.in_progress;
         session.last_main_entry = None;
 
         self.set_git_buffer(status_buffer, status_panel);
@@ -13017,6 +13074,287 @@ impl App {
             git_panel::GitEntry::Commit(_) => return,
         };
         self.git_confirm = Some(action);
+    }
+
+    // -- Rebase, merge and the operations that suspend -----------------
+
+    /// The repo any Git action should target: whichever Git-ish view is
+    /// open, else the focused buffer's project.
+    fn git_action_repo_root(&self) -> PathBuf {
+        self.git_session
+            .as_ref()
+            .map(|s| s.repo_root.clone())
+            .or_else(|| self.history_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.compare_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.project_root.clone())
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// Runs one git operation and reports what happened.
+    ///
+    /// A conflict is *not* a failure to recover from: `rebase`/`merge`/
+    /// `cherry-pick` all exit non-zero when they stop for one, having
+    /// done exactly what they were asked. So a non-zero exit that leaves
+    /// an operation in progress reads as "stopped, here's what to do",
+    /// while one that doesn't is a real error.
+    fn run_git_operation(&mut self, what: &str, result: Result<String, String>) {
+        let repo_root = self.git_action_repo_root();
+        match result {
+            Ok(_) => self.set_message(format!("{what} finished")),
+            Err(err) => match fenix_git::in_progress(&repo_root) {
+                Some(op) => self.set_error(format!("{} -- resolve the conflicts, then SPC g R to continue", op.label())),
+                None => self.set_error(format!("{what} failed: {}", err.trim().lines().next().unwrap_or("").trim())),
+            },
+        }
+        self.git_refresh_all_views();
+    }
+
+    /// Re-reads every open file whose contents changed on disk.
+    ///
+    /// A rebase, merge, checkout or discard rewrites working-tree files
+    /// underneath whatever is already open. Without this, a buffer keeps
+    /// showing what the file said before the operation -- and during a
+    /// conflicted rebase that's actively dangerous, because saving that
+    /// stale buffer writes the *pre-rebase* content back over git's
+    /// conflict markers and silently destroys the merge state.
+    ///
+    /// A buffer with unsaved edits is never touched: those changes are
+    /// the user's, and reloading would throw them away. They're counted
+    /// and reported instead, so a file that didn't refresh says so
+    /// rather than quietly lying about what's on disk.
+    fn reload_buffers_changed_on_disk(&mut self) -> usize {
+        let mut skipped = 0usize;
+        let ids: Vec<BufferId> = self.buffers.ids_sorted_by_path();
+        for id in ids {
+            let Some(ob) = self.buffers.get(id) else { continue };
+            if !ob.kind.tracks_unsaved_changes() {
+                continue;
+            }
+            let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { continue };
+            let Ok(on_disk) = std::fs::read_to_string(&path) else { continue };
+            if on_disk == ob.buffer.text() {
+                continue;
+            }
+            if ob.buffer.is_dirty() {
+                skipped += 1;
+                continue;
+            }
+            if let Some(ob) = self.buffers.get_mut(id) {
+                let end = ob.buffer.len_chars();
+                let mut scratch = Cursor::at_start();
+                ob.buffer.replace_range(&mut scratch, 0, end, &on_disk);
+                // A reload isn't user work: leaving it dirty would make
+                // every touched file look unsaved and block `:qa`.
+                ob.buffer.mark_saved();
+            }
+            // Every pane showing it keeps its line, clamped to the new
+            // length -- the file changed, but where you were looking in
+            // it is still the best guess at where you want to be.
+            let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
+            for pane in self.windows().windows() {
+                if self.windows().content(pane) != Some(&id) {
+                    continue;
+                }
+                let line = self
+                    .buffers
+                    .get(id)
+                    .map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0.min(line_count.saturating_sub(1)))
+                    .unwrap_or(0);
+                let Some(ob) = self.buffers.get(id) else { continue };
+                let char_idx = ob.buffer.line_start_char(line);
+                self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+            }
+        }
+        skipped
+    }
+
+    /// Refreshes whichever Git views are open -- every operation here
+    /// can change the working tree, the branch, and the graph at once.
+    fn git_refresh_all_views(&mut self) {
+        let stale = self.reload_buffers_changed_on_disk();
+        if stale > 0 {
+            self.set_error(format!("{stale} open file(s) have unsaved changes and were not reloaded from disk"));
+        }
+        if self.git_session.is_some() {
+            self.git_refresh_session();
+        }
+        if self.history_session.is_some() {
+            self.history_refresh();
+        }
+        if self.compare_session.is_some() {
+            self.compare_refresh();
+        }
+    }
+
+    /// `SPC g r`: pick a ref to replay the current branch onto.
+    pub(crate) fn start_rebase_picker(&mut self) {
+        let repo_root = self.git_action_repo_root();
+        let refs = self.compare_ref_candidates(&repo_root);
+        if refs.len() <= 1 {
+            self.set_error("no refs to rebase onto -- is this a git repository?".to_string());
+            return;
+        }
+        let candidates = refs.into_iter().skip(1).map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
+        self.enter_picker(ActivePicker::RebaseOnto(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC g m`: pick a ref to merge into the current branch.
+    pub(crate) fn start_merge_picker(&mut self) {
+        let repo_root = self.git_action_repo_root();
+        let refs = self.compare_ref_candidates(&repo_root);
+        if refs.len() <= 1 {
+            self.set_error("no refs to merge -- is this a git repository?".to_string());
+            return;
+        }
+        let candidates = refs.into_iter().skip(1).map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
+        self.enter_picker(ActivePicker::MergeFrom(fenix_picker::PickerState::new(candidates)));
+    }
+
+    pub(crate) fn git_rebase_onto(&mut self, onto: &str) {
+        let repo_root = self.git_action_repo_root();
+        let result = fenix_git::rebase(&repo_root, onto);
+        self.run_git_operation(&format!("rebase onto {onto}"), result);
+    }
+
+    pub(crate) fn git_merge_from(&mut self, branch: &str) {
+        let repo_root = self.git_action_repo_root();
+        let result = fenix_git::merge(&repo_root, branch);
+        self.run_git_operation(&format!("merge {branch}"), result);
+    }
+
+    /// `SPC g R`: carries on whichever operation is suspended.
+    ///
+    /// One key for all of them because from the user's side it's one
+    /// question -- "I've fixed it, keep going" -- and having to remember
+    /// whether this was a rebase or a cherry-pick to pick the right key
+    /// is exactly the friction the banner exists to remove.
+    pub(crate) fn git_operation_continue(&mut self) {
+        let repo_root = self.git_action_repo_root();
+        let Some(op) = fenix_git::in_progress(&repo_root) else {
+            self.set_error("nothing in progress to continue".to_string());
+            return;
+        };
+        // Staging is the caller's job in git's model, and skipping it is
+        // the single most common way `--continue` fails; say so rather
+        // than surfacing git's own longer complaint.
+        let unresolved = conflict_count(&fenix_git::list_files(&repo_root));
+        if unresolved > 0 {
+            self.set_error(format!("{unresolved} file(s) still conflicted -- resolve and stage them first"));
+            return;
+        }
+        let result = match op {
+            fenix_git::InProgress::Rebase { .. } => fenix_git::rebase_continue(&repo_root),
+            fenix_git::InProgress::Merge => fenix_git::commit(&repo_root, "Merge"),
+            fenix_git::InProgress::CherryPick | fenix_git::InProgress::Revert | fenix_git::InProgress::Bisect => {
+                self.set_error(format!("{} can't be continued from here -- finish it with git", op.label()));
+                return;
+            }
+        };
+        self.run_git_operation("continue", result);
+    }
+
+    /// `SPC g A`: abandons whichever operation is suspended, putting the
+    /// tree back where it started.
+    pub(crate) fn git_operation_abort(&mut self) {
+        let repo_root = self.git_action_repo_root();
+        let Some(op) = fenix_git::in_progress(&repo_root) else {
+            self.set_error("nothing in progress to abort".to_string());
+            return;
+        };
+        let result = match op {
+            fenix_git::InProgress::Rebase { .. } => fenix_git::rebase_abort(&repo_root),
+            fenix_git::InProgress::Merge => fenix_git::merge_abort(&repo_root),
+            fenix_git::InProgress::CherryPick | fenix_git::InProgress::Revert | fenix_git::InProgress::Bisect => {
+                self.set_error(format!("{} can't be aborted from here -- finish it with git", op.label()));
+                return;
+            }
+        };
+        self.run_git_operation("abort", result);
+    }
+
+    /// `SPC g p`: pull, rebasing local commits on top rather than adding
+    /// a merge commit for every sync.
+    pub(crate) fn git_pull_rebase(&mut self) {
+        let repo_root = self.git_action_repo_root();
+        let result = fenix_git::pull_rebase(&repo_root);
+        self.run_git_operation("pull --rebase", result);
+    }
+
+    /// `SPC g F`: push after a rebase rewrote history.
+    ///
+    /// Always `--force-with-lease`: it refuses if the remote moved since
+    /// the last fetch, so it can't silently discard someone else's work.
+    /// Confirmed first anyway, since it does rewrite a published branch.
+    pub(crate) fn git_force_push(&mut self) {
+        self.git_confirm = Some(GitConfirmAction::ForcePush);
+    }
+
+    // -- Conflict resolution in an ordinary file buffer -----------------
+
+    /// The conflicts in the focused buffer, parsed fresh from its text.
+    ///
+    /// Recomputed on every use rather than cached: the buffer is a real,
+    /// editable file that the user may have just hand-edited, and acting
+    /// on stale line numbers would resolve the wrong region.
+    fn focused_conflicts(&self) -> Vec<fenix_git::Conflict> {
+        fenix_git::find_conflicts(&self.open().buffer.text())
+    }
+
+    /// `SPC g j`/`SPC g k`: move to the next/previous conflict in the
+    /// focused file.
+    pub(crate) fn goto_conflict(&mut self, forward: bool) {
+        let conflicts = self.focused_conflicts();
+        if conflicts.is_empty() {
+            self.set_message("no conflict markers in this file");
+            return;
+        }
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let target = if forward {
+            conflicts.iter().find(|c| c.start > line).or_else(|| conflicts.first())
+        } else {
+            conflicts.iter().rev().find(|c| c.end < line).or_else(|| conflicts.last())
+        };
+        let Some(target) = target else { return };
+        let char_idx = self.open().buffer.line_start_char(target.start);
+        let pane = self.focused_pane_id();
+        self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        self.wake_caret();
+    }
+
+    /// `SPC g o`/`SPC g t`/`SPC g b`: resolve the conflict under the
+    /// cursor by keeping ours, theirs, or both.
+    ///
+    /// Edits the buffer rather than the file on disk, so it lands in the
+    /// undo history like any other edit and isn't written until the
+    /// buffer is saved -- a mistaken choice is one `u` away.
+    pub(crate) fn resolve_conflict_at_cursor(&mut self, resolution: fenix_git::Resolution) {
+        let conflicts = self.focused_conflicts();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let Some(conflict) = conflicts.iter().find(|c| c.contains(line)).or_else(|| conflicts.iter().find(|c| c.start > line)) else {
+            self.set_error("no conflict under the cursor".to_string());
+            return;
+        };
+        let text = self.open().buffer.text();
+        let resolved = fenix_git::resolve_conflict(&text, conflict, resolution);
+        let start_char = self.open().buffer.line_start_char(conflict.start);
+
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let end = buffer.len_chars();
+        let mut scratch = Cursor::at_start();
+        buffer.replace_range(&mut scratch, 0, end, &resolved);
+        // Land on where the conflict was, so the next one is a `SPC g j`
+        // away rather than needing the file re-navigated.
+        cursor.char_idx = start_char.min(buffer.len_chars());
+        cursor.sticky_col = 0;
+
+        let kept = match resolution {
+            fenix_git::Resolution::Ours => "ours",
+            fenix_git::Resolution::Theirs => "theirs",
+            fenix_git::Resolution::Both => "both sides",
+        };
+        let left = fenix_git::find_conflicts(&self.open().buffer.text()).len();
+        self.set_message(format!("kept {kept} -- {left} conflict(s) left in this file"));
+        self.wake_caret();
     }
 
     // -- History view (`SPC g l`) ------------------------------------------
@@ -13496,6 +13834,7 @@ impl App {
             GitConfirmAction::DiscardDir { path } => format!("Discard all changes under {path}/? (y/n)"),
             GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
             GitConfirmAction::DropStash { index } => format!("Drop stash@{{{index}}}? (y/n)"),
+            GitConfirmAction::ForcePush => "Force-push (with lease), rewriting the remote branch? (y/n)".to_string(),
             GitConfirmAction::DiscardHunk { buffer, anchor } => {
                 let path = self
                     .diff_models
@@ -13520,6 +13859,7 @@ impl App {
                     GitConfirmAction::DiscardDir { path } => fenix_git::discard_dir(&repo_root, &path),
                     GitConfirmAction::DeleteBranch { name } => fenix_git::delete_branch(&repo_root, &name, false),
                     GitConfirmAction::DropStash { index } => fenix_git::stash_drop(&repo_root, index),
+                    GitConfirmAction::ForcePush => fenix_git::push_force_with_lease(&repo_root),
                     GitConfirmAction::DiscardHunk { buffer, anchor } => self.hunk_patch_for(buffer, anchor).map_or_else(
                         || Err("that hunk is no longer in the diff".to_string()),
                         |patch| fenix_git::apply_patch(&repo_root, &patch, fenix_git::ApplyTarget::Discard),
@@ -14664,6 +15004,18 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.open_compare_view(base, head);
+            }
+            Some(ActivePicker::RebaseOnto(state)) => {
+                let Some(onto) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.git_rebase_onto(&onto);
+            }
+            Some(ActivePicker::MergeFrom(state)) => {
+                let Some(branch) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.git_merge_from(&branch);
             }
             Some(ActivePicker::MibTelecommandLookup(state)) => {
                 let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -17694,6 +18046,8 @@ impl App {
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE", picker_len(picker)),
+                Some(picker @ ActivePicker::RebaseOnto(_)) => ("REBASE ONTO", picker_len(picker)),
+                Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
                 None => ("PICKER", 0),
             };
@@ -27459,13 +27813,13 @@ mod tests {
 
         // request_id 3 is stale -- must not overwrite the session's
         // cached file list at all.
-        let stale = GitRefreshData { status: None, files: Vec::new(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new() };
+        let stale = GitRefreshData { status: None, files: Vec::new(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None };
         app.apply_git_refresh(3, stale);
         assert_eq!(app.git_session.as_ref().unwrap().files, sentinel);
 
         // request_id 5 (current) applies normally.
         let fresh = vec![fenix_git::FileEntry { path: "fresh.txt".to_string(), index_status: 'A', worktree_status: '.' }];
-        let current = GitRefreshData { status: None, files: fresh.clone(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new() };
+        let current = GitRefreshData { status: None, files: fresh.clone(), branches: Vec::new(), commits: Vec::new(), stashes: Vec::new(), in_progress: None };
         app.apply_git_refresh(5, current);
         assert_eq!(app.git_session.as_ref().unwrap().files, fresh);
     }
@@ -27576,6 +27930,264 @@ mod tests {
 
         let files = fenix_git::list_files(&repo_root);
         assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should now be staged: {files:?}");
+    }
+
+    // -- Rebase, merge and conflict resolution ----------------------------
+
+    /// A repo where `main` and `side` both changed the same line, so
+    /// rebasing or merging one onto the other is guaranteed to conflict.
+    fn conflicting_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "original\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "initial"]);
+        git(&["checkout", "-q", "-b", "side"]);
+        dir.write("a.txt", "side version\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "side change"]);
+        git(&["checkout", "-q", "main"]);
+        dir.write("a.txt", "main version\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "main change"]);
+        dir
+    }
+
+    #[test]
+    fn a_conflicted_rebase_reports_itself_in_the_status_banner() {
+        let dir = conflicting_repo("rebase_banner");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_rebase_onto("side");
+
+        let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
+        assert!(status.contains("REBASING"), "the banner has to say what's running:\n{status}");
+        assert!(status.contains("SPC g R continue"), "and how to get out of it:\n{status}");
+        assert!(status.contains("conflicted file"), "the conflict count belongs there too:\n{status}");
+        // The message points at the next step rather than reading as a
+        // plain failure -- a conflict is the normal middle of a rebase.
+        assert!(app.modeline_pieces().1.contains("resolve the conflicts"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn aborting_puts_the_tree_back_and_clears_the_banner() {
+        let dir = conflicting_repo("rebase_abort");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("side");
+        assert!(fenix_git::in_progress(dir.path()).is_some());
+
+        app.git_operation_abort();
+
+        assert_eq!(fenix_git::in_progress(dir.path()), None);
+        // Line endings normalized: git rewrites them on checkout wherever
+        // `core.autocrlf` is on, and this is about *what* was restored.
+        let restored = std::fs::read_to_string(dir.path().join("a.txt")).unwrap().replace("\r\n", "\n");
+        assert_eq!(restored, "main version\n");
+        let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
+        assert!(!status.contains("REBASING"), "the banner should be gone:\n{status}");
+    }
+
+    #[test]
+    fn continuing_with_conflicts_still_unresolved_says_what_is_missing() {
+        let dir = conflicting_repo("rebase_continue_blocked");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("side");
+
+        app.git_operation_continue();
+
+        assert!(app.modeline_pieces().1.contains("still conflicted"), "got: {}", app.modeline_pieces().1);
+        assert!(fenix_git::in_progress(dir.path()).is_some(), "and the rebase is still suspended");
+    }
+
+    #[test]
+    fn continuing_and_aborting_with_nothing_running_say_so() {
+        let dir = conflicting_repo("nothing_running");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.git_operation_continue();
+        assert!(app.modeline_pieces().1.contains("nothing in progress"));
+        app.git_operation_abort();
+        assert!(app.modeline_pieces().1.contains("nothing in progress"));
+    }
+
+    #[test]
+    fn a_whole_rebase_can_be_driven_to_completion_from_the_editor() {
+        // The end-to-end path the milestone exists for: rebase, hit a
+        // conflict, resolve it in the buffer, stage, continue.
+        let dir = conflicting_repo("rebase_full");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+        };
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_rebase_onto("side");
+        assert!(fenix_git::in_progress(dir.path()).is_some(), "the rebase should stop on the conflict");
+
+        // Open the conflicted file and take our side.
+        let conflicted = dir.path().join("a.txt");
+        app.open_file_from_picker(&conflicted);
+        assert!(app.open().buffer.text().contains("<<<<<<<"), "the file has markers in it: {:?}", app.open().buffer.text());
+        app.goto_conflict(true);
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        assert!(!app.open().buffer.text().contains("<<<<<<<"), "markers gone after resolving");
+        app.save();
+
+        git(&["add", "a.txt"]);
+        app.git_operation_continue();
+
+        assert_eq!(fenix_git::in_progress(dir.path()), None, "the rebase should have finished");
+        assert!(app.modeline_pieces().1.contains("finished"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_file_already_open_when_the_rebase_starts_shows_the_conflict() {
+        // The bug this exists for: the file was open *before* the rebase,
+        // so the buffer held the pre-rebase text while git had written
+        // conflict markers into the file underneath it. Saving that stale
+        // buffer would have written the old content straight back over
+        // git's markers and destroyed the merge state.
+        let dir = conflicting_repo("rebase_open_buffer");
+        let conflicted = dir.path().join("a.txt");
+        let mut app = App::with_file(Some(conflicted.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        assert!(!app.open().buffer.text().contains("<<<<<<<"), "no markers before the rebase");
+
+        app.git_rebase_onto("side");
+
+        let id = app.buffers.id_for_path(&conflicted).unwrap();
+        let shown = app.buffers.get(id).unwrap().buffer.text();
+        assert!(shown.contains("<<<<<<<"), "the open buffer has to catch up with what git wrote:\n{shown}");
+        assert_eq!(shown.replace("\r\n", "\n"), std::fs::read_to_string(&conflicted).unwrap().replace("\r\n", "\n"));
+    }
+
+    #[test]
+    fn a_buffer_with_unsaved_edits_is_never_reloaded_out_from_under_you() {
+        let dir = conflicting_repo("rebase_dirty_buffer");
+        let conflicted = dir.path().join("a.txt");
+        let mut app = App::with_file(Some(conflicted.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_insert('!');
+        let edited = app.open().buffer.text();
+        app.open_git_panel();
+
+        app.git_rebase_onto("side");
+
+        let id = app.buffers.id_for_path(&conflicted).unwrap();
+        let shown = app.buffers.get(id).unwrap().buffer.text();
+        assert_eq!(shown, edited, "unsaved work outranks the reload");
+        assert!(app.modeline_pieces().1.contains("unsaved changes"), "and it says so: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn conflict_navigation_walks_the_markers_and_wraps() {
+        let dir = TempDir::new("conflict_nav");
+        let file = dir.write(
+            "c.txt",
+            "a\n<<<<<<< HEAD\nx1\n=======\ny1\n>>>>>>> b\nmiddle\n<<<<<<< HEAD\nx2\n=======\ny2\n>>>>>>> b\nz\n",
+        );
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.goto_conflict(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1, "the first conflict's opener");
+        app.goto_conflict(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 7, "the second");
+        // Wraps rather than stopping: there are only ever a handful, and
+        // cycling beats being stuck at the last one.
+        app.goto_conflict(true);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1);
+        app.goto_conflict(false);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 7);
+    }
+
+    #[test]
+    fn resolving_keeps_the_chosen_side_and_reports_what_is_left() {
+        let dir = TempDir::new("conflict_resolve");
+        let file = dir.write("c.txt", "a\n<<<<<<< HEAD\nx1\n=======\ny1\n>>>>>>> b\nm\n<<<<<<< HEAD\nx2\n=======\ny2\n>>>>>>> b\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.goto_conflict(true);
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Theirs);
+
+        assert!(app.open().buffer.text().starts_with("a\ny1\nm\n"), "got: {:?}", app.open().buffer.text());
+        assert!(app.modeline_pieces().1.contains("kept theirs"), "got: {}", app.modeline_pieces().1);
+        assert!(app.modeline_pieces().1.contains("1 conflict(s) left"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn resolving_is_an_ordinary_edit_that_undo_takes_back() {
+        let dir = TempDir::new("conflict_undo");
+        let file = dir.write("c.txt", "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let before = app.open().buffer.text();
+
+        app.goto_conflict(true);
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        assert_ne!(app.open().buffer.text(), before);
+
+        app.undo();
+        assert_eq!(app.open().buffer.text(), before, "a mistaken choice is one undo away");
+    }
+
+    #[test]
+    fn resolving_with_no_conflict_under_the_cursor_says_so() {
+        let dir = TempDir::new("conflict_none");
+        let file = dir.write("c.txt", "nothing conflicted here\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        assert!(app.modeline_pieces().1.contains("no conflict under the cursor"));
+        app.goto_conflict(true);
+        assert!(app.modeline_pieces().1.contains("no conflict markers"));
+    }
+
+    #[test]
+    fn a_force_push_is_confirmed_before_it_rewrites_anything() {
+        let dir = conflicting_repo("force_push_confirm");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_force_push();
+
+        assert!(app.git_confirm_text().is_some_and(|t| t.contains("Force-push")), "got: {:?}", app.git_confirm_text());
+        assert!(app.git_confirm_text().is_some_and(|t| t.contains("with lease")), "the lease is the safety and should be visible");
+    }
+
+    #[test]
+    fn the_rebase_and_merge_pickers_offer_every_ref_but_head() {
+        let dir = conflicting_repo("rebase_picker");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.start_rebase_picker();
+        match &app.active_picker {
+            Some(ActivePicker::RebaseOnto(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
+                assert!(labels.contains(&"side".to_string()), "{labels:?}");
+                assert!(!labels.contains(&"HEAD".to_string()), "rebasing onto HEAD is a no-op: {labels:?}");
+            }
+            _ => panic!("expected the rebase picker"),
+        }
+
+        app.picker_cancel();
+        app.start_merge_picker();
+        assert!(matches!(app.active_picker, Some(ActivePicker::MergeFrom(_))));
     }
 
     // -- History view (`SPC g l`) and Compare view (`SPC g c`) -------------

@@ -121,6 +121,17 @@ impl CommandRegistry {
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
+        registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
+        registry.register("git.continue", "Continue the suspended rebase/merge", cmd_git_continue);
+        registry.register("git.abort", "Abort the suspended rebase/merge", cmd_git_abort);
+        registry.register("git.merge", "Merge another ref into the current branch", cmd_git_merge);
+        registry.register("git.pull_rebase", "Pull, rebasing local commits on top", cmd_git_pull_rebase);
+        registry.register("git.force_push", "Force-push with lease (confirms first)", cmd_git_force_push);
+        registry.register("git.next_conflict", "Jump to the next conflict in this file", cmd_git_next_conflict);
+        registry.register("git.prev_conflict", "Jump to the previous conflict in this file", cmd_git_prev_conflict);
+        registry.register("git.keep_ours", "Resolve the conflict under the cursor, keeping ours", cmd_git_keep_ours);
+        registry.register("git.keep_theirs", "Resolve the conflict under the cursor, keeping theirs", cmd_git_keep_theirs);
+        registry.register("git.keep_both", "Resolve the conflict under the cursor, keeping both sides", cmd_git_keep_both);
         registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
         registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
         registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
@@ -746,4 +757,48 @@ fn cmd_git_compare(ctx: &mut CommandCtx) {
 
 fn cmd_git_compare_close(ctx: &mut CommandCtx) {
     ctx.app.compare_close();
+}
+
+fn cmd_git_rebase(ctx: &mut CommandCtx) {
+    ctx.app.start_rebase_picker();
+}
+
+fn cmd_git_continue(ctx: &mut CommandCtx) {
+    ctx.app.git_operation_continue();
+}
+
+fn cmd_git_abort(ctx: &mut CommandCtx) {
+    ctx.app.git_operation_abort();
+}
+
+fn cmd_git_merge(ctx: &mut CommandCtx) {
+    ctx.app.start_merge_picker();
+}
+
+fn cmd_git_pull_rebase(ctx: &mut CommandCtx) {
+    ctx.app.git_pull_rebase();
+}
+
+fn cmd_git_force_push(ctx: &mut CommandCtx) {
+    ctx.app.git_force_push();
+}
+
+fn cmd_git_next_conflict(ctx: &mut CommandCtx) {
+    ctx.app.goto_conflict(true);
+}
+
+fn cmd_git_prev_conflict(ctx: &mut CommandCtx) {
+    ctx.app.goto_conflict(false);
+}
+
+fn cmd_git_keep_ours(ctx: &mut CommandCtx) {
+    ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+}
+
+fn cmd_git_keep_theirs(ctx: &mut CommandCtx) {
+    ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Theirs);
+}
+
+fn cmd_git_keep_both(ctx: &mut CommandCtx) {
+    ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
 }

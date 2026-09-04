@@ -155,7 +155,7 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
     let rail_width = lane_count * 2;
     let hash_width = commits.iter().map(|c| c.short_hash.chars().count()).max().unwrap_or(7);
 
-    let mut push_edge = |text: &mut String, lines: &mut Vec<Option<GraphLine>>, rails: Rails| {
+    let push_edge = |text: &mut String, lines: &mut Vec<Option<GraphLine>>, rails: Rails| {
         let row = rails.finish(rail_width);
         // Trailing blanks carry no information on a connector row, but
         // the leading rails must keep their columns.

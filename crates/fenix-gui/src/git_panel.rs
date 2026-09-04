@@ -359,8 +359,32 @@ pub fn render_stash(stashes: &[Stash]) -> GitPanel {
 /// repo overview" role (see its `Status`-panel keybindings: switch
 /// recent repo, cycle branch logs -- overview actions, not per-item
 /// detail), which is what this mirrors.
-pub fn render_status(status: Option<&RepoStatus>, staged: usize, unstaged: usize, untracked: usize) -> GitPanel {
+pub fn render_status(
+    status: Option<&RepoStatus>,
+    staged: usize,
+    unstaged: usize,
+    untracked: usize,
+    in_progress: Option<&fenix_git::InProgress>,
+    conflicts: usize,
+) -> GitPanel {
     let mut b = Builder::new();
+    // A suspended rebase/merge leads, before anything else. Being
+    // stranded mid-operation without knowing it is how commits silently
+    // stop landing, so the banner says what's running and which keys
+    // finish or abandon it.
+    if let Some(op) = in_progress {
+        b.push(
+            &format!("  {}  --  SPC g R continue, SPC g A abort", op.label()),
+            Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }),
+        );
+    }
+    if conflicts > 0 {
+        let (badge, color) = (format!("  [{conflicts}] "), GitBadgeColor::Bad);
+        b.push(
+            &format!("{badge}conflicted file{}", if conflicts == 1 { "" } else { "s" }),
+            Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: None, badge: Some((badge.chars().count(), color)) }),
+        );
+    }
     match status {
         None => {
             let (text, meta) = empty_line("Not a git repository");
@@ -678,13 +702,13 @@ mod tests {
 
     #[test]
     fn render_status_none_shows_not_a_repo() {
-        assert!(render_status(None, 0, 0, 0).text.contains("Not a git repository"));
+        assert!(render_status(None, 0, 0, 0, None, 0).text.contains("Not a git repository"));
     }
 
     #[test]
     fn render_status_shows_branch_and_file_counts() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 2, 1, 3);
+        let panel = render_status(Some(&s), 2, 1, 3, None, 0);
         assert!(panel.text.contains("Branch: main"));
         assert!(panel.text.contains("Staged: 2"));
         assert!(panel.text.contains("Unstaged: 1"));
@@ -695,16 +719,48 @@ mod tests {
     #[test]
     fn render_status_shows_upstream_and_ahead_behind_when_tracking() {
         let s = RepoStatus { branch: "main".to_string(), upstream: Some("origin/main".to_string()), ahead: 2, behind: 1 };
-        let panel = render_status(Some(&s), 0, 0, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
         assert!(panel.text.contains("Upstream: origin/main"));
         assert!(panel.text.contains("Ahead/Behind: +2 -1"));
+    }
+
+    #[test]
+    fn a_suspended_operation_leads_the_status_pane_with_the_keys_that_end_it() {
+        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let op = fenix_git::InProgress::Rebase { step: Some((2, 5)) };
+        let panel = render_status(Some(&s), 0, 0, 0, Some(&op), 0);
+        let first = panel.text.lines().next().unwrap();
+        assert!(first.contains("REBASING 2/5"), "got: {first:?}");
+        assert!(first.contains("continue") && first.contains("abort"), "the way out has to be on screen: {first:?}");
+    }
+
+    #[test]
+    fn conflicted_files_are_counted_where_they_cannot_be_missed() {
+        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let panel = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 3);
+        assert!(panel.text.contains("[3] conflicted files"), "got:
+{}", panel.text);
+        // Singular reads properly too.
+        let one = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 1);
+        assert!(one.text.contains("[1] conflicted file
+"), "got:
+{}", one.text);
+    }
+
+    #[test]
+    fn a_clean_repo_gets_no_banner_and_no_conflict_row() {
+        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
+        assert!(panel.text.starts_with("    Branch:"), "got:
+{}", panel.text);
+        assert!(!panel.text.contains("conflicted"));
     }
 
     #[test]
     fn a_long_status_detail_value_word_wraps_onto_continuation_lines() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
         let s = RepoStatus { branch: long_branch.clone(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
         let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).count();
         assert!(detail_rows > 4, "expected the long branch name to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
         assert_eq!(panel.text.lines().count(), panel.lines.len(), "text and lines must stay in lockstep after wrapping");
@@ -714,7 +770,7 @@ mod tests {
     fn a_wrapped_status_continuation_line_is_dimmed_in_full() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
         let s = RepoStatus { branch: long_branch, upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
         let detail_lines: Vec<&GitLine> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).collect();
         assert!(detail_lines.iter().any(|l| l.dim_from == Some(0)), "expected a continuation line dimmed from column 0");
     }
@@ -722,7 +778,7 @@ mod tests {
     #[test]
     fn a_short_status_detail_value_never_wraps() {
         let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0);
+        let panel = render_status(Some(&s), 0, 0, 0, None, 0);
         assert!(!panel.text.contains("\nmain\n"), "a short value must not spill onto its own continuation line");
     }
 

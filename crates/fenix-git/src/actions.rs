@@ -260,7 +260,21 @@ pub fn stash_drop(repo: &Path, index: usize) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::files::list_files;
+
     use crate::test_util::{git, init_repo, TempDir};
+
+    /// A file's contents with CRLF line endings normalized to LF.
+    ///
+    /// git rewrites line endings on checkout wherever `core.autocrlf` is
+    /// on (the Windows default), so a file git just restored comes back
+    /// CRLF even though the test wrote LF. These assertions are about
+    /// *what* was restored, not about which endings the platform chose,
+    /// and comparing raw bytes made them fail on every such machine --
+    /// a permanently-red test hides the real regression it was written
+    /// to catch.
+    fn read_normalized(path: std::path::PathBuf) -> String {
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    }
 
     fn committed_repo(name: &str) -> TempDir {
         let dir = TempDir::new(name);
@@ -305,7 +319,7 @@ mod tests {
         let dir = committed_repo("actions_discard_tracked");
         dir.write("a.txt", "changed\n");
         discard_file(dir.path(), "a.txt", false).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "v1\n");
+        assert_eq!(read_normalized(dir.path().join("a.txt")), "v1\n");
     }
 
     #[test]
@@ -350,7 +364,7 @@ mod tests {
         let untracked = dir.write("sub/new.txt", "new\n");
 
         discard_dir(dir.path(), "sub").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("sub/a.txt")).unwrap(), "v1\n");
+        assert_eq!(read_normalized(dir.path().join("sub/a.txt")), "v1\n");
         assert!(!untracked.exists());
     }
 
@@ -395,11 +409,11 @@ mod tests {
         let dir = committed_repo("actions_stash");
         dir.write("a.txt", "stashed change\n");
         stash_push(dir.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "v1\n");
+        assert_eq!(read_normalized(dir.path().join("a.txt")), "v1\n");
         assert_eq!(crate::stash::list_stashes(dir.path()).len(), 1);
 
         stash_apply(dir.path(), 0).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "stashed change\n");
+        assert_eq!(read_normalized(dir.path().join("a.txt")), "stashed change\n");
         assert_eq!(crate::stash::list_stashes(dir.path()).len(), 1); // apply keeps the entry
 
         stash_drop(dir.path(), 0).unwrap();
@@ -413,7 +427,7 @@ mod tests {
         stash_push(dir.path()).unwrap();
 
         stash_pop(dir.path(), 0).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "popped change\n");
+        assert_eq!(read_normalized(dir.path().join("a.txt")), "popped change\n");
         assert!(crate::stash::list_stashes(dir.path()).is_empty());
     }
 

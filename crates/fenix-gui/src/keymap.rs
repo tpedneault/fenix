@@ -218,6 +218,25 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('C')], "close compare", "git.compare_close");
 
+        // Operations that rewrite history, and the two keys that end one
+        // that stopped for a conflict. `R`/`A` are deliberately one pair
+        // for every kind of suspended operation -- from the user's side
+        // it's one question ("keep going" / "put it back"), and the
+        // Status banner names which operation is answering.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('r')], "rebase onto...", "git.rebase");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('R')], "continue", "git.continue");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('A')], "abort", "git.abort");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('m')], "merge...", "git.merge");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull --rebase", "git.pull_rebase");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('F')], "force-push (lease)", "git.force_push");
+
+        // Conflict resolution, on whichever file is focused.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('j')], "next conflict", "git.next_conflict");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('k')], "prev conflict", "git.prev_conflict");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('o')], "keep ours", "git.keep_ours");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('t')], "keep theirs", "git.keep_theirs");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('b')], "keep both", "git.keep_both");
+
         // Jira dashboard -- read-only browsing this phase (see the Jira
         // dashboard plan's own scope notes). `p`/`u` add/delete letters
         // mirror `SPC p a`/`SPC p d`'s own add/delete-from-a-persisted-
