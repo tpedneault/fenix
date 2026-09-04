@@ -64,7 +64,9 @@ for anyone curious to poke around or build on it.
   ctags-scanned project definition, or a symbols-file entry (the same
   three sources autocompletion draws from), matched against its
   fully-qualified path with an optional leading `::` -- not just any
-  word that happens to be first on a line. Markdown gets a real second
+  word that happens to be first on a line, and including the procs
+  defined in the file you're looking at (which is the whole of what's
+  known for a lone script with no project for `ctags` to scan). Markdown gets a real second
   pass beyond its own block structure (headings, lists, code fences):
   tree-sitter-md ships two grammars, and the block one only ever marks
   a span of prose with a bare `(inline)` node rather than parsing
@@ -534,7 +536,15 @@ for anyone curious to poke around or build on it.
   for the original.
 - **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
   `Solarized Dark`, and `One Dark`, jumped to directly by name with a
-  fuzzy picker (`SPC t p`), persisted.
+  fuzzy picker (`SPC t p`), persisted. Two rules hold across all of
+  them, and are pinned by tests: comments sit closer to the background
+  than body text does, so they read as quieter rather than as more
+  code; and operators and punctuation share an accent that is neither
+  the body-text color nor the comment color, so the structure of a line
+  is visible. Both used to be violated -- punctuation was body-colored
+  (invisible as a distinct thing) or comment-colored (actively
+  de-emphasized) depending on the theme, which is most of why a
+  brace-and-bracket language like Tcl looked flat.
 - **Terminal panel**: `SPC o t` toggles a real, interactive terminal --
   `powershell.exe` on Windows, `$SHELL` (falling back to `/bin/sh`)
   elsewhere -- as a full-width strip along the bottom of the window,

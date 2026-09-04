@@ -19195,7 +19195,17 @@ impl App {
         });
         let known_tcl_commands: Option<std::collections::HashSet<String>> = if is_tcl {
             let root = self.project_root.clone();
-            Some(self.tcl_candidates(root.as_deref()).into_iter().map(|c| c.payload.label).collect())
+            let mut known: std::collections::HashSet<String> =
+                self.tcl_candidates(root.as_deref()).into_iter().map(|c| c.payload.label).collect();
+            // Plus whatever this file itself defines. Without it, a call
+            // to a proc defined twenty lines up renders as plain body
+            // text whenever `ctags` has nothing to say -- which is every
+            // single-file script (no project root, so `tcl_tags` never
+            // runs) and every proc added since the last index.
+            if let Some(ob) = self.buffers.get(id) {
+                known.extend(fenix_completion::tcl::procs_defined_in(&ob.buffer.text()));
+            }
+            Some(known)
         } else {
             None
         };
@@ -23529,6 +23539,35 @@ mod tests {
             Some(app.theme.syntax_color("function")),
             "expected \"myUnknownCmd123\" NOT colored as a command, got {spans:?}"
         );
+    }
+
+    #[test]
+    fn tcl_command_highlighting_recognizes_a_proc_defined_in_the_same_file() {
+        // The everyday case, and the one that used to render as plain
+        // text: a single script with no project root at all, so `ctags`
+        // is never run and the only other source of known names is the
+        // builtin list.
+        let dir = TempDir::new("tcl_command_highlight_same_file");
+        let file = dir.write("main.tcl", "proc configure_board {b} {
+    return $b
+}
+
+configure_board stm32
+");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        assert_eq!(app.project_root, None, "no project root, so nothing is indexed");
+        let id = app.focused_buffer_id();
+
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 5);
+        let command_color = app.theme.syntax_color("function");
+        let call = app.open().buffer.text().rfind("configure_board").unwrap();
+        let color_at = |byte: usize| highlights.iter().find(|(r, _)| r.contains(&byte)).map(|(_, c)| *c);
+
+        assert_eq!(color_at(call), Some(command_color), "a call to a proc defined above it should read as a command");
+        // The definition's own name reads the same way, rather than as
+        // a variable (which in most themes is plain body text).
+        let definition = app.open().buffer.text().find("configure_board").unwrap();
+        assert_eq!(color_at(definition), Some(command_color));
     }
 
     #[test]

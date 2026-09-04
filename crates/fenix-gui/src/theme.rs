@@ -247,7 +247,7 @@ pub const ORBIT_DARK: Theme = Theme {
     syntax_constant: text_color(0xff9e64),
     syntax_variable: text_color(0xc0caf5),
     syntax_operator: text_color(0x89ddff),
-    syntax_punctuation: text_color(0xc0caf5),
+    syntax_punctuation: text_color(0x89ddff),
     syntax_attribute: text_color(0xe0af68),
 
     icon_folder: text_color(0x7aa2f7),
@@ -276,8 +276,9 @@ pub const ORBIT_DARK: Theme = Theme {
 ///
 /// One remaining disclosed simplification: TempleOS's own HolyC IDE
 /// colors identifiers quasi-randomly per token, which isn't replicated
-/// here (`syntax_color` resolves a fixed color per capture name
-/// everywhere in Fenix, same as every other theme).
+/// here -- `syntax_color` resolves a fixed color per capture name
+/// everywhere in Fenix, same as every other theme, so identifiers get
+/// one consistent accent rather than a per-token one.
 pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
     font_family: Some("TempleOS"),
@@ -351,14 +352,23 @@ pub const TEMPLEOS: Theme = Theme {
     // bright accent.
     syntax_keyword: text_color(0x0000aa),
     syntax_string: text_color(0x00aa00),
-    syntax_comment: text_color(0x555555),
+    syntax_comment: text_color(0xaaaaaa),
     syntax_function: text_color(0xaa00aa),
     syntax_type: text_color(0x00aaaa),
     syntax_number: text_color(0xaa0000),
     syntax_constant: text_color(0xaa5500),
-    syntax_variable: text_color(0x000000),
-    syntax_operator: text_color(0x000000),
-    syntax_punctuation: text_color(0x555555),
+    // Light Blue rather than the body text's own black. Tcl -- the
+    // language this theme is most often read in here, and one that
+    // will never have an LSP -- is written almost entirely in `$name`
+    // substitutions, `set` targets and proc parameters, all of which
+    // are `variable` captures; leaving them at `fg` meant those query
+    // rules produced no visible result at all and a script rendered as
+    // a wall of black. It's also closer to real TempleOS, whose own
+    // HolyC IDE colors identifiers rather than leaving them as body
+    // text (see this theme's doc comment).
+    syntax_variable: text_color(0x5555ff),
+    syntax_operator: text_color(0xaa5500),
+    syntax_punctuation: text_color(0xaa5500),
     syntax_attribute: text_color(0x00aaaa),
 
     icon_folder: text_color(0x0000aa),
@@ -416,7 +426,7 @@ pub const GRUVBOX_DARK: Theme = Theme {
     syntax_constant: text_color(0xfe8019),
     syntax_variable: text_color(0xebdbb2),
     syntax_operator: text_color(0x8ec07c),
-    syntax_punctuation: text_color(0x928374),
+    syntax_punctuation: text_color(0x8ec07c),
     syntax_attribute: text_color(0xd79921),
 
     icon_folder: text_color(0x83a598),
@@ -533,7 +543,7 @@ pub const DRACULA: Theme = Theme {
     syntax_constant: text_color(0xbd93f9),
     syntax_variable: text_color(0xf8f8f2),
     syntax_operator: text_color(0xff79c6),
-    syntax_punctuation: text_color(0xf8f8f2),
+    syntax_punctuation: text_color(0xff79c6),
     syntax_attribute: text_color(0x50fa7b),
 
     icon_folder: text_color(0xbd93f9),
@@ -592,7 +602,7 @@ pub const SOLARIZED_DARK: Theme = Theme {
     syntax_constant: text_color(0xd33682),
     syntax_variable: text_color(0x839496),
     syntax_operator: text_color(0x859900),
-    syntax_punctuation: text_color(0x586e75),
+    syntax_punctuation: text_color(0x859900),
     syntax_attribute: text_color(0xcb4b16),
 
     icon_folder: text_color(0x268bd2),
@@ -657,8 +667,8 @@ pub const ONE_DARK: Theme = Theme {
     syntax_number: text_color(0x56b6c2),
     syntax_constant: text_color(0xe06c75),
     syntax_variable: text_color(0xabb2bf),
-    syntax_operator: text_color(0xabb2bf),
-    syntax_punctuation: text_color(0x5c6370),
+    syntax_operator: text_color(0x56b6c2),
+    syntax_punctuation: text_color(0x56b6c2),
     syntax_attribute: text_color(0xe5c07b),
 
     icon_folder: text_color(0x61afef),
@@ -685,6 +695,64 @@ pub fn by_name(name: &str) -> Option<&'static Theme> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Relative luminance, the sRGB formula WCAG uses -- enough to ask
+    /// "is this closer to the background than the body text is", which
+    /// is what "dimmer" means for a color that has to work on both a
+    /// white page and a dark terminal.
+    fn luminance(c: glyphon::Color) -> f32 {
+        let channel = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
+    fn bg_luminance(theme: &Theme) -> f32 {
+        let to_u8 = |v: f32| (v * 255.0).round() as u8;
+        luminance(glyphon::Color::rgb(to_u8(theme.bg[0]), to_u8(theme.bg[1]), to_u8(theme.bg[2])))
+    }
+
+    /// Comments must read as *quieter* than ordinary code in every
+    /// theme -- closer to the background than the body text is, whether
+    /// that means a lighter grey on a white page or a darker one on a
+    /// dark terminal. A comment the same weight as the code it explains
+    /// is noise.
+    #[test]
+    fn every_theme_dims_its_comments_below_its_body_text() {
+        for theme in ALL {
+            let (bg, fg, comment) = (bg_luminance(theme), luminance(theme.fg), luminance(theme.syntax_comment));
+            assert!(
+                (comment - bg).abs() < (fg - bg).abs(),
+                "{}: comments ({comment:.3}) must sit closer to the background ({bg:.3}) than body text ({fg:.3}) does",
+                theme.name
+            );
+        }
+    }
+
+    /// Operators and punctuation carry the structure of a line -- the
+    /// braces and brackets of a Tcl script are most of what there is to
+    /// read. They were the same color as body text in several themes
+    /// (invisible as a distinct thing) and the same as comments in
+    /// others (actively de-emphasized), so both are pinned here: a
+    /// symbol is neither ordinary text nor a comment.
+    #[test]
+    fn every_theme_makes_its_symbols_stand_out_from_text_and_comments() {
+        for theme in ALL {
+            for (role, color) in [("operator", theme.syntax_operator), ("punctuation", theme.syntax_punctuation)] {
+                assert_ne!(rgb_of(color), rgb_of(theme.fg), "{}: {role} is the same color as body text", theme.name);
+                assert_ne!(rgb_of(color), rgb_of(theme.syntax_comment), "{}: {role} is as dim as a comment", theme.name);
+            }
+        }
+    }
+
+    fn rgb_of(c: glyphon::Color) -> (u8, u8, u8) {
+        (c.r(), c.g(), c.b())
+    }
     use super::*;
 
     #[test]

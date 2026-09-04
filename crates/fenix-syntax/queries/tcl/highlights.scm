@@ -4,8 +4,11 @@
 
 "proc" @keyword.function @keyword
 
+; A proc's own name reads as a function, the same as a call to it --
+; capturing it as a variable made every definition in a file render as
+; plain body text, which is most of why Tcl looked flat.
 (procedure
-  name: (_) @variable
+  name: (_) @function
 )
 
 (set (id) @variable)
@@ -142,9 +145,24 @@
  "|"
  "&&"
  "||"
+ ; `expr {$verbose ? 1 : 0}` -- the ternary's own two tokens, which
+ ; were the only operators in an expression left uncolored.
+ "?"
+ ":"
+ "!"
+ "~"
  ] @operator
 
 (variable_substitution) @variable
+
+; A fully-qualified name passed as an *argument* (`lappend
+; ::build_flags $x`, `namespace eval ::app {...}`) is a global variable
+; or a namespace, and gets no capture of its own otherwise -- so those
+; names rendered as plain body text. Scoped to `word_list` on purpose:
+; a `::`-qualified word in *command* position (`::myns::greet arg`) is
+; a call, and must keep the function color that rule gives it.
+((word_list (simple_word) @variable)
+            (#match? @variable "^::"))
 (quoted_word) @string
 (escaped_character) @string.escape
 

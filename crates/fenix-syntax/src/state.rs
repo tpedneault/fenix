@@ -165,6 +165,60 @@ impl SyntaxState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tcl gets no LSP -- there is no server for it -- so the
+    /// tree-sitter query *is* the whole of its code intelligence, and
+    /// anything it misses renders as plain body text. These pin the
+    /// four things it used to miss.
+    fn tcl_captures(source: &str) -> Vec<(String, String)> {
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        state.highlights_in_range(source, 0..source.len()).into_iter().map(|(r, n)| (n.to_string(), source[r].to_string())).collect()
+    }
+
+    fn captured_as(source: &str, text: &str) -> Vec<String> {
+        tcl_captures(source).into_iter().filter(|(_, t)| t == text).map(|(n, _)| n).collect()
+    }
+
+    #[test]
+    fn a_procs_own_name_reads_as_a_function_not_a_variable() {
+        // It was captured as a variable, which in most themes is just
+        // body text -- so every definition in a file looked unhighlighted.
+        assert_eq!(captured_as("proc build_all {} {}
+", "build_all"), vec!["function"]);
+    }
+
+    #[test]
+    fn a_ternary_in_an_expr_gets_its_operators_colored() {
+        let names = tcl_captures("set x [expr {1 ? 2 : 3}]
+");
+        let operators: Vec<&str> = names.iter().filter(|(n, _)| n == "operator").map(|(_, t)| t.as_str()).collect();
+        assert_eq!(operators, vec!["?", ":"]);
+    }
+
+    #[test]
+    fn a_fully_qualified_name_reads_as_a_variable() {
+        // `::build_flags` is a plain command argument as far as the
+        // grammar is concerned, so nothing captured it at all.
+        assert_eq!(captured_as("lappend ::build_flags $x
+", "::build_flags"), vec!["variable"]);
+        assert_eq!(captured_as("namespace eval ::app {}
+", "::app"), vec!["variable"]);
+    }
+
+    #[test]
+    fn a_qualified_name_is_found_inside_a_nested_body_too() {
+        let source = "foreach f $flags {
+    lappend ::build_flags $f
+}
+";
+        assert_eq!(captured_as(source, "::build_flags"), vec!["variable"]);
+    }
+
+    #[test]
+    fn an_ordinary_word_is_not_mistaken_for_a_qualified_name() {
+        assert!(captured_as("puts hello
+", "hello").is_empty());
+    }
     use crate::language::LanguageId;
 
     #[test]
@@ -443,3 +497,4 @@ mod tests {
         assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
     }
 }
+
