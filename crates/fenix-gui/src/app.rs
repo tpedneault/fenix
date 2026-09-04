@@ -8032,6 +8032,34 @@ impl App {
         (((width - text::PAD_LEFT * 2.0) / char_width).floor().max(1.0)) as u16
     }
 
+    /// How many characters wide `pane`'s content area is, for wrapping
+    /// generated text to the pane it's actually going into rather than
+    /// to a fixed guess.
+    ///
+    /// Same shape as `terminal_cols`, including its headless fallback:
+    /// with no GPU or text pipeline there's no real geometry to measure
+    /// (every test, and any `redraw` before the pipeline is up), so it
+    /// answers with `wrap::DEFAULT_WRAP_WIDTH` -- the fixed width every
+    /// other panel wraps to, which keeps rendering tests asserting on
+    /// one predictable layout.
+    fn pane_cols(&self, pane: fenix_window::WindowId) -> usize {
+        let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else {
+            return crate::wrap::DEFAULT_WRAP_WIDTH;
+        };
+        let (window_width, window_height) = (gpu.size.width as f32, gpu.size.height as f32);
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else {
+            return crate::wrap::DEFAULT_WRAP_WIDTH;
+        };
+        // Two characters of slack: a pane's own padding, and the
+        // rightmost column being flush against the divider reads as
+        // text running into the next pane even when it technically
+        // fits.
+        let cols = ((rect.w - text::PAD_LEFT * 2.0) / text.char_width()).floor() as isize - 2;
+        cols.clamp(20, 400) as usize
+    }
+
     /// `FenixUserEvent::TerminalOutput` handling: feeds the chunk into
     /// the live session's `vt100` parser and requests a redraw. A no-op
     /// if the session's since been replaced/closed (a stray chunk from
@@ -13481,8 +13509,11 @@ impl App {
         let list_pane = self.focused_pane_id();
         let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
         self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
-        // The list is an index of titles; the detail is what's read.
-        self.windows_mut().resize_focused(0.3);
+        // An even split. `resize_focused`'s delta grows the *first*
+        // child, so the `0.3` this used to pass gave the list 80% and
+        // squeezed the detail -- the pane with all the reading in it --
+        // into 20%. Left at the default rather than corrected to a
+        // negative delta, because 50/50 is what's wanted here.
         self.windows_mut().focus(list_pane);
 
         self.pane_titles.insert(list_pane, "1. Merge Requests".to_string());
@@ -13512,12 +13543,21 @@ impl App {
     /// Re-renders both panes from what's already cached -- no network.
     fn forge_render(&mut self) {
         let Some(session) = self.forge_session.as_ref() else { return };
-        let list = forge_panel::render_list(&session.project, session.filter, &session.requests, session.list_error.as_deref());
+        // Wrapped to the panes they're going into, not to a fixed
+        // width: this view is an even split, so each pane is about half
+        // as wide as the fixed default assumes.
+        let (list_cols, detail_cols) = (self.pane_cols(session.list_pane), self.pane_cols(session.detail_pane));
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let list = forge_panel::render_list(&session.project, session.filter, &session.requests, session.list_error.as_deref(), list_cols);
         let detail = match &session.detail {
-            Some(detail) => {
-                forge_panel::render_detail(Some(&detail.request), detail.approvals.as_ref(), &detail.files, detail.error.as_deref())
-            }
-            None => forge_panel::render_detail(None, None, &[], None),
+            Some(detail) => forge_panel::render_detail(
+                Some(&detail.request),
+                detail.approvals.as_ref(),
+                &detail.files,
+                detail.error.as_deref(),
+                detail_cols,
+            ),
+            None => forge_panel::render_detail(None, None, &[], None, detail_cols),
         };
         let (list_buffer, detail_buffer) = (session.list_buffer, session.detail_buffer);
         self.set_git_buffer_preserving_line(list_buffer, list);
@@ -13769,9 +13809,10 @@ impl App {
         let files_pane = self.focused_pane_id();
         let merge_pane = self.windows_mut().split(SplitKind::Vertical, merge_buffer);
         self.workspaces.active_pane_states_mut().insert(merge_pane, PaneState::seeded_at(cursor));
-        // The file list is a short index; the columns need everything
-        // else, and they're what's actually being read.
-        self.windows_mut().resize_focused(0.22);
+        // The file list is a short index; the two columns need the
+        // width, and they're what's actually being read. Negative,
+        // because the delta grows the *first* child (the list).
+        self.windows_mut().resize_focused(-0.25);
         self.windows_mut().focus(files_pane);
 
         self.pane_titles.insert(files_pane, "1. Conflicts".to_string());
@@ -14588,7 +14629,9 @@ impl App {
         let diff_pane = self.windows_mut().split(SplitKind::Vertical, diff_buffer);
         self.workspaces.active_pane_states_mut().insert(diff_pane, PaneState::seeded_at(cursor));
         // The commit list is narrow; the diff is what's being read.
-        self.windows_mut().resize_focused(0.15);
+        // Negative: the delta grows the split's *first* child, which is
+        // the list.
+        self.windows_mut().resize_focused(-0.35);
         self.windows_mut().focus(commits_pane);
 
         self.pane_titles.insert(commits_pane, "1. Commits".to_string());
@@ -29556,6 +29599,43 @@ configure_board stm32
         let detail_pane = app.forge_session.as_ref().unwrap().detail_pane;
         app.windows_mut().focus(detail_pane);
         assert!(app.focused_pane_holds_a_tracked_session());
+    }
+
+    /// `resize_focused`'s delta grows the split's *first* child, which
+    /// is the easiest thing in this file to get backwards -- a positive
+    /// delta here gave the Merge Requests list 80% of the window and
+    /// squeezed the detail pane, the one with all the reading in it,
+    /// into the remaining 20%. Pinned as real laid-out widths rather
+    /// than as the delta, so the assertion is about what's on screen.
+    #[test]
+    fn the_git_views_give_their_widths_to_the_pane_being_read() {
+        let bounds = fenix_window::Rect { x: 0.0, y: 0.0, w: 1000.0, h: 500.0 };
+        let width_of = |app: &App, pane: fenix_window::WindowId| {
+            app.windows().layout(bounds).into_iter().find(|(id, _)| *id == pane).map(|(_, r)| r.w).unwrap()
+        };
+
+        // Merge Requests: an even split, as asked for.
+        let (_dir, app) = opened_forge_view("ratio_forge");
+        let session = app.forge_session.as_ref().unwrap();
+        assert_eq!(width_of(&app, session.list_pane), 500.0);
+        assert_eq!(width_of(&app, session.detail_pane), 500.0);
+
+        // Merge view: the file list is a short index, the two aligned
+        // columns need the width.
+        let dir = rebase_conflict_repo("ratio_merge");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_merge_view();
+        let session = app.merge_session.as_ref().unwrap();
+        assert!(width_of(&app, session.files_pane) < width_of(&app, session.merge_pane), "the columns need the room");
+        assert_eq!(width_of(&app, session.files_pane), 250.0);
+
+        // Compare: the commit list is narrow, the diff is what's read.
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_compare_view("main".to_string(), "develop".to_string());
+        let session = app.compare_session.as_ref().unwrap();
+        assert!(width_of(&app, session.commits_pane) < width_of(&app, session.diff_pane), "the diff needs the room");
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------

@@ -345,7 +345,13 @@ for anyone curious to poke around or build on it.
   `mr-42` rather than the source branch's name, which may not exist
   locally or may mean something else entirely. Each row's badge is
   colored by what would stop it merging -- failing CI or conflicts read
-  as bad without reading a word of the titles.
+  as bad without reading a word of the titles. The two panes split the
+  window evenly, and both wrap to their own real width -- long titles,
+  paths, URLs and descriptions fold rather than running off the edge,
+  with every line of a wrapped row still answering the action keys.
+  Diffs and the merge view's two columns are deliberately never
+  wrapped: a wrapped diff line no longer lines up with its neighbours,
+  which is the whole point of showing it.
 
   The only configuration is `[gitlab] base_url` and `token` in
   `config.ini` (the instance root, *not* `/api/v4`; a personal access
