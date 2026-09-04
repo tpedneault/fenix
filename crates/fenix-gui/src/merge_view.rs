@@ -114,16 +114,24 @@ impl From<&fenix_git::ConflictSides> for SideLabels {
     }
 }
 
-/// Total width the two columns share, gutter included.
-const WIDTH: usize = 160;
+/// The width to fall back to when the pane's own isn't known -- a
+/// `redraw` before the text pipeline is up, and every test, where a
+/// fixed width keeps the rendering assertions predictable.
+pub const DEFAULT_WIDTH: usize = 160;
 /// The `│` between the columns, plus a space either side.
 const GUTTER: &str = " │ ";
 /// The divider on its own -- what a row is searched for to find where
 /// its two columns split.
 const DIVIDER: char = '│';
 
-pub fn column_width() -> usize {
-    (WIDTH - GUTTER.chars().count()) / 2
+/// How wide each column is, given the pane's total width.
+///
+/// A floor of 48 rather than columns too thin to read anything in:
+/// past that the alignment would still be exact, there just wouldn't
+/// be room, and truncating every line to nothing is worse than letting
+/// a very narrow pane scroll.
+pub fn column_width_for(total: usize) -> usize {
+    (total.max(48) - GUTTER.chars().count()) / 2
 }
 
 /// Renders `text` -- a working-tree file with conflict markers in it --
@@ -133,13 +141,17 @@ pub fn column_width() -> usize {
 /// passing them in rather than recomputing keeps this view and the
 /// resolve actions working from one list, so "conflict 2" means the same
 /// thing to both.
-pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabels) -> MergeView {
-    let mut out = Builder::new();
+pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabels, width: usize) -> MergeView {
+    let mut out = Builder::new(width);
     let lines: Vec<&str> = text.split('\n').collect();
 
     out.push(&format!("  {path}"), MergeStyle::Header, Side::Both, None, None);
     if conflicts.is_empty() {
-        out.push("  No conflict markers left  --  s stages it as resolved, u puts the conflict back", MergeStyle::Meta, Side::Both, None, None);
+        // Kept under 80 columns: these two hint rows are the only
+        // fixed-width text here -- every other row sizes itself to the
+        // pane, so they were the one thing that could still overflow a
+        // narrow one.
+        out.push("  Nothing left to resolve  --  s stages it, u puts the conflict back", MergeStyle::Meta, Side::Both, None, None);
         out.push("", MergeStyle::Meta, Side::Both, None, None);
         // The resolved file, not an empty pane: the last thing anyone
         // wants after choosing a side is to have to go somewhere else
@@ -156,10 +168,10 @@ pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabel
     // The legend is the whole point of the view: it says which branch
     // each column is, and -- for a rebase, where git's own words are
     // actively misleading -- what that branch's role is.
-    out.push(&two_columns(&format!("<<< {} ", labels.ours), &format!(">>> {} ", labels.theirs)), MergeStyle::Header, Side::Both, None, None);
-    out.push(&two_columns(&labels.ours_role, &labels.theirs_role), MergeStyle::Meta, Side::Both, None, None);
+    out.push(&two_columns(&format!("<<< {} ", labels.ours), &format!(">>> {} ", labels.theirs), out.width), MergeStyle::Header, Side::Both, None, None);
+    out.push(&two_columns(&labels.ours_role, &labels.theirs_role, out.width), MergeStyle::Meta, Side::Both, None, None);
     out.push(
-        &format!("  {} conflict{}  --  o keeps the left, t the right, b both; n/p to move between them", conflicts.len(), if conflicts.len() == 1 { "" } else { "s" }),
+        &format!("  {} conflict{}  --  o left, t right, b both; n/p to move", conflicts.len(), if conflicts.len() == 1 { "" } else { "s" }),
         MergeStyle::Meta,
         Side::Both,
         None,
@@ -176,7 +188,7 @@ pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabel
             out.push(&format!("  {}", lines.get(line).copied().unwrap_or_default()), MergeStyle::Context, Side::Both, None, Some(line));
             line += 1;
         }
-        out.push(&separator(index, conflicts.len()), MergeStyle::Separator, Side::Both, Some(index), Some(conflict.start));
+        out.push(&separator(index, conflicts.len(), out.width), MergeStyle::Separator, Side::Both, Some(index), Some(conflict.start));
 
         let ours: Vec<&str> = lines.get(conflict.ours.clone()).unwrap_or_default().to_vec();
         let theirs: Vec<&str> = lines.get(conflict.theirs.clone()).unwrap_or_default().to_vec();
@@ -193,7 +205,7 @@ pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabel
             // builds from `Side`.
             let side = if row < ours.len() { Side::Ours } else { Side::Theirs };
             let file_line = if row < ours.len() { conflict.ours.start.checked_add(row) } else { conflict.theirs.start.checked_add(row - ours.len()) };
-            out.push(&two_columns(left, right), MergeStyle::Context, side, Some(index), file_line);
+            out.push(&two_columns(left, right, out.width), MergeStyle::Context, side, Some(index), file_line);
         }
 
         // `diff3`/`zdiff3` records what both sides started from. It's
@@ -228,9 +240,9 @@ pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabel
 /// `──── conflict 2 of 3 ─────...` -- ASCII-safe box drawing is not
 /// used here because the row is decoration only; see `graph_view`'s own
 /// note on why glyph width matters for anything that has to line up.
-fn separator(index: usize, total: usize) -> String {
+fn separator(index: usize, total: usize, width: usize) -> String {
     let label = format!(" conflict {} of {total} ", index + 1);
-    let dashes = WIDTH.saturating_sub(label.chars().count() + 2);
+    let dashes = width.saturating_sub(label.chars().count() + 2);
     format!("  {}{label}{}", "-".repeat(4), "-".repeat(dashes.saturating_sub(4)))
 }
 
@@ -241,8 +253,8 @@ fn separator(index: usize, total: usize) -> String {
 /// wrapped: wrapping would push the two columns out of alignment, which
 /// is the one thing this view exists to guarantee. The full text is
 /// always a keypress away in the real file.
-fn two_columns(left: &str, right: &str) -> String {
-    format!("{}{GUTTER}{}", fit(&format!("  {left}"), column_width()), right)
+fn two_columns(left: &str, right: &str, width: usize) -> String {
+    format!("{}{GUTTER}{}", fit(&format!("  {left}"), column_width_for(width)), right)
 }
 
 fn fit(text: &str, width: usize) -> String {
@@ -258,11 +270,16 @@ fn fit(text: &str, width: usize) -> String {
 struct Builder {
     text: String,
     lines: Vec<Option<MergeViewLine>>,
+    /// The pane's own width, so the columns are sized to where they're
+    /// actually shown rather than to a fixed guess -- the merge-request
+    /// panes already do this, and this view needs it more, since its
+    /// whole point is two columns lining up.
+    width: usize,
 }
 
 impl Builder {
-    fn new() -> Self {
-        Builder { text: String::new(), lines: Vec::new() }
+    fn new(width: usize) -> Self {
+        Builder { text: String::new(), lines: Vec::new(), width }
     }
 
     fn push(&mut self, text: &str, style: MergeStyle, side: Side, conflict: Option<usize>, file_line: Option<usize>) {
@@ -300,7 +317,25 @@ mod tests {
     }
 
     fn render_conflicted(text: &str) -> MergeView {
-        render("app.conf", text, &fenix_git::find_conflicts(text), &labels())
+        render("app.conf", text, &fenix_git::find_conflicts(text), &labels(), DEFAULT_WIDTH)
+    }
+
+    #[test]
+    fn the_columns_size_themselves_to_the_pane_they_are_going_into() {
+        let view = render("app.conf", CONFLICTED, &fenix_git::find_conflicts(CONFLICTED), &labels(), 80);
+        let row = view.text.lines().find(|l| l.contains("from develop")).expect("ours is shown");
+        let gutter = row.find('\u{2502}').expect("a gutter");
+        assert_eq!(row[..gutter].chars().count(), column_width_for(80) + 1);
+        assert!(view.text.lines().all(|l| l.chars().count() <= 80), "nothing runs past the pane:\n{}", view.text);
+    }
+
+    #[test]
+    fn a_pane_too_narrow_to_split_gets_a_floor_rather_than_nothing() {
+        // Truncating every line to a couple of characters would be
+        // perfectly aligned and perfectly useless.
+        let view = render("app.conf", CONFLICTED, &fenix_git::find_conflicts(CONFLICTED), &labels(), 10);
+        assert_eq!(column_width_for(10), column_width_for(48));
+        assert!(view.text.contains("from develop"), "got:\n{}", view.text);
     }
 
     #[test]
@@ -322,7 +357,7 @@ mod tests {
         assert!(row.contains("from my branch"), "both sides share a row so they can be compared:\n{row}");
         // And the gutter is where the column width says it is.
         let gutter = row.find('│').expect("a gutter between the columns");
-        assert_eq!(row[..gutter].chars().count(), column_width() + 1, "every row's gutter lands in the same column");
+        assert_eq!(row[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1, "every row's gutter lands in the same column");
     }
 
     #[test]
@@ -363,7 +398,7 @@ mod tests {
         for row in &rows {
             let line = text[*row];
             let gutter = line.find('│').expect("every conflict row keeps its gutter");
-            assert_eq!(line[..gutter].chars().count(), column_width() + 1);
+            assert_eq!(line[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1);
         }
         assert!(text[rows[1]].trim_end().ends_with('│'), "the right column is empty here: {:?}", text[rows[1]]);
     }
@@ -379,8 +414,8 @@ mod tests {
     #[test]
     fn a_file_with_nothing_left_to_resolve_says_what_to_do_next() {
         let view = render_conflicted("all resolved\n");
-        assert!(view.text.contains("No conflict markers left"));
-        assert!(view.text.contains("stages it as resolved"), "got:\n{}", view.text);
+        assert!(view.text.contains("Nothing left to resolve"));
+        assert!(view.text.contains("s stages it"), "got:\n{}", view.text);
     }
 
     #[test]
@@ -391,7 +426,7 @@ mod tests {
         let view = render_conflicted(&long);
         let row = view.text.lines().find(|l| l.contains('…')).expect("the long line is truncated");
         let gutter = row.find('│').unwrap();
-        assert_eq!(row[..gutter].chars().count(), column_width() + 1);
+        assert_eq!(row[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1);
         assert!(row.ends_with("short"));
     }
 }

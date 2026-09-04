@@ -50,8 +50,21 @@ mod tests {
     use super::*;
     use crate::test_util::TempDir;
 
+    /// Whether `rg` is on `PATH`. Ripgrep is a disclosed hard
+    /// requirement for this one feature (see `grep_project`), so on a
+    /// machine without it these have nothing to exercise -- they say so
+    /// and stop, rather than failing forever and drowning out a real
+    /// regression next to them.
+    fn ripgrep_available() -> bool {
+        std::process::Command::new("rg").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
     #[test]
     fn finds_a_match_with_correct_position_and_text() {
+        if !ripgrep_available() {
+            eprintln!("skipping finds_a_match_with_correct_position_and_text: ripgrep (rg) is not on PATH");
+            return;
+        }
         let dir = TempDir::new("grep_finds_match");
         dir.write("a.txt", "hello\nneedle here\nworld\n");
 
@@ -65,6 +78,10 @@ mod tests {
 
     #[test]
     fn no_matches_is_ok_with_an_empty_list_not_an_error() {
+        if !ripgrep_available() {
+            eprintln!("skipping no_matches_is_ok_with_an_empty_list_not_an_error: ripgrep (rg) is not on PATH");
+            return;
+        }
         let dir = TempDir::new("grep_no_matches");
         dir.write("a.txt", "nothing interesting here\n");
         let matches = grep_project(dir.path(), "totally_absent_pattern_xyz").unwrap();
@@ -73,6 +90,10 @@ mod tests {
 
     #[test]
     fn finds_matches_across_multiple_files() {
+        if !ripgrep_available() {
+            eprintln!("skipping finds_matches_across_multiple_files: ripgrep (rg) is not on PATH");
+            return;
+        }
         let dir = TempDir::new("grep_multi_file");
         dir.write("a.txt", "shared_term\n");
         dir.write("sub/b.txt", "also has shared_term here\n");

@@ -232,7 +232,9 @@ for anyone curious to poke around or build on it.
   views of the same file list (a file that's both staged *and* further
   modified appears in both, since git tracks the two halves separately)
   -- `s`/`S` stage/unstage the file under the cursor from either pane,
-  `a`/`A` stage/unstage everything, `c` commits (prompts for a message),
+  `a`/`A` stage/unstage everything, `c` commits (opening a compose
+  buffer for the message -- a subject, a blank line and a body, which is
+  the convention and which a one-line prompt cannot express),
   `d` on Unstaged discards the file under the cursor (`y`/`n` confirm,
   handling untracked files correctly via `git clean` rather than `git
   checkout`), `z` stashes every change, `P`/`p` push/pull. Status is a
@@ -765,7 +767,7 @@ popup shows what keys continue it.
 | `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
 | `r` / `R` / `C` (Review pane) | Reply to this thread / resolve or reopen it / comment on this line |
 | `A` / `m` (Merge Requests) | Approve or withdraw / merge (press twice) |
-| `Enter` / `q` (Compose) | Send what's written / discard it |
+| `Enter` / `q` (Compose) | Send what's written / discard it (also used for commit messages) |
 | `SPC g s` | Stage the selected conflicted file as resolved |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |

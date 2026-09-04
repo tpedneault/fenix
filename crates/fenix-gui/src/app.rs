@@ -488,6 +488,13 @@ enum ComposePurpose {
     /// because it's much larger than the other variant and this enum is
     /// carried around by value.
     NewComment { number: u64, position: Box<fenix_forge::Position> },
+    /// A commit message. The one use of this buffer that has nothing to
+    /// do with a forge -- and the reason the plan called for a compose
+    /// buffer in the first place: a commit message is the most ordinary
+    /// multi-line text an editor asks for, and typing one into a
+    /// single-line prompt means no body, no bullet list, and no way to
+    /// see what you have written.
+    CommitMessage { repo_root: PathBuf },
 }
 
 impl ComposePurpose {
@@ -495,14 +502,15 @@ impl ComposePurpose {
     /// a compose buffer is the one surface here you type prose into, so
     /// "how do I send this" has to be visible without pressing anything.
     fn title(&self) -> String {
-        let what = match self {
-            ComposePurpose::Reply { number, .. } => format!("Reply to !{number}"),
+        let (what, verb) = match self {
+            ComposePurpose::Reply { number, .. } => (format!("Reply to !{number}"), "send"),
             ComposePurpose::NewComment { number, position } => {
                 let line = position.new_line.or(position.old_line).map(|l| l.to_string()).unwrap_or_default();
-                format!("Comment on !{number} {}:{line}", position.new_path)
+                (format!("Comment on !{number} {}:{line}", position.new_path), "send")
             }
+            ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
         };
-        format!("{what}  --  Esc then Enter to send, q to cancel")
+        format!("{what}  --  Esc then Enter to {verb}, q to cancel")
     }
 }
 
@@ -1801,7 +1809,6 @@ enum GitConfirmAction {
 /// implemented (see the Git panel's own scope notes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GitPromptKind {
-    CommitMessage,
     NewBranch,
 }
 
@@ -7729,7 +7736,13 @@ impl App {
 
     /// Whether any buffer has unsaved changes worth warning about --
     /// extends the modeline's existing single-buffer `[+]` marker
-    /// across every open buffer. `request_quit`'s own check.
+    /// across every open buffer.
+    ///
+    /// Test-only now: `request_quit` grew past a boolean and works
+    /// from `dirty_tracked_buffer_ids` directly, so it can name the
+    /// buffers it is blocking on. Kept because it is the readable way
+    /// to assert "nothing is unsaved", which several tests want.
+    #[cfg(test)]
     fn any_buffer_dirty(&self) -> bool {
         !self.dirty_tracked_buffer_ids().is_empty()
     }
@@ -8143,14 +8156,22 @@ impl App {
     /// other panel wraps to, which keeps rendering tests asserting on
     /// one predictable layout.
     fn pane_cols(&self, pane: fenix_window::WindowId) -> usize {
+        self.pane_cols_or(pane, crate::wrap::DEFAULT_WRAP_WIDTH)
+    }
+
+    /// `pane_cols` with the caller's own headless fallback -- the merge
+    /// view's columns want a different one from the panels' wrap width,
+    /// and a view that renders differently under test than in use is
+    /// worse than one that renders wide.
+    fn pane_cols_or(&self, pane: fenix_window::WindowId, fallback: usize) -> usize {
         let (Some(gpu), Some(text)) = (&self.gpu, &self.text) else {
-            return crate::wrap::DEFAULT_WRAP_WIDTH;
+            return fallback;
         };
         let (window_width, window_height) = (gpu.size.width as f32, gpu.size.height as f32);
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else {
-            return crate::wrap::DEFAULT_WRAP_WIDTH;
+            return fallback;
         };
         // Two characters of slack: a pane's own padding, and the
         // rightmost column being flush against the divider reads as
@@ -9590,11 +9611,24 @@ impl App {
     /// Builds fuzzy-picker candidates for every file in `root` --
     /// relative path as the label (fuzzy-matched and displayed),
     /// absolute path as the payload (what actually gets opened).
+    /// A path relative to `root`, written with forward slashes on
+    /// every platform.
+    ///
+    /// Not cosmetic. Every other path Fenix shows comes from `git`,
+    /// which always writes `/` regardless of platform -- so on Windows
+    /// a native-separator label made the file picker the one place a
+    /// path looked different (`src\\main.rs` in the picker,
+    /// `src/main.rs` in the Git panel two keys away), and made the
+    /// obvious fuzzy query for a nested file (`src/ma`) match nothing.
+    fn relative_label(root: &Path, path: &Path) -> String {
+        path.strip_prefix(root).unwrap_or(path).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+    }
+
     fn find_file_candidates(root: &Path) -> Vec<fenix_picker::Candidate<PathBuf>> {
         fenix_project::list_project_files(root)
             .into_iter()
             .map(|path| {
-                let label = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                let label = Self::relative_label(root, &path);
                 fenix_picker::Candidate::new(label, path)
             })
             .collect()
@@ -9617,7 +9651,7 @@ impl App {
         fenix_project::list_project_files_including_ignored(root)
             .into_iter()
             .map(|path| {
-                let label = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                let label = Self::relative_label(root, &path);
                 fenix_picker::Candidate::new(label, path)
             })
             .collect()
@@ -9812,7 +9846,7 @@ impl App {
                 let candidates = matches
                     .into_iter()
                     .map(|m| {
-                        let rel = m.path.strip_prefix(&root).unwrap_or(&m.path).to_string_lossy().into_owned();
+                        let rel = Self::relative_label(&root, &m.path);
                         let label = format!("{rel}:{}: {}", m.line, m.text.trim());
                         fenix_picker::Candidate::new(label, m)
                     })
@@ -13409,9 +13443,23 @@ impl App {
         }
     }
 
-    /// `c` on Files: arms the commit-message prompt.
+    /// `c` on Files: opens a compose buffer for the commit message.
+    ///
+    /// A buffer rather than the single-line prompt every other Git
+    /// action here uses, because a commit message is the one piece of
+    /// text in this panel that is routinely more than one line -- a
+    /// subject, a blank line and a body is the convention, and a prompt
+    /// can express none of it.
     fn git_commit_prompt(&mut self) {
-        self.git_prompt = Some(GitPrompt { kind: GitPromptKind::CommitMessage, input: String::new() });
+        let repo_root = self.git_action_repo_root();
+        if fenix_git::list_files(&repo_root).iter().all(|f| f.index_status == '.' || f.index_status == '?') {
+            // `git commit` would refuse anyway, but it refuses *after*
+            // the message has been written, which is the wrong moment
+            // to find out.
+            self.set_error("nothing staged to commit".to_string());
+            return;
+        }
+        self.open_compose(ComposePurpose::CommitMessage { repo_root });
     }
 
     /// `n` on Branches: arms the new-branch-name prompt.
@@ -14183,6 +14231,27 @@ impl App {
             return;
         }
         let purpose = compose.purpose.clone();
+
+        // A commit message goes to `git`, not to a forge -- so it needs
+        // none of the client below, and works with no Merge Requests
+        // view open at all.
+        if let ComposePurpose::CommitMessage { repo_root } = &purpose {
+            match fenix_git::commit(repo_root, &body) {
+                Ok(_) => {
+                    self.close_compose();
+                    let summary = body.lines().next().unwrap_or_default().to_string();
+                    self.set_message(format!("committed: {summary}"));
+                    self.git_refresh_all_views();
+                }
+                // The draft stays put, same as a failed post: a hook
+                // that rejected the message is something you fix in the
+                // message.
+                Err(err) => self.set_error(format!("commit failed: {err} -- the message is still here")),
+            }
+            self.wake_caret();
+            return;
+        }
+
         let repo_root = match self.forge_session.as_ref() {
             Some(session) => session.repo_root.clone(),
             None => {
@@ -14202,6 +14271,7 @@ impl App {
             ComposePurpose::NewComment { number, position } => {
                 (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
             }
+            ComposePurpose::CommitMessage { .. } => unreachable!("handled above"),
         };
         match result {
             Ok(()) => {
@@ -14274,7 +14344,7 @@ impl App {
     fn merge_refresh(&mut self) {
         let Some(session) = self.merge_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
-        let (files_buffer, merge_buffer) = (session.files_buffer, session.merge_buffer);
+        let (files_buffer, merge_buffer, merge_pane) = (session.files_buffer, session.merge_buffer, session.merge_pane);
 
         // `u` entries are exactly git's own unmerged paths -- the same
         // ones `git status` calls "Unmerged", and the same list
@@ -14296,18 +14366,24 @@ impl App {
         }
         self.set_git_buffer_preserving_line(files_buffer, git_panel::render_conflicts(&files, &labels.ours, &labels.theirs, &labels.ours_role, &labels.theirs_role));
 
+        // Sized to the pane, so the two columns fill it rather than
+        // being cut to a fixed 160 in a wider one or overflowing a
+        // narrower one.
+        let cols = self.pane_cols_or(merge_pane, merge_view::DEFAULT_WIDTH);
         let view = match &selected {
             Some(path) => {
                 let full = repo_root.join(path);
                 match std::fs::read_to_string(&full) {
                     Ok(text) => {
                         let conflicts = fenix_git::find_conflicts(&text);
-                        merge_view::render(path, &text, &conflicts, &labels)
+                        merge_view::render(path, &text, &conflicts, &labels, cols)
                     }
-                    Err(err) => merge_view::render(path, &format!("couldn't read {}: {err}\n", full.display()), &[], &labels),
+                    Err(err) => {
+                        merge_view::render(path, &format!("couldn't read {}: {err}\n", full.display()), &[], &labels, cols)
+                    }
                 }
             }
-            None => merge_view::render("", "", &[], &labels),
+            None => merge_view::render("", "", &[], &labels, cols),
         };
         self.set_merge_buffer(merge_buffer, view);
     }
@@ -15265,7 +15341,6 @@ impl App {
     fn git_prompt_text(&self) -> Option<String> {
         let prompt = self.git_prompt.as_ref()?;
         Some(match prompt.kind {
-            GitPromptKind::CommitMessage => format!("Commit message: {}", prompt.input),
             GitPromptKind::NewBranch => format!("New branch name: {}", prompt.input),
         })
     }
@@ -15303,7 +15378,6 @@ impl App {
         let Some(session) = self.git_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         let result = match kind {
-            GitPromptKind::CommitMessage => fenix_git::commit(&repo_root, input),
             GitPromptKind::NewBranch => fenix_git::create_branch(&repo_root, input),
         };
         if let Err(err) = result {
@@ -27389,6 +27463,15 @@ configure_board stm32
         assert_eq!(app.active_prompt_text(), Some("Create file: x".to_string()));
     }
 
+    /// Whether `rg` is on `PATH`. The grep feature is a disclosed hard
+    /// requirement on ripgrep (see `fenix_project::grep_project`), so
+    /// on a machine without it these tests have nothing to exercise --
+    /// they say so and stop, rather than failing forever and drowning
+    /// out a real regression next to them.
+    fn ripgrep_available() -> bool {
+        std::process::Command::new("rg").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
     #[test]
     fn find_file_candidates_labels_are_relative_to_root() {
         let dir = TempDir::new("find_file_candidates");
@@ -27457,6 +27540,10 @@ configure_board stm32
 
     #[test]
     fn run_grep_and_jump_to_grep_match_moves_the_cursor_to_the_match() {
+        if !ripgrep_available() {
+            eprintln!("skipping run_grep_and_jump_to_grep_match_moves_the_cursor_to_the_match: ripgrep (rg) is not on PATH");
+            return;
+        }
         let dir = TempDir::new("run_grep");
         dir.write("a.txt", "line one\nneedle here\nline three\n");
         let mut app = App::with_file(None);
@@ -27477,6 +27564,10 @@ configure_board stm32
 
     #[test]
     fn run_grep_with_no_matches_still_opens_an_empty_picker() {
+        if !ripgrep_available() {
+            eprintln!("skipping run_grep_with_no_matches_still_opens_an_empty_picker: ripgrep (rg) is not on PATH");
+            return;
+        }
         // `grep_project` treats "no matches" as `Ok(empty)`, not an error
         // -- `run_grep` still opens the (now-empty) Grep picker rather
         // than silently doing nothing, so the user sees "no results"
@@ -27610,6 +27701,10 @@ configure_board stm32
 
     #[test]
     fn grep_query_key_routes_chars_backspace_and_enter() {
+        if !ripgrep_available() {
+            eprintln!("skipping grep_query_key_routes_chars_backspace_and_enter: ripgrep (rg) is not on PATH");
+            return;
+        }
         let dir = TempDir::new("grep_query_key");
         dir.write("a.txt", "target line\n");
         let mut app = App::with_file(None);
@@ -30470,6 +30565,69 @@ configure_board stm32
         assert!(app.focused_pane_holds_a_tracked_session(), "and so is the compose pane");
     }
 
+    #[test]
+    fn a_commit_message_is_written_in_a_compose_buffer_not_a_one_line_prompt() {
+        // The plan asked for this in Milestone A; the buffer only got
+        // built in F. A commit message is the most ordinary multi-line
+        // text an editor asks for -- subject, blank line, body -- and a
+        // single-line prompt can express none of it.
+        let dir = TempDir::new("commit_compose");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "one
+");
+        git(&["add", "."]);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_commit_prompt();
+
+        let compose = app.compose.as_ref().expect("a compose buffer, not a prompt");
+        assert!(app.git_prompt.is_none(), "and not the single-line prompt");
+        assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Commit message"));
+        assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Enter to commit"));
+
+        app.test_insert_str("Add a.txt");
+        app.compose_submit();
+
+        assert!(app.compose.is_none(), "committed, so the buffer closed: {}", app.modeline_pieces().1);
+        assert!(app.modeline_pieces().1.contains("committed: Add a.txt"), "got: {}", app.modeline_pieces().1);
+        let log = std::process::Command::new("git").current_dir(dir.path()).args(["log", "--format=%s", "-1"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Add a.txt");
+    }
+
+    #[test]
+    fn committing_with_nothing_staged_says_so_before_asking_for_a_message() {
+        // `git commit` refuses too, but it refuses *after* the message
+        // has been written, which is the wrong moment to find out.
+        let dir = TempDir::new("commit_nothing_staged");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "one
+");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        dir.write("a.txt", "two
+");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+
+        app.git_commit_prompt();
+
+        assert!(app.compose.is_none(), "no buffer to fill in for nothing");
+        assert!(app.modeline_pieces().1.contains("nothing staged"), "got: {}", app.modeline_pieces().1);
+    }
+
     // -- Against the real thing (`dev/gitlab`) -------------------------
     //
     // Ignored by default: these need the dev GitLab container running
@@ -30724,7 +30882,7 @@ configure_board stm32
         // Named by branch: "kept theirs" would be exactly the wording
         // that makes people resolve a rebase backwards.
         assert!(app.modeline_pieces().1.contains("kept myfeature"), "got: {}", app.modeline_pieces().1);
-        assert!(merge_view_text(&app).contains("No conflict markers left"), "got:\n{}", merge_view_text(&app));
+        assert!(merge_view_text(&app).contains("Nothing left to resolve"), "got:\n{}", merge_view_text(&app));
     }
 
     #[test]
@@ -33093,10 +33251,10 @@ configure_board stm32
     #[test]
     fn git_prompt_ctrl_v_pastes_the_clipboard() {
         let mut app = App::with_file(None);
-        app.git_prompt = Some(GitPrompt { kind: GitPromptKind::CommitMessage, input: String::new() });
-        if let Some(_guard) = test_set_clipboard(&mut app, "fix: pasted commit message") {
+        app.git_prompt = Some(GitPrompt { kind: GitPromptKind::NewBranch, input: String::new() });
+        if let Some(_guard) = test_set_clipboard(&mut app, "feature/pasted-name") {
             app.git_prompt_key(KeyPress::char('v').with_ctrl());
-            assert_eq!(app.git_prompt.as_ref().unwrap().input, "fix: pasted commit message");
+            assert_eq!(app.git_prompt.as_ref().unwrap().input, "feature/pasted-name");
         }
     }
 
