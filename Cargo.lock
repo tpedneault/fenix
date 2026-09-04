@@ -706,6 +706,7 @@ dependencies = [
 name = "fenix-gitlab"
 version = "0.0.1"
 dependencies = [
+ "fenix-diff",
  "fenix-forge",
  "serde_json",
  "ureq",

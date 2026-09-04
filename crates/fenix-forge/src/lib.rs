@@ -77,12 +77,15 @@ impl PipelineStatus {
 }
 
 /// The three commit SHAs a line-anchored review comment has to quote to
-/// say *which version* of a file it's about.
+/// say *which version* of a file it's about. A comment posted against
+/// the wrong version lands on the wrong line or is rejected outright.
 ///
-/// Carried on every merge request even though nothing in the current
-/// milestone reads them: they're only obtainable from the same call
-/// that fetches the merge request, and a comment posted against the
-/// wrong version lands on the wrong line or is rejected outright.
+/// **Only populated by fetching one merge request, not by listing
+/// them.** Checked against a real instance (GitLab 19.3): entries in a
+/// listing carry no `diff_refs` at all, so these are empty on anything
+/// that came from `list_merge_requests`. That's why opening a merge
+/// request re-fetches it rather than reusing the row already on screen
+/// -- an optimization that looks free and silently breaks commenting.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffRefs {
     /// The target branch's tip when the diff was computed.
@@ -260,6 +263,28 @@ impl Position {
             new_path: new_path.to_string(),
             old_line: None,
             new_line: Some(line),
+        }
+    }
+
+    /// A comment on a line that exists on *both* sides -- an unchanged
+    /// context line.
+    ///
+    /// Both numbers, not just the new one. Checked against a real
+    /// instance: GitLab derives an internal line code from the pair,
+    /// and a context-line position carrying only `new_line` is
+    /// rejected outright with `line_code can't be blank`. Since most
+    /// of a diff is context, getting this wrong means most of the
+    /// lines you'd want to comment on refuse the comment -- and a stub
+    /// accepts it happily, which is why this is spelled out here.
+    pub fn on_context_line(refs: &DiffRefs, old_path: &str, new_path: &str, old: usize, new: usize) -> Self {
+        Position {
+            base_sha: refs.base_sha.clone(),
+            head_sha: refs.head_sha.clone(),
+            start_sha: refs.start_sha.clone(),
+            old_path: old_path.to_string(),
+            new_path: new_path.to_string(),
+            old_line: Some(old),
+            new_line: Some(new),
         }
     }
 
@@ -450,6 +475,14 @@ mod tests {
         // The SHAs come along, because a comment stored against the
         // wrong version lands on the wrong line.
         assert_eq!((p.base_sha.as_str(), p.head_sha.as_str(), p.start_sha.as_str()), ("b", "h", "s"));
+    }
+
+    #[test]
+    fn a_context_line_comment_names_both_sides() {
+        // Not a stylistic choice: GitLab derives a line code from the
+        // pair and rejects a context position that carries only one.
+        let p = Position::on_context_line(&refs(), "a.rs", "a.rs", 9, 12);
+        assert_eq!((p.old_line, p.new_line), (Some(9), Some(12)));
     }
 
     #[test]

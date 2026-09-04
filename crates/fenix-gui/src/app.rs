@@ -13791,11 +13791,17 @@ impl App {
         let Some(model) = self.diff_models.get(&session.review_buffer) else { return };
         let Some(file) = model.files.get(anchor.file) else { return };
         let (old_path, new_path) = (file.old_path.clone(), file.new_path.clone());
-        // The new side where the line has one -- that's the version
-        // being reviewed. A removed line only exists on the old side.
-        let position = match (anchor.new_line, anchor.old_line) {
-            (Some(new), _) => fenix_forge::Position::on_new_line(&refs, &old_path, &new_path, new),
-            (None, Some(old)) => fenix_forge::Position::on_old_line(&refs, &old_path, &new_path, old),
+        // All three cases, because the forge distinguishes them: an
+        // added line exists only on the new side, a removed line only
+        // on the old, and an unchanged line on both -- and a context
+        // position that names only one side is rejected outright (see
+        // `Position::on_context_line`). Most of a diff is context, so
+        // collapsing this into "new side where there is one" made most
+        // of the lines you'd want to comment on refuse the comment.
+        let position = match (anchor.old_line, anchor.new_line) {
+            (Some(old), Some(new)) => fenix_forge::Position::on_context_line(&refs, &old_path, &new_path, old, new),
+            (None, Some(new)) => fenix_forge::Position::on_new_line(&refs, &old_path, &new_path, new),
+            (Some(old), None) => fenix_forge::Position::on_old_line(&refs, &old_path, &new_path, old),
             (None, None) => {
                 self.set_message("put the cursor on a line of the diff, not on a header");
                 return;
@@ -30306,6 +30312,23 @@ configure_board stm32
     }
 
     #[test]
+    fn commenting_on_an_unchanged_line_names_both_sides() {
+        // The case a stub accepted and a real GitLab rejects: a context
+        // position carrying only `new_line` comes back 400, and most of
+        // any diff is context.
+        let (_dir, mut app) = reviewing("review_comment_context");
+        cursor_on_review_row(&mut app, "fn main() {}");
+
+        app.forge_comment_at_cursor();
+
+        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+            panic!("expected a new-comment compose");
+        };
+        assert_eq!(position.old_line, Some(1));
+        assert_eq!(position.new_line, Some(1));
+    }
+
+    #[test]
     fn commenting_on_a_removed_line_anchors_to_the_old_side() {
         let (_dir, mut app) = reviewing("review_comment_old");
         cursor_on_review_row(&mut app, "-let old = 1;");
@@ -30445,6 +30468,165 @@ configure_board stm32
         let compose_pane = app.compose.as_ref().unwrap().pane;
         app.windows_mut().focus(compose_pane);
         assert!(app.focused_pane_holds_a_tracked_session(), "and so is the compose pane");
+    }
+
+    // -- Against the real thing (`dev/gitlab`) -------------------------
+    //
+    // Ignored by default: these need the dev GitLab container running
+    // and seeded. `fenix-gitlab`'s own `tests/live.rs` covers the wire
+    // protocol; these cover the half that lives here -- that what comes
+    // back off a real instance renders into the panes correctly, which
+    // is where a field name Fenix reads but GitLab stopped sending
+    // shows up as a blank row rather than an error.
+    //
+    //   cargo test -p fenix-gui live_ -- --ignored --test-threads=1
+
+    /// A clone of the seeded project, so the project is inferred from a
+    /// real `origin` exactly as it is in use.
+    fn live_clone(name: &str) -> Option<TempDir> {
+        let url = std::env::var("GITLAB_URL").unwrap_or_else(|_| "http://localhost:8929".to_string());
+        let token = std::env::var("GITLAB_TOKEN").unwrap_or_else(|_| "fenix-dev-token-0123456789".to_string());
+        let remote = format!("{}/fenix-dev/widget.git", url.replace("http://", &format!("http://root:{token}@")));
+        let dir = TempDir::new(name);
+        let out = std::process::Command::new("git")
+            .args(["clone", "-q", &remote, dir.path().to_str().unwrap()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            panic!("couldn't clone the seeded project -- is dev/gitlab up and seeded?\n{}", String::from_utf8_lossy(&out.stderr));
+        }
+        Some(dir)
+    }
+
+    fn live_app(name: &str) -> (TempDir, App) {
+        let dir = live_clone(name).expect("a clone of the seeded project");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some(std::env::var("GITLAB_URL").unwrap_or_else(|_| "http://localhost:8929".to_string()));
+        app.config.gitlab_token =
+            Some(std::env::var("GITLAB_TOKEN").unwrap_or_else(|_| "fenix-dev-token-0123456789".to_string()));
+        app.open_forge_view();
+        (dir, app)
+    }
+
+    /// Opens the seeded merge request with the diff and the thread on
+    /// it. Explicit, because the list is ordered by last update and the
+    /// view opens whatever is at the top of it -- which is right, and
+    /// is not necessarily this one.
+    fn live_select_timeout_mr(app: &mut App) -> u64 {
+        let number = app
+            .forge_session
+            .as_ref()
+            .unwrap()
+            .requests
+            .iter()
+            .find(|r| r.title.contains("timeout"))
+            .expect("seed.sh opens it")
+            .number;
+        app.forge_select(number);
+        number
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_the_project_is_inferred_from_the_clones_own_origin() {
+        let (_dir, app) = live_app("live_project");
+        let session = app.forge_session.as_ref().expect("the view opened");
+        assert_eq!(session.project, "fenix-dev/widget", "nothing about the project is configured");
+        assert!(session.list_error.is_none(), "got: {:?}", session.list_error);
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_the_list_renders_both_seeded_requests() {
+        let (_dir, app) = live_app("live_list");
+        let session = app.forge_session.as_ref().unwrap();
+        let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
+        assert!(list.contains("Make the timeout configurable"), "got:\n{list}");
+        // Seeded with `Draft:` already in the title *and* the flag set,
+        // which is what GitLab really does -- the label must not double.
+        assert!(list.contains("Expand the README"), "got:\n{list}");
+        assert!(!list.contains("Draft: Draft:"), "got:\n{list}");
+        assert_eq!(session.requests.len(), 2, "got: {:?}", session.requests);
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_the_detail_pane_fills_in_from_a_real_instance() {
+        let (_dir, mut app) = live_app("live_detail");
+        live_select_timeout_mr(&mut app);
+        let session = app.forge_session.as_ref().unwrap();
+        let detail = app.buffers.get(session.detail_buffer).unwrap().buffer.text();
+        assert!(detail.contains("feature/configurable-timeout -> main"), "got:\n{detail}");
+        assert!(detail.contains("State: open"), "got:\n{detail}");
+        // A Free instance has no approval rules, so the pane must
+        // report approvers without inventing a rule.
+        assert!(!detail.contains("of 0"), "no rule should be claimed:\n{detail}");
+        // The seeded comment that hangs on no line goes here, not on
+        // the diff.
+        assert!(detail.contains("Overall this reads well"), "got:\n{detail}");
+        assert!(detail.contains("[M] widget.rs"), "got:\n{detail}");
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_the_review_pane_shows_the_real_diff_with_its_thread_inline() {
+        let (_dir, mut app) = live_app("live_review");
+        live_select_timeout_mr(&mut app);
+        let review = review_text(&app);
+        assert!(review.contains("widget.rs"), "got:\n{review}");
+        assert!(review.contains("read_timeout"), "the real diff:\n{review}");
+        // The thread seed.sh anchored to line 7, drawn under line 7.
+        let rows: Vec<&str> = review.lines().collect();
+        let commented = rows
+            .iter()
+            .position(|r| r.contains("Should this be a const"))
+            .unwrap_or_else(|| panic!("the seeded thread should be inline:\n{review}"));
+        assert!(commented > 0);
+        assert!(
+            rows[..commented].iter().rev().take(3).any(|r| r.contains("read_timeout") || r.contains("unwrap_or")),
+            "it should sit under the line it hangs on:\n{review}"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_a_comment_written_here_is_accepted_and_comes_back_on_its_line() {
+        // The end-to-end that no stub can stand in for: compose it the
+        // way a person would, post it, and read it back off the server.
+        let (_dir, mut app) = live_app("live_comment");
+        live_select_timeout_mr(&mut app);
+        cursor_on_review_row(&mut app, "+fn read_timeout");
+        app.forge_comment_at_cursor();
+        assert!(app.compose.is_some(), "a compose buffer opened: {}", app.modeline_pieces().1);
+        let marker = format!("Live test comment {:?}.", std::time::SystemTime::now());
+        app.test_insert_str(&marker);
+
+        app.compose_submit();
+
+        assert!(app.compose.is_none(), "sent, so the buffer closed: {}", app.modeline_pieces().1);
+        assert!(app.modeline_pieces().1.contains("posted to"), "got: {}", app.modeline_pieces().1);
+        // And it is on the line it was written on, read back from the
+        // instance rather than from anything cached here.
+        let review = review_text(&app);
+        assert!(review.contains(marker.trim_end_matches('.')), "the comment came back inline:\n{review}");
+    }
+
+    #[test]
+    #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
+    fn live_checking_out_a_merge_request_lands_its_commit_in_the_tree() {
+        let (dir, mut app) = live_app("live_checkout");
+        let number = live_select_timeout_mr(&mut app);
+
+        app.forge_checkout_selected();
+
+        assert!(app.modeline_pieces().1.contains("checked out"), "got: {}", app.modeline_pieces().1);
+        let branches = fenix_git::list_branches(dir.path());
+        assert_eq!(branches.iter().find(|b| b.current).map(|b| b.name.as_str()), Some(format!("mr-{number}").as_str()));
+        // The merge request's own content, fetched from GitLab's
+        // published ref rather than from the source branch.
+        let source = std::fs::read_to_string(dir.path().join("widget.rs")).unwrap();
+        assert!(source.contains("read_timeout"), "got:\n{source}");
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------

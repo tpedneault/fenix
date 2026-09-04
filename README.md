@@ -381,6 +381,15 @@ for anyone curious to poke around or build on it.
   leaves the draft where it is, which is the difference between retrying
   and retyping.
 
+  Verified against a real GitLab, not just a stub: `dev/gitlab` brings
+  up a containerized instance and seeds it with a project, two merge
+  requests and a review thread, and `cargo test -p fenix-gitlab --test
+  live -- --ignored` plus `cargo test -p fenix-gui live_ -- --ignored`
+  run the whole integration against it. That is what caught the one bug
+  a stub structurally cannot: a comment on an *unchanged* line needs
+  both `old_line` and `new_line`, and GitLab rejects a position carrying
+  only one of them.
+
   The only configuration is `[gitlab] base_url` and `token` in
   `config.ini` (the instance root, *not* `/api/v4`; a personal access
   token with `api` scope). Which project a repo belongs to is read from

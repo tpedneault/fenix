@@ -7,3 +7,9 @@ edition.workspace = true
 fenix-forge = { path = "../fenix-forge" }
 serde_json = "1"
 ureq = { version = "2", features = ["tls", "native-certs"] }
+
+# Only the live tests need this: they check that the diff GitLab hands
+# back, once `unified_diff` puts a header on it, is something Fenix's
+# own parser actually reads.
+[dev-dependencies]
+fenix-diff = { path = "../fenix-diff" }

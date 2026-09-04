@@ -113,9 +113,14 @@ pub fn approvals(value: &Value) -> Approvals {
 ///
 /// A discussion's own resolved state isn't a field on it: GitLab
 /// records resolution per *note*, and a thread counts as resolved when
-/// every resolvable note in it is. Same for resolvability -- a plain
-/// comment on the merge request carries `resolvable: false`, and
-/// offering the resolve key on one would only produce a forge error.
+/// every resolvable note in it is.
+///
+/// Resolvability is read the same way rather than inferred from whether
+/// the thread has a diff position. Checked against a real instance
+/// (GitLab 19.3): a plain comment on the merge request comes back as a
+/// `DiscussionNote` with `resolvable: true` -- threads on a merge
+/// request are resolvable whether or not they hang on a line. Only the
+/// forge's own narration (`system: true`) isn't.
 pub fn discussion(value: &Value) -> Option<Discussion> {
     let id = value.get("id").and_then(Value::as_str)?.to_string();
     let entries = value.get("notes").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -243,16 +248,30 @@ mod tests {
         assert!(discussion(&value).unwrap().resolved);
     }
 
+    /// A plain comment on the merge request, shaped as a real instance
+    /// returns it: a `DiscussionNote` with no position, and -- checked
+    /// against GitLab 19.3 -- `resolvable: true`, which is not what
+    /// "it isn't on a diff line" would suggest.
     #[test]
-    fn a_plain_comment_on_the_merge_request_is_not_resolvable_and_has_no_position() {
+    fn a_plain_comment_on_the_merge_request_has_no_position_but_is_still_resolvable() {
         let value = json!({
             "id": "plain",
-            "notes": [{"id": 9, "body": "Nice work.", "author": {"username": "carol"}, "system": false, "resolvable": false}]
+            "notes": [{"id": 9, "body": "Nice work.", "author": {"username": "carol"}, "type": "DiscussionNote",
+                       "system": false, "resolvable": true, "resolved": false}]
         });
         let d = discussion(&value).unwrap();
-        assert!(!d.resolvable, "offering the resolve key here would only produce a forge error");
+        assert!(d.resolvable, "read from the flag, not inferred from the absence of a position");
         assert_eq!(d.position, None);
         assert_eq!(d.notes[0].author, "carol", "falls back to the username");
+    }
+
+    #[test]
+    fn only_the_forges_own_narration_comes_back_unresolvable() {
+        let value = json!({
+            "id": "sys",
+            "notes": [{"id": 9, "body": "approved this merge request", "author": {"name": "A"}, "system": true, "resolvable": false}]
+        });
+        assert!(!discussion(&value).unwrap().resolvable);
     }
 
     #[test]
