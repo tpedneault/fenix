@@ -21,7 +21,7 @@
 pub mod parse;
 pub mod remote;
 
-use fenix_forge::{Approvals, ChangedFile, Forge, MergeRequest, MrFilter};
+use fenix_forge::{Approvals, ChangedFile, Discussion, Forge, MergeOptions, MergeRequest, MrFilter, Position};
 use serde_json::Value;
 
 /// How many merge requests one listing asks for. Past this the pane
@@ -67,6 +67,27 @@ impl GitLab {
         let response = req.call().map_err(|err| describe_error(&err))?;
         let body = response.into_string().map_err(|err| format!("couldn't read response body: {err}"))?;
         serde_json::from_str(&body).map_err(|err| format!("couldn't parse response as JSON: {err}"))
+    }
+
+    /// The write-side counterpart to `get`. Mirrors `fenix-jira`'s own
+    /// `send`, including its reason for hand-serializing rather than
+    /// using `ureq`'s `send_json`: this crate then needs only `tls` from
+    /// `ureq`, not its `json` feature on top.
+    ///
+    /// A successful write whose body isn't JSON (or is empty) is still a
+    /// success -- GitLab answers some of these with `204 No Content`, and
+    /// treating that as a parse failure would report a comment that
+    /// posted fine as an error.
+    fn send(&self, method: &str, path: &str, body: &Value) -> Result<(), String> {
+        let url = format!("{}/api/v4{path}", self.base_url);
+        let payload = serde_json::to_string(body).map_err(|err| format!("couldn't encode request body: {err}"))?;
+        ureq::request(method, &url)
+            .set("PRIVATE-TOKEN", &self.token)
+            .set("Accept", "application/json")
+            .set("Content-Type", "application/json")
+            .send_string(&payload)
+            .map(|_| ())
+            .map_err(|err| describe_error(&err))
     }
 
     fn mr_path(&self, number: u64, suffix: &str) -> String {
@@ -134,6 +155,71 @@ impl Forge for GitLab {
         Ok(entries.iter().filter_map(parse::changed_file).collect())
     }
 
+    fn discussions(&self, number: u64) -> Result<Vec<Discussion>, String> {
+        let per_page = PER_PAGE.to_string();
+        let value = self.get(&self.mr_path(number, "/discussions"), &[("per_page", per_page.as_str())])?;
+        let entries = value.as_array().ok_or_else(|| "expected a list of discussions".to_string())?;
+        Ok(entries.iter().filter_map(parse::discussion).collect())
+    }
+
+    fn reply(&self, number: u64, discussion: &str, body: &str) -> Result<(), String> {
+        // POST adds a note to the thread; PUT on the same path with a
+        // note id *edits* one, which is a different action entirely.
+        self.send("POST", &self.mr_path(number, &format!("/discussions/{discussion}/notes")), &serde_json::json!({ "body": body }))
+    }
+
+    fn resolve(&self, number: u64, discussion: &str, resolved: bool) -> Result<(), String> {
+        self.send("PUT", &self.mr_path(number, &format!("/discussions/{discussion}")), &serde_json::json!({ "resolved": resolved }))
+    }
+
+    fn comment_on_line(&self, number: u64, position: &Position, body: &str) -> Result<(), String> {
+        let mut pos = serde_json::json!({
+            "base_sha": position.base_sha,
+            "head_sha": position.head_sha,
+            "start_sha": position.start_sha,
+            "position_type": "text",
+            "old_path": position.old_path,
+            "new_path": position.new_path,
+        });
+        // Sent only when set. A `null` line is not the same as an absent
+        // one here: GitLab reads the pair to decide which side of the
+        // diff the comment belongs on, and sending both for a line that
+        // only exists on one side is rejected.
+        if let Some(old) = position.old_line {
+            pos["old_line"] = serde_json::json!(old);
+        }
+        if let Some(new) = position.new_line {
+            pos["new_line"] = serde_json::json!(new);
+        }
+        self.send("POST", &self.mr_path(number, "/discussions"), &serde_json::json!({ "body": body, "position": pos }))
+    }
+
+    fn approve(&self, number: u64, sha: Option<&str>) -> Result<(), String> {
+        let body = match sha {
+            // Optional in the API, always sent here: it makes the forge
+            // refuse rather than record an approval of a version that
+            // moved since it was read.
+            Some(sha) => serde_json::json!({ "sha": sha }),
+            None => serde_json::json!({}),
+        };
+        self.send("POST", &self.mr_path(number, "/approve"), &body)
+    }
+
+    fn unapprove(&self, number: u64) -> Result<(), String> {
+        self.send("POST", &self.mr_path(number, "/unapprove"), &serde_json::json!({}))
+    }
+
+    fn merge(&self, number: u64, options: &MergeOptions) -> Result<(), String> {
+        let mut body = serde_json::json!({
+            "squash": options.squash,
+            "should_remove_source_branch": options.remove_source_branch,
+        });
+        if let Some(sha) = &options.sha {
+            body["sha"] = serde_json::json!(sha);
+        }
+        self.send("PUT", &self.mr_path(number, "/merge"), &body)
+    }
+
     fn checkout_refspec(&self, number: u64) -> String {
         // GitLab publishes every merge request's head under this ref on
         // the project's own remote, so no fork remote has to be added
@@ -155,6 +241,17 @@ fn describe_error(err: &ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_review_path_is_scoped_to_the_encoded_project_and_the_request() {
+        let gl = GitLab::new("https://gitlab.example.com", "tok", "group/project");
+        let base = "/projects/group%2Fproject/merge_requests/42";
+        assert_eq!(gl.mr_path(42, "/discussions"), format!("{base}/discussions"));
+        assert_eq!(gl.mr_path(42, "/discussions/abc/notes"), format!("{base}/discussions/abc/notes"));
+        assert_eq!(gl.mr_path(42, "/approve"), format!("{base}/approve"));
+        assert_eq!(gl.mr_path(42, "/unapprove"), format!("{base}/unapprove"));
+        assert_eq!(gl.mr_path(42, "/merge"), format!("{base}/merge"));
+    }
 
     #[test]
     fn the_base_url_loses_a_trailing_slash_and_never_carries_the_api_path() {

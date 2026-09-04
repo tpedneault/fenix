@@ -478,6 +478,50 @@ struct CompareSession {
     three_dot: bool,
 }
 
+/// What a compose buffer's text is going to be used for once it's
+/// submitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposePurpose {
+    /// Another note on an existing review thread.
+    Reply { number: u64, discussion: String },
+    /// A new thread anchored to a diff line. The position is boxed
+    /// because it's much larger than the other variant and this enum is
+    /// carried around by value.
+    NewComment { number: u64, position: Box<fenix_forge::Position> },
+}
+
+impl ComposePurpose {
+    /// The pane title, which is also where the keys are documented --
+    /// a compose buffer is the one surface here you type prose into, so
+    /// "how do I send this" has to be visible without pressing anything.
+    fn title(&self) -> String {
+        let what = match self {
+            ComposePurpose::Reply { number, .. } => format!("Reply to !{number}"),
+            ComposePurpose::NewComment { number, position } => {
+                let line = position.new_line.or(position.old_line).map(|l| l.to_string()).unwrap_or_default();
+                format!("Comment on !{number} {}:{line}", position.new_path)
+            }
+        };
+        format!("{what}  --  Esc then Enter to send, q to cancel")
+    }
+}
+
+/// A scratch buffer for writing something more than one line long.
+///
+/// Fenix's existing prompts are single-line, which is fine for a branch
+/// name and wrong for a review comment. This is a real buffer in a real
+/// pane: ordinary Vim editing, ordinary undo, and no modal dialog to
+/// fight with -- submitted from Normal mode with `Enter`, abandoned
+/// with `q`.
+struct ComposeSession {
+    pane: fenix_window::WindowId,
+    buffer: BufferId,
+    purpose: ComposePurpose,
+    /// The pane focus returns to once this closes, so sending a reply
+    /// puts you back where you were reading.
+    returning_to: fenix_window::WindowId,
+}
+
 /// Everything one forge round-trip fetched for a merge request's
 /// detail pane. Bundled because all three come from the same click and
 /// are shown together -- and because a partial arrival would leave the
@@ -488,6 +532,7 @@ pub(crate) struct ForgeDetail {
     request: fenix_forge::MergeRequest,
     approvals: Option<fenix_forge::Approvals>,
     files: Vec<fenix_forge::ChangedFile>,
+    discussions: Vec<fenix_forge::Discussion>,
     /// A failure fetching the *files* specifically. The request itself
     /// having arrived is worth showing even when its diff didn't.
     error: Option<String>,
@@ -506,8 +551,10 @@ struct ForgeSession {
     workspace_index: usize,
     list_pane: fenix_window::WindowId,
     detail_pane: fenix_window::WindowId,
+    review_pane: fenix_window::WindowId,
     list_buffer: BufferId,
     detail_buffer: BufferId,
+    review_buffer: BufferId,
     repo_root: PathBuf,
     /// `group/project`, inferred from the repo's own `origin` remote.
     project: String,
@@ -522,6 +569,11 @@ struct ForgeSession {
     list_error: Option<String>,
     list_request_id: u64,
     detail_request_id: u64,
+    /// Armed by `m` until the next keypress confirms -- merging is the
+    /// one action here that can't be taken back, so it doesn't happen
+    /// on a single keystroke. Mirrors `GitConfirmAction`'s own
+    /// arm-then-confirm shape.
+    merge_armed: bool,
 }
 
 /// The Merge view (`SPC g x`): the conflicted files on the left, the
@@ -565,6 +617,11 @@ struct DiffModel {
     /// re-renders the whole buffer -- without this, the first `Tab`
     /// silently dropped the header.
     header: Vec<(String, diff_view::DiffStyle)>,
+    /// Review threads drawn inline under the lines they hang on. Stored
+    /// here for exactly the reason `header` is: `Tab` re-renders the
+    /// whole buffer, and threads passed only at build time would vanish
+    /// the first time a file was folded.
+    threads: Vec<diff_view::ThreadAnnotation>,
 }
 
 /// Which diff a `DiffModel` holds, and therefore what a hunk action on
@@ -3256,6 +3313,35 @@ pub(crate) struct GitRefreshData {
     sides: Option<fenix_git::ConflictSides>,
 }
 
+/// Review threads, as the diff viewer wants them.
+///
+/// Threads with no diff position (a plain comment on the merge request
+/// as a whole) and threads that are only the forge narrating its own
+/// events are dropped: neither hangs on a line of code, and drawing
+/// them somewhere arbitrary in the diff would be worse than not
+/// drawing them.
+fn forge_thread_annotations(discussions: &[fenix_forge::Discussion]) -> Vec<diff_view::ThreadAnnotation> {
+    discussions
+        .iter()
+        .filter(|d| d.is_human())
+        .filter_map(|d| {
+            let position = d.position.as_ref()?;
+            Some(diff_view::ThreadAnnotation {
+                id: d.id.clone(),
+                // The new path, except where the file was deleted and
+                // only ever had an old one -- matching what
+                // `FileDiff::display_path` puts on the header row.
+                path: if position.new_path.is_empty() { position.old_path.clone() } else { position.new_path.clone() },
+                old_line: position.old_line,
+                new_line: position.new_line,
+                resolved: d.resolved,
+                notes: d.notes.iter().filter(|n| !n.system).map(|n| (n.author.clone(), n.body.clone())).collect(),
+            })
+        })
+        .filter(|t| !t.notes.is_empty())
+        .collect()
+}
+
 /// The three forge calls one merge request's detail pane needs.
 ///
 /// Run together on the worker thread rather than as three separate
@@ -3272,7 +3358,11 @@ fn fetch_forge_detail(client: &fenix_gitlab::GitLab, number: u64) -> Result<Forg
         Ok(files) => (files, None),
         Err(err) => (Vec::new(), Some(err)),
     };
-    Ok(ForgeDetail { request, approvals, files, error })
+    // Threads are a bonus on top of the diff, not a precondition for
+    // it: an instance that refuses this endpoint should still show the
+    // changes.
+    let discussions = client.discussions(number).unwrap_or_default();
+    Ok(ForgeDetail { request, approvals, files, discussions, error })
 }
 
 /// The actual four `git` shell-outs `git_refresh_session` needs -- called
@@ -3804,6 +3894,13 @@ fn diff_highlights_for_visible_range(
             diff_view::DiffStyle::Added => theme.git_staged,
             diff_view::DiffStyle::Removed => theme.git_conflicted,
             diff_view::DiffStyle::Meta => theme.gutter_fg,
+            // A review comment reads as prose beside code: its author
+            // row takes the same accent a file header does, its body
+            // the string color, so a thread is scannable among the
+            // diff lines it's wedged between without competing with
+            // the additions and removals for the eye.
+            diff_view::DiffStyle::NoteHeader => theme.syntax_function,
+            diff_view::DiffStyle::NoteBody => theme.syntax_string,
             // Unchanged context reads as ordinary text -- no range at
             // all, so it falls through to the pane's default color.
             diff_view::DiffStyle::Context => continue,
@@ -4993,6 +5090,7 @@ pub struct App {
     compare_session: Option<CompareSession>,
     merge_session: Option<MergeSession>,
     forge_session: Option<ForgeSession>,
+    compose: Option<ComposeSession>,
     /// Capturing a commit message or new branch name -- mirrors
     /// `explorer_prompt`'s "next keystrokes are text input" shape.
     git_prompt: Option<GitPrompt>,
@@ -5733,6 +5831,7 @@ impl App {
             compare_session: None,
             merge_session: None,
             forge_session: None,
+            compose: None,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
             graph_lines: HashMap::new(),
@@ -6364,7 +6463,8 @@ impl App {
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
             || self.compare_session.as_ref().is_some_and(|s| focused == s.commits_pane || focused == s.diff_pane)
             || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
-            || self.forge_session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane)
+            || self.forge_session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane || focused == s.review_pane)
+            || self.compose.as_ref().is_some_and(|c| focused == c.pane)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -12599,11 +12699,13 @@ impl App {
         } else {
             self.diff_models.get(&id).map(|m| m.collapsed.clone()).unwrap_or_default()
         };
-        let view = diff_view::render_with_header(header, &files, &collapsed);
+        let threads = self.diff_models.get(&id).map(|m| m.threads.clone()).unwrap_or_default();
+        let view = diff_view::render_with_threads(header, &files, &collapsed, &threads);
         self.diff_lines.insert(id, view.lines);
         self.diff_models.insert(
             id,
-            DiffModel { repo_root: repo_root.to_path_buf(), files, collapsed, source, header: header.to_vec() },
+            DiffModel {
+                repo_root: repo_root.to_path_buf(), files, collapsed, source, header: header.to_vec(), threads },
         );
         if let Some(ob) = self.buffers.get_mut(id) {
             let end = ob.buffer.len_chars();
@@ -12632,7 +12734,7 @@ impl App {
         for (row, style) in rows {
             text.push_str(row);
             text.push('\n');
-            lines.push(Some(diff_view::DiffViewLine { style: *style, content_from: 0, anchor: None }));
+            lines.push(Some(diff_view::DiffViewLine { style: *style, content_from: 0, anchor: None, thread: None }));
         }
         self.diff_lines.insert(id, lines);
         self.diff_models.insert(
@@ -12643,6 +12745,7 @@ impl App {
                 collapsed: HashSet::new(),
                 source: DiffSource::ReadOnly,
                 header: Vec::new(),
+                threads: Vec::new(),
             },
         );
         self.replace_buffer_text(id, &text);
@@ -12655,7 +12758,7 @@ impl App {
     /// preserving_line`'s own reasoning for the Files tree.
     fn rerender_diff_buffer(&mut self, id: BufferId) {
         let Some(model) = self.diff_models.get(&id) else { return };
-        let view = diff_view::render_with_header(&model.header, &model.files, &model.collapsed);
+        let view = diff_view::render_with_threads(&model.header, &model.files, &model.collapsed, &model.threads);
         self.diff_lines.insert(id, view.lines);
 
         let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
@@ -13502,6 +13605,9 @@ impl App {
 
         let list_buffer = self.buffers.open_git("");
         let detail_buffer = self.buffers.open_git("");
+        let empty = diff_view::render(&[], &HashSet::new());
+        let review_buffer = self.buffers.open_diff(&empty.text);
+        self.diff_lines.insert(review_buffer, empty.lines);
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(list_buffer, cursor);
@@ -13509,6 +13615,13 @@ impl App {
         let list_pane = self.focused_pane_id();
         let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
         self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
+        // The right half stacks: what the request *is* on top, the diff
+        // being reviewed below. The diff takes most of the height --
+        // the description is read once, the changes are read for as
+        // long as the review takes.
+        let review_pane = self.windows_mut().split(SplitKind::Horizontal, review_buffer);
+        self.workspaces.active_pane_states_mut().insert(review_pane, PaneState::seeded_at(cursor));
+        self.windows_mut().resize_focused(-0.15);
         // An even split. `resize_focused`'s delta grows the *first*
         // child, so the `0.3` this used to pass gave the list 80% and
         // squeezed the detail -- the pane with all the reading in it --
@@ -13518,13 +13631,16 @@ impl App {
 
         self.pane_titles.insert(list_pane, "1. Merge Requests".to_string());
         self.pane_titles.insert(detail_pane, "2. Detail".to_string());
+        self.pane_titles.insert(review_pane, "3. Review".to_string());
 
         self.forge_session = Some(ForgeSession {
             workspace_index,
             list_pane,
             detail_pane,
+            review_pane,
             list_buffer,
             detail_buffer,
+            review_buffer,
             repo_root,
             project,
             filter: fenix_forge::MrFilter::AllOpen,
@@ -13534,6 +13650,7 @@ impl App {
             list_error: None,
             list_request_id: 0,
             detail_request_id: 0,
+            merge_armed: false,
         });
         self.forge_render();
         self.forge_refresh_list();
@@ -13554,14 +13671,230 @@ impl App {
                 Some(&detail.request),
                 detail.approvals.as_ref(),
                 &detail.files,
+                &detail.discussions,
                 detail.error.as_deref(),
                 detail_cols,
             ),
-            None => forge_panel::render_detail(None, None, &[], None, detail_cols),
+            None => forge_panel::render_detail(None, None, &[], &[], None, detail_cols),
         };
         let (list_buffer, detail_buffer) = (session.list_buffer, session.detail_buffer);
         self.set_git_buffer_preserving_line(list_buffer, list);
         self.set_git_buffer_preserving_line(detail_buffer, detail);
+        self.forge_render_review();
+    }
+
+    /// Renders the selected merge request's whole diff into the review
+    /// pane, with its threads drawn in under the lines they hang on.
+    ///
+    /// The diff is reassembled from the forge's per-file hunks (see
+    /// `ChangedFile::unified_diff`) and handed to the same parser and
+    /// the same viewer every other diff in Fenix goes through -- so
+    /// folding, hunk navigation and "open the real file here" work
+    /// without this view knowing anything about them.
+    fn forge_render_review(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let (review_buffer, repo_root) = (session.review_buffer, session.repo_root.clone());
+        let Some(detail) = session.detail.as_ref() else {
+            self.set_diff_buffer(review_buffer, None, DiffSource::ReadOnly, &repo_root);
+            return;
+        };
+        let diff: String = detail.files.iter().map(|f| f.unified_diff()).collect();
+        let threads = forge_thread_annotations(&detail.discussions);
+        let header = vec![(
+            format!("{} {}  --  r reply, R resolve, C comment on this line", detail.request.reference(), detail.request.title),
+            diff_view::DiffStyle::Title,
+        )];
+        self.set_diff_buffer_with_header(review_buffer, &header, Some(&diff), DiffSource::ReadOnly, &repo_root);
+        if let Some(model) = self.diff_models.get_mut(&review_buffer) {
+            model.threads = threads;
+        }
+        self.rerender_diff_buffer(review_buffer);
+    }
+
+    /// The review thread under the cursor, if the cursor is on one.
+    fn forge_thread_at_cursor(&self) -> Option<String> {
+        let session = self.forge_session.as_ref()?;
+        if self.focused_pane_id() != session.review_pane {
+            return None;
+        }
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        self.diff_lines.get(&session.review_buffer)?.get(line)?.as_ref()?.thread.clone()
+    }
+
+    /// `r` in the review pane: open a compose buffer to reply to the
+    /// thread under the cursor.
+    pub(crate) fn forge_reply_at_cursor(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(number) = session.selected else { return };
+        let Some(discussion) = self.forge_thread_at_cursor() else {
+            self.set_message("put the cursor on a review comment to reply to it");
+            return;
+        };
+        self.open_compose(ComposePurpose::Reply { number, discussion });
+    }
+
+    /// `R` in the review pane: resolve the thread under the cursor, or
+    /// reopen it if it's already resolved.
+    pub(crate) fn forge_resolve_at_cursor(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(number) = session.selected else { return };
+        let Some(discussion) = self.forge_thread_at_cursor() else {
+            self.set_message("put the cursor on a review comment to resolve it");
+            return;
+        };
+        let was_resolved = session
+            .detail
+            .as_ref()
+            .and_then(|d| d.discussions.iter().find(|t| t.id == discussion))
+            .map(|t| t.resolved)
+            .unwrap_or(false);
+        let repo_root = session.repo_root.clone();
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        match fenix_forge::Forge::resolve(&client, number, &discussion, !was_resolved) {
+            Ok(()) => {
+                self.set_message(if was_resolved { "thread reopened" } else { "thread resolved" });
+                self.forge_select(number);
+            }
+            Err(err) => self.set_error(format!("couldn't resolve that thread: {err}")),
+        }
+        self.wake_caret();
+    }
+
+    /// `C` in the review pane: start a new thread on the diff line
+    /// under the cursor.
+    pub(crate) fn forge_comment_at_cursor(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        if self.focused_pane_id() != session.review_pane {
+            self.set_message("comment from the Review pane (3)");
+            return;
+        }
+        let Some(number) = session.selected else { return };
+        let Some(detail) = session.detail.as_ref() else { return };
+        let refs = detail.request.diff_refs.clone();
+        if refs.head_sha.is_empty() {
+            // Without the three SHAs a comment either lands on the
+            // wrong line or is rejected; saying so beats posting it and
+            // finding out on the forge.
+            self.set_error("this merge request has no diff version to anchor a comment to yet".to_string());
+            return;
+        }
+        let Some((_, anchor)) = self.diff_anchor_at_cursor() else {
+            self.set_message("put the cursor on a line of the diff".to_string());
+            return;
+        };
+        let Some(model) = self.diff_models.get(&session.review_buffer) else { return };
+        let Some(file) = model.files.get(anchor.file) else { return };
+        let (old_path, new_path) = (file.old_path.clone(), file.new_path.clone());
+        // The new side where the line has one -- that's the version
+        // being reviewed. A removed line only exists on the old side.
+        let position = match (anchor.new_line, anchor.old_line) {
+            (Some(new), _) => fenix_forge::Position::on_new_line(&refs, &old_path, &new_path, new),
+            (None, Some(old)) => fenix_forge::Position::on_old_line(&refs, &old_path, &new_path, old),
+            (None, None) => {
+                self.set_message("put the cursor on a line of the diff, not on a header");
+                return;
+            }
+        };
+        self.open_compose(ComposePurpose::NewComment { number, position: Box::new(position) });
+    }
+
+    /// `A`: approve the selected merge request, or withdraw an approval
+    /// already given.
+    pub(crate) fn forge_toggle_approval(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(number) = session.selected else {
+            self.set_message("no merge request selected");
+            return;
+        };
+        let (repo_root, detail) = (session.repo_root.clone(), session.detail.clone());
+        let approved = detail.as_ref().and_then(|d| d.approvals.as_ref()).map(|a| a.approved).unwrap_or(false);
+        let sha = detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty());
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        let result = if approved {
+            fenix_forge::Forge::unapprove(&client, number)
+        } else {
+            fenix_forge::Forge::approve(&client, number, sha.as_deref())
+        };
+        match result {
+            Ok(()) => {
+                self.set_message(if approved { format!("approval withdrawn from !{number}") } else { format!("approved !{number}") });
+                self.forge_select(number);
+            }
+            Err(err) => self.set_error(format!("couldn't change the approval: {err}")),
+        }
+        self.wake_caret();
+    }
+
+    /// Backs out of an armed merge. Called from the key handler for
+    /// every key in this view that isn't a second `m`, so an arm left
+    /// hanging can't fire later on a keystroke meant for something
+    /// else.
+    fn forge_disarm_merge(&mut self) {
+        if let Some(session) = self.forge_session.as_mut() {
+            session.merge_armed = false;
+        }
+    }
+
+    /// `m`: arm the merge; a second `m` performs it.
+    ///
+    /// The one action in this view that can't be taken back, so it
+    /// doesn't happen on a single keystroke -- the same arm-then-confirm
+    /// the Git panel's destructive actions already use.
+    pub(crate) fn forge_merge_request(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(number) = session.selected else {
+            self.set_message("no merge request selected");
+            return;
+        };
+        if !session.merge_armed {
+            if let Some(session) = self.forge_session.as_mut() {
+                session.merge_armed = true;
+            }
+            self.set_message(format!("merge !{number}? press m again to confirm, any other key cancels"));
+            self.wake_caret();
+            return;
+        }
+        let (repo_root, detail) = (session.repo_root.clone(), session.detail.clone());
+        if let Some(session) = self.forge_session.as_mut() {
+            session.merge_armed = false;
+        }
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        let options = fenix_forge::MergeOptions {
+            squash: false,
+            remove_source_branch: false,
+            // Sent so the forge refuses rather than merging something
+            // that moved between reading the diff and pressing the key.
+            sha: detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty()),
+        };
+        match fenix_forge::Forge::merge(&client, number, &options) {
+            Ok(()) => {
+                self.set_message(format!("merged !{number}"));
+                self.forge_refresh_list();
+            }
+            // The forge's own words: "unresolved discussions", "pipeline
+            // must succeed", "branch cannot be merged" are all far more
+            // useful than anything this could say instead.
+            Err(err) => self.set_error(format!("couldn't merge !{number}: {err}")),
+        }
+        self.wake_caret();
     }
 
     /// Fetches the merge request list for the current filter.
@@ -13760,6 +14093,7 @@ impl App {
         match n {
             1 => Some(session.list_pane),
             2 => Some(session.detail_pane),
+            3 => Some(session.review_pane),
             _ => None,
         }
     }
@@ -13767,16 +14101,113 @@ impl App {
     /// `SPC g Q`: closes the Merge Requests view.
     pub(crate) fn forge_close(&mut self) {
         let Some(session) = self.forge_session.take() else { return };
-        for id in [session.list_buffer, session.detail_buffer] {
+        for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
             self.buffers.close(id);
             self.git_lines.remove(&id);
+            self.diff_lines.remove(&id);
+            self.diff_models.remove(&id);
         }
-        for pane in [session.list_pane, session.detail_pane] {
+        for pane in [session.list_pane, session.detail_pane, session.review_pane] {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
         self.workspaces.remove_active();
         self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    // -- Compose buffer ----------------------------------------------
+
+    /// Opens a compose buffer in a strip under the current pane.
+    ///
+    /// Replaces any compose buffer already open rather than stacking a
+    /// second one: there's only ever one thing being written, and two
+    /// would leave no way to tell which `Enter` submits.
+    fn open_compose(&mut self, purpose: ComposePurpose) {
+        self.close_compose();
+        let returning_to = self.focused_pane_id();
+        let buffer = self.buffers.open_scratch();
+        let pane = self.windows_mut().split(SplitKind::Horizontal, buffer);
+        self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(Cursor::at_start()));
+        // A comment is a few lines; the thing being commented on is
+        // what needs the room, and is what you're looking at while you
+        // write.
+        self.windows_mut().resize_focused(0.25);
+        self.pane_titles.insert(pane, purpose.title());
+        self.windows_mut().focus(pane);
+        self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to });
+        self.set_message("write your comment (i to insert), then Esc and Enter to send");
+        self.wake_caret();
+    }
+
+    /// Tears the compose pane down and puts focus back where it was.
+    fn close_compose(&mut self) {
+        let Some(compose) = self.compose.take() else { return };
+        self.pane_titles.remove(&compose.pane);
+        self.windows_mut().focus(compose.pane);
+        if self.windows_mut().close_focused() {
+            self.workspaces.active_pane_states_mut().remove(&compose.pane);
+            self.workspaces.active_scroll_anims_mut().remove(&compose.pane);
+        }
+        self.buffers.close(compose.buffer);
+        if self.windows().windows().contains(&compose.returning_to) {
+            self.windows_mut().focus(compose.returning_to);
+        }
+        self.wake_caret();
+    }
+
+    /// `q` in the compose pane: throw the draft away.
+    pub(crate) fn compose_cancel(&mut self) {
+        if self.compose.is_none() {
+            return;
+        }
+        self.close_compose();
+        self.set_message("comment discarded");
+    }
+
+    /// `Enter` in the compose pane (Normal mode): send what's written.
+    pub(crate) fn compose_submit(&mut self) {
+        let Some(compose) = self.compose.as_ref() else { return };
+        let body = self.buffers.get(compose.buffer).map(|ob| ob.buffer.text()).unwrap_or_default();
+        let body = body.trim().to_string();
+        if body.is_empty() {
+            // Posting an empty comment is never what was meant, and the
+            // forge would either reject it or publish a blank note.
+            self.set_error("nothing written yet -- q discards this instead".to_string());
+            return;
+        }
+        let purpose = compose.purpose.clone();
+        let repo_root = match self.forge_session.as_ref() {
+            Some(session) => session.repo_root.clone(),
+            None => {
+                self.set_error("the Merge Requests view was closed -- nothing to send this to".to_string());
+                return;
+            }
+        };
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        let (number, result) = match &purpose {
+            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(&client, *number, discussion, &body)),
+            ComposePurpose::NewComment { number, position } => {
+                (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
+            }
+        };
+        match result {
+            Ok(()) => {
+                // Only torn down on success: a failed send leaves the
+                // draft in the buffer, which is the difference between
+                // retrying and retyping.
+                self.close_compose();
+                self.set_message(format!("posted to !{number}"));
+                self.forge_select(number);
+            }
+            Err(err) => self.set_error(format!("couldn't post that: {err} -- the draft is still here")),
+        }
         self.wake_caret();
     }
 
@@ -18140,6 +18571,27 @@ impl App {
         // stepping between hunks have to mean the same thing in all
         // three. Everything else falls through to the per-view blocks
         // below, and from there to Vim.
+        // The compose pane's own two keys, checked before anything else
+        // claims them. Only in Normal mode: in Insert, `Enter` is a
+        // newline and `q` is a letter, which is the whole point of
+        // writing a comment in a real buffer.
+        if self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id())
+            && self.vim.mode() == Mode::Normal
+            && keypress.mods == Mods::default()
+        {
+            match keypress.code {
+                KeyCode::Named(FenixNamedKey::Enter) => {
+                    self.compose_submit();
+                    return;
+                }
+                KeyCode::Char('q') => {
+                    self.compose_cancel();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         if self.focused_diff_buffer().is_some() && keypress.mods == Mods::default() {
             match keypress.code {
                 KeyCode::Char('s') => {
@@ -18255,12 +18707,38 @@ impl App {
         }
 
         // The Merge Requests view's own keys.
-        if let Some((on_list, on_detail)) = self.forge_session.as_ref().map(|s| {
+        if let Some((on_list, on_detail, on_review)) = self.forge_session.as_ref().map(|s| {
             let focused = self.focused_pane_id();
-            (focused == s.list_pane, focused == s.detail_pane)
+            (focused == s.list_pane, focused == s.detail_pane, focused == s.review_pane)
         }) {
-            if (on_list || on_detail) && keypress.mods == Mods::default() {
+            if (on_list || on_detail || on_review) && keypress.mods == Mods::default() {
+                // Any key that isn't a second `m` cancels an armed
+                // merge -- the same "arm, then anything else backs out"
+                // the Git panel's destructive actions already use.
+                if keypress.code != KeyCode::Char('m') {
+                    self.forge_disarm_merge();
+                }
                 match keypress.code {
+                    KeyCode::Char('r') if on_review => {
+                        self.forge_reply_at_cursor();
+                        return;
+                    }
+                    KeyCode::Char('R') if on_review => {
+                        self.forge_resolve_at_cursor();
+                        return;
+                    }
+                    KeyCode::Char('C') if on_review => {
+                        self.forge_comment_at_cursor();
+                        return;
+                    }
+                    KeyCode::Char('A') => {
+                        self.forge_toggle_approval();
+                        return;
+                    }
+                    KeyCode::Char('m') => {
+                        self.forge_merge_request();
+                        return;
+                    }
                     KeyCode::Named(fenix_keymap::NamedKey::Enter) if on_list => {
                         self.forge_open_at_cursor();
                         return;
@@ -20140,15 +20618,29 @@ impl App {
         }
         if let Some(session) = &self.forge_session {
             let focused = self.focused_pane_id();
-            if focused == session.list_pane || focused == session.detail_pane {
-                let bindings: &[(&str, &str)] = &[
-                    ("1/2", "go to pane"),
+            if focused == session.list_pane || focused == session.detail_pane || focused == session.review_pane {
+                let mut bindings: Vec<(&str, &str)> = vec![
+                    ("1/2/3", "go to pane"),
                     ("Enter", "show this one"),
                     ("f", "cycle filter"),
                     ("c", "check it out locally"),
                     ("u", "refresh"),
+                    ("A", "approve / withdraw"),
+                    ("m", "merge (press twice)"),
                 ];
-                return self.git_menu_popup_at(bindings, window_width, modeline_top);
+                if focused == session.review_pane {
+                    // Only offered where they mean something: these act
+                    // on a diff line or a thread, and neither exists in
+                    // the other two panes.
+                    bindings.extend([
+                        ("C", "comment on this line"),
+                        ("r", "reply to this thread"),
+                        ("R", "resolve / reopen"),
+                        ("Tab", "fold this file"),
+                        ("]/[", "next/prev hunk"),
+                    ]);
+                }
+                return self.git_menu_popup_at(&bindings, window_width, modeline_top);
             }
         }
         if let Some(session) = &self.merge_session {
@@ -29511,6 +30003,7 @@ configure_board stm32
                 change: fenix_forge::FileChange::Modified,
                 diff: String::new(),
             }],
+            discussions: Vec::new(),
             error: None,
         };
         app.apply_forge_detail(detail_id, 42, Ok(detail));
@@ -29636,6 +30129,322 @@ configure_board stm32
         app.open_compare_view("main".to_string(), "develop".to_string());
         let session = app.compare_session.as_ref().unwrap();
         assert!(width_of(&app, session.commits_pane) < width_of(&app, session.diff_pane), "the diff needs the room");
+    }
+
+    // -- Review (Milestone F) ------------------------------------------
+
+    fn sample_note(author: &str, body: &str, system: bool) -> fenix_forge::Note {
+        fenix_forge::Note {
+            id: 1,
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: "2026-09-04T10:00:00Z".to_string(),
+            system,
+        }
+    }
+
+    fn sample_refs() -> fenix_forge::DiffRefs {
+        fenix_forge::DiffRefs { base_sha: "b1".to_string(), head_sha: "h1".to_string(), start_sha: "s1".to_string() }
+    }
+
+    /// A merge request with one changed file and one thread on the line
+    /// it adds, loaded into the view.
+    fn reviewing(name: &str) -> (TempDir, App) {
+        let (dir, mut app) = opened_forge_view(name);
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let mut request = sample_mr(42, "Add the widget");
+        request.diff_refs = sample_refs();
+        request.sha = "h1".to_string();
+        app.apply_forge_list(id, Ok(vec![request.clone()]));
+
+        let detail = ForgeDetail {
+            request,
+            approvals: Some(fenix_forge::Approvals::default()),
+            files: vec![fenix_forge::ChangedFile {
+                old_path: "src/widget.rs".to_string(),
+                new_path: "src/widget.rs".to_string(),
+                change: fenix_forge::FileChange::Modified,
+                diff: "@@ -1,2 +1,3 @@\n fn main() {}\n-let old = 1;\n+let new = 2;\n".to_string(),
+            }],
+            discussions: vec![fenix_forge::Discussion {
+                id: "thread-1".to_string(),
+                notes: vec![sample_note("Alice", "Should this be a const?", false)],
+                resolved: false,
+                resolvable: true,
+                position: Some(fenix_forge::Position::on_new_line(&sample_refs(), "src/widget.rs", "src/widget.rs", 2)),
+            }],
+            error: None,
+        };
+        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        app.apply_forge_detail(detail_id, 42, Ok(detail));
+        (dir, app)
+    }
+
+    fn review_text(app: &App) -> String {
+        let session = app.forge_session.as_ref().expect("a forge session");
+        app.buffers.get(session.review_buffer).unwrap().buffer.text()
+    }
+
+    /// Puts the cursor on the first review pane row whose text matches.
+    fn cursor_on_review_row(app: &mut App, needle: &str) {
+        let session = app.forge_session.as_ref().unwrap();
+        let (pane, buffer) = (session.review_pane, session.review_buffer);
+        app.windows_mut().focus(pane);
+        let row = app
+            .buffers
+            .get(buffer)
+            .unwrap()
+            .buffer
+            .text()
+            .lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no review row containing {needle:?}"));
+        let char_idx = app.buffers.get(buffer).unwrap().buffer.line_start_char(row);
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+    }
+
+    #[test]
+    fn the_review_pane_shows_the_diff_with_its_threads_on_the_lines_they_hang_on() {
+        let (_dir, app) = reviewing("review_inline");
+        let text = review_text(&app);
+        let rows: Vec<&str> = text.lines().collect();
+        let code = rows.iter().position(|r| r.ends_with("+let new = 2;")).expect("the added line");
+        // Inline, directly under its line -- reading a comment about a
+        // line anywhere else means holding the line in your head while
+        // you look elsewhere for what was said about it.
+        assert!(rows[code + 1].contains("Alice:"), "got:\n{text}");
+        assert!(rows[code + 2].contains("Should this be a const?"), "got:\n{text}");
+        assert!(rows[code + 3].contains("r reply, R resolve"), "got:\n{text}");
+    }
+
+    #[test]
+    fn the_forges_own_narration_is_kept_off_the_diff() {
+        let (_dir, mut app) = reviewing("review_system_notes");
+        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        let mut detail = app.forge_session.as_ref().unwrap().detail.clone().unwrap();
+        detail.discussions[0].notes = vec![sample_note("Alice", "approved this merge request", true)];
+        app.apply_forge_detail(detail_id, 42, Ok(detail));
+
+        assert!(!review_text(&app).contains("approved this merge request"), "got:\n{}", review_text(&app));
+    }
+
+    #[test]
+    fn a_thread_survives_folding_the_file_it_hangs_on() {
+        // Folding re-renders the whole buffer; threads passed only at
+        // build time would vanish on the first Tab, which is exactly
+        // how the commit header was lost once before.
+        let (_dir, mut app) = reviewing("review_fold");
+        let session = app.forge_session.as_ref().unwrap();
+        let (pane, buffer) = (session.review_pane, session.review_buffer);
+        app.windows_mut().focus(pane);
+        let char_idx = app.buffers.get(buffer).unwrap().buffer.line_start_char(1);
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+
+        app.diff_toggle_fold();
+        app.diff_toggle_fold();
+
+        assert!(review_text(&app).contains("Alice:"), "the thread came back with the file:\n{}", review_text(&app));
+    }
+
+    #[test]
+    fn replying_opens_a_compose_buffer_naming_the_thread() {
+        let (_dir, mut app) = reviewing("review_reply");
+        cursor_on_review_row(&mut app, "Alice:");
+
+        app.forge_reply_at_cursor();
+
+        let compose = app.compose.as_ref().expect("a compose buffer opened");
+        assert_eq!(compose.purpose, ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() });
+        // The keys are in the pane title, because a buffer you type
+        // prose into has to say how to send it without pressing
+        // anything first.
+        let title = app.pane_titles.get(&compose.pane).unwrap();
+        assert!(title.contains("Reply to !42"), "got: {title}");
+        assert!(title.contains("Enter to send"), "got: {title}");
+    }
+
+    #[test]
+    fn replying_from_anywhere_in_a_thread_finds_the_same_thread() {
+        let (_dir, mut app) = reviewing("review_reply_anywhere");
+        cursor_on_review_row(&mut app, "Should this be a const?");
+
+        app.forge_reply_at_cursor();
+
+        assert_eq!(
+            app.compose.as_ref().unwrap().purpose,
+            ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() }
+        );
+    }
+
+    #[test]
+    fn replying_with_the_cursor_on_code_says_what_to_do_instead() {
+        let (_dir, mut app) = reviewing("review_reply_on_code");
+        cursor_on_review_row(&mut app, "+let new = 2;");
+
+        app.forge_reply_at_cursor();
+
+        assert!(app.compose.is_none());
+        assert!(app.modeline_pieces().1.contains("put the cursor on a review comment"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn commenting_on_an_added_line_anchors_to_the_new_side() {
+        let (_dir, mut app) = reviewing("review_comment_new");
+        cursor_on_review_row(&mut app, "+let new = 2;");
+
+        app.forge_comment_at_cursor();
+
+        let ComposePurpose::NewComment { number, position } = app.compose.as_ref().unwrap().purpose.clone() else {
+            panic!("expected a new-comment compose");
+        };
+        assert_eq!(number, 42);
+        assert_eq!(position.new_line, Some(2));
+        assert_eq!(position.old_line, None, "an added line only exists on the new side");
+        assert_eq!(position.new_path, "src/widget.rs");
+        // The version the comment is against travels with it.
+        assert_eq!((position.base_sha.as_str(), position.head_sha.as_str(), position.start_sha.as_str()), ("b1", "h1", "s1"));
+    }
+
+    #[test]
+    fn commenting_on_a_removed_line_anchors_to_the_old_side() {
+        let (_dir, mut app) = reviewing("review_comment_old");
+        cursor_on_review_row(&mut app, "-let old = 1;");
+
+        app.forge_comment_at_cursor();
+
+        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+            panic!("expected a new-comment compose");
+        };
+        assert_eq!(position.old_line, Some(2));
+        assert_eq!(position.new_line, None, "a removed line only exists on the old side");
+    }
+
+    #[test]
+    fn commenting_is_refused_when_there_is_no_diff_version_to_anchor_to() {
+        // Without the three SHAs the comment either lands on the wrong
+        // line or is rejected -- better to say so than to post it and
+        // find out on the forge.
+        let (_dir, mut app) = reviewing("review_comment_no_refs");
+        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        let mut detail = app.forge_session.as_ref().unwrap().detail.clone().unwrap();
+        detail.request.diff_refs = fenix_forge::DiffRefs::default();
+        app.apply_forge_detail(detail_id, 42, Ok(detail));
+        cursor_on_review_row(&mut app, "+let new = 2;");
+
+        app.forge_comment_at_cursor();
+
+        assert!(app.compose.is_none());
+        assert!(app.modeline_pieces().1.contains("no diff version"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn an_empty_draft_is_not_posted() {
+        let (_dir, mut app) = reviewing("review_empty_draft");
+        cursor_on_review_row(&mut app, "Alice:");
+        app.forge_reply_at_cursor();
+
+        app.compose_submit();
+
+        assert!(app.compose.is_some(), "the buffer stays open");
+        assert!(app.modeline_pieces().1.contains("nothing written yet"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_failed_send_keeps_the_draft_rather_than_making_you_retype_it() {
+        // Pointed at a port nothing is listening on, so the post fails
+        // the way an unreachable VPN does.
+        let (_dir, mut app) = reviewing("review_failed_send");
+        cursor_on_review_row(&mut app, "Alice:");
+        app.forge_reply_at_cursor();
+        let buffer = app.compose.as_ref().unwrap().buffer;
+        app.test_insert('h');
+
+        app.compose_submit();
+
+        assert!(app.compose.is_some(), "still open");
+        assert_eq!(app.buffers.get(buffer).unwrap().buffer.text().trim(), "h", "the draft survived");
+        assert!(app.modeline_pieces().1.contains("the draft is still here"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn cancelling_throws_the_draft_away_and_returns_focus() {
+        let (_dir, mut app) = reviewing("review_cancel");
+        let review_pane = app.forge_session.as_ref().unwrap().review_pane;
+        cursor_on_review_row(&mut app, "Alice:");
+        app.forge_reply_at_cursor();
+        let (pane, buffer) = {
+            let c = app.compose.as_ref().unwrap();
+            (c.pane, c.buffer)
+        };
+
+        app.compose_cancel();
+
+        assert!(app.compose.is_none());
+        assert!(app.buffers.get(buffer).is_none(), "the scratch buffer goes with it");
+        assert!(!app.windows().windows().contains(&pane));
+        assert_eq!(app.focused_pane_id(), review_pane, "focus goes back to what you were reading");
+    }
+
+    #[test]
+    fn opening_a_second_compose_replaces_the_first_rather_than_stacking() {
+        let (_dir, mut app) = reviewing("review_one_compose");
+        cursor_on_review_row(&mut app, "Alice:");
+        app.forge_reply_at_cursor();
+        let first = app.compose.as_ref().unwrap().pane;
+
+        cursor_on_review_row(&mut app, "+let new = 2;");
+        app.forge_comment_at_cursor();
+
+        assert!(!app.windows().windows().contains(&first), "the first pane is gone");
+        assert!(matches!(app.compose.as_ref().unwrap().purpose, ComposePurpose::NewComment { .. }));
+    }
+
+    #[test]
+    fn merging_takes_two_presses() {
+        // The one action here that can't be taken back.
+        let (_dir, mut app) = reviewing("review_merge_arm");
+
+        app.forge_merge_request();
+
+        assert!(app.forge_session.as_ref().unwrap().merge_armed);
+        assert!(app.modeline_pieces().1.contains("press m again to confirm"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn an_armed_merge_is_cancelled_by_any_other_key() {
+        let (_dir, mut app) = reviewing("review_merge_cancel");
+        app.forge_merge_request();
+        assert!(app.forge_session.as_ref().unwrap().merge_armed);
+
+        // What the key handler calls for every key in this view that
+        // isn't a second `m`.
+        app.forge_disarm_merge();
+
+        assert!(!app.forge_session.as_ref().unwrap().merge_armed, "anything else backs out");
+    }
+
+    #[test]
+    fn a_merge_that_the_forge_refuses_reports_the_forges_own_words() {
+        let (_dir, mut app) = reviewing("review_merge_refused");
+        app.forge_merge_request();
+
+        app.forge_merge_request();
+
+        assert!(!app.forge_session.as_ref().unwrap().merge_armed, "disarmed either way");
+        assert!(app.modeline_pieces().1.contains("couldn't merge !42"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_review_pane_is_a_tracked_session_so_opening_a_file_does_not_hijack_it() {
+        let (_dir, mut app) = reviewing("review_tracked");
+        let review_pane = app.forge_session.as_ref().unwrap().review_pane;
+        app.windows_mut().focus(review_pane);
+        assert!(app.focused_pane_holds_a_tracked_session());
+        cursor_on_review_row(&mut app, "Alice:");
+        app.forge_reply_at_cursor();
+        let compose_pane = app.compose.as_ref().unwrap().pane;
+        app.windows_mut().focus(compose_pane);
+        assert!(app.focused_pane_holds_a_tracked_session(), "and so is the compose pane");
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------

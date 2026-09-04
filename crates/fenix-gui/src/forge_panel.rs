@@ -9,7 +9,7 @@
 //! Written against `fenix_forge`'s neutral model rather than GitLab's
 //! JSON, so a second forge is a second client, not a second panel.
 
-use fenix_forge::{Approvals, ChangedFile, MergeRequest, MrFilter};
+use fenix_forge::{Approvals, ChangedFile, Discussion, MergeRequest, MrFilter};
 
 use crate::git_panel::{GitBadgeColor, GitEntry, GitLine, GitLineStyle, GitPanel};
 
@@ -69,6 +69,7 @@ pub fn render_detail(
     request: Option<&MergeRequest>,
     approvals: Option<&Approvals>,
     files: &[ChangedFile],
+    discussions: &[Discussion],
     error: Option<&str>,
     width: usize,
 ) -> GitPanel {
@@ -122,6 +123,26 @@ pub fn render_detail(
             }
             for line in crate::wrap::wrap_text(source_line, b.width.saturating_sub(4).max(20)) {
                 b.detail(&format!("    {line}"));
+            }
+        }
+    }
+
+    // Comments on the merge request as a whole. Threads anchored to a
+    // diff line are drawn on that line in the review pane instead, so
+    // this only ever holds the ones that have nowhere else to go --
+    // without it they'd be invisible in Fenix entirely.
+    let general: Vec<&Discussion> = discussions.iter().filter(|d| d.is_human() && d.position.is_none()).collect();
+    if !general.is_empty() {
+        b.blank();
+        b.header(&format!("  Comments ({})", general.len()));
+        for thread in general {
+            for note in thread.notes.iter().filter(|n| !n.system) {
+                b.detail(&format!("    {}:", note.author));
+                for source_line in note.body.trim().lines() {
+                    for line in crate::wrap::wrap_text(source_line, b.width.saturating_sub(6).max(20)) {
+                        b.detail(&format!("      {line}"));
+                    }
+                }
             }
         }
     }
@@ -288,14 +309,14 @@ mod tests {
         // the badge's characters are on.
         let badges: Vec<bool> =
             panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Commit).map(|l| l.badge.is_some()).collect();
-        assert_eq!(badges[0], true);
+        assert!(badges[0], "the first line carries the badge");
         assert!(badges[1..].iter().all(|b| !b), "got: {badges:?}");
     }
 
     #[test]
     fn a_long_file_path_wraps_to_the_pane_too() {
         let deep = file("src/very/deeply/nested/module/with/a/long/name/implementation_detail.rs", FileChange::Modified);
-        let panel = render_detail(Some(&mr(1, "t")), None, &[deep], None, 40);
+        let panel = render_detail(Some(&mr(1, "t")), None, &[deep], &[], None, 40);
         let rows: Vec<&str> = panel.text.lines().collect();
         assert!(rows.iter().all(|l| l.chars().count() <= 40), "a row ran past the pane:\n{}", panel.text);
     }
@@ -305,9 +326,65 @@ mod tests {
         let mut wordy = mr(1, "t");
         wordy.description = "A description long enough that it has to wrap more than once at this width.".to_string();
         wordy.web_url = "https://gitlab.example.com/some/deeply/nested/group/project/-/merge_requests/1".to_string();
-        let panel = render_detail(Some(&wordy), None, &[], None, 44);
+        let panel = render_detail(Some(&wordy), None, &[], &[], None, 44);
         assert!(panel.text.lines().all(|l| l.chars().count() <= 44), "a row ran past the pane:\n{}", panel.text);
         // Still one metadata row per text row after all that wrapping.
+        assert_eq!(panel.text.trim_end_matches('\n').split('\n').count(), panel.lines.len());
+    }
+
+    #[test]
+    fn a_comment_on_the_whole_request_appears_here_since_it_hangs_on_no_line() {
+        // Threads anchored to a diff line are drawn on that line in the
+        // review pane; without this section, one that isn't would be
+        // invisible in Fenix entirely.
+        let note = |author: &str, body: &str, system: bool| fenix_forge::Note {
+            id: 1,
+            author: author.to_string(),
+            body: body.to_string(),
+            created_at: String::new(),
+            system,
+        };
+        let general = Discussion {
+            id: "d1".to_string(),
+            notes: vec![note("Bob", "Overall this looks fine.", false)],
+            resolved: false,
+            resolvable: false,
+            position: None,
+        };
+        let narration = Discussion {
+            id: "d2".to_string(),
+            notes: vec![note("Alice", "changed the description", true)],
+            resolved: false,
+            resolvable: false,
+            position: None,
+        };
+        let on_a_line = Discussion {
+            id: "d3".to_string(),
+            notes: vec![note("Carol", "This line is wrong.", false)],
+            resolved: false,
+            resolvable: true,
+            position: Some(fenix_forge::Position::on_new_line(&fenix_forge::DiffRefs::default(), "a.rs", "a.rs", 3)),
+        };
+
+        let panel = render_detail(
+            Some(&mr(1, "t")),
+            None,
+            &[],
+            &[general, narration, on_a_line],
+            None,
+            crate::wrap::DEFAULT_WRAP_WIDTH,
+        );
+
+        assert!(panel.text.contains("Comments (1)"), "got:
+{}", panel.text);
+        assert!(panel.text.contains("Bob:"), "got:
+{}", panel.text);
+        assert!(panel.text.contains("Overall this looks fine."), "got:
+{}", panel.text);
+        assert!(!panel.text.contains("changed the description"), "forge narration stays out:
+{}", panel.text);
+        assert!(!panel.text.contains("This line is wrong."), "a diff thread belongs on its line:
+{}", panel.text);
         assert_eq!(panel.text.trim_end_matches('\n').split('\n').count(), panel.lines.len());
     }
 
@@ -342,7 +419,7 @@ mod tests {
         // step, so every color below it lands on the wrong row.
         let mut multi = mr(1, "t");
         multi.description = "First paragraph.\n\nSecond one, quite a lot longer so that it also has to wrap somewhere.".to_string();
-        let panel = render_detail(Some(&multi), None, &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(Some(&multi), None, &[], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert_eq!(
             panel.text.trim_end_matches('\n').split('\n').count(),
             panel.lines.len(),
@@ -429,7 +506,7 @@ mod tests {
     #[test]
     fn the_detail_pane_answers_whether_this_can_merge() {
         let approvals = Approvals { approved: false, required: 2, left: 1, approved_by: vec!["Alice".to_string()] };
-        let panel = render_detail(Some(&mr(42, "Add the thing")), Some(&approvals), &[file("src/a.rs", FileChange::Modified)], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(Some(&mr(42, "Add the thing")), Some(&approvals), &[file("src/a.rs", FileChange::Modified)], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert!(panel.text.contains("!42 Add the thing"), "got:\n{}", panel.text);
         assert!(panel.text.contains("feature/thing -> develop"), "got:\n{}", panel.text);
         assert!(panel.text.contains("Pipeline: passed"), "got:\n{}", panel.text);
@@ -441,7 +518,7 @@ mod tests {
     fn a_conflicted_request_says_so_where_it_cannot_be_missed() {
         let mut conflicted = mr(1, "t");
         conflicted.has_conflicts = true;
-        let panel = render_detail(Some(&conflicted), None, &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(Some(&conflicted), None, &[], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert!(panel.text.contains("this can't merge as it stands"), "got:\n{}", panel.text);
     }
 
@@ -450,7 +527,7 @@ mod tests {
         // `approvals_required` is a Premium field; on Free it's absent,
         // and claiming "0 of 0" would be inventing a rule.
         let approvals = Approvals { approved: true, required: 0, left: 0, approved_by: vec!["Bob".to_string()] };
-        let panel = render_detail(Some(&mr(1, "t")), Some(&approvals), &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(Some(&mr(1, "t")), Some(&approvals), &[], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert!(panel.text.contains("Approved by: Bob"), "got:\n{}", panel.text);
         assert!(!panel.text.contains("of 0"), "got:\n{}", panel.text);
     }
@@ -459,7 +536,7 @@ mod tests {
     fn a_long_description_is_wrapped_rather_than_running_off_the_pane() {
         let mut long = mr(1, "t");
         long.description = "word ".repeat(60);
-        let panel = render_detail(Some(&long), None, &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(Some(&long), None, &[], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert!(
             panel.text.lines().all(|l| l.chars().count() <= crate::wrap::DEFAULT_WRAP_WIDTH + 8),
             "a line ran long:\n{}",
@@ -469,7 +546,7 @@ mod tests {
 
     #[test]
     fn nothing_selected_says_what_to_do_rather_than_rendering_blank() {
-        let panel = render_detail(None, None, &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
+        let panel = render_detail(None, None, &[], &[], None, crate::wrap::DEFAULT_WRAP_WIDTH);
         assert!(panel.text.contains("Select a merge request"), "got:\n{}", panel.text);
     }
 }

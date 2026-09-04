@@ -7,7 +7,7 @@
 //! versions behind, so every read is written to degrade to a default
 //! rather than to fail.
 
-use fenix_forge::{Approvals, ChangedFile, DiffRefs, FileChange, MergeRequest, MrState, PipelineStatus};
+use fenix_forge::{Approvals, ChangedFile, DiffRefs, Discussion, FileChange, MergeRequest, MrState, Note, PipelineStatus, Position};
 use serde_json::Value;
 
 fn string(value: &Value, key: &str) -> String {
@@ -109,6 +109,66 @@ pub fn approvals(value: &Value) -> Approvals {
     }
 }
 
+/// One entry from `GET /projects/:id/merge_requests/:iid/discussions`.
+///
+/// A discussion's own resolved state isn't a field on it: GitLab
+/// records resolution per *note*, and a thread counts as resolved when
+/// every resolvable note in it is. Same for resolvability -- a plain
+/// comment on the merge request carries `resolvable: false`, and
+/// offering the resolve key on one would only produce a forge error.
+pub fn discussion(value: &Value) -> Option<Discussion> {
+    let id = value.get("id").and_then(Value::as_str)?.to_string();
+    let entries = value.get("notes").and_then(Value::as_array).cloned().unwrap_or_default();
+    let notes: Vec<Note> = entries.iter().filter_map(note).collect();
+    let resolvable = entries.iter().any(|n| bool_at(n, "resolvable"));
+    let resolved = resolvable && entries.iter().filter(|n| bool_at(n, "resolvable")).all(|n| bool_at(n, "resolved"));
+    // The position hangs off whichever note carries one -- the first
+    // note of a diff thread does; replies to it don't.
+    let position = entries.iter().find_map(|n| n.get("position")).and_then(position);
+    Some(Discussion { id, notes, resolved, resolvable, position })
+}
+
+pub fn note(value: &Value) -> Option<Note> {
+    Some(Note {
+        id: value.get("id").and_then(Value::as_u64).unwrap_or(0),
+        author: value
+            .get("author")
+            .map(|a| {
+                let name = string(a, "name");
+                if name.is_empty() {
+                    string(a, "username")
+                } else {
+                    name
+                }
+            })
+            .unwrap_or_default(),
+        body: string(value, "body"),
+        created_at: string(value, "created_at"),
+        system: bool_at(value, "system"),
+    })
+}
+
+/// A note's `position` object.
+///
+/// Only `text` positions are understood: an image comment anchors to
+/// pixel coordinates on a rendered file, which a text diff has nowhere
+/// to put. Returning `None` drops it from the inline rendering rather
+/// than putting it on an arbitrary line.
+pub fn position(value: &Value) -> Option<Position> {
+    if value.get("position_type").and_then(Value::as_str).unwrap_or("text") != "text" {
+        return None;
+    }
+    Some(Position {
+        base_sha: string(value, "base_sha"),
+        head_sha: string(value, "head_sha"),
+        start_sha: string(value, "start_sha"),
+        old_path: string(value, "old_path"),
+        new_path: string(value, "new_path"),
+        old_line: value.get("old_line").and_then(Value::as_u64).map(|n| n as usize),
+        new_line: value.get("new_line").and_then(Value::as_u64).map(|n| n as usize),
+    })
+}
+
 /// One entry from `GET /projects/:id/merge_requests/:iid/diffs`.
 ///
 /// The older `/changes` endpoint (deprecated in GitLab 15.7) returns
@@ -143,6 +203,80 @@ pub fn changed_file(value: &Value) -> Option<ChangedFile> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn diff_thread() -> Value {
+        json!({
+            "id": "abc123",
+            "individual_note": false,
+            "notes": [
+                {"id": 1, "body": "This looks wrong.", "author": {"name": "Alice"}, "created_at": "2026-09-04T10:00:00Z",
+                 "system": false, "resolvable": true, "resolved": false, "type": "DiffNote",
+                 "position": {"position_type": "text", "base_sha": "b", "head_sha": "h", "start_sha": "s",
+                              "old_path": "src/a.rs", "new_path": "src/a.rs", "old_line": null, "new_line": 12}},
+                {"id": 2, "body": "Fixed.", "author": {"name": "Bob"}, "created_at": "2026-09-04T11:00:00Z",
+                 "system": false, "resolvable": true, "resolved": false, "type": "DiffNote"}
+            ]
+        })
+    }
+
+    #[test]
+    fn a_diff_thread_carries_its_notes_and_where_it_hangs() {
+        let d = discussion(&diff_thread()).unwrap();
+        assert_eq!(d.id, "abc123");
+        assert_eq!(d.notes.len(), 2);
+        assert_eq!(d.notes[0].author, "Alice");
+        assert_eq!(d.notes[1].body, "Fixed.");
+        assert!(d.resolvable);
+        assert!(!d.resolved);
+        let position = d.position.expect("a diff thread has a position");
+        assert_eq!(position.new_path, "src/a.rs");
+        assert_eq!(position.new_line, Some(12));
+        assert_eq!(position.old_line, None);
+    }
+
+    #[test]
+    fn a_thread_is_resolved_only_when_every_resolvable_note_is() {
+        let mut value = diff_thread();
+        value["notes"][0]["resolved"] = json!(true);
+        assert!(!discussion(&value).unwrap().resolved, "one note still open keeps the thread open");
+        value["notes"][1]["resolved"] = json!(true);
+        assert!(discussion(&value).unwrap().resolved);
+    }
+
+    #[test]
+    fn a_plain_comment_on_the_merge_request_is_not_resolvable_and_has_no_position() {
+        let value = json!({
+            "id": "plain",
+            "notes": [{"id": 9, "body": "Nice work.", "author": {"username": "carol"}, "system": false, "resolvable": false}]
+        });
+        let d = discussion(&value).unwrap();
+        assert!(!d.resolvable, "offering the resolve key here would only produce a forge error");
+        assert_eq!(d.position, None);
+        assert_eq!(d.notes[0].author, "carol", "falls back to the username");
+    }
+
+    #[test]
+    fn the_forges_own_narration_is_kept_but_marked_as_such() {
+        let value = json!({
+            "id": "sys",
+            "notes": [{"id": 3, "body": "changed the description", "author": {"name": "Alice"}, "system": true}]
+        });
+        let d = discussion(&value).unwrap();
+        assert!(d.notes[0].system);
+        assert!(!d.is_human(), "so the panel can keep it off the diff, where it is pure noise");
+    }
+
+    #[test]
+    fn an_image_comment_is_dropped_rather_than_put_on_an_arbitrary_line() {
+        let value = json!({"position_type": "image", "base_sha": "b", "head_sha": "h", "start_sha": "s",
+                           "new_path": "logo.png", "old_path": "logo.png", "x": 10, "y": 20});
+        assert_eq!(position(&value), None);
+    }
+
+    #[test]
+    fn a_discussion_with_no_id_is_skipped() {
+        assert!(discussion(&json!({"notes": []})).is_none());
+    }
 
     fn full_mr() -> Value {
         json!({

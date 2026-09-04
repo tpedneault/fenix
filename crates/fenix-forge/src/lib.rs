@@ -227,6 +227,125 @@ impl ChangedFile {
     }
 }
 
+/// Where on a diff a review comment is anchored.
+///
+/// The three SHAs are not decoration: a forge stores a comment against
+/// a specific *version* of the diff, and one quoted from a stale fetch
+/// either lands on the wrong line or is rejected outright. They come
+/// from the same call that fetched the merge request, which is why
+/// `MergeRequest` carries them even though only this reads them.
+///
+/// Exactly one of `old_line`/`new_line` is set for an added or removed
+/// line; a context line has both, and a forge may return either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Position {
+    pub base_sha: String,
+    pub head_sha: String,
+    pub start_sha: String,
+    pub old_path: String,
+    pub new_path: String,
+    pub old_line: Option<usize>,
+    pub new_line: Option<usize>,
+}
+
+impl Position {
+    /// A comment on the *new* side of a file -- what commenting on an
+    /// added or context line means.
+    pub fn on_new_line(refs: &DiffRefs, old_path: &str, new_path: &str, line: usize) -> Self {
+        Position {
+            base_sha: refs.base_sha.clone(),
+            head_sha: refs.head_sha.clone(),
+            start_sha: refs.start_sha.clone(),
+            old_path: old_path.to_string(),
+            new_path: new_path.to_string(),
+            old_line: None,
+            new_line: Some(line),
+        }
+    }
+
+    /// A comment on the *old* side -- the only side a removed line has.
+    pub fn on_old_line(refs: &DiffRefs, old_path: &str, new_path: &str, line: usize) -> Self {
+        Position {
+            base_sha: refs.base_sha.clone(),
+            head_sha: refs.head_sha.clone(),
+            start_sha: refs.start_sha.clone(),
+            old_path: old_path.to_string(),
+            new_path: new_path.to_string(),
+            old_line: Some(line),
+            new_line: None,
+        }
+    }
+
+    /// Whether this anchors to the same diff line as `(old, new)`.
+    ///
+    /// Lenient on purpose: a forge records a context line's position
+    /// with both numbers, or with just the side that was clicked, so
+    /// matching the pair exactly would silently drop threads. Whichever
+    /// side the position names has to agree; a side it doesn't name
+    /// isn't consulted.
+    pub fn anchors_to(&self, old: Option<usize>, new: Option<usize>) -> bool {
+        match (self.new_line, self.old_line) {
+            (Some(n), _) if new == Some(n) => true,
+            (Some(_), Some(o)) | (None, Some(o)) => old == Some(o),
+            _ => false,
+        }
+    }
+}
+
+/// One comment in a thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    pub id: u64,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    /// Written by the forge itself ("changed the description",
+    /// "approved this merge request"), not by a person. Kept rather
+    /// than dropped at parse time so the panel can decide -- but never
+    /// shown inline on a diff, where it is pure noise.
+    pub system: bool,
+}
+
+/// A review thread: one comment and its replies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discussion {
+    pub id: String,
+    pub notes: Vec<Note>,
+    pub resolved: bool,
+    /// Whether resolving is even possible. A plain comment on the merge
+    /// request (as opposed to on a diff line) usually is not, and
+    /// offering the key anyway would just produce a forge error.
+    pub resolvable: bool,
+    /// Where on the diff this hangs, or `None` for a comment on the
+    /// merge request as a whole.
+    pub position: Option<Position>,
+}
+
+impl Discussion {
+    /// The comment that started the thread -- what a one-line summary
+    /// shows.
+    pub fn first(&self) -> Option<&Note> {
+        self.notes.first()
+    }
+
+    /// Whether this is a real review thread rather than the forge
+    /// narrating its own events.
+    pub fn is_human(&self) -> bool {
+        self.notes.iter().any(|n| !n.system)
+    }
+}
+
+/// What to do with the source branch and history when merging.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeOptions {
+    pub squash: bool,
+    pub remove_source_branch: bool,
+    /// The head SHA the merge is expected to apply to. Sent so the
+    /// forge refuses rather than merging something that moved under you
+    /// between reading the diff and pressing the key.
+    pub sha: Option<String>,
+}
+
 /// Which merge requests to list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MrFilter {
@@ -285,11 +404,94 @@ pub trait Forge {
     /// is exactly why it's on the trait rather than assembled by the
     /// caller.
     fn checkout_refspec(&self, number: u64) -> String;
+
+    // -- Review ---------------------------------------------------------
+    //
+    // Everything below writes to the forge. Each is one deliberate
+    // keypress in a view built for exactly that, and each returns the
+    // forge's own message on failure -- a merge refused for an
+    // unresolved thread says so in words no error enum here could
+    // improve on.
+
+    fn discussions(&self, number: u64) -> Result<Vec<Discussion>, String>;
+
+    /// Adds a note to an existing thread.
+    fn reply(&self, number: u64, discussion: &str, body: &str) -> Result<(), String>;
+
+    /// Marks a thread resolved, or reopens it.
+    fn resolve(&self, number: u64, discussion: &str, resolved: bool) -> Result<(), String>;
+
+    /// Starts a new thread anchored to a diff line.
+    fn comment_on_line(&self, number: u64, position: &Position, body: &str) -> Result<(), String>;
+
+    /// Approves, or withdraws an approval. `sha` is the head the
+    /// approval is for, so approving a version you have not seen is
+    /// refused rather than silently recorded.
+    fn approve(&self, number: u64, sha: Option<&str>) -> Result<(), String>;
+
+    fn unapprove(&self, number: u64) -> Result<(), String>;
+
+    fn merge(&self, number: u64, options: &MergeOptions) -> Result<(), String>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refs() -> DiffRefs {
+        DiffRefs { base_sha: "b".to_string(), head_sha: "h".to_string(), start_sha: "s".to_string() }
+    }
+
+    #[test]
+    fn a_new_side_comment_names_only_the_new_line() {
+        let p = Position::on_new_line(&refs(), "a.rs", "a.rs", 12);
+        assert_eq!(p.new_line, Some(12));
+        assert_eq!(p.old_line, None);
+        // The SHAs come along, because a comment stored against the
+        // wrong version lands on the wrong line.
+        assert_eq!((p.base_sha.as_str(), p.head_sha.as_str(), p.start_sha.as_str()), ("b", "h", "s"));
+    }
+
+    #[test]
+    fn an_old_side_comment_names_only_the_old_line() {
+        let p = Position::on_old_line(&refs(), "a.rs", "a.rs", 4);
+        assert_eq!(p.old_line, Some(4));
+        assert_eq!(p.new_line, None);
+    }
+
+    #[test]
+    fn a_position_matches_the_diff_line_it_names() {
+        let added = Position::on_new_line(&refs(), "a.rs", "a.rs", 12);
+        assert!(added.anchors_to(None, Some(12)));
+        assert!(!added.anchors_to(None, Some(13)));
+
+        let removed = Position::on_old_line(&refs(), "a.rs", "a.rs", 4);
+        assert!(removed.anchors_to(Some(4), None));
+        assert!(!removed.anchors_to(Some(5), None));
+    }
+
+    #[test]
+    fn a_context_line_matches_whichever_side_the_forge_recorded() {
+        // A forge records a context line's position with both numbers,
+        // or just the side that was clicked -- matching the pair
+        // exactly would silently drop those threads.
+        let mut both = Position::on_new_line(&refs(), "a.rs", "a.rs", 12);
+        both.old_line = Some(9);
+        assert!(both.anchors_to(Some(9), Some(12)));
+        assert!(both.anchors_to(Some(9), None), "the old side alone still matches");
+        assert!(both.anchors_to(None, Some(12)), "and so does the new side alone");
+    }
+
+    #[test]
+    fn a_thread_of_only_forge_narration_is_not_a_human_one() {
+        let note = |system: bool| Note { id: 1, author: "a".to_string(), body: "b".to_string(), created_at: String::new(), system };
+        let narration =
+            Discussion { id: "d".to_string(), notes: vec![note(true)], resolved: false, resolvable: false, position: None };
+        assert!(!narration.is_human());
+        let real = Discussion { id: "d".to_string(), notes: vec![note(false)], resolved: false, resolvable: true, position: None };
+        assert!(real.is_human());
+        assert_eq!(real.first().map(|n| n.id), Some(1));
+    }
 
     fn file(change: FileChange, old: &str, new: &str) -> ChangedFile {
         ChangedFile { old_path: old.to_string(), new_path: new.to_string(), change, diff: "@@ -1 +1 @@\n-a\n+b\n".to_string() }

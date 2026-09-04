@@ -352,6 +352,34 @@ for anyone curious to poke around or build on it.
   Diffs and the merge view's two columns are deliberately never
   wrapped: a wrapped diff line no longer lines up with its neighbours,
   which is the whole point of showing it.
+- **Reviewing a merge request**, in the third pane of the same view. The
+  whole diff is reassembled from GitLab's per-file hunks and rendered by
+  the same diff viewer everything else here goes through, so folding
+  (`Tab`), hunk navigation (`]`/`[`) and "open the real file at this
+  line" (`Enter`) work without the review knowing anything about them.
+  Review threads are drawn **inline, under the line they hang on** --
+  reading a comment about a line anywhere else means holding the line in
+  your head while you look elsewhere for what was said about it. Every
+  row a thread produces answers the same keys, so `r` (reply) and `R`
+  (resolve / reopen) work with the cursor anywhere in it. `C` starts a
+  new thread on the diff line under the cursor, anchored to the new side
+  for an added or context line and the old side for a removed one, and
+  quoting the merge request's own base/head/start SHAs so it can't land
+  on a line of a version you weren't looking at -- if those SHAs are
+  missing, commenting is refused rather than posted and lost. `A`
+  approves or withdraws an approval, and `m` merges, twice: it's the one
+  action here that can't be taken back, so it arms first and any other
+  key backs out. Comments on the request as a whole (which hang on no
+  line) appear in the detail pane instead, and the forge's own narration
+  ("changed the description") is kept off the diff entirely.
+
+  Comments are written in a **compose buffer**: a real scratch buffer in
+  a strip under what you're reading, with ordinary Vim editing and undo,
+  sent with `Enter` from Normal mode and abandoned with `q` -- the keys
+  are in the pane title, since a buffer you type prose into has to say
+  how to send it without pressing anything first. A send that fails
+  leaves the draft where it is, which is the difference between retrying
+  and retyping.
 
   The only configuration is `[gitlab] base_url` and `token` in
   `config.ini` (the instance root, *not* `/api/v4`; a personal access
@@ -725,6 +753,10 @@ popup shows what keys continue it.
 | `SPC g M` / `SPC g Q` | Open / close the GitLab Merge Requests view |
 | `1` / `2` (Merge Requests) | Jump to the list / detail pane |
 | `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
+| `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
+| `r` / `R` / `C` (Review pane) | Reply to this thread / resolve or reopen it / comment on this line |
+| `A` / `m` (Merge Requests) | Approve or withdraw / merge (press twice) |
+| `Enter` / `q` (Compose) | Send what's written / discard it |
 | `SPC g s` | Stage the selected conflicted file as resolved |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
