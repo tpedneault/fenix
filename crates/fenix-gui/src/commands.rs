@@ -30,6 +30,8 @@ impl CommandRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self { commands: Vec::new() };
         registry.register("file.save", "Save the current file", cmd_save);
+        registry.register("file.save_force", "Save, overwriting a file that changed on disk (:w!)", cmd_save_force);
+        registry.register("file.reload", "Re-read the current file from disk, discarding unsaved edits (:e!)", cmd_file_reload);
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
@@ -311,6 +313,14 @@ fn cmd_search_replace_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_search_replace_project(ctx: &mut CommandCtx) {
     ctx.app.start_replace_project();
+}
+
+fn cmd_save_force(ctx: &mut CommandCtx) {
+    ctx.app.save_force();
+}
+
+fn cmd_file_reload(ctx: &mut CommandCtx) {
+    ctx.app.reload_focused_file();
 }
 
 fn cmd_file_find(ctx: &mut CommandCtx) {

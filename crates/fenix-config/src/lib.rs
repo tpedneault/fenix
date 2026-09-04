@@ -73,6 +73,11 @@ pub struct Config {
     pub mib_telecommand_template: Option<String>,
     pub mib_telecommand_argument_template: Option<String>,
     pub mib_telecommand_argument_separator: Option<String>,
+    /// Whether to notice files changing on disk while they're open and
+    /// re-read them. Unset means on, which is what anyone expects; the
+    /// setting exists for a working copy on a network share, where a
+    /// `stat` every couple of seconds per open file is not free.
+    pub watch_files: Option<bool>,
     /// The self-hosted Jira instance's own REST API root (e.g.
     /// `https://jira.mycompany.com`), and a personal access token for
     /// it -- plaintext, same as every other setting in this file (a
@@ -234,6 +239,7 @@ impl Config {
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
+            watch_files: editor.and_then(|s| s.get("watch_files")).and_then(|v| v.parse().ok()),
             jira_base_url: jira.and_then(|s| s.get("base_url")).cloned(),
             jira_token: jira.and_then(|s| s.get("token")).cloned(),
             jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
@@ -270,6 +276,7 @@ impl Config {
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
+            watch_files: None,
             jira_base_url: None,
             jira_token: None,
             jira_projects: Vec::new(),
@@ -340,6 +347,10 @@ impl Config {
         }
         if let Some(tab_width) = self.tab_width {
             out.push_str(&format!("tab_width = {tab_width}\n"));
+        }
+        if let Some(watch) = self.watch_files {
+            out.push_str(&format!("watch_files = {watch}
+"));
         }
         if let Some(animations) = self.animations {
             out.push_str(&format!("animations = {animations}\n"));

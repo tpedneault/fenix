@@ -133,6 +133,31 @@ for anyone curious to poke around or build on it.
   directly in the editor without reopening the picker or re-running the
   search, clamping (not wrapping) at either end -- switch between known
   projects (`SPC p p`).
+- **Files changing on disk**: every open file is checked against what's
+  actually on disk a couple of times a second, and whenever the window
+  regains focus. Both are needed -- focus catches editing in another
+  application, and the timer catches Fenix's *own* terminal panel, which
+  never takes focus away from the window at all. A clean buffer is
+  re-read in place, keeping every pane on the line it was on. A buffer
+  with unsaved edits is never touched: it's flagged instead, shown as
+  `[disk]` in the modeline, and `:w` on it **refuses** rather than
+  overwriting -- `:w!` keeps yours, `:e!` takes theirs. That refusal is
+  the point of the whole feature. A plain write is a whole-file
+  overwrite, so without it, running `git checkout` or a formatter in the
+  terminal two splits away and then pressing `:w` silently discards it,
+  with nothing to recover from.
+
+  A deleted file never blanks its buffer -- a "safe write" in another
+  editor removes and recreates the file, and an editor that empties your
+  buffer for that moment is worse than one that says nothing. A file
+  rewritten with identical content (a build, a formatter that changed
+  nothing) says nothing either. The periodic check is a `stat` per open
+  file, comparing modification time and length; the save guard reads the
+  file outright, because that check can miss a same-length edit made
+  inside the filesystem's timestamp granularity and a write is the one
+  moment where being approximately right costs somebody their work.
+  `[editor] watch_files = false` turns the whole thing off, for a
+  working copy on a network share.
 - **Search and replace** (`SPC s ...`): `SPC s s` fuzzy-finds any line in
   the current buffer (live-filtered as you type). `SPC s r` prompts for a
   pattern then a replacement and shows the match count before applying --
@@ -710,6 +735,7 @@ popup shows what keys continue it.
 |---|---|
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
+| `:w!` / `:e!` | Save over a file that changed on disk / re-read it, discarding your edits |
 | `SPC f j` | Open the file explorer at the current file's directory |
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
@@ -1274,6 +1300,7 @@ window2 = 4480,0,1920,1040|true
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 | `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
+| `editor` | `watch_files` | `false` stops Fenix noticing files that change on disk while they're open; unset means on |
 | `gitlab` | `base_url` | The GitLab instance's own root, e.g. `https://gitlab.mycompany.com` -- not `/api/v4`, which Fenix appends itself |
 | `gitlab` | `token` | A GitLab personal access token with `api` scope. There is deliberately no project setting: it's read from each repo's `origin` remote |
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |

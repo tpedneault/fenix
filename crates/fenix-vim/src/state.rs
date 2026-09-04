@@ -22,6 +22,15 @@ use crate::textobject;
 pub enum VimEvent {
     None,
     RequestSave,
+    /// `:w!` -- write even though the host has a reason not to. Today
+    /// that reason is "the file changed on disk since it was read", and
+    /// this is the way to say "yes, mine wins". Real Vim's own `!`
+    /// convention, same as `RequestForceCloseBuffer`'s.
+    RequestForceSave,
+    /// `:e!`/`:edit!` -- throw away whatever is in the buffer and read
+    /// the file again. The other half of the answer when a file changed
+    /// underneath you: `:w!` keeps yours, this keeps theirs.
+    RequestReloadFile,
     /// `:q`/`SPC b k` -- the host should close the *current buffer*,
     /// but only after checking it for unsaved changes first (unlike
     /// `RequestForceCloseBuffer`). Never quits the application --

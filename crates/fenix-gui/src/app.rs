@@ -125,6 +125,17 @@ const DOCKER_LOG_TAIL_LINES: usize = 500;
 /// stats` (a real subprocess spawn) many times a second for no
 /// perceptible benefit.
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often the open files are checked against what's on disk.
+///
+/// Two seconds because the thing being caught is usually a command in
+/// Fenix's own terminal panel -- `git checkout`, a formatter, a codegen
+/// script -- and the gap between running it and looking at the file is
+/// about that long. The check is a `stat` per open file, so the interval
+/// could be far shorter without costing anything; it isn't, because a
+/// buffer that reloads under the cursor the instant an editor elsewhere
+/// writes its own temp file is worse than one that takes a moment.
+const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// The stats-poller thread's stop check granularity -- it sleeps in
 /// steps this short (rather than one `STATS_POLL_INTERVAL`-long sleep)
 /// so a stop request (session closed, app quitting) lands within this
@@ -476,6 +487,93 @@ struct CompareSession {
     /// `base...head` (merge-base) vs. `base..head` -- `t` toggles. See
     /// `fenix_git::diff_refs` for why three-dot is the default.
     three_dot: bool,
+}
+
+/// A cheap "has this file moved under us" check: modification time and
+/// length, as of the last time Fenix read or wrote it.
+///
+/// Only ever used to decide whether the *real* check -- reading the file
+/// and comparing it with the buffer -- is worth doing. Neither field is
+/// trustworthy on its own: a filesystem with one-second timestamps hides
+/// two edits in the same second, and a same-length rewrite is invisible
+/// to `len`. Together they catch essentially everything, and whatever
+/// they miss costs nothing, because the save guard reads the file
+/// outright before writing over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskFingerprint {
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl DiskFingerprint {
+    /// `None` when the path can't be stat'd at all -- it was deleted,
+    /// replaced by a directory, or was never there.
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        Some(DiskFingerprint { mtime: meta.modified().ok(), len: meta.len() })
+    }
+}
+
+/// What one sweep of the open files found.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DiskSweep {
+    /// Clean buffers whose file had changed; re-read in place.
+    reloaded: Vec<String>,
+    /// Buffers with unsaved edits whose file also changed. Left exactly
+    /// as they are -- the edits are the user's -- and flagged so the
+    /// next save refuses rather than silently discarding the other
+    /// version.
+    conflicted: Vec<String>,
+    /// Files that stopped existing while open.
+    vanished: Vec<String>,
+}
+
+impl DiskSweep {
+    fn is_empty(&self) -> bool {
+        self.reloaded.is_empty() && self.conflicted.is_empty() && self.vanished.is_empty()
+    }
+
+    /// One line naming what happened, or `None` when nothing did.
+    ///
+    /// Names the files rather than counting them: "1 file changed" makes
+    /// you go looking, and the whole point is that you weren't expecting
+    /// this.
+    fn message(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.reloaded.is_empty() {
+            parts.push(format!("reloaded {}", join_names(&self.reloaded)));
+        }
+        if !self.conflicted.is_empty() {
+            parts.push(format!("{} changed on disk and has unsaved edits -- :e! takes theirs, :w! keeps yours", join_names(&self.conflicted)));
+        }
+        if !self.vanished.is_empty() {
+            parts.push(format!("{} no longer exists on disk", join_names(&self.vanished)));
+        }
+        Some(parts.join("; "))
+    }
+
+    /// Whether this is bad news rather than housekeeping -- a reload is
+    /// the expected outcome and shouldn't read as an error.
+    fn is_bad(&self) -> bool {
+        !self.conflicted.is_empty() || !self.vanished.is_empty()
+    }
+}
+
+/// `a`, `a and b`, `a, b and 2 more` -- a handful of names is more use
+/// than a count, and a hundred of them is less.
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+    }
 }
 
 /// What a compose buffer's text is going to be used for once it's
@@ -5098,6 +5196,20 @@ pub struct App {
     merge_session: Option<MergeSession>,
     forge_session: Option<ForgeSession>,
     compose: Option<ComposeSession>,
+    /// Each file-backed buffer's file as Fenix last saw it. Absent for a
+    /// buffer whose file hasn't been looked at yet, which the sweep
+    /// treats as "check it properly".
+    disk_state: HashMap<BufferId, DiskFingerprint>,
+    /// Buffers whose file changed on disk while they had unsaved edits.
+    /// Saving one of these would silently discard the other version, so
+    /// it takes `:w!`; `:e!` goes the other way.
+    externally_changed: HashSet<BufferId>,
+    /// When the next sweep is due. Driven from `about_to_wait`'s own
+    /// `WaitUntil` deadline rather than a poller thread: `stat` on a
+    /// handful of open files is far cheaper than a thread and a channel,
+    /// and keeping it on the main thread means no locking around the
+    /// buffer list it walks.
+    next_disk_check: Instant,
     /// Capturing a commit message or new branch name -- mirrors
     /// `explorer_prompt`'s "next keystrokes are text input" shape.
     git_prompt: Option<GitPrompt>,
@@ -5736,6 +5848,15 @@ impl App {
                 id
             }
         };
+        // The file named on the command line is the most common buffer
+        // there is, and it's opened here, before `self` exists -- so
+        // its fingerprint is taken here too. Without it the first thing
+        // to change that file is indistinguishable from the buffer's
+        // own unsaved edits, and the warning that should fire doesn't.
+        let mut disk_state: HashMap<BufferId, DiskFingerprint> = HashMap::new();
+        if let Some(fingerprint) = buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(DiskFingerprint::of) {
+            disk_state.insert(initial_id, fingerprint);
+        }
         let initial_cursor = buffers.get(initial_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         let workspaces = WorkspaceList::new(WindowTree::new(initial_id), initial_cursor);
 
@@ -5839,6 +5960,9 @@ impl App {
             merge_session: None,
             forge_session: None,
             compose: None,
+            disk_state,
+            externally_changed: HashSet::new(),
+            next_disk_check: Instant::now() + DISK_CHECK_INTERVAL,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
             graph_lines: HashMap::new(),
@@ -7702,14 +7826,58 @@ impl App {
     }
 
     pub(crate) fn save(&mut self) {
+        self.save_inner(false);
+    }
+
+    /// `:w!` -- write even though the file changed underneath us.
+    pub(crate) fn save_force(&mut self) {
+        self.save_inner(true);
+    }
+
+    /// Writes the focused buffer, refusing by default if the file has
+    /// changed on disk since Fenix last read or wrote it.
+    ///
+    /// The refusal is the point of the whole file-watching feature. A
+    /// plain write is a whole-file overwrite: whatever the other side
+    /// did between the buffer being read and this keystroke is gone,
+    /// with nothing to recover it from. Both ways out are offered by
+    /// name, because "your file changed" is useless without them.
+    fn save_inner(&mut self, force: bool) {
+        let id = self.focused_buffer_id();
         if self.open().buffer.path().is_none() {
             self.set_error("no file path to save to yet; pass a file path as the first argument");
             return;
+        }
+        if !force {
+            // Re-checked here rather than trusting the last sweep: the
+            // sweep runs every couple of seconds, and the write is
+            // happening now.
+            let mut sweep = DiskSweep::default();
+            self.check_one_file(id, &mut sweep, false);
+            if self.externally_changed.contains(&id) {
+                let name = self.buffer_display_name(id);
+                self.set_error(format!("{name} changed on disk since you opened it -- :w! keeps yours, :e! takes theirs"));
+                self.wake_caret();
+                return;
+            }
+            // The check may have reloaded a clean buffer out from under
+            // this save, in which case there is nothing left to write
+            // and saying so beats silently writing the file back to
+            // itself.
+            if !sweep.reloaded.is_empty() {
+                self.set_message(format!("{} changed on disk and was reloaded -- nothing of yours to save", join_names(&sweep.reloaded)));
+                self.wake_caret();
+                return;
+            }
         }
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
                 let path = ob.buffer.path().unwrap().to_path_buf();
+                // Recorded before the message: this is what stops the
+                // next sweep reporting Fenix's own write as somebody
+                // else's change.
+                self.note_disk_state(id);
                 self.set_message(format!("saved {}", path.display()));
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
@@ -8285,6 +8453,7 @@ impl App {
             return;
         }
         let id = self.buffers.open_path(path);
+        self.note_disk_state(id);
         self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(path);
@@ -13540,58 +13709,197 @@ impl App {
     /// the user's, and reloading would throw them away. They're counted
     /// and reported instead, so a file that didn't refresh says so
     /// rather than quietly lying about what's on disk.
-    fn reload_buffers_changed_on_disk(&mut self) -> usize {
-        let mut skipped = 0usize;
-        let ids: Vec<BufferId> = self.buffers.ids_sorted_by_path();
-        for id in ids {
+    fn reload_buffers_changed_on_disk(&mut self) -> DiskSweep {
+        // Buffers close from a dozen places; pruning here rather than
+        // hooking every one of them keeps the bookkeeping in the one
+        // place that already walks the list, and is self-healing if a
+        // new close path is added later.
+        self.disk_state.retain(|id, _| self.buffers.get(*id).is_some());
+        self.externally_changed.retain(|id| self.buffers.get(*id).is_some());
+
+        let mut sweep = DiskSweep::default();
+        for id in self.buffers.ids_sorted_by_path() {
+            self.check_one_file(id, &mut sweep, true);
+        }
+        sweep
+    }
+
+    /// One buffer's file, checked and acted on. The whole sweep in
+    /// miniature, split out so the save guard can re-check exactly one
+    /// file without walking every open buffer.
+    /// `trust_fingerprint` skips the read when mtime and length are
+    /// unchanged. The periodic sweep sets it, because it runs on every
+    /// open file every couple of seconds and a stat is far cheaper than
+    /// a read. The save guard clears it, because the fingerprint can
+    /// miss a same-length edit made inside the filesystem's timestamp
+    /// granularity -- rare, but a write is the one moment where being
+    /// approximately right means losing somebody's work.
+    fn check_one_file(&mut self, id: BufferId, sweep: &mut DiskSweep, trust_fingerprint: bool) {
+        let Some(ob) = self.buffers.get(id) else { return };
+        // Generated panels (Git, Docker, diffs, the graph) have no file
+        // behind them, and the host rewrites their contents constantly.
+        if !ob.kind.tracks_unsaved_changes() {
+            return;
+        }
+        let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
+        let name = self.buffer_display_name(id);
+
+        let fingerprint = DiskFingerprint::of(&path);
+        let Some(fingerprint) = fingerprint else {
+            // Gone, or no longer a regular file. Never reloaded to
+            // empty: an editor that blanks your buffer because
+            // something deleted the file for a moment -- which is
+            // exactly what a "safe write" in another editor looks like
+            // -- is worse than one that says nothing happened.
+            if self.disk_state.remove(&id).is_some() {
+                self.externally_changed.insert(id);
+                sweep.vanished.push(name);
+            }
+            return;
+        };
+        // The fast path: nothing about the file has moved since we last
+        // looked, so there is nothing to read.
+        let previously_seen = self.disk_state.get(&id).copied();
+        if trust_fingerprint && previously_seen == Some(fingerprint) {
+            return;
+        }
+
+        let Ok(on_disk) = std::fs::read_to_string(&path) else {
+            // Stat'd fine but unreadable (a permission change, or a
+            // binary file that isn't UTF-8). Not a change we can act on.
+            return;
+        };
+        let Some(ob) = self.buffers.get(id) else { return };
+        if on_disk == ob.buffer.text() {
+            // The file moved but its content didn't -- `touch`, or a
+            // tool that rewrote it identically. Record the new
+            // fingerprint so this doesn't re-read every two seconds,
+            // and say nothing: nothing happened.
+            self.disk_state.insert(id, fingerprint);
+            return;
+        }
+
+        if ob.buffer.is_dirty() {
+            if previously_seen.is_none() || previously_seen == Some(fingerprint) {
+                // Either this file has never been looked at, or it
+                // hasn't moved since it was -- so the difference is the
+                // buffer's own unsaved edits, which is what "dirty"
+                // means, and no evidence at all that anybody else
+                // touched it. Recording the fingerprint is all that can
+                // honestly be done; a real change from here on moves it.
+                self.disk_state.insert(id, fingerprint);
+                return;
+            }
+            // Both sides changed since the last look. Neither can be
+            // thrown away without being asked, so the buffer is left
+            // exactly as it is and the next save refuses -- see `save`.
+            self.externally_changed.insert(id);
+            sweep.conflicted.push(name);
+            return;
+        }
+
+        self.replace_buffer_from_disk(id, &on_disk);
+        self.disk_state.insert(id, fingerprint);
+        self.externally_changed.remove(&id);
+        sweep.reloaded.push(name);
+    }
+
+    /// Swaps a buffer's text for what's on disk, keeping every pane that
+    /// shows it on the same line.
+    fn replace_buffer_from_disk(&mut self, id: BufferId, on_disk: &str) {
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch, 0, end, on_disk);
+            // A reload isn't user work: leaving it dirty would make
+            // every touched file look unsaved and block `:qa`.
+            ob.buffer.mark_saved();
+        }
+        // Every pane showing it keeps its line, clamped to the new
+        // length -- the file changed, but where you were looking in it
+        // is still the best guess at where you want to be.
+        let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) != Some(&id) {
+                continue;
+            }
+            let line = self
+                .buffers
+                .get(id)
+                .map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0.min(line_count.saturating_sub(1)))
+                .unwrap_or(0);
             let Some(ob) = self.buffers.get(id) else { continue };
-            if !ob.kind.tracks_unsaved_changes() {
-                continue;
+            let char_idx = ob.buffer.line_start_char(line);
+            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        }
+    }
+
+    /// Records a buffer's file as Fenix last left it -- called after
+    /// every read and every write, so the sweep's fast path stays
+    /// accurate and a save Fenix performed itself never looks like
+    /// somebody else's change.
+    fn note_disk_state(&mut self, id: BufferId) {
+        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
+        match DiskFingerprint::of(&path) {
+            Some(fingerprint) => {
+                self.disk_state.insert(id, fingerprint);
             }
-            let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { continue };
-            let Ok(on_disk) = std::fs::read_to_string(&path) else { continue };
-            if on_disk == ob.buffer.text() {
-                continue;
-            }
-            if ob.buffer.is_dirty() {
-                skipped += 1;
-                continue;
-            }
-            if let Some(ob) = self.buffers.get_mut(id) {
-                let end = ob.buffer.len_chars();
-                let mut scratch = Cursor::at_start();
-                ob.buffer.replace_range(&mut scratch, 0, end, &on_disk);
-                // A reload isn't user work: leaving it dirty would make
-                // every touched file look unsaved and block `:qa`.
-                ob.buffer.mark_saved();
-            }
-            // Every pane showing it keeps its line, clamped to the new
-            // length -- the file changed, but where you were looking in
-            // it is still the best guess at where you want to be.
-            let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
-            for pane in self.windows().windows() {
-                if self.windows().content(pane) != Some(&id) {
-                    continue;
-                }
-                let line = self
-                    .buffers
-                    .get(id)
-                    .map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0.min(line_count.saturating_sub(1)))
-                    .unwrap_or(0);
-                let Some(ob) = self.buffers.get(id) else { continue };
-                let char_idx = ob.buffer.line_start_char(line);
-                self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+            None => {
+                self.disk_state.remove(&id);
             }
         }
-        skipped
+        self.externally_changed.remove(&id);
+    }
+
+    /// The periodic sweep, plus whatever it found, reported once.
+    ///
+    /// Called from the event loop's own wait deadline and whenever the
+    /// window regains focus. Both are needed: focus catches editing in
+    /// another application, and the timer catches Fenix's own terminal
+    /// panel, which never takes focus away from the window at all.
+    pub(crate) fn poll_files_changed_on_disk(&mut self) {
+        if !self.config.watch_files.unwrap_or(true) {
+            return;
+        }
+        self.next_disk_check = Instant::now() + DISK_CHECK_INTERVAL;
+        let sweep = self.reload_buffers_changed_on_disk();
+        let Some(message) = sweep.message() else { return };
+        if sweep.is_bad() {
+            self.set_error(message);
+        } else {
+            self.set_message(message);
+        }
+        self.wake_caret();
+    }
+
+    /// `:e!`: throw away the buffer's own edits and read the file again.
+    pub(crate) fn reload_focused_file(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else {
+            self.set_error("this buffer has no file to reload from".to_string());
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(on_disk) => {
+                self.replace_buffer_from_disk(id, &on_disk);
+                self.note_disk_state(id);
+                self.set_message(format!("reloaded {}", path.display()));
+            }
+            Err(err) => self.set_error(format!("couldn't reload {}: {err}", path.display())),
+        }
+        self.wake_caret();
     }
 
     /// Refreshes whichever Git views are open -- every operation here
     /// can change the working tree, the branch, and the graph at once.
     fn git_refresh_all_views(&mut self) {
-        let stale = self.reload_buffers_changed_on_disk();
-        if stale > 0 {
-            self.set_error(format!("{stale} open file(s) have unsaved changes and were not reloaded from disk"));
+        let sweep = self.reload_buffers_changed_on_disk();
+        if let Some(message) = sweep.message() {
+            if sweep.is_bad() {
+                self.set_error(message);
+            } else {
+                self.set_message(message);
+            }
         }
         if self.git_session.is_some() {
             self.git_refresh_session();
@@ -16577,6 +16885,7 @@ impl App {
             return;
         }
         let id = self.buffers.open_path(path);
+        self.note_disk_state(id);
         self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(path);
@@ -17202,6 +17511,7 @@ impl App {
         }
 
         let id = self.buffers.open_path(&path);
+        self.note_disk_state(id);
         self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.record_recent_file(&path);
@@ -19203,6 +19513,12 @@ impl App {
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
             }
+            VimEvent::RequestForceSave => {
+                CommandRegistry::with_builtins().run(self, event_loop, "file.save_force");
+            }
+            VimEvent::RequestReloadFile => {
+                CommandRegistry::with_builtins().run(self, event_loop, "file.reload");
+            }
             VimEvent::RequestCloseBuffer => {
                 CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill");
             }
@@ -19694,7 +20010,13 @@ impl App {
         let ob = self.open();
         let filename = self.buffer_display_name(self.focused_buffer_id());
         let modified = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { " [+]" } else { "" };
+        // A file that moved under an unsaved buffer is worth seeing
+        // without pressing anything: the message that announced it
+        // scrolls away, and the next `:w` refusing out of nowhere is a
+        // worse way to find out.
+        let diverged = if self.externally_changed.contains(&self.focused_buffer_id()) { " [disk]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
+        let modified = format!("{modified}{diverged}");
         let mode_label = self.mode_badge_label();
         // Only shown once there's more than one workspace to distinguish --
         // stays out of the way for the common single-workspace case.
@@ -22916,6 +23238,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             // get torn down just because focus moved elsewhere, which
             // would otherwise strand the visible cursor at this window's
             // edge until the user fights their way back into it.
+            // Coming back from another application is the other half
+            // of the answer: the timer catches Fenix's own terminal
+            // panel (which never takes focus away), and this catches
+            // everything else, without waiting out the interval.
+            WindowEvent::Focused(true) => self.poll_files_changed_on_disk(),
             WindowEvent::Focused(false) => self.set_vnc_focused(None),
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = (position.x as f32, position.y as f32);
@@ -23018,7 +23345,16 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
         }
 
+        if now >= self.next_disk_check {
+            self.poll_files_changed_on_disk();
+        }
+
+        // The disk check has to be one of the deadlines the loop waits
+        // on, not just something that happens when a redraw was already
+        // due -- an idle editor whose terminal panel just rewrote a file
+        // has no other reason to wake up.
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
+        let wait_until = wait_until.min(self.next_disk_check);
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }
@@ -23174,6 +23510,7 @@ impl App {
     /// `explorer_open_selected` do in production.
     fn test_open_path(&mut self, path: &Path) {
         let id = self.buffers.open_path(path);
+        self.note_disk_state(id);
         let focused = self.focused_pane_id();
         self.set_pane_content(focused, id);
     }
@@ -29859,7 +30196,13 @@ configure_board stm32
         let id = app.buffers.id_for_path(&conflicted).unwrap();
         let shown = app.buffers.get(id).unwrap().buffer.text();
         assert_eq!(shown, edited, "unsaved work outranks the reload");
-        assert!(app.modeline_pieces().1.contains("unsaved changes"), "and it says so: {}", app.modeline_pieces().1);
+        // Flagged, so the next save refuses rather than discarding what
+        // the rebase wrote. Asserted on the flag rather than on the
+        // message: the rebase's own "resolve the conflicts" is the more
+        // actionable thing to say at this moment and legitimately
+        // replaces it, which is exactly why the flag (and the `[disk]`
+        // marker it drives) is the durable half of the warning.
+        assert!(app.externally_changed.contains(&id), "the divergence outlives the message");
     }
 
     // -- Merge Requests view (`SPC g M`) -------------------------------
@@ -30626,6 +30969,264 @@ configure_board stm32
 
         assert!(app.compose.is_none(), "no buffer to fill in for nothing");
         assert!(app.modeline_pieces().1.contains("nothing staged"), "got: {}", app.modeline_pieces().1);
+    }
+
+    // -- Files changing on disk while they're open ---------------------
+
+    /// Rewrites `path` and makes sure the change is visible to a
+    /// fingerprint check.
+    ///
+    /// A filesystem with one-second timestamp resolution reports the
+    /// same mtime for two writes in the same second, which is exactly
+    /// the case the length half of the fingerprint exists for -- but a
+    /// test that happens to write the same number of bytes would then
+    /// depend on timer luck. Writing different lengths keeps these
+    /// deterministic; `an_edit_of_the_same_length_is_still_caught`
+    /// covers the other case on purpose.
+    fn write_externally(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn open_file(name: &str, contents: &str) -> (TempDir, App) {
+        let dir = TempDir::new(name);
+        let file = dir.write("a.txt", contents);
+        let app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        (dir, app)
+    }
+
+    #[test]
+    fn a_clean_buffer_reloads_when_its_file_changes_underneath_it() {
+        let (dir, mut app) = open_file("watch_reload", "one\n");
+        app.poll_files_changed_on_disk();
+        write_externally(&dir.path().join("a.txt"), "one\ntwo\nthree\n");
+
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), "one\ntwo\nthree\n");
+        assert!(!app.open().buffer.is_dirty(), "a reload isn't user work, so it mustn't block :qa");
+        assert!(app.modeline_pieces().1.contains("reloaded a.txt"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_dirty_buffer_is_left_alone_and_flagged_instead() {
+        let (dir, mut app) = open_file("watch_dirty", "one\n");
+        app.poll_files_changed_on_disk();
+        app.test_insert('X');
+        let mine = app.open().buffer.text();
+        write_externally(&dir.path().join("a.txt"), "theirs\ntheirs\n");
+
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), mine, "unsaved edits are never thrown away silently");
+        assert!(app.modeline_pieces().1.contains(":e! takes theirs"), "got: {}", app.modeline_pieces().1);
+        assert!(app.modeline_pieces().1.contains(":w! keeps yours"), "got: {}", app.modeline_pieces().1);
+        // And once the message times out, the marker is still there --
+        // which is the point of having one: the announcement scrolls
+        // away, the divergence doesn't.
+        app.status_message = None;
+        assert!(app.modeline_text().contains("[disk]"), "got: {}", app.modeline_text());
+    }
+
+    #[test]
+    fn saving_over_a_file_that_changed_underneath_you_is_refused() {
+        // The data-loss case this whole feature exists for: a plain
+        // write is a whole-file overwrite, and whatever the other side
+        // did would be gone with nothing to recover it from.
+        let (dir, mut app) = open_file("watch_save_refused", "one\n");
+        app.poll_files_changed_on_disk();
+        app.test_insert('X');
+        write_externally(&dir.path().join("a.txt"), "written by something else\n");
+
+        app.save();
+
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "written by something else\n");
+        assert!(app.modeline_pieces().1.contains("changed on disk"), "got: {}", app.modeline_pieces().1);
+        assert!(app.open().buffer.is_dirty(), "and the edits are still there to save once you decide");
+    }
+
+    #[test]
+    fn a_forced_save_overwrites_and_clears_the_flag() {
+        let (dir, mut app) = open_file("watch_save_forced", "one\n");
+        app.poll_files_changed_on_disk();
+        app.test_insert('X');
+        let mine = app.open().buffer.text();
+        write_externally(&dir.path().join("a.txt"), "written by something else\n");
+        app.save();
+        assert!(app.modeline_pieces().1.contains("changed on disk"));
+
+        app.save_force();
+
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), mine);
+        assert!(!app.externally_changed.contains(&app.focused_buffer_id()), "the two sides agree again");
+        app.status_message = None;
+        assert!(!app.modeline_text().contains("[disk]"));
+    }
+
+    #[test]
+    fn reloading_takes_the_other_side_and_discards_your_edits() {
+        let (dir, mut app) = open_file("watch_reload_cmd", "one\n");
+        app.poll_files_changed_on_disk();
+        app.test_insert('X');
+        write_externally(&dir.path().join("a.txt"), "theirs\n");
+
+        app.reload_focused_file();
+
+        assert_eq!(app.open().buffer.text(), "theirs\n");
+        assert!(!app.open().buffer.is_dirty());
+        assert!(!app.externally_changed.contains(&app.focused_buffer_id()));
+        // And a save now goes through, because there's nothing to lose.
+        app.test_insert('Y');
+        app.save();
+        assert!(app.modeline_pieces().1.contains("saved"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn fenixs_own_save_is_never_reported_as_somebody_elses_change() {
+        // The false positive that would make the whole feature
+        // unusable: every `:w` followed by "your file changed on disk".
+        let (_dir, mut app) = open_file("watch_own_save", "one\n");
+        app.poll_files_changed_on_disk();
+        app.test_insert('X');
+
+        app.save();
+        app.poll_files_changed_on_disk();
+
+        assert!(!app.modeline_pieces().1.contains("changed on disk"), "got: {}", app.modeline_pieces().1);
+        assert!(!app.modeline_pieces().1.contains("reloaded"), "got: {}", app.modeline_pieces().1);
+        assert!(app.externally_changed.is_empty());
+    }
+
+    #[test]
+    fn a_file_rewritten_with_identical_content_says_nothing() {
+        // A build or formatter that rewrites a file unchanged bumps its
+        // mtime. Reporting that as a change would cry wolf constantly.
+        let (dir, mut app) = open_file("watch_touch", "one\n");
+        app.poll_files_changed_on_disk();
+        write_externally(&dir.path().join("a.txt"), "one\n");
+
+        app.poll_files_changed_on_disk();
+
+        assert!(!app.modeline_pieces().1.contains("reloaded"), "got: {}", app.modeline_pieces().1);
+        assert!(app.externally_changed.is_empty());
+    }
+
+    #[test]
+    fn an_edit_of_the_same_length_is_still_caught() {
+        // The fingerprint is mtime *and* length precisely because
+        // neither is enough alone; this is the case length can't see.
+        let (dir, mut app) = open_file("watch_same_len", "aaaa\n");
+        app.poll_files_changed_on_disk();
+        write_externally(&dir.path().join("a.txt"), "bbbb\n");
+
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), "bbbb\n");
+    }
+
+    #[test]
+    fn a_deleted_file_never_blanks_its_buffer() {
+        // A "safe write" in another editor deletes and recreates the
+        // file. An editor that empties your buffer for that moment is
+        // worse than one that says nothing.
+        let (dir, mut app) = open_file("watch_deleted", "one\ntwo\n");
+        app.poll_files_changed_on_disk();
+        std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), "one\ntwo\n", "the content is still here");
+        assert!(app.modeline_pieces().1.contains("no longer exists"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_file_that_comes_back_is_picked_up_again() {
+        let (dir, mut app) = open_file("watch_recreated", "one\n");
+        app.poll_files_changed_on_disk();
+        std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+        app.poll_files_changed_on_disk();
+
+        write_externally(&dir.path().join("a.txt"), "back again\n");
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), "back again\n");
+    }
+
+    #[test]
+    fn generated_panels_are_never_treated_as_files() {
+        // Every Git/Docker/diff pane is a real buffer the host rewrites
+        // constantly and none of them has a file behind it.
+        let dir = TempDir::new("watch_panels");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        std::process::Command::new("git").current_dir(dir.path()).args(["init", "-q"]).output().unwrap();
+        app.open_git_panel();
+
+        app.poll_files_changed_on_disk();
+
+        assert!(app.disk_state.is_empty(), "nothing here has a file to watch");
+        assert!(app.modeline_pieces().1.is_empty() || !app.modeline_pieces().1.contains("changed on disk"));
+    }
+
+    #[test]
+    fn a_buffer_with_no_path_is_skipped() {
+        let mut app = App::with_file(None);
+        app.test_insert('x');
+        app.poll_files_changed_on_disk();
+        assert!(app.disk_state.is_empty());
+    }
+
+    #[test]
+    fn watching_can_be_turned_off() {
+        let (dir, mut app) = open_file("watch_disabled", "one\n");
+        app.config.watch_files = Some(false);
+        write_externally(&dir.path().join("a.txt"), "changed\n");
+
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.open().buffer.text(), "one\n", "left entirely alone");
+    }
+
+    #[test]
+    fn closing_a_buffer_drops_what_was_remembered_about_its_file() {
+        let (_dir, mut app) = open_file("watch_prune", "one\n");
+        app.poll_files_changed_on_disk();
+        assert_eq!(app.disk_state.len(), 1);
+
+        app.force_kill_buffer();
+        app.poll_files_changed_on_disk();
+
+        assert!(app.disk_state.is_empty(), "the bookkeeping goes with the buffer");
+    }
+
+    #[test]
+    fn several_changed_files_are_named_rather_than_counted() {
+        let dir = TempDir::new("watch_many");
+        let a = dir.write("a.txt", "a\n");
+        dir.write("b.txt", "b\n");
+        dir.write("c.txt", "c\n");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        app.open_file_from_picker(&dir.path().join("b.txt"));
+        app.open_file_from_picker(&dir.path().join("c.txt"));
+        app.poll_files_changed_on_disk();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write_externally(&dir.path().join(name), "changed by something else\n");
+        }
+
+        app.poll_files_changed_on_disk();
+
+        // "3 files changed" makes you go looking; the point is that you
+        // weren't expecting this at all.
+        let message = app.modeline_pieces().1;
+        assert!(message.contains("a.txt"), "got: {message}");
+        assert!(message.contains("and 1 more"), "got: {message}");
+    }
+
+    #[test]
+    fn the_sweep_reschedules_itself_so_the_loop_keeps_waking() {
+        let (_dir, mut app) = open_file("watch_schedule", "one\n");
+        let before = app.next_disk_check;
+        app.poll_files_changed_on_disk();
+        assert!(app.next_disk_check > before, "the event loop waits on this deadline");
     }
 
     // -- Against the real thing (`dev/gitlab`) -------------------------

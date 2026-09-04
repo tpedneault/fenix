@@ -26,6 +26,8 @@ pub fn run_ex_command(
     let cmd = cmd.trim();
     match cmd {
         "w" => return VimEvent::RequestSave,
+        "w!" => return VimEvent::RequestForceSave,
+        "e!" | "edit!" => return VimEvent::RequestReloadFile,
         "q" => return VimEvent::RequestCloseBuffer,
         "q!" => return VimEvent::RequestForceCloseBuffer,
         "wq" | "x" => return VimEvent::RequestSaveAndCloseBuffer,
@@ -362,6 +364,11 @@ mod tests {
         assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4, None), VimEvent::RequestSave);
         assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4, None), VimEvent::RequestCloseBuffer);
         assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceCloseBuffer);
+        // The two answers to "this file changed underneath you": keep
+        // mine, or keep theirs.
+        assert_eq!(run_ex_command("w!", &mut b, &mut c, &mut 4, None), VimEvent::RequestForceSave);
+        assert_eq!(run_ex_command("e!", &mut b, &mut c, &mut 4, None), VimEvent::RequestReloadFile);
+        assert_eq!(run_ex_command("edit!", &mut b, &mut c, &mut 4, None), VimEvent::RequestReloadFile);
         assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndCloseBuffer);
         assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4, None), VimEvent::RequestSaveAndCloseBuffer);
     }
