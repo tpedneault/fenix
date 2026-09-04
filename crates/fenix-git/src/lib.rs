@@ -15,6 +15,7 @@ mod status;
 mod test_util;
 
 pub use actions::{
+    fetch_refspec, remote_url,
     amend_commit, checkout_branch, checkout_side, cherry_pick, commit, create_branch, delete_branch, discard_dir, discard_file,
     fetch, merge, restore_conflict,
     merge_abort, pull, pull_rebase, push, push_force_with_lease, push_set_upstream, rebase, rebase_abort, rebase_continue,

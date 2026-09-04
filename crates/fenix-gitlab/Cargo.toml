@@ -1,0 +1,9 @@
+[package]
+name = "fenix-gitlab"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-forge = { path = "../fenix-forge" }
+serde_json = "1"
+ureq = { version = "2", features = ["tls", "native-certs"] }

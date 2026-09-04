@@ -334,6 +334,28 @@ for anyone curious to poke around or build on it.
   (`kept develop`, `o = keep myfeature`) and spell out its role. Opening
   a conflicted file directly still works, and its markers are colored
   with the same two colors the columns use.
+- **GitLab merge requests** (`SPC g M`): the project's open merge
+  requests on the left, the selected one in full on the right --
+  author, source -> target, state, pipeline result, approvals, comment
+  count, description, and the list of changed files. `f` cycles the
+  filter (all open / mine / assigned to me), `Enter` shows one, `u`
+  refreshes, and `c` checks one out locally: fetched from GitLab's own
+  published `refs/merge-requests/N/head` on the project's remote, so a
+  request opened from a fork needs no extra remote, and landing on
+  `mr-42` rather than the source branch's name, which may not exist
+  locally or may mean something else entirely. Each row's badge is
+  colored by what would stop it merging -- failing CI or conflicts read
+  as bad without reading a word of the titles.
+
+  The only configuration is `[gitlab] base_url` and `token` in
+  `config.ini` (the instance root, *not* `/api/v4`; a personal access
+  token with `api` scope). Which project a repo belongs to is read from
+  its own `origin` remote -- SSH, `ssh://`, or HTTPS -- so one pair of
+  values covers every repo on the instance, and nothing is configured
+  per checkout. Each of the three ways that can fail says which one it
+  was. The client is written against a `Forge` trait rather than
+  GitLab's JSON, so a second forge would be a second client, not a
+  second panel.
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
@@ -694,6 +716,9 @@ popup shows what keys continue it.
 | `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
 | `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
 | `SPC g x` / `SPC g X` | Open / close the Merge view (conflicts side by side) |
+| `SPC g M` / `SPC g Q` | Open / close the GitLab Merge Requests view |
+| `1` / `2` (Merge Requests) | Jump to the list / detail pane |
+| `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
 | `SPC g s` | Stage the selected conflicted file as resolved |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
@@ -1200,6 +1225,8 @@ window2 = 4480,0,1920,1040|true
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 | `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
+| `gitlab` | `base_url` | The GitLab instance's own root, e.g. `https://gitlab.mycompany.com` -- not `/api/v4`, which Fenix appends itself |
+| `gitlab` | `token` | A GitLab personal access token with `api` scope. There is deliberately no project setting: it's read from each repo's `origin` remote |
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |

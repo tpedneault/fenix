@@ -89,6 +89,17 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// The GitLab instance's own root URL (e.g.
+    /// `https://gitlab.mycompany.com` -- the instance, *not* `/api/v4`,
+    /// which `fenix-gitlab` appends itself) and a personal access token
+    /// with `api` scope. Plaintext, same tradeoff `jira_token` already
+    /// documents.
+    ///
+    /// There is deliberately no project setting: which project a repo
+    /// belongs to is read from its own `origin` remote, so one pair of
+    /// values covers every repo on the instance.
+    pub gitlab_base_url: Option<String>,
+    pub gitlab_token: Option<String>,
     /// Frequently-read documents, `(display name, path)`, in the order
     /// they appear in `config.ini`'s `[documents]` section -- what the
     /// reader's `SPC r f` index picks from. Same numbered-key `docN =
@@ -203,6 +214,7 @@ impl Config {
         let mib = sections.get("mib");
         let jira = sections.get("jira");
         let git = sections.get("git");
+        let gitlab = sections.get("gitlab");
         let vnc = sections.get("vnc");
         let documents = sections.get("documents");
         let windows = sections.get("windows");
@@ -228,6 +240,8 @@ impl Config {
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
             git_graph_limit: git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok()),
             git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
+            gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
+            gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
             git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
@@ -262,6 +276,8 @@ impl Config {
             jira_users: Vec::new(),
             git_graph_limit: None,
             git_base_branch: None,
+            gitlab_base_url: None,
+            gitlab_token: None,
             git_graph_style: None,
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
@@ -373,6 +389,14 @@ impl Config {
         }
         if let Some(base) = &self.git_base_branch {
             out.push_str(&format!("base_branch = {}\n", ini::quote_if_needed(base)));
+        }
+        out.push('\n');
+        out.push_str("[gitlab]\n");
+        if let Some(url) = &self.gitlab_base_url {
+            out.push_str(&format!("base_url = {}\n", ini::quote_if_needed(url)));
+        }
+        if let Some(token) = &self.gitlab_token {
+            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
         }
         out.push('\n');
         out.push_str("[vnc]\n");
@@ -959,6 +983,27 @@ mod tests {
                 ("TENTH".to_string(), PathBuf::from("/j")),
             ]
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn the_gitlab_section_round_trips_through_a_save() {
+        let path = temp_path("config_gitlab");
+        let mut config = Config::load_or_default(path.clone());
+        config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
+        config.gitlab_token = Some("glpat-secret".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.gitlab_base_url.as_deref(), Some("https://gitlab.example.com"));
+        assert_eq!(reloaded.gitlab_token.as_deref(), Some("glpat-secret"));
+        // No project key: which project a repo belongs to comes from
+        // its own `origin` remote, so one pair covers every repo.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[gitlab]"), "got:
+{text}");
+        assert!(!text.contains("project ="), "got:
+{text}");
         std::fs::remove_file(&path).ok();
     }
 

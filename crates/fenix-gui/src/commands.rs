@@ -132,6 +132,8 @@ impl CommandRegistry {
         registry.register("git.keep_ours", "Resolve the conflict under the cursor, keeping ours", cmd_git_keep_ours);
         registry.register("git.keep_theirs", "Resolve the conflict under the cursor, keeping theirs", cmd_git_keep_theirs);
         registry.register("git.keep_both", "Resolve the conflict under the cursor, keeping both sides", cmd_git_keep_both);
+        registry.register("git.merge_requests", "Open the Merge Requests view (GitLab)", cmd_git_merge_requests);
+        registry.register("git.merge_requests_close", "Close the Merge Requests view", cmd_git_merge_requests_close);
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
@@ -804,6 +806,14 @@ fn cmd_git_keep_theirs(ctx: &mut CommandCtx) {
 
 fn cmd_git_keep_both(ctx: &mut CommandCtx) {
     ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
+}
+
+fn cmd_git_merge_requests(ctx: &mut CommandCtx) {
+    ctx.app.open_forge_view();
+}
+
+fn cmd_git_merge_requests_close(ctx: &mut CommandCtx) {
+    ctx.app.forge_close();
 }
 
 fn cmd_git_merge_view(ctx: &mut CommandCtx) {

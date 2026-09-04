@@ -31,6 +31,7 @@ use crate::completion;
 use crate::dashboard;
 use crate::diff_view;
 use crate::docker_panel;
+use crate::forge_panel;
 use crate::git_panel;
 use crate::gpu::{GpuContext, GpuState};
 use crate::graph_view;
@@ -475,6 +476,52 @@ struct CompareSession {
     /// `base...head` (merge-base) vs. `base..head` -- `t` toggles. See
     /// `fenix_git::diff_refs` for why three-dot is the default.
     three_dot: bool,
+}
+
+/// Everything one forge round-trip fetched for a merge request's
+/// detail pane. Bundled because all three come from the same click and
+/// are shown together -- and because a partial arrival would leave the
+/// pane claiming an approval count from one request beside a file list
+/// from another.
+#[derive(Debug, Clone)]
+pub(crate) struct ForgeDetail {
+    request: fenix_forge::MergeRequest,
+    approvals: Option<fenix_forge::Approvals>,
+    files: Vec<fenix_forge::ChangedFile>,
+    /// A failure fetching the *files* specifically. The request itself
+    /// having arrived is worth showing even when its diff didn't.
+    error: Option<String>,
+}
+
+/// The Merge Requests view (`SPC g M`): the project's open merge
+/// requests on the left, the selected one in full on the right.
+///
+/// Same shape as every other session here -- fixed pane/buffer ids,
+/// cached domain data, a `request_id` guard so a slow answer can't
+/// overwrite a newer one. The guard matters more here than anywhere
+/// else in the Git views: these are network round-trips over someone
+/// else's VPN, and arriving out of order is normal rather than
+/// theoretical.
+struct ForgeSession {
+    workspace_index: usize,
+    list_pane: fenix_window::WindowId,
+    detail_pane: fenix_window::WindowId,
+    list_buffer: BufferId,
+    detail_buffer: BufferId,
+    repo_root: PathBuf,
+    /// `group/project`, inferred from the repo's own `origin` remote.
+    project: String,
+    filter: fenix_forge::MrFilter,
+    requests: Vec<fenix_forge::MergeRequest>,
+    /// Which request the detail pane is showing.
+    selected: Option<u64>,
+    detail: Option<ForgeDetail>,
+    /// A failure listing merge requests, rendered into the list pane --
+    /// an empty list beside an error that has scrolled past reads as
+    /// "there are none", a different answer entirely.
+    list_error: Option<String>,
+    list_request_id: u64,
+    detail_request_id: u64,
 }
 
 /// The Merge view (`SPC g x`): the conflicted files on the left, the
@@ -1873,6 +1920,14 @@ pub enum FenixUserEvent {
     /// and discarded instead of clobbering Main with a stale diff --
     /// see `GitSession::main_request_id`'s own doc comment.
     GitMainReady { request_id: u64, buffer: BufferId, diff: Option<String> },
+    /// A finished merge-request listing from the forge, under the
+    /// `request_id` it was issued with -- same stale-result guard as
+    /// `GitMainReady`, and more load-bearing here: these are network
+    /// calls that routinely answer out of order.
+    ForgeListReady { request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String> },
+    /// One merge request's full detail (the request, its approvals, its
+    /// changed files), under its own `request_id`.
+    ForgeDetailReady { request_id: u64, number: u64, result: Box<Result<ForgeDetail, String>> },
     /// A History-view commit's metadata and diff finished fetching --
     /// same request_id-guarded shape as `GitMainReady`, for the other
     /// view. `None` when the commit couldn't be read at all.
@@ -3199,6 +3254,25 @@ pub(crate) struct GitRefreshData {
     /// disagree with the file list beside it.
     in_progress: Option<fenix_git::InProgress>,
     sides: Option<fenix_git::ConflictSides>,
+}
+
+/// The three forge calls one merge request's detail pane needs.
+///
+/// Run together on the worker thread rather than as three separate
+/// events, so the pane can never show one request's approval count
+/// beside another's file list. The request itself is the only one that
+/// has to succeed: an instance without approval rules answers 404 on
+/// `/approvals`, and a diff that's too large to return shouldn't take
+/// the description and branch names down with it.
+fn fetch_forge_detail(client: &fenix_gitlab::GitLab, number: u64) -> Result<ForgeDetail, String> {
+    use fenix_forge::Forge;
+    let request = client.merge_request(number)?;
+    let approvals = client.approvals(number).ok();
+    let (files, error) = match client.changed_files(number) {
+        Ok(files) => (files, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
+    Ok(ForgeDetail { request, approvals, files, error })
 }
 
 /// The actual four `git` shell-outs `git_refresh_session` needs -- called
@@ -4918,6 +4992,7 @@ pub struct App {
     /// The Compare view (`SPC g c`), if open -- see `CompareSession`.
     compare_session: Option<CompareSession>,
     merge_session: Option<MergeSession>,
+    forge_session: Option<ForgeSession>,
     /// Capturing a commit message or new branch name -- mirrors
     /// `explorer_prompt`'s "next keystrokes are text input" shape.
     git_prompt: Option<GitPrompt>,
@@ -5657,6 +5732,7 @@ impl App {
             history_session: None,
             compare_session: None,
             merge_session: None,
+            forge_session: None,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
             graph_lines: HashMap::new(),
@@ -6288,6 +6364,7 @@ impl App {
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
             || self.compare_session.as_ref().is_some_and(|s| focused == s.commits_pane || focused == s.diff_pane)
             || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
+            || self.forge_session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane)
     }
 
     /// Points the focused pane at `id` -- unless the focused pane
@@ -13351,6 +13428,318 @@ impl App {
         }
     }
 
+    // -- Merge Requests view (`SPC g M`) -------------------------------
+
+    /// A GitLab client for `repo_root`, or the reason there isn't one.
+    ///
+    /// Three things have to line up, and each failure says which:
+    /// `[gitlab] base_url`/`token` in `config.ini`, and an `origin`
+    /// remote whose URL names a project. Nothing is configured per
+    /// repo -- the checkout already knows which project it came from.
+    fn forge_client(&self, repo_root: &Path) -> Result<fenix_gitlab::GitLab, String> {
+        let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
+            return Err("set [gitlab] base_url in config.ini first".to_string());
+        };
+        let Some(token) = self.config.gitlab_token.clone().filter(|t| !t.trim().is_empty()) else {
+            return Err("set [gitlab] token in config.ini first (a personal access token with `api` scope)".to_string());
+        };
+        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
+            return Err("this repo has no `origin` remote to work out the project from".to_string());
+        };
+        fenix_gitlab::GitLab::from_remote(base_url, token, &url)
+            .ok_or_else(|| format!("couldn't read a GitLab project path out of origin's URL ({url})"))
+    }
+
+    /// `SPC g M`: opens (or refocuses and refreshes) the Merge Requests
+    /// view.
+    pub(crate) fn open_forge_view(&mut self) {
+        if let Some(session) = &self.forge_session {
+            let (workspace_index, list_pane) = (session.workspace_index, session.list_pane);
+            self.workspaces.switch_to_index(workspace_index);
+            self.windows_mut().focus(list_pane);
+            self.forge_refresh_list();
+            self.wake_caret();
+            return;
+        }
+        let repo_root = self.compare_repo_root();
+        // Checked before a workspace is opened: a view that can only
+        // ever show one error message isn't worth two panes.
+        let project = match self.forge_client(&repo_root) {
+            Ok(client) => fenix_forge::Forge::project(&client).to_string(),
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+
+        let list_buffer = self.buffers.open_git("");
+        let detail_buffer = self.buffers.open_git("");
+
+        let cursor = Cursor::at_start();
+        self.workspaces.new_workspace(list_buffer, cursor);
+        let workspace_index = self.workspaces.active_index();
+        let list_pane = self.focused_pane_id();
+        let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
+        self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
+        // The list is an index of titles; the detail is what's read.
+        self.windows_mut().resize_focused(0.3);
+        self.windows_mut().focus(list_pane);
+
+        self.pane_titles.insert(list_pane, "1. Merge Requests".to_string());
+        self.pane_titles.insert(detail_pane, "2. Detail".to_string());
+
+        self.forge_session = Some(ForgeSession {
+            workspace_index,
+            list_pane,
+            detail_pane,
+            list_buffer,
+            detail_buffer,
+            repo_root,
+            project,
+            filter: fenix_forge::MrFilter::AllOpen,
+            requests: Vec::new(),
+            selected: None,
+            detail: None,
+            list_error: None,
+            list_request_id: 0,
+            detail_request_id: 0,
+        });
+        self.forge_render();
+        self.forge_refresh_list();
+        self.wake_caret();
+    }
+
+    /// Re-renders both panes from what's already cached -- no network.
+    fn forge_render(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let list = forge_panel::render_list(&session.project, session.filter, &session.requests, session.list_error.as_deref());
+        let detail = match &session.detail {
+            Some(detail) => {
+                forge_panel::render_detail(Some(&detail.request), detail.approvals.as_ref(), &detail.files, detail.error.as_deref())
+            }
+            None => forge_panel::render_detail(None, None, &[], None),
+        };
+        let (list_buffer, detail_buffer) = (session.list_buffer, session.detail_buffer);
+        self.set_git_buffer_preserving_line(list_buffer, list);
+        self.set_git_buffer_preserving_line(detail_buffer, detail);
+    }
+
+    /// Fetches the merge request list for the current filter.
+    fn forge_refresh_list(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        use fenix_forge::Forge;
+        let (repo_root, filter) = (session.repo_root.clone(), session.filter);
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                if let Some(session) = self.forge_session.as_mut() {
+                    session.list_error = Some(err.clone());
+                    session.requests.clear();
+                }
+                self.set_error(err);
+                self.forge_render();
+                return;
+            }
+        };
+        let Some(session) = self.forge_session.as_mut() else { return };
+        session.list_request_id += 1;
+        let request_id = session.list_request_id;
+        self.set_message(format!("loading merge requests ({})...", filter.label()));
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = client.list_merge_requests(filter);
+                    let _ = proxy.send_event(FenixUserEvent::ForgeListReady { request_id, result });
+                });
+            }
+            None => {
+                let result = client.list_merge_requests(filter);
+                self.apply_forge_list(request_id, result);
+            }
+        }
+    }
+
+    fn apply_forge_list(&mut self, request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String>) {
+        let Some(session) = self.forge_session.as_mut() else { return };
+        // A slower earlier request answering after a newer one would
+        // otherwise put the previous filter's list back on screen.
+        if request_id != session.list_request_id {
+            return;
+        }
+        match result {
+            Ok(requests) => {
+                let count = requests.len();
+                let filter = session.filter;
+                session.requests = requests;
+                session.list_error = None;
+                // Keep the current selection if it survived the new
+                // filter; otherwise show the first, so the detail pane
+                // is never left describing something the list no longer
+                // contains.
+                let keep = session.selected.filter(|n| session.requests.iter().any(|r| r.number == *n));
+                let next = keep.or_else(|| session.requests.first().map(|r| r.number));
+                self.set_message(format!("{count} merge request(s) ({})", filter.label()));
+                self.forge_render();
+                if let Some(number) = next {
+                    self.forge_select(number);
+                } else if let Some(session) = self.forge_session.as_mut() {
+                    session.selected = None;
+                    session.detail = None;
+                    self.forge_render();
+                }
+            }
+            Err(err) => {
+                session.requests.clear();
+                session.list_error = Some(err.clone());
+                session.selected = None;
+                session.detail = None;
+                self.set_error(err);
+                self.forge_render();
+            }
+        }
+    }
+
+    /// Loads one merge request's detail into the right pane.
+    fn forge_select(&mut self, number: u64) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let repo_root = session.repo_root.clone();
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        let Some(session) = self.forge_session.as_mut() else { return };
+        session.selected = Some(number);
+        session.detail_request_id += 1;
+        let request_id = session.detail_request_id;
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = Box::new(fetch_forge_detail(&client, number));
+                    let _ = proxy.send_event(FenixUserEvent::ForgeDetailReady { request_id, number, result });
+                });
+            }
+            None => {
+                let result = fetch_forge_detail(&client, number);
+                self.apply_forge_detail(request_id, number, result);
+            }
+        }
+    }
+
+    fn apply_forge_detail(&mut self, request_id: u64, number: u64, result: Result<ForgeDetail, String>) {
+        let Some(session) = self.forge_session.as_mut() else { return };
+        if request_id != session.detail_request_id {
+            return;
+        }
+        match result {
+            Ok(detail) => session.detail = Some(detail),
+            Err(err) => {
+                session.detail = None;
+                self.set_error(format!("couldn't load !{number}: {err}"));
+            }
+        }
+        self.forge_render();
+        self.wake_caret();
+    }
+
+    /// The merge request number under the cursor in the list pane.
+    fn forge_number_at_cursor(&self) -> Option<u64> {
+        let session = self.forge_session.as_ref()?;
+        if self.focused_pane_id() != session.list_pane {
+            return None;
+        }
+        match self.git_entry_at_cursor()? {
+            git_panel::GitEntry::Commit(number) => number.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// `Enter` in the list pane: show that merge request.
+    pub(crate) fn forge_open_at_cursor(&mut self) {
+        let Some(number) = self.forge_number_at_cursor() else {
+            self.set_message("put the cursor on a merge request");
+            return;
+        };
+        self.forge_select(number);
+        self.wake_caret();
+    }
+
+    /// `f`: cycle the list filter (all open / mine / assigned to me).
+    pub(crate) fn forge_cycle_filter(&mut self) {
+        let Some(session) = self.forge_session.as_mut() else { return };
+        session.filter = session.filter.next();
+        self.forge_render();
+        self.forge_refresh_list();
+        self.wake_caret();
+    }
+
+    /// `c`: fetch the selected merge request's head into a local branch
+    /// and check it out.
+    ///
+    /// Fetched from the *project's* own published ref rather than from
+    /// the source branch, so a request opened from a fork needs no
+    /// extra remote -- and lands on `mr-42` rather than the source
+    /// branch's name, which may not exist locally, may point somewhere
+    /// else, or may collide with an unrelated branch.
+    pub(crate) fn forge_checkout_selected(&mut self) {
+        let Some(session) = self.forge_session.as_ref() else { return };
+        let (repo_root, selected) = (session.repo_root.clone(), session.selected);
+        let Some(number) = self.forge_number_at_cursor().or(selected) else {
+            self.set_message("no merge request selected");
+            return;
+        };
+        let client = match self.forge_client(&repo_root) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_error(err);
+                return;
+            }
+        };
+        let branch = format!("mr-{number}");
+        let refspec = fenix_forge::Forge::checkout_refspec(&client, number);
+        if let Err(err) = fenix_git::fetch_refspec(&repo_root, "origin", &refspec) {
+            self.set_error(format!("couldn't fetch !{number}: {err}"));
+            return;
+        }
+        match fenix_git::checkout_branch(&repo_root, &branch) {
+            Ok(_) => self.set_message(format!("checked out !{number} as {branch}")),
+            Err(err) => self.set_error(format!("fetched !{number}, but couldn't check out {branch}: {err}")),
+        }
+        // The checkout rewrote the working tree, so every other Git
+        // view -- and every open file -- has to catch up.
+        self.git_refresh_all_views();
+        self.wake_caret();
+    }
+
+    fn forge_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.forge_session.as_ref()?;
+        match n {
+            1 => Some(session.list_pane),
+            2 => Some(session.detail_pane),
+            _ => None,
+        }
+    }
+
+    /// `SPC g Q`: closes the Merge Requests view.
+    pub(crate) fn forge_close(&mut self) {
+        let Some(session) = self.forge_session.take() else { return };
+        for id in [session.list_buffer, session.detail_buffer] {
+            self.buffers.close(id);
+            self.git_lines.remove(&id);
+        }
+        for pane in [session.list_pane, session.detail_pane] {
+            self.pane_titles.remove(&pane);
+        }
+        self.workspaces.switch_to_index(session.workspace_index);
+        self.workspaces.remove_active();
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
     // -- Merge view (`SPC g x`) --------------------------------------------
 
     /// `SPC g x`: opens (or refocuses and refreshes) the Merge view --
@@ -16918,6 +17307,8 @@ impl App {
             FenixUserEvent::Dap(event) => self.apply_dap_event(event),
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
+            FenixUserEvent::ForgeListReady { request_id, result } => self.apply_forge_list(request_id, result),
+            FenixUserEvent::ForgeDetailReady { request_id, number, result } => self.apply_forge_detail(request_id, number, *result),
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
             }
@@ -17817,6 +18208,46 @@ impl App {
                     return;
                 }
                 _ => {}
+            }
+        }
+
+        // The Merge Requests view's own keys.
+        if let Some((on_list, on_detail)) = self.forge_session.as_ref().map(|s| {
+            let focused = self.focused_pane_id();
+            (focused == s.list_pane, focused == s.detail_pane)
+        }) {
+            if (on_list || on_detail) && keypress.mods == Mods::default() {
+                match keypress.code {
+                    KeyCode::Named(fenix_keymap::NamedKey::Enter) if on_list => {
+                        self.forge_open_at_cursor();
+                        return;
+                    }
+                    KeyCode::Char('f') => {
+                        self.forge_cycle_filter();
+                        return;
+                    }
+                    KeyCode::Char('c') => {
+                        self.forge_checkout_selected();
+                        return;
+                    }
+                    KeyCode::Char('u') => {
+                        self.forge_refresh_list();
+                        return;
+                    }
+                    KeyCode::Char('x') => {
+                        self.git_menu_open = true;
+                        self.wake_caret();
+                        return;
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        if let Some(pane) = self.forge_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                            self.windows_mut().focus(pane);
+                            self.wake_caret();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -19659,6 +20090,19 @@ impl App {
                     ("Tab", "fold/unfold file"),
                     ("]", "next hunk"),
                     ("[", "prev hunk"),
+                    ("u", "refresh"),
+                ];
+                return self.git_menu_popup_at(bindings, window_width, modeline_top);
+            }
+        }
+        if let Some(session) = &self.forge_session {
+            let focused = self.focused_pane_id();
+            if focused == session.list_pane || focused == session.detail_pane {
+                let bindings: &[(&str, &str)] = &[
+                    ("1/2", "go to pane"),
+                    ("Enter", "show this one"),
+                    ("f", "cycle filter"),
+                    ("c", "check it out locally"),
                     ("u", "refresh"),
                 ];
                 return self.git_menu_popup_at(bindings, window_width, modeline_top);
@@ -28780,6 +29224,338 @@ configure_board stm32
         let shown = app.buffers.get(id).unwrap().buffer.text();
         assert_eq!(shown, edited, "unsaved work outranks the reload");
         assert!(app.modeline_pieces().1.contains("unsaved changes"), "and it says so: {}", app.modeline_pieces().1);
+    }
+
+    // -- Merge Requests view (`SPC g M`) -------------------------------
+
+    /// A repo whose `origin` points at a GitLab-shaped URL, so the
+    /// project can be inferred the way it is in real use.
+    fn gitlab_repo(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "one\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["remote", "add", "origin", "git@gitlab.example.com:group/project.git"]);
+        dir
+    }
+
+    #[test]
+    fn the_merge_requests_view_refuses_to_open_without_a_configured_instance() {
+        // Two panes that can only ever show one error message aren't
+        // worth opening -- say what's missing and stay put.
+        let dir = gitlab_repo("forge_no_config");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_forge_view();
+
+        assert!(app.forge_session.is_none(), "no workspace should have been opened");
+        assert!(app.modeline_pieces().1.contains("[gitlab] base_url"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_missing_token_is_named_separately_from_a_missing_url() {
+        let dir = gitlab_repo("forge_no_token");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
+
+        app.open_forge_view();
+
+        assert!(app.modeline_pieces().1.contains("token"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_repo_with_no_origin_says_that_rather_than_a_config_problem() {
+        let dir = TempDir::new("forge_no_origin");
+        std::process::Command::new("git").current_dir(dir.path()).args(["init", "-q"]).output().unwrap();
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+
+        app.open_forge_view();
+
+        assert!(app.modeline_pieces().1.contains("no `origin` remote"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn an_origin_that_is_not_a_project_url_says_which_url_it_could_not_read() {
+        let dir = TempDir::new("forge_bad_origin");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://example.com/lonely.git"]);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+
+        app.open_forge_view();
+
+        assert!(app.modeline_pieces().1.contains("lonely.git"), "the URL itself is the useful part: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn the_view_opens_two_panes_and_reports_the_instance_being_unreachable() {
+        // Pointed at a port nothing is listening on, so the request
+        // fails the way an unreachable VPN does. The panes still open:
+        // the configuration is fine, the network isn't, and those are
+        // different problems with different fixes.
+        let dir = gitlab_repo("forge_unreachable");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+
+        app.open_forge_view();
+
+        let session = app.forge_session.as_ref().expect("the panes open");
+        assert_eq!(session.project, "group/project", "inferred from origin, not configured");
+        let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
+        assert!(list.contains("couldn't reach GitLab"), "the error belongs in the pane:\n{list}");
+        assert!(list.contains("group/project"), "got:\n{list}");
+    }
+
+    #[test]
+    fn closing_the_view_takes_its_workspace_and_buffers_with_it() {
+        let dir = gitlab_repo("forge_close");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+        app.open_forge_view();
+        let (list_buffer, detail_buffer) = {
+            let s = app.forge_session.as_ref().unwrap();
+            (s.list_buffer, s.detail_buffer)
+        };
+
+        app.forge_close();
+
+        assert!(app.forge_session.is_none());
+        assert!(app.buffers.get(list_buffer).is_none());
+        assert!(app.buffers.get(detail_buffer).is_none());
+    }
+
+    fn sample_mr(number: u64, title: &str) -> fenix_forge::MergeRequest {
+        fenix_forge::MergeRequest {
+            number,
+            title: title.to_string(),
+            description: String::new(),
+            state: fenix_forge::MrState::Open,
+            draft: false,
+            source_branch: "feature".to_string(),
+            target_branch: "main".to_string(),
+            author: "Someone".to_string(),
+            web_url: String::new(),
+            has_conflicts: false,
+            sha: String::new(),
+            diff_refs: fenix_forge::DiffRefs::default(),
+            comment_count: 0,
+            pipeline: None,
+            updated_at: String::new(),
+        }
+    }
+
+    fn opened_forge_view(name: &str) -> (TempDir, App) {
+        let dir = gitlab_repo(name);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+        app.open_forge_view();
+        (dir, app)
+    }
+
+    #[test]
+    fn a_finished_listing_renders_and_selects_the_first_entry() {
+        let (_dir, mut app) = opened_forge_view("forge_apply_list");
+        let request_id = app.forge_session.as_ref().unwrap().list_request_id;
+
+        app.apply_forge_list(request_id, Ok(vec![sample_mr(42, "Add the thing"), sample_mr(7, "Fix the other")]));
+
+        let session = app.forge_session.as_ref().unwrap();
+        assert_eq!(session.requests.len(), 2);
+        assert_eq!(session.selected, Some(42), "the first entry is shown without another keypress");
+        let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
+        assert!(list.contains("[!42] Add the thing"), "got:\n{list}");
+        assert!(list.contains("[!7] Fix the other"), "got:\n{list}");
+    }
+
+    #[test]
+    fn a_stale_listing_that_arrives_late_is_dropped() {
+        // These are network round-trips over someone else's VPN;
+        // answering out of order is normal, and without the guard an
+        // earlier filter's results would replace a newer filter's.
+        let (_dir, mut app) = opened_forge_view("forge_stale_list");
+        let stale = app.forge_session.as_ref().unwrap().list_request_id;
+        // A newer request goes out (the filter changed, or `u` was
+        // pressed again) and comes back first.
+        app.forge_session.as_mut().unwrap().list_request_id = stale + 1;
+        app.apply_forge_list(stale + 1, Ok(vec![sample_mr(1, "newer")]));
+
+        // Then the older one finally crawls in.
+        app.apply_forge_list(stale, Ok(vec![sample_mr(99, "older, slower")]));
+
+        let session = app.forge_session.as_ref().unwrap();
+        assert_eq!(session.requests.len(), 1);
+        assert_eq!(session.requests[0].number, 1, "the newer answer stands");
+    }
+
+    #[test]
+    fn a_selection_that_survives_a_filter_change_is_kept() {
+        let (_dir, mut app) = opened_forge_view("forge_keep_selection");
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(42, "a"), sample_mr(7, "b")]));
+        app.forge_session.as_mut().unwrap().selected = Some(7);
+
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(7, "b"), sample_mr(9, "c")]));
+
+        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(7));
+    }
+
+    #[test]
+    fn a_selection_that_the_new_filter_dropped_moves_to_the_first_entry() {
+        let (_dir, mut app) = opened_forge_view("forge_drop_selection");
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(42, "a")]));
+        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(42));
+
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(7, "b")]));
+
+        // Never left describing something the list no longer contains.
+        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(7));
+    }
+
+    #[test]
+    fn an_empty_listing_clears_the_detail_pane_rather_than_leaving_it_stale() {
+        let (_dir, mut app) = opened_forge_view("forge_empty_list");
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(42, "a")]));
+
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(Vec::new()));
+
+        let session = app.forge_session.as_ref().unwrap();
+        assert_eq!(session.selected, None);
+        assert!(session.detail.is_none());
+        let detail = app.buffers.get(session.detail_buffer).unwrap().buffer.text();
+        assert!(detail.contains("Select a merge request"), "got:\n{detail}");
+    }
+
+    #[test]
+    fn the_detail_pane_renders_a_finished_fetch() {
+        let (_dir, mut app) = opened_forge_view("forge_apply_detail");
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(42, "Add the thing")]));
+
+        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        let detail = ForgeDetail {
+            request: sample_mr(42, "Add the thing"),
+            approvals: Some(fenix_forge::Approvals { approved: false, required: 2, left: 1, approved_by: vec!["Alice".to_string()] }),
+            files: vec![fenix_forge::ChangedFile {
+                old_path: "src/a.rs".to_string(),
+                new_path: "src/a.rs".to_string(),
+                change: fenix_forge::FileChange::Modified,
+                diff: String::new(),
+            }],
+            error: None,
+        };
+        app.apply_forge_detail(detail_id, 42, Ok(detail));
+
+        let text = app.buffers.get(app.forge_session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
+        assert!(text.contains("!42 Add the thing"), "got:\n{text}");
+        assert!(text.contains("feature -> main"), "got:\n{text}");
+        assert!(text.contains("Approvals: 1 of 2 -- Alice"), "got:\n{text}");
+        assert!(text.contains("[M] src/a.rs"), "got:\n{text}");
+    }
+
+    #[test]
+    fn checking_out_a_merge_request_lands_on_its_own_branch() {
+        // The forge's published ref, fetched from the project's own
+        // remote -- so a request opened from a fork needs no extra
+        // remote, and lands on `mr-N` rather than a source branch name
+        // that may not exist locally or may mean something else.
+        let remote = TempDir::new("forge_checkout_remote");
+        let git_at = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+        };
+        git_at(remote.path(), &["init", "-q", "-b", "main"]);
+        git_at(remote.path(), &["config", "user.email", "t@e.st"]);
+        git_at(remote.path(), &["config", "user.name", "Test"]);
+        remote.write("a.txt", "from the merge request\n");
+        git_at(remote.path(), &["add", "."]);
+        git_at(remote.path(), &["commit", "-q", "-m", "mr commit"]);
+        git_at(remote.path(), &["update-ref", "refs/merge-requests/42/head", "HEAD"]);
+
+        let dir = TempDir::new("forge_checkout");
+        git_at(dir.path(), &["init", "-q", "-b", "main"]);
+        git_at(dir.path(), &["config", "user.email", "t@e.st"]);
+        git_at(dir.path(), &["config", "user.name", "Test"]);
+        dir.write("b.txt", "local\n");
+        git_at(dir.path(), &["add", "."]);
+        git_at(dir.path(), &["commit", "-q", "-m", "local"]);
+        // A `file://` URL rather than a bare path: `origin` has to be
+        // something the project inference can read *and* something git
+        // can fetch from, and this is both. Which project it names
+        // doesn't matter here -- the refspec doesn't depend on it.
+        let origin = format!("file:///{}", remote.path().display().to_string().replace(std::path::MAIN_SEPARATOR, "/"));
+        git_at(dir.path(), &["remote", "add", "origin", &origin]);
+
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+        app.open_forge_view();
+        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        app.apply_forge_list(id, Ok(vec![sample_mr(42, "Add the thing")]));
+
+        app.forge_checkout_selected();
+
+        assert!(app.modeline_pieces().1.contains("checked out !42 as mr-42"), "got: {}", app.modeline_pieces().1);
+        let branches = fenix_git::list_branches(dir.path());
+        let current = branches.iter().find(|b| b.current).expect("a current branch");
+        assert_eq!(current.name, "mr-42");
+        assert!(dir.path().join("a.txt").exists(), "the merge request's own content is in the tree");
+    }
+
+    #[test]
+    fn cycling_the_filter_moves_through_all_three_and_says_which() {
+        let (_dir, mut app) = opened_forge_view("forge_filter");
+        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
+
+        app.forge_cycle_filter();
+        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::Mine);
+        app.forge_cycle_filter();
+        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::ForMe);
+        app.forge_cycle_filter();
+        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
+
+        let list = app.buffers.get(app.forge_session.as_ref().unwrap().list_buffer).unwrap().buffer.text();
+        assert!(list.contains("showing: all open"), "got:\n{list}");
+    }
+
+    #[test]
+    fn a_forge_pane_is_a_tracked_session_so_opening_a_file_does_not_hijack_it() {
+        // The guard that has already caught this exact bug for Task
+        // Output and Debug: a session's pane must never be quietly
+        // repurposed by "open this wherever I'm looking".
+        let (_dir, mut app) = opened_forge_view("forge_tracked");
+        let list_pane = app.forge_session.as_ref().unwrap().list_pane;
+        app.windows_mut().focus(list_pane);
+        assert!(app.focused_pane_holds_a_tracked_session());
+        let detail_pane = app.forge_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(detail_pane);
+        assert!(app.focused_pane_holds_a_tracked_session());
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------

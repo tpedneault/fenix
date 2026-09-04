@@ -22,7 +22,9 @@ fenix-docker = { path = "../fenix-docker" }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-format = { path = "../fenix-format" }
 fenix-diff = { path = "../fenix-diff" }
+fenix-forge = { path = "../fenix-forge" }
 fenix-git = { path = "../fenix-git" }
+fenix-gitlab = { path = "../fenix-gitlab" }
 fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-lsp = { path = "../fenix-lsp" }

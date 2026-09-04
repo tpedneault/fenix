@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::process::run_action;
+use crate::process::{run_action, run_lines};
 
 fn stage_args(path: &str) -> Vec<String> {
     vec!["add".to_string(), "--".to_string(), path.to_string()]
@@ -41,6 +41,28 @@ pub fn stage_file(repo: &Path, path: &str) -> Result<String, String> {
 
 pub fn unstage_file(repo: &Path, path: &str) -> Result<String, String> {
     run_action(repo, &unstage_args(path))
+}
+
+/// The URL a remote points at -- `origin` unless told otherwise.
+///
+/// What a forge client is built from: the checkout already knows which
+/// project it came from, so nothing has to be configured per repo.
+/// `None` when there's no such remote, which is the ordinary state of a
+/// repo that was never cloned from anywhere.
+pub fn remote_url(repo: &Path, remote: &str) -> Option<String> {
+    run_lines(repo, &["remote", "get-url", remote]).into_iter().next().map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
+}
+
+/// Fetches one refspec from `remote` -- what checking out a merge
+/// request is, since a forge publishes each one under a ref of its own
+/// (`refs/merge-requests/N/head` on GitLab) rather than as a branch.
+///
+/// Forced, because the ref moves every time the author pushes: without
+/// `+`, the second checkout of a merge request that has been amended or
+/// rebased fails as a non-fast-forward, which is exactly the case where
+/// you most want the new version.
+pub fn fetch_refspec(repo: &Path, remote: &str, refspec: &str) -> Result<String, String> {
+    run_action(repo, &["fetch".to_string(), remote.to_string(), format!("+{refspec}")])
 }
 
 /// Resolves a whole conflicted file by taking one side wholesale, then
@@ -301,6 +323,55 @@ mod tests {
     use crate::files::list_files;
 
     use crate::test_util::{git, init_repo, TempDir};
+
+    #[test]
+    fn the_origin_url_is_read_back_from_the_checkout_itself() {
+        // A forge client is built from this, so nothing has to be
+        // configured per repo.
+        let dir = committed_repo("remote_url");
+        assert_eq!(remote_url(dir.path(), "origin"), None, "a repo that was never cloned has no origin");
+        git(dir.path(), &["remote", "add", "origin", "git@gitlab.example.com:group/project.git"]);
+        assert_eq!(remote_url(dir.path(), "origin").as_deref(), Some("git@gitlab.example.com:group/project.git"));
+        assert_eq!(remote_url(dir.path(), "upstream"), None);
+    }
+
+    #[test]
+    fn a_refspec_fetch_lands_the_ref_on_a_local_branch() {
+        let remote = committed_repo("refspec_source");
+        // Stand in for a forge's published merge-request ref: an
+        // ordinary ref outside `refs/heads` on the remote.
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
+
+        let dir = TempDir::new("refspec_fetch");
+        init_repo(dir.path());
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+
+        fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").unwrap();
+
+        let branches = crate::list_branches(dir.path());
+        assert!(branches.iter().any(|b| b.name == "mr-7"), "got: {:?}", branches.iter().map(|b| &b.name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn refetching_a_ref_that_moved_succeeds_rather_than_failing_as_non_fast_forward() {
+        // The author amended or rebased and force-pushed -- exactly
+        // when you most want the new version, and what an unforced
+        // fetch refuses.
+        let remote = committed_repo("refspec_moved_source");
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
+        let dir = TempDir::new("refspec_moved");
+        init_repo(dir.path());
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").unwrap();
+
+        // Rewrite the remote ref to an unrelated commit.
+        remote.write("a.txt", "amended
+");
+        git(remote.path(), &["commit", "-q", "--amend", "-a", "-m", "amended"]);
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
+
+        fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").expect("a moved ref still fetches");
+    }
 
     /// A file's contents with CRLF line endings normalized to LF.
     ///

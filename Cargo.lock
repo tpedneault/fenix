@@ -688,6 +688,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-forge"
+version = "0.0.1"
+
+[[package]]
 name = "fenix-format"
 version = "0.0.1"
 
@@ -696,6 +700,15 @@ name = "fenix-git"
 version = "0.0.1"
 dependencies = [
  "fenix-diff",
+]
+
+[[package]]
+name = "fenix-gitlab"
+version = "0.0.1"
+dependencies = [
+ "fenix-forge",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -715,8 +728,10 @@ dependencies = [
  "fenix-diff",
  "fenix-docker",
  "fenix-explorer",
+ "fenix-forge",
  "fenix-format",
  "fenix-git",
+ "fenix-gitlab",
  "fenix-jira",
  "fenix-keymap",
  "fenix-lsp",

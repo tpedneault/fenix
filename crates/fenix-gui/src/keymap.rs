@@ -244,6 +244,12 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x')], "resolve conflicts", "git.merge_view");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('X')], "close conflicts", "git.merge_close");
 
+        // GitLab merge requests. `M`, not `m` -- `SPC g m` is the merge
+        // *operation*, and the two are asked for in completely
+        // different moods.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('M')], "merge requests", "git.merge_requests");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('Q')], "close merge requests", "git.merge_requests_close");
+
         // Jira dashboard -- read-only browsing this phase (see the Jira
         // dashboard plan's own scope notes). `p`/`u` add/delete letters
         // mirror `SPC p a`/`SPC p d`'s own add/delete-from-a-persisted-
