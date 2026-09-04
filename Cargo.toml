@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-core", "crates/fenix-dap", "crates/fenix-diff", "crates/fenix-docker", "crates/fenix-explorer", "crates/fenix-forge", "crates/fenix-format", "crates/fenix-git", "crates/fenix-gitlab", "crates/fenix-gui", "crates/fenix-jira", "crates/fenix-keymap", "crates/fenix-lsp", "crates/fenix-mib", "crates/fenix-pdf", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-rpc", "crates/fenix-syntax", "crates/fenix-table", "crates/fenix-tasks", "crates/fenix-terminal", "crates/fenix-vim", "crates/fenix-vnc", "crates/fenix-window"]
+members = ["crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-core", "crates/fenix-dap", "crates/fenix-diff", "crates/fenix-docker", "crates/fenix-explorer", "crates/fenix-forge", "crates/fenix-format", "crates/fenix-git", "crates/fenix-gitlab", "crates/fenix-gui", "crates/fenix-jira", "crates/fenix-keymap", "crates/fenix-lsp", "crates/fenix-mib", "crates/fenix-pdf", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-recovery", "crates/fenix-rpc", "crates/fenix-syntax", "crates/fenix-table", "crates/fenix-tasks", "crates/fenix-terminal", "crates/fenix-vim", "crates/fenix-vnc", "crates/fenix-window"]
 
 [workspace.package]
 version = "0.0.1"

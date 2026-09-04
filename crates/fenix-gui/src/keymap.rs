@@ -96,6 +96,9 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('R')], "rename file", "file.rename");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('D')], "delete file", "file.delete");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('y')], "yank file path", "file.yank_path");
+        // `v` for "revive" -- `r` is recent files and `R` is rename,
+        // and this belongs in the same group as both.
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('v')], "recover unsaved work", "file.recover");
 
         t.label_group(&[spc, KeyPress::char('q')], "quit");
         t.insert(&[spc, KeyPress::char('q'), KeyPress::char('q')], "quit", "app.quit");

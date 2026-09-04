@@ -1,0 +1,7 @@
+[package]
+name = "fenix-recovery"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirs = "6"

@@ -71,6 +71,7 @@ impl CommandRegistry {
         );
         registry.register("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", cmd_file_find_all);
         registry.register("file.recent", "Fuzzy-find a recently-opened file", cmd_file_recent);
+        registry.register("file.recover", "Recover unsaved work a previous session left behind", cmd_file_recover);
         registry.register("file.rename", "Rename the current file on disk", cmd_file_rename);
         registry.register("file.delete", "Delete the current file (with confirmation)", cmd_file_delete);
         registry.register("file.yank_path", "Copy the current file's path to the clipboard", cmd_file_yank_path);
@@ -337,6 +338,10 @@ fn cmd_file_find_all(ctx: &mut CommandCtx) {
 
 fn cmd_file_recent(ctx: &mut CommandCtx) {
     ctx.app.picker_recent_files();
+}
+
+fn cmd_file_recover(ctx: &mut CommandCtx) {
+    ctx.app.picker_recovery();
 }
 
 fn cmd_file_rename(ctx: &mut CommandCtx) {

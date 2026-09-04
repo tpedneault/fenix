@@ -158,6 +158,28 @@ for anyone curious to poke around or build on it.
   moment where being approximately right costs somebody their work.
   `[editor] watch_files = false` turns the whole thing off, for a
   working copy on a network share.
+- **Crash recovery**: every buffer with unsaved changes is written to a
+  snapshot a couple of times a second, so a crash, a power cut or a
+  killed process costs at most a moment's typing instead of everything
+  since the last `:w`. The snapshot is deleted the instant the buffer is
+  saved or deliberately closed, so a normal session leaves nothing
+  behind and only an abnormal exit leaves anything to find. On the next
+  start, if anything survived, the modeline says which files and that
+  `SPC f v` recovers them; recovering loads the text back as an
+  *unsaved* edit, so `:w` accepts it and `:e!` throws it away -- the
+  same pair of answers as any other two versions that disagree.
+  Snapshots older than two weeks are cleaned up on startup.
+
+  Deliberately **not** Vim's swap files. Those live next to the file
+  being edited, which means `.gitignore` entries and build tools
+  tripping over them, and they carry a locking protocol for "another
+  instance has this file open" that Fenix has no use for -- their
+  famous failure mode, a stale `.swp` prompting about a file nobody is
+  editing, is worse than the loss they prevent. Snapshots here live in
+  one directory under Fenix's own config location, keyed by a hash of
+  the file's path, and never touch the working tree. Nor is there a
+  modal "recover?" prompt on launch: it says what's there and gets out
+  of the way.
 - **Search and replace** (`SPC s ...`): `SPC s s` fuzzy-finds any line in
   the current buffer (live-filtered as you type). `SPC s r` prompts for a
   pattern then a replacement and shows the match count before applying --
@@ -736,6 +758,7 @@ popup shows what keys continue it.
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `:w!` / `:e!` | Save over a file that changed on disk / re-read it, discarding your edits |
+| `SPC f v` | Recover unsaved work a previous session left behind |
 | `SPC f j` | Open the file explorer at the current file's directory |
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |

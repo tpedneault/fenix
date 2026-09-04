@@ -148,6 +148,17 @@ impl Buffer {
         self.dirty
     }
 
+    /// Declares the buffer's contents to *differ* from what's on disk,
+    /// without editing anything -- the inverse of `mark_saved`.
+    ///
+    /// For text that was put into the buffer from somewhere other than
+    /// its file: a recovered crash snapshot (see `fenix-recovery`),
+    /// which exists nowhere on disk. Letting `:qa` past it would lose
+    /// the same work a second time.
+    pub fn mark_unsaved(&mut self) {
+        self.dirty = true;
+    }
+
     /// Declares the buffer's contents to match what's on disk without
     /// writing anything -- for when the *file* changed and the buffer
     /// was re-read from it, rather than the other way round (a git

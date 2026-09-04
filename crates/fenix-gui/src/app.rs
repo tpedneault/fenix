@@ -136,6 +136,14 @@ const STATS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// buffer that reloads under the cursor the instant an editor elsewhere
 /// writes its own temp file is worse than one that takes a moment.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long a recovery snapshot is kept before being cleaned up.
+///
+/// Two weeks: long enough to cover a crash before a holiday, short
+/// enough that the directory doesn't accumulate work from files that
+/// were recovered by hand, renamed, or deleted outright -- none of
+/// which Fenix ever hears about.
+const RECOVERY_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 14);
 /// The stats-poller thread's stop check granularity -- it sleeps in
 /// steps this short (rather than one `STATS_POLL_INTERVAL`-long sleep)
 /// so a stop request (session closed, app quitting) lands within this
@@ -562,6 +570,20 @@ impl DiskSweep {
     /// the expected outcome and shouldn't read as an error.
     fn is_bad(&self) -> bool {
         !self.conflicted.is_empty() || !self.vanished.is_empty()
+    }
+}
+
+/// "4 minutes ago", "2 days ago" -- enough to tell a snapshot from
+/// this morning's crash apart from one left behind months ago, without
+/// a date-formatting dependency for a single label.
+fn describe_age(age: Option<Duration>) -> String {
+    let Some(age) = age else { return "at an unknown time".to_string() };
+    let seconds = age.as_secs();
+    match seconds {
+        0..=90 => "just now".to_string(),
+        91..=5400 => format!("{} minutes ago", seconds / 60),
+        5401..=172_800 => format!("{} hours ago", seconds / 3600),
+        _ => format!("{} days ago", seconds / 86_400),
     }
 }
 
@@ -2451,6 +2473,12 @@ enum ActivePicker {
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
     SwitchBuffer(fenix_picker::PickerState<BufferId>),
+    /// `SPC f v`: unsaved work a previous session left behind, one row
+    /// per file. Confirming puts the recovered text back into the
+    /// buffer as an unsaved edit -- so `:w` accepts it and `:e!`
+    /// throws it away, which is the vocabulary the file-watching work
+    /// already established for "these two versions disagree".
+    Recovery(fenix_picker::PickerState<fenix_recovery::Snapshot>),
     /// `SPC p d`: same candidate list as `SwitchProject`, but confirming
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
@@ -2607,6 +2635,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Grep(s) => s.push_char(c),
         ActivePicker::SwitchProject(s) => s.push_char(c),
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
+        ActivePicker::Recovery(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::DeleteMibRoot(s) => s.push_char(c),
         ActivePicker::DeleteJiraProject(s) => s.push_char(c),
@@ -2645,6 +2674,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Grep(s) => s.backspace(),
         ActivePicker::SwitchProject(s) => s.backspace(),
         ActivePicker::SwitchBuffer(s) => s.backspace(),
+        ActivePicker::Recovery(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::DeleteMibRoot(s) => s.backspace(),
         ActivePicker::DeleteJiraProject(s) => s.backspace(),
@@ -2683,6 +2713,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Grep(s) => s.move_selection(delta),
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
+        ActivePicker::Recovery(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::DeleteMibRoot(s) => s.move_selection(delta),
         ActivePicker::DeleteJiraProject(s) => s.move_selection(delta),
@@ -2724,6 +2755,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Grep(s) => s.toggle_mark(),
         ActivePicker::SwitchProject(s) => s.toggle_mark(),
         ActivePicker::SwitchBuffer(s) => s.toggle_mark(),
+        ActivePicker::Recovery(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
         ActivePicker::DeleteMibRoot(s) => s.toggle_mark(),
         ActivePicker::DeleteJiraProject(s) => s.toggle_mark(),
@@ -2762,6 +2794,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Grep(s) => s.query(),
         ActivePicker::SwitchProject(s) => s.query(),
         ActivePicker::SwitchBuffer(s) => s.query(),
+        ActivePicker::Recovery(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::DeleteMibRoot(s) => s.query(),
         ActivePicker::DeleteJiraProject(s) => s.query(),
@@ -2800,6 +2833,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Grep(s) => s.len(),
         ActivePicker::SwitchProject(s) => s.len(),
         ActivePicker::SwitchBuffer(s) => s.len(),
+        ActivePicker::Recovery(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::DeleteMibRoot(s) => s.len(),
         ActivePicker::DeleteJiraProject(s) => s.len(),
@@ -2838,6 +2872,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Grep(s) => s.selected_row(),
         ActivePicker::SwitchProject(s) => s.selected_row(),
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
+        ActivePicker::Recovery(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::DeleteMibRoot(s) => s.selected_row(),
         ActivePicker::DeleteJiraProject(s) => s.selected_row(),
@@ -2880,6 +2915,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Grep(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Recovery(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteMibRoot(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteJiraProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5204,6 +5240,14 @@ pub struct App {
     /// Saving one of these would silently discard the other version, so
     /// it takes `:w!`; `:e!` goes the other way.
     externally_changed: HashSet<BufferId>,
+    /// Where unsaved work is written so a crash doesn't take it. `None`
+    /// when the config directory can't be found at all, in which case
+    /// the whole feature quietly does nothing rather than failing on
+    /// every keystroke.
+    recovery_dir: Option<PathBuf>,
+    /// Each dirty buffer's `edit_count` as of its last snapshot, so an
+    /// unchanged buffer isn't rewritten every tick.
+    snapshot_state: HashMap<BufferId, u64>,
     /// When the next sweep is due. Driven from `about_to_wait`'s own
     /// `WaitUntil` deadline rather than a poller thread: `stat` on a
     /// handful of open files is far cheaper than a thread and a channel,
@@ -5816,6 +5860,7 @@ impl App {
                 app.record_recent_file(path);
             }
         }
+        app.announce_recoverable_work();
         app
     }
 
@@ -5962,6 +6007,14 @@ impl App {
             compose: None,
             disk_state,
             externally_changed: HashSet::new(),
+            // `None` under test: the recovery directory is a real,
+            // shared location in the user's config, and a suite with a
+            // thousand buffers in it would otherwise scatter snapshots
+            // through it -- which it did, until this was noticed.
+            // Tests that exercise recovery point this at a temp
+            // directory of their own.
+            recovery_dir: if cfg!(test) { None } else { fenix_recovery::default_dir() },
+            snapshot_state: HashMap::new(),
             next_disk_check: Instant::now() + DISK_CHECK_INTERVAL,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
@@ -7878,6 +7931,10 @@ impl App {
                 // next sweep reporting Fenix's own write as somebody
                 // else's change.
                 self.note_disk_state(id);
+                // The work is on disk now, so the snapshot describes
+                // nothing that's lost -- and leaving it would offer to
+                // "recover" it on the next start.
+                self.discard_recovery_for(id);
                 self.set_message(format!("saved {}", path.display()));
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
@@ -11312,6 +11369,10 @@ impl App {
     /// changes`) buffer is a hard refusal naming it, not a prompt.
     /// `force = true` bypasses this entirely -- same "`!` means I know,
     /// do it anyway" convention as `:qa!`.
+    /// Closing a buffer means its snapshot has no owner left. Dropped
+    /// either way: a clean close has nothing to recover, and a forced
+    /// one is the user saying they don't want it -- offering it back on
+    /// the next start would be ignoring that.
     fn close_focused_buffer(&mut self, force: bool) {
         let id = self.focused_buffer_id();
         if !force && self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty()) {
@@ -11319,6 +11380,7 @@ impl App {
             self.set_error(format!("{name} has unsaved changes -- use :q! to discard or :wq to save"));
             return;
         }
+        self.discard_recovery_for(id);
         self.kill_buffer_now();
     }
 
@@ -13862,6 +13924,10 @@ impl App {
             return;
         }
         self.next_disk_check = Instant::now() + DISK_CHECK_INTERVAL;
+        // Before the sweep, not after: a sweep that reloads a buffer
+        // makes it clean, and snapshotting afterwards would then throw
+        // away a snapshot that had never been written.
+        self.snapshot_dirty_buffers();
         let sweep = self.reload_buffers_changed_on_disk();
         let Some(message) = sweep.message() else { return };
         if sweep.is_bad() {
@@ -13869,6 +13935,143 @@ impl App {
         } else {
             self.set_message(message);
         }
+        self.wake_caret();
+    }
+
+    /// Writes every dirty buffer that has changed since its last
+    /// snapshot, and clears the snapshot of every buffer that no longer
+    /// needs one.
+    ///
+    /// Runs on the same tick as the disk sweep -- so at most a couple of
+    /// seconds of typing is ever at risk, and a buffer nobody is
+    /// touching costs one integer comparison. Keyed on `edit_count`
+    /// rather than on the text, because comparing whole buffers every
+    /// two seconds to decide whether to write them would cost more than
+    /// writing them.
+    fn snapshot_dirty_buffers(&mut self) {
+        let Some(dir) = self.recovery_dir.clone() else { return };
+        for id in self.buffers.ids_sorted_by_path() {
+            let Some(ob) = self.buffers.get(id) else { continue };
+            if !ob.kind.tracks_unsaved_changes() {
+                continue;
+            }
+            let Some(path) = ob.buffer.path().map(Path::to_path_buf) else {
+                // A buffer with no path has nowhere to be recovered
+                // *to*, so there is nothing useful to write: restoring
+                // it would produce text with no home. `:w` on it names
+                // a file, and from then on it snapshots like any other.
+                continue;
+            };
+            if !ob.buffer.is_dirty() {
+                // Saved or reverted since the last tick -- the snapshot
+                // is now describing work that isn't lost, and leaving it
+                // would offer to "recover" it on the next start.
+                if self.snapshot_state.remove(&id).is_some() {
+                    let _ = fenix_recovery::discard(&dir, &path);
+                }
+                continue;
+            }
+            let edits = ob.buffer.edit_count();
+            if self.snapshot_state.get(&id) == Some(&edits) {
+                continue;
+            }
+            let contents = ob.buffer.text();
+            match fenix_recovery::write(&dir, &path, &contents) {
+                Ok(_) => {
+                    self.snapshot_state.insert(id, edits);
+                }
+                // Deliberately silent. This runs every couple of
+                // seconds; a read-only config directory would otherwise
+                // produce an error message the user can neither act on
+                // nor dismiss, on top of whatever they were doing.
+                Err(err) => eprintln!("fenix: couldn't write a recovery snapshot for {}: {err}", path.display()),
+            }
+        }
+    }
+
+    /// Drops the recovery snapshot for a buffer whose work is no longer
+    /// at risk -- it was saved, or deliberately thrown away.
+    fn discard_recovery_for(&mut self, id: BufferId) {
+        self.snapshot_state.remove(&id);
+        let Some(dir) = self.recovery_dir.clone() else { return };
+        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
+        let _ = fenix_recovery::discard(&dir, &path);
+    }
+
+    /// Says once, at startup, that a previous session left work behind.
+    ///
+    /// A message rather than a prompt: a modal "recover?" on launch is
+    /// the thing everyone hates about swap files, and it fires on every
+    /// start until it's answered. This says what's there and where the
+    /// key is, and gets out of the way. Old snapshots are pruned first,
+    /// so a crash from months ago isn't still being announced.
+    fn announce_recoverable_work(&mut self) {
+        let Some(dir) = self.recovery_dir.clone() else { return };
+        fenix_recovery::prune(&dir, RECOVERY_MAX_AGE);
+        let snapshots = fenix_recovery::list(&dir);
+        if snapshots.is_empty() {
+            return;
+        }
+        let names: Vec<String> =
+            snapshots.iter().filter_map(|s| s.original.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+        self.set_message(format!("unsaved work from a previous session: {} -- SPC f v recovers it", join_names(&names)));
+    }
+
+    /// `SPC f v`: what a previous session left unsaved.
+    pub(crate) fn picker_recovery(&mut self) {
+        let Some(dir) = self.recovery_dir.clone() else {
+            self.set_error("no config directory to keep recovery snapshots in".to_string());
+            return;
+        };
+        let snapshots = fenix_recovery::list(&dir);
+        if snapshots.is_empty() {
+            self.set_message("nothing to recover -- no unsaved work was left behind");
+            return;
+        }
+        let candidates = snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let label = format!("{}   ({})", snapshot.original.display(), describe_age(snapshot.age()));
+                fenix_picker::Candidate::new(label, snapshot)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::Recovery(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Puts a snapshot's text back, as an unsaved edit.
+    ///
+    /// Deliberately *not* written straight to the file. The recovered
+    /// text is what you had, not necessarily what you want -- and the
+    /// file may have moved on since the crash. Loading it as a dirty
+    /// buffer means `:w` accepts it and `:e!` throws it away, which is
+    /// the same pair of answers the file-watching work already
+    /// established for two versions that disagree.
+    fn recover_snapshot(&mut self, snapshot: &fenix_recovery::Snapshot) {
+        self.main_view = MainView::Editor;
+        let existed = snapshot.original.exists();
+        self.open_file_from_picker(&snapshot.original);
+        let id = self.focused_buffer_id();
+        // Compared against what's on disk *now*: a snapshot identical to
+        // the file is work that was saved after all (recovered by hand,
+        // or saved by another session), and re-opening it as a dirty
+        // buffer would invent a change nobody made.
+        let unchanged = self.buffers.get(id).is_some_and(|ob| ob.buffer.text() == snapshot.contents);
+        if unchanged {
+            self.discard_recovery_for(id);
+            self.set_message(format!("{} already matches what was recovered", snapshot.original.display()));
+            self.wake_caret();
+            return;
+        }
+        self.replace_buffer_from_disk(id, &snapshot.contents);
+        // `replace_buffer_from_disk` marks the buffer saved, which is
+        // right when the text came from the file and wrong here: this
+        // text exists nowhere but the snapshot, and letting `:qa` past
+        // it would lose it a second time.
+        if let Some(ob) = self.buffers.get_mut(id) {
+            ob.buffer.mark_unsaved();
+        }
+        let note = if existed { "" } else { " (the file itself is gone)" };
+        self.set_message(format!("recovered {}{note} -- :w keeps it, :e! discards it", snapshot.original.display()));
         self.wake_caret();
     }
 
@@ -16626,6 +16829,11 @@ impl App {
                 let Some(id) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.switch_focused_to_buffer(id);
+            }
+            Some(ActivePicker::Recovery(state)) => {
+                let Some(snapshot) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.recover_snapshot(&snapshot);
             }
             Some(ActivePicker::DeleteProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -19961,6 +20169,7 @@ impl App {
                 Some(picker @ ActivePicker::Grep(_)) => ("GREP", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
+                Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteJiraProject(_)) => ("DELJIRAPROJ", picker_len(picker)),
@@ -30969,6 +31178,257 @@ configure_board stm32
 
         assert!(app.compose.is_none(), "no buffer to fill in for nothing");
         assert!(app.modeline_pieces().1.contains("nothing staged"), "got: {}", app.modeline_pieces().1);
+    }
+
+    // -- Crash recovery ------------------------------------------------
+
+    /// An app whose recovery snapshots go somewhere throwaway rather
+    /// than into the real config directory.
+    fn app_with_recovery(name: &str, contents: &str) -> (TempDir, TempDir, App) {
+        let work = TempDir::new(&format!("{name}_work"));
+        let store = TempDir::new(&format!("{name}_store"));
+        let file = work.write("notes.txt", contents);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.recovery_dir = Some(store.path().to_path_buf());
+        (work, store, app)
+    }
+
+    #[test]
+    fn a_dirty_buffer_is_snapshotted_and_the_snapshot_survives_the_app() {
+        // The whole point: what's in memory exists somewhere else too.
+        let (work, store, mut app) = app_with_recovery("recover_basic", "one\n");
+        app.test_insert_str("unsaved work ");
+
+        app.poll_files_changed_on_disk();
+
+        let found = fenix_recovery::list(store.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].original, work.path().join("notes.txt"));
+        assert!(found[0].contents.starts_with("unsaved work "), "got: {:?}", found[0].contents);
+        // And the file itself is untouched -- a snapshot is not a save.
+        assert_eq!(std::fs::read_to_string(work.path().join("notes.txt")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn a_clean_buffer_is_never_snapshotted() {
+        let (_work, store, mut app) = app_with_recovery("recover_clean", "one\n");
+        app.poll_files_changed_on_disk();
+        assert!(fenix_recovery::list(store.path()).is_empty(), "nothing is at risk, so nothing is written");
+    }
+
+    #[test]
+    fn saving_removes_the_snapshot() {
+        // Otherwise the next start would offer to recover work that
+        // isn't lost, which is exactly the swap-file failure mode.
+        let (_work, store, mut app) = app_with_recovery("recover_saved", "one\n");
+        app.test_insert('X');
+        app.poll_files_changed_on_disk();
+        assert_eq!(fenix_recovery::list(store.path()).len(), 1);
+
+        app.save();
+
+        assert!(fenix_recovery::list(store.path()).is_empty(), "a saved buffer has nothing to recover");
+    }
+
+    #[test]
+    fn discarding_a_buffer_removes_its_snapshot_too() {
+        // `:q!` is the user saying they don't want these edits; offering
+        // them back on the next start would be ignoring that.
+        let (_work, store, mut app) = app_with_recovery("recover_discarded", "one\n");
+        app.test_insert('X');
+        app.poll_files_changed_on_disk();
+
+        app.force_kill_buffer();
+
+        assert!(fenix_recovery::list(store.path()).is_empty());
+    }
+
+    #[test]
+    fn a_buffer_that_stops_being_dirty_drops_its_snapshot_on_the_next_tick() {
+        let (_work, store, mut app) = app_with_recovery("recover_reverted", "one\n");
+        app.test_insert('X');
+        app.poll_files_changed_on_disk();
+        assert_eq!(fenix_recovery::list(store.path()).len(), 1);
+
+        // Undone back to the saved state, so nothing is at risk again.
+        app.reload_focused_file();
+        app.poll_files_changed_on_disk();
+
+        assert!(fenix_recovery::list(store.path()).is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_dirty_buffer_is_not_rewritten_every_tick() {
+        // The check runs every couple of seconds over every open buffer;
+        // writing each one each time would be a lot of disk for nothing.
+        let (_work, store, mut app) = app_with_recovery("recover_no_churn", "one\n");
+        app.test_insert('X');
+        app.poll_files_changed_on_disk();
+        let first = std::fs::metadata(&fenix_recovery::list(store.path())[0].snapshot).unwrap().modified().unwrap();
+        let id = app.focused_buffer_id();
+        let edits = app.buffers.get(id).unwrap().buffer.edit_count();
+
+        app.poll_files_changed_on_disk();
+        app.poll_files_changed_on_disk();
+
+        assert_eq!(app.snapshot_state.get(&id), Some(&edits), "still keyed to the same edit");
+        let again = std::fs::metadata(&fenix_recovery::list(store.path())[0].snapshot).unwrap().modified().unwrap();
+        assert_eq!(first, again, "not rewritten");
+    }
+
+    #[test]
+    fn a_buffer_with_no_file_is_not_snapshotted() {
+        // There would be nowhere to recover it *to*: restoring it would
+        // produce text with no home.
+        let store = TempDir::new("recover_no_path");
+        let mut app = App::with_file(None);
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.test_insert_str("scratch work");
+
+        app.poll_files_changed_on_disk();
+
+        assert!(fenix_recovery::list(store.path()).is_empty());
+    }
+
+    #[test]
+    fn a_crashed_session_can_be_recovered_in_a_new_one() {
+        // The end-to-end this exists for: one app writes a snapshot and
+        // is dropped without saving, standing in for a crash; a fresh
+        // one finds it and hands the work back.
+        let work = TempDir::new("recover_crash_work");
+        let store = TempDir::new("recover_crash_store");
+        let file = work.write("notes.txt", "original\n");
+        {
+            let mut crashed = App::with_file(Some(file.to_string_lossy().into_owned()));
+            crashed.recovery_dir = Some(store.path().to_path_buf());
+            crashed.test_insert_str("work in progress ");
+            crashed.poll_files_changed_on_disk();
+            // Dropped without saving and without closing anything.
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n", "the file never got the edits");
+
+        let mut fresh = App::with_file(None);
+        fresh.recovery_dir = Some(store.path().to_path_buf());
+        fresh.announce_recoverable_work();
+        assert!(fresh.modeline_pieces().1.contains("notes.txt"), "the start says so: {}", fresh.modeline_pieces().1);
+        assert!(fresh.modeline_pieces().1.contains("SPC f v"), "and where the key is: {}", fresh.modeline_pieces().1);
+
+        fresh.picker_recovery();
+        assert!(matches!(fresh.active_picker, Some(ActivePicker::Recovery(_))));
+        fresh.picker_confirm();
+
+        assert!(fresh.open().buffer.text().starts_with("work in progress "), "got: {:?}", fresh.open().buffer.text());
+        assert_eq!(fresh.open().buffer.path(), Some(file.as_path()));
+        // Dirty, not written: the recovered text is what you had, not
+        // necessarily what you want, and `:qa` must not walk past it.
+        assert!(fresh.open().buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n", "still not written until you say so");
+    }
+
+    #[test]
+    fn saving_recovered_work_finishes_the_job_and_clears_the_snapshot() {
+        let work = TempDir::new("recover_accept_work");
+        let store = TempDir::new("recover_accept_store");
+        let file = work.write("notes.txt", "original\n");
+        {
+            let mut crashed = App::with_file(Some(file.to_string_lossy().into_owned()));
+            crashed.recovery_dir = Some(store.path().to_path_buf());
+            crashed.test_insert_str("recovered ");
+            crashed.poll_files_changed_on_disk();
+        }
+        let mut fresh = App::with_file(None);
+        fresh.recovery_dir = Some(store.path().to_path_buf());
+        fresh.picker_recovery();
+        fresh.picker_confirm();
+
+        fresh.save();
+
+        assert!(std::fs::read_to_string(&file).unwrap().starts_with("recovered "));
+        assert!(fenix_recovery::list(store.path()).is_empty(), "nothing left to recover");
+    }
+
+    #[test]
+    fn a_snapshot_matching_the_file_is_not_offered_back_as_an_edit() {
+        // The work was saved after all -- by hand, or by another
+        // session. Loading it as a dirty buffer would invent a change
+        // nobody made.
+        let work = TempDir::new("recover_already_saved_work");
+        let store = TempDir::new("recover_already_saved_store");
+        let file = work.write("notes.txt", "the same\n");
+        fenix_recovery::write(store.path(), &file, "the same\n").unwrap();
+
+        let mut app = App::with_file(None);
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.picker_recovery();
+        app.picker_confirm();
+
+        assert!(!app.open().buffer.is_dirty(), "nothing to recover, so nothing is unsaved");
+        assert!(app.modeline_pieces().1.contains("already matches"), "got: {}", app.modeline_pieces().1);
+        assert!(fenix_recovery::list(store.path()).is_empty(), "and the stale snapshot is cleaned up");
+    }
+
+    #[test]
+    fn work_whose_file_was_deleted_is_still_recoverable() {
+        let work = TempDir::new("recover_gone_work");
+        let store = TempDir::new("recover_gone_store");
+        let file = work.path().join("gone.txt");
+        fenix_recovery::write(store.path(), &file, "the only copy\n").unwrap();
+
+        let mut app = App::with_file(None);
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.picker_recovery();
+        app.picker_confirm();
+
+        assert_eq!(app.open().buffer.text(), "the only copy\n");
+        assert!(app.open().buffer.is_dirty(), "it exists nowhere but here");
+        assert!(app.modeline_pieces().1.contains("the file itself is gone"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn nothing_to_recover_says_so_rather_than_opening_an_empty_picker() {
+        let store = TempDir::new("recover_nothing");
+        let mut app = App::with_file(None);
+        app.recovery_dir = Some(store.path().to_path_buf());
+
+        app.picker_recovery();
+
+        assert!(app.active_picker.is_none());
+        assert!(app.modeline_pieces().1.contains("nothing to recover"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_clean_start_says_nothing_at_all() {
+        // The common case, and the one swap files get wrong.
+        let store = TempDir::new("recover_quiet");
+        let mut app = App::with_file(None);
+        app.recovery_dir = Some(store.path().to_path_buf());
+
+        app.announce_recoverable_work();
+
+        assert!(!app.modeline_pieces().1.contains("previous session"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn nothing_is_written_next_to_the_file_being_edited() {
+        // Not swap files: the working tree stays exactly as it was, so
+        // there is nothing to gitignore and nothing for a build to trip
+        // over.
+        let (work, _store, mut app) = app_with_recovery("recover_no_litter", "one\n");
+        app.test_insert('X');
+        app.poll_files_changed_on_disk();
+
+        let names: Vec<String> =
+            std::fs::read_dir(work.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn the_age_of_a_snapshot_reads_in_units_a_person_uses() {
+        assert_eq!(describe_age(Some(Duration::from_secs(5))), "just now");
+        assert_eq!(describe_age(Some(Duration::from_secs(60 * 7))), "7 minutes ago");
+        assert_eq!(describe_age(Some(Duration::from_secs(60 * 60 * 5))), "5 hours ago");
+        assert_eq!(describe_age(Some(Duration::from_secs(60 * 60 * 24 * 3))), "3 days ago");
+        assert_eq!(describe_age(None), "at an unknown time");
     }
 
     // -- Files changing on disk while they're open ---------------------

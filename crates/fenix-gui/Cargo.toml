@@ -32,6 +32,7 @@ fenix-mib = { path = "../fenix-mib" }
 fenix-pdf = { path = "../fenix-pdf" }
 fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
+fenix-recovery = { path = "../fenix-recovery" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }

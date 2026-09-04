@@ -740,6 +740,7 @@ dependencies = [
  "fenix-pdf",
  "fenix-picker",
  "fenix-project",
+ "fenix-recovery",
  "fenix-syntax",
  "fenix-table",
  "fenix-tasks",
@@ -802,6 +803,13 @@ version = "0.0.1"
 dependencies = [
  "dirs",
  "fenix-picker",
+]
+
+[[package]]
+name = "fenix-recovery"
+version = "0.0.1"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
