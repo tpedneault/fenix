@@ -264,7 +264,11 @@ for anyone curious to poke around or build on it.
   git abbreviates hashes to differing lengths), the refs pointing at it
   (`(HEAD -> develop)`, `(origin/main)`, tags), and its subject; moving
   down the graph shows that commit's author, date, full message and
-  diff in the shared diff viewer. Rails are ASCII by default because the
+  diff in the shared diff viewer -- with its files folded when it
+  touched more than one, so a wide-ranging commit reads as a scannable
+  list of what it touched and `Tab` opens whichever file you want to
+  look at. `1`/`2`/`3` jump straight to the Graph, Refs and Commit
+  panes, and `x` lists the keys the focused pane understands. Rails are ASCII by default because the
   box-drawing alternatives are missing from many monospace fonts, and
   the fallback font's different character width knocks every row out of
   alignment -- `[git] graph_style = unicode` opts in if yours has them. Beside it, a refs tree of Local / Remotes / Tags,
@@ -632,13 +636,16 @@ popup shows what keys continue it.
 | `SPC g f` | Fetch all remotes and prune deleted branches |
 | `SPC g c` | Compare two refs (pick base, then head) |
 | `SPC g C` | Close the Compare view |
+| `1` / `2` / `3` (History) | Jump to the Graph / Refs / Commit pane |
 | `u` / `f` (History) | Refresh / fetch |
+| `1` / `2` (Compare) | Jump to the Commits / Changes pane |
 | `t` / `r` / `u` (Compare) | Toggle three-dot vs two-dot / re-target refs / refresh |
-| `s` / `S` (Main pane) | Stage / unstage the hunk under the cursor |
-| `d` (Main pane) | Discard the hunk under the cursor (confirms first) |
-| `]` / `[` (Main pane) | Next / previous hunk |
-| `Tab` (Main pane) | Fold the file under the cursor down to its header |
-| `Enter` (Main pane) | Open the real file at the line under the cursor |
+| `x` (any Git view) | Show the keys the focused pane understands |
+| `s` / `S` (working-tree diff) | Stage / unstage the hunk under the cursor |
+| `d` (working-tree diff) | Discard the hunk under the cursor (confirms first) |
+| `]` / `[` (any diff) | Next / previous hunk |
+| `Tab` (any diff) | Fold the file under the cursor down to its header |
+| `Enter` (any diff) | Open the real file at the line under the cursor |
 | `SPC j j` | Open (or refocus) the JIRA dashboard |
 | `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
 | `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |

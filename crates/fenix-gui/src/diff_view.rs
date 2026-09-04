@@ -37,6 +37,11 @@ pub struct DiffAnchor {
 /// uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffStyle {
+    /// A caller-supplied title above the diff (`commit abc1234`, a merge
+    /// request's own heading) -- distinct from `FileHeader` even though
+    /// they look alike, so that scanning the rendered rows for "the
+    /// files in this diff" can't accidentally match the title.
+    Title,
     /// The per-file summary row (`M  src/main.rs   +12 -3`).
     FileHeader,
     /// A `@@ -a,b +c,d @@` row.
@@ -342,7 +347,7 @@ mod tests {
     #[test]
     fn a_header_is_rendered_above_the_diff_and_carries_no_anchor() {
         let header = vec![
-            ("abc1234  Jane Doe  2026-09-03 14:22".to_string(), DiffStyle::FileHeader),
+            ("abc1234  Jane Doe  2026-09-03 14:22".to_string(), DiffStyle::Title),
             ("Fix the thing".to_string(), DiffStyle::Meta),
         ];
         let view = render_with_header(&header, &fenix_diff::parse(SIMPLE), &HashSet::new());
@@ -357,7 +362,7 @@ mod tests {
 
     #[test]
     fn a_header_still_shows_when_the_commit_changed_nothing() {
-        let header = vec![("abc1234  an empty commit".to_string(), DiffStyle::FileHeader)];
+        let header = vec![("abc1234  an empty commit".to_string(), DiffStyle::Title)];
         let view = render_with_header(&header, &[], &HashSet::new());
         assert!(view.text.starts_with("abc1234"), "got: {:?}", view.text);
         assert!(view.text.contains("(no changes)"));

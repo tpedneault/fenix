@@ -488,6 +488,11 @@ struct DiffModel {
     /// Display paths of files folded down to their header row.
     collapsed: HashSet<String>,
     source: DiffSource,
+    /// Rows rendered above the diff (a commit's author, date and
+    /// message). Stored rather than passed once, because folding a file
+    /// re-renders the whole buffer -- without this, the first `Tab`
+    /// silently dropped the header.
+    header: Vec<(String, diff_view::DiffStyle)>,
 }
 
 /// Which diff a `DiffModel` holds, and therefore what a hunk action on
@@ -3079,7 +3084,7 @@ fn commit_detail(repo_root: &Path, hash: &str) -> Option<CommitDetail> {
 /// subject, then any message body, then a blank spacer before the diff.
 fn commit_header_rows(meta: &fenix_git::CommitMeta) -> Vec<(String, diff_view::DiffStyle)> {
     let mut rows = vec![
-        (format!("commit {}", meta.short_hash), diff_view::DiffStyle::FileHeader),
+        (format!("commit {}", meta.short_hash), diff_view::DiffStyle::Title),
         (format!("  {} <{}>  {}", meta.author, meta.email, meta.date), diff_view::DiffStyle::Meta),
         (String::new(), diff_view::DiffStyle::Meta),
         (format!("  {}", meta.subject), diff_view::DiffStyle::HunkHeader),
@@ -3648,7 +3653,7 @@ fn diff_highlights_for_visible_range(
         let color = match meta.style {
             // Same roles the Jira panel already established for a page
             // title vs. a section header.
-            diff_view::DiffStyle::FileHeader => theme.syntax_function,
+            diff_view::DiffStyle::Title | diff_view::DiffStyle::FileHeader => theme.syntax_function,
             diff_view::DiffStyle::HunkHeader => theme.syntax_keyword,
             diff_view::DiffStyle::Added => theme.git_staged,
             diff_view::DiffStyle::Removed => theme.git_conflicted,
@@ -12282,10 +12287,24 @@ impl App {
         repo_root: &Path,
     ) {
         let files = diff.map(fenix_diff::parse).unwrap_or_default();
-        let collapsed = self.diff_models.get(&id).map(|m| m.collapsed.clone()).unwrap_or_default();
+        // A read-only diff -- a commit, a stash, a comparison -- opens
+        // with its files folded, so a change touching a dozen files
+        // reads as a scannable list of what it touched rather than a
+        // wall of hunks; `Tab` opens the one under the cursor. A
+        // single-file diff has no list worth showing, so it stays open.
+        // A working-tree diff also stays open: there you're staging
+        // hunks, not surveying.
+        let collapsed = if source == DiffSource::ReadOnly && files.len() > 1 {
+            files.iter().map(|f| f.display_path().to_string()).collect()
+        } else {
+            self.diff_models.get(&id).map(|m| m.collapsed.clone()).unwrap_or_default()
+        };
         let view = diff_view::render_with_header(header, &files, &collapsed);
         self.diff_lines.insert(id, view.lines);
-        self.diff_models.insert(id, DiffModel { repo_root: repo_root.to_path_buf(), files, collapsed, source });
+        self.diff_models.insert(
+            id,
+            DiffModel { repo_root: repo_root.to_path_buf(), files, collapsed, source, header: header.to_vec() },
+        );
         if let Some(ob) = self.buffers.get_mut(id) {
             let end = ob.buffer.len_chars();
             let mut scratch_cursor = Cursor::at_start();
@@ -12306,7 +12325,7 @@ impl App {
     /// preserving_line`'s own reasoning for the Files tree.
     fn rerender_diff_buffer(&mut self, id: BufferId) {
         let Some(model) = self.diff_models.get(&id) else { return };
-        let view = diff_view::render(&model.files, &model.collapsed);
+        let view = diff_view::render_with_header(&model.header, &model.files, &model.collapsed);
         self.diff_lines.insert(id, view.lines);
 
         let mut old_lines: Vec<(fenix_window::WindowId, usize)> = Vec::new();
@@ -12413,6 +12432,20 @@ impl App {
             // git's own "error: patch does not apply" is far more
             // useful than anything this could paraphrase.
             Err(err) => self.set_error(err.trim().to_string()),
+        }
+    }
+
+    /// `d` on a diff row: asks to discard the hunk under the cursor.
+    ///
+    /// Discarding is gated behind the panel's confirm-then-act step, but
+    /// only a working-tree diff can be discarded at all -- a commit or a
+    /// comparison says so rather than arming a confirmation that would
+    /// then decline, which would make `y` look broken.
+    fn diff_discard_request(&mut self) {
+        if self.focused_diff_is_read_only() {
+            self.set_error("this diff isn't editable (a commit, a stash, or a comparison)".to_string());
+        } else {
+            self.git_arm_confirm();
         }
     }
 
@@ -12990,14 +13023,16 @@ impl App {
         // split already uses.
         let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
         self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
-        // The graph is what's being read here, and its rows are long
-        // (rails, hash, refs, subject) -- give it the larger share.
+        // `resize_focused` adjusts the *first* child's share of the
+        // nearest split whichever side is focused, so this gives the
+        // graph 40% and the right-hand column 60%, where the diffs are.
         self.windows_mut().resize_focused(-0.1);
         let refs_pane = self.windows_mut().split(SplitKind::Horizontal, refs_buffer);
         self.workspaces.active_pane_states_mut().insert(refs_pane, PaneState::seeded_at(cursor));
-        // `split` focuses the new pane, so the refs pane is current here
-        // -- shrink it (a short listing) in favour of the diff below it.
-        self.windows_mut().resize_focused(-0.2);
+        // Commit detail (the split's first child) takes three quarters:
+        // it holds a whole diff, while the refs tree is a short list
+        // that only ever needs a handful of rows.
+        self.windows_mut().resize_focused(0.25);
         self.windows_mut().focus(graph_pane);
 
         self.pane_titles.insert(graph_pane, "1. Graph".to_string());
@@ -13047,6 +13082,35 @@ impl App {
             session.last_detail_commit = None; // force the detail pane to re-fetch
         }
         self.history_sync_detail();
+    }
+
+    /// `1`/`2`/`3` in the History view, matching the pane titles -- the
+    /// same jump-to-pane shortcut the Docker and Git panels already
+    /// advertise in theirs.
+    fn history_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.history_session.as_ref()?;
+        match n {
+            1 => Some(session.graph_pane),
+            2 => Some(session.refs_pane),
+            3 => Some(session.detail_pane),
+            _ => None,
+        }
+    }
+
+    /// `1`/`2` in the Compare view.
+    fn compare_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
+        let session = self.compare_session.as_ref()?;
+        match n {
+            1 => Some(session.commits_pane),
+            2 => Some(session.diff_pane),
+            _ => None,
+        }
+    }
+
+    /// Whether the focused diff is one with no index relationship to
+    /// change -- a commit, a stash, or a ref comparison.
+    fn focused_diff_is_read_only(&self) -> bool {
+        self.focused_diff_buffer().and_then(|id| self.diff_models.get(&id)).is_some_and(|m| m.source == DiffSource::ReadOnly)
     }
 
     /// The commit the cursor is on in the Graph pane, if that's where it
@@ -16716,6 +16780,50 @@ impl App {
             }
         }
 
+        // Diff-viewer keys, claimed wherever a rendered diff is focused
+        // rather than per-panel: the working tree's Main pane, a
+        // commit's detail in the History view and a comparison's changes
+        // are all the same viewer, so `Tab` folding a file and `]`/`[`
+        // stepping between hunks have to mean the same thing in all
+        // three. Everything else falls through to the per-view blocks
+        // below, and from there to Vim.
+        if self.focused_diff_buffer().is_some() && keypress.mods == Mods::default() {
+            match keypress.code {
+                KeyCode::Char('s') => {
+                    self.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('S') => {
+                    self.diff_apply_hunk(fenix_git::ApplyTarget::Unstage);
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('d') => {
+                    self.diff_discard_request();
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char(']') => {
+                    self.diff_jump_hunk(true);
+                    return;
+                }
+                KeyCode::Char('[') => {
+                    self.diff_jump_hunk(false);
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::Tab) => {
+                    self.diff_toggle_fold();
+                    return;
+                }
+                KeyCode::Named(FenixNamedKey::Enter) => {
+                    self.diff_open_file_at_cursor();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // The History and Compare views claim their own small key sets
         // the same way, ahead of the working-tree panel's block below --
         // they're separate workspaces, so there's no ambiguity about
@@ -16734,6 +16842,23 @@ impl App {
                 KeyCode::Char('f') => {
                     self.git_fetch();
                     self.wake_caret();
+                    return;
+                }
+                KeyCode::Char('x') => {
+                    self.git_menu_open = true;
+                    self.wake_caret();
+                    return;
+                }
+                // Jump straight to a numbered pane, the same shortcut
+                // the Docker and Git panels' own titles advertise.
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    if let Some(pane) = self.history_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                        self.windows_mut().focus(pane);
+                        // Landing on the graph re-syncs the detail pane
+                        // to whatever row the cursor was left on there.
+                        self.history_sync_detail();
+                        self.wake_caret();
+                    }
                     return;
                 }
                 _ => {}
@@ -16758,6 +16883,18 @@ impl App {
                     // Re-target without closing: the same two-step ref
                     // picker `SPC g c` opens, reusing this workspace.
                     self.start_compare_picker();
+                    return;
+                }
+                KeyCode::Char('x') => {
+                    self.git_menu_open = true;
+                    self.wake_caret();
+                    return;
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    if let Some(pane) = self.compare_pane_by_number(c.to_digit(10).unwrap_or(0)) {
+                        self.windows_mut().focus(pane);
+                        self.wake_caret();
+                    }
                     return;
                 }
                 _ => {}
@@ -16850,49 +16987,10 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                // -- the Main pane's own diff-viewer keys ------------
-                // `s`/`S`/`d` mean the same verbs they do on a file row,
-                // one level finer: the hunk under the cursor rather than
-                // the whole file. Which of them is legal depends on
-                // which diff is showing (`DiffSource`), and asking for
-                // the wrong one says so rather than doing nothing.
-                (Main, KeyCode::Char('s')) if keypress.mods == Mods::default() => {
-                    self.diff_apply_hunk(fenix_git::ApplyTarget::Stage);
-                    self.wake_caret();
-                    return;
-                }
-                (Main, KeyCode::Char('S')) if keypress.mods == Mods::default() => {
-                    self.diff_apply_hunk(fenix_git::ApplyTarget::Unstage);
-                    self.wake_caret();
-                    return;
-                }
-                (Main, KeyCode::Char('d')) if keypress.mods == Mods::default() => {
-                    self.git_arm_confirm();
-                    self.wake_caret();
-                    return;
-                }
-                // Single `]`/`[` rather than Vim's two-key `]c`/`[c`:
-                // every other action in this panel is one pane-scoped
-                // key (`s`/`S`/`a`/`c`/`u`/`x`/Tab), and `x`'s own menu
-                // is how these get discovered -- a two-key sequence
-                // would need a pending-key mechanism this panel doesn't
-                // otherwise have, for no gain.
-                (Main, KeyCode::Char(']')) if keypress.mods == Mods::default() => {
-                    self.diff_jump_hunk(true);
-                    return;
-                }
-                (Main, KeyCode::Char('[')) if keypress.mods == Mods::default() => {
-                    self.diff_jump_hunk(false);
-                    return;
-                }
-                (Main, KeyCode::Named(FenixNamedKey::Tab)) if keypress.mods == Mods::default() => {
-                    self.diff_toggle_fold();
-                    return;
-                }
-                (Main, KeyCode::Named(FenixNamedKey::Enter)) if keypress.mods == Mods::default() => {
-                    self.diff_open_file_at_cursor();
-                    return;
-                }
+                // The Main pane's own diff keys (`s`/`S`/`d`, `]`/`[`,
+                // Tab, Enter) are handled by the shared diff-viewer
+                // block above, which covers every pane showing a
+                // rendered diff rather than just this one.
                 (_, KeyCode::Char('u')) if keypress.mods == Mods::default() => {
                     self.git_refresh_session();
                     self.wake_caret();
@@ -18492,6 +18590,40 @@ impl App {
         if !self.git_menu_open {
             return None;
         }
+        // The History and Compare views are separate workspaces with no
+        // `GitPaneRole` of their own, but `x` means the same thing in
+        // them -- "what can I press here" -- so they get their own key
+        // lists rather than no menu at all.
+        if let Some(session) = &self.history_session {
+            let focused = self.focused_pane_id();
+            let bindings: Option<&[(&str, &str)]> = if focused == session.graph_pane {
+                Some(&[("1/2/3", "go to pane"), ("u", "refresh"), ("f", "fetch")])
+            } else if focused == session.refs_pane {
+                Some(&[("1/2/3", "go to pane"), ("u", "refresh"), ("f", "fetch")])
+            } else if focused == session.detail_pane {
+                Some(&[("Tab", "fold/unfold file"), ("]", "next hunk"), ("[", "prev hunk"), ("Enter", "open file here"), ("u", "refresh")])
+            } else {
+                None
+            };
+            if let Some(bindings) = bindings {
+                return self.git_menu_popup_at(bindings, window_width, modeline_top);
+            }
+        }
+        if let Some(session) = &self.compare_session {
+            let focused = self.focused_pane_id();
+            if focused == session.commits_pane || focused == session.diff_pane {
+                let bindings: &[(&str, &str)] = &[
+                    ("1/2", "go to pane"),
+                    ("t", "three-dot/two-dot"),
+                    ("r", "re-target refs"),
+                    ("Tab", "fold/unfold file"),
+                    ("]", "next hunk"),
+                    ("[", "prev hunk"),
+                    ("u", "refresh"),
+                ];
+                return self.git_menu_popup_at(bindings, window_width, modeline_top);
+            }
+        }
         let bindings: &[(&str, &str)] = match self.git_focused_role()? {
             GitPaneRole::Staged => &[
                 ("Tab", "expand/collapse"),
@@ -18533,7 +18665,19 @@ impl App {
             ],
             GitPaneRole::Status => return None,
         };
+        self.git_menu_popup_at(bindings, window_width, modeline_top)
+    }
 
+    /// Lays out one key list as the contextual popup -- the shared half
+    /// of `git_menu_popup`, so the History and Compare views' own key
+    /// lists render identically to the Git panel's without duplicating
+    /// the geometry.
+    fn git_menu_popup_at(
+        &self,
+        bindings: &[(&str, &str)],
+        window_width: f32,
+        modeline_top: f32,
+    ) -> Option<(fenix_window::Rect, RowSpans)> {
         let (char_width, line_height) = match &self.text {
             Some(text) => (text.char_width(), text.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
@@ -27519,6 +27663,134 @@ mod tests {
         app.history_sync_detail();
 
         assert_eq!(app.buffers.get(detail_buffer).unwrap().buffer.text(), before, "the detail pane should be unchanged");
+    }
+
+    #[test]
+    fn digit_keys_jump_between_the_history_views_panes() {
+        let dir = diverged_repo("history_digits");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let (graph, refs, detail) = {
+            let s = app.history_session.as_ref().unwrap();
+            (s.graph_pane, s.refs_pane, s.detail_pane)
+        };
+
+        // What the digit arm in `route_keypress` resolves and focuses.
+        assert_eq!(app.history_pane_by_number(1), Some(graph));
+        assert_eq!(app.history_pane_by_number(2), Some(refs));
+        assert_eq!(app.history_pane_by_number(3), Some(detail));
+        assert_eq!(app.history_pane_by_number(7), None, "a pane number that doesn't exist is ignored");
+
+        let target = app.history_pane_by_number(2).unwrap();
+        app.windows_mut().focus(target);
+        assert_eq!(app.focused_pane_id(), refs);
+    }
+
+    #[test]
+    fn digit_keys_jump_between_the_compare_views_panes() {
+        let dir = diverged_repo("compare_digits");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_compare_view("main".to_string(), "side".to_string());
+        let (commits, diff) = {
+            let s = app.compare_session.as_ref().unwrap();
+            (s.commits_pane, s.diff_pane)
+        };
+
+        assert_eq!(app.compare_pane_by_number(1), Some(commits));
+        assert_eq!(app.compare_pane_by_number(2), Some(diff));
+        assert_eq!(app.compare_pane_by_number(3), None);
+
+        let target = app.compare_pane_by_number(2).unwrap();
+        app.windows_mut().focus(target);
+        assert_eq!(app.focused_pane_id(), diff);
+    }
+
+    #[test]
+    fn the_commit_pane_gets_a_larger_share_than_the_refs_tree() {
+        let dir = diverged_repo("history_proportions");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let (detail, refs) = {
+            let s = app.history_session.as_ref().unwrap();
+            (s.detail_pane, s.refs_pane)
+        };
+
+        let layout = app.windows().layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 });
+        let height = |pane| layout.iter().find(|(id, _)| *id == pane).map(|(_, r)| r.h).unwrap();
+        assert!(height(detail) > height(refs), "the commit detail holds a diff, the refs tree a short list");
+    }
+
+    #[test]
+    fn a_multi_file_commit_opens_with_its_files_folded_and_tab_unfolds_one() {
+        let dir = diverged_repo("history_fold");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        // A commit touching two files is where a folded list earns its
+        // keep.
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        dir.write("one.txt", "1\n");
+        dir.write("two.txt", "2\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "touch two files"]);
+        app.open_history_view();
+
+        let (detail_pane, detail_buffer) = {
+            let s = app.history_session.as_ref().unwrap();
+            (s.detail_pane, s.detail_buffer)
+        };
+        let folded = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        assert!(folded.contains("one.txt") && folded.contains("two.txt"), "both files are listed:\n{folded}");
+        assert!(!folded.contains("@@"), "but no hunks until one is opened:\n{folded}");
+
+        // Tab on the first file row opens just that file.
+        app.windows_mut().focus(detail_pane);
+        let first_file = app.diff_lines[&detail_buffer]
+            .iter()
+            .position(|l| l.as_ref().is_some_and(|l| l.style == diff_view::DiffStyle::FileHeader))
+            .expect("a file header row");
+        let char_idx = app.buffers.get(detail_buffer).unwrap().buffer.line_start_char(first_file);
+        app.test_set_cursor(Cursor { char_idx, sticky_col: 0 });
+        app.diff_toggle_fold();
+
+        let after = app.buffers.get(detail_buffer).unwrap().buffer.text();
+        assert!(after.contains("@@"), "Tab should open the file under the cursor:\n{after}");
+        // Folding re-renders the whole buffer, so the commit's own
+        // header has to survive it -- the first Tab used to drop it.
+        assert!(after.starts_with("commit "), "the commit header must survive a fold toggle:\n{after}");
+        assert!(after.contains("Test <test@example.com>"), "including the author:\n{after}");
+    }
+
+    #[test]
+    fn a_single_file_commit_is_not_folded_since_there_is_no_list_to_scan() {
+        let dir = diverged_repo("history_single_file");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+
+        // The newest commit on `main` touches exactly one file.
+        let detail = app.buffers.get(app.history_session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
+        assert!(detail.contains("@@"), "a one-file commit shows its hunks straight away:\n{detail}");
+    }
+
+    #[test]
+    fn a_read_only_diff_refuses_a_discard_rather_than_arming_a_confirmation() {
+        let dir = diverged_repo("history_no_discard");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_history_view();
+        let detail_pane = app.history_session.as_ref().unwrap().detail_pane;
+        app.windows_mut().focus(detail_pane);
+
+        app.diff_discard_request();
+
+        assert!(app.git_confirm.is_none(), "nothing to confirm on a commit's diff");
+        assert!(app.modeline_pieces().1.contains("isn't editable"), "got: {}", app.modeline_pieces().1);
     }
 
     #[test]
