@@ -12318,6 +12318,36 @@ impl App {
         }
     }
 
+    /// Fills a diff buffer with a message instead of a diff -- what a
+    /// failed comparison shows. Deliberately *not* `set_diff_buffer`
+    /// with an empty diff: that renders "(no changes)", which claims
+    /// the two sides are identical rather than admitting the question
+    /// couldn't be answered.
+    ///
+    /// The model is left empty, so every hunk action correctly declines
+    /// on these rows.
+    fn set_diff_buffer_message(&mut self, id: BufferId, rows: &[(String, diff_view::DiffStyle)], repo_root: &Path) {
+        let mut text = String::new();
+        let mut lines = Vec::new();
+        for (row, style) in rows {
+            text.push_str(row);
+            text.push('\n');
+            lines.push(Some(diff_view::DiffViewLine { style: *style, content_from: 0, anchor: None }));
+        }
+        self.diff_lines.insert(id, lines);
+        self.diff_models.insert(
+            id,
+            DiffModel {
+                repo_root: repo_root.to_path_buf(),
+                files: Vec::new(),
+                collapsed: HashSet::new(),
+                source: DiffSource::ReadOnly,
+                header: Vec::new(),
+            },
+        );
+        self.replace_buffer_text(id, &text);
+    }
+
     /// Re-renders a diff buffer from its already-parsed model, keeping
     /// every pane's cursor on the same line index -- for fold toggles,
     /// where the content above the cursor is unchanged and resetting to
@@ -13260,8 +13290,20 @@ impl App {
             self.set_error("no refs to compare -- is this a git repository?".to_string());
             return;
         }
-        let preferred = self.config.git_base_branch.clone().unwrap_or_else(|| "main".to_string());
-        if let Some(i) = refs.iter().position(|r| *r == preferred) {
+        // Lead with a mainline that actually exists. `[git] base_branch`
+        // first, then the two conventional names -- a repo on `master`
+        // would otherwise fall through to `HEAD` leading the list, and
+        // then Enter-Enter compares HEAD against HEAD and reports
+        // nothing, which reads as the feature being broken rather than
+        // as "you compared a ref with itself".
+        let preferred: Vec<String> = self
+            .config
+            .git_base_branch
+            .clone()
+            .into_iter()
+            .chain(["main".to_string(), "master".to_string()])
+            .collect();
+        if let Some(i) = preferred.iter().find_map(|p| refs.iter().position(|r| r == p)) {
             let base = refs.remove(i);
             refs.insert(0, base);
         }
@@ -13320,17 +13362,25 @@ impl App {
         let (repo_root, base, head, three_dot) = (session.repo_root.clone(), session.base.clone(), session.head.clone(), session.three_dot);
         let (commits_buffer, diff_buffer) = (session.commits_buffer, session.diff_buffer);
 
-        let commits = fenix_git::commits_between(&repo_root, &base, &head, 200);
+        const COMMIT_LIMIT: usize = 200;
+        let commits = fenix_git::commits_between(&repo_root, &base, &head, COMMIT_LIMIT);
         let dots = if three_dot { "..." } else { ".." };
-        self.set_git_buffer(commits_buffer, git_panel::render_compare(&format!("{base}{dots}{head}"), &commits));
+        self.set_git_buffer(
+            commits_buffer,
+            git_panel::render_compare(&format!("{base}{dots}{head}"), &commits, commits.len() >= COMMIT_LIMIT),
+        );
 
-        // A comparison against a ref git doesn't know is the one case
-        // worth surfacing loudly -- otherwise it just looks like an
-        // empty diff, which is a real and very different answer.
+        // A comparison against a ref git doesn't know has to be loud.
+        // Rendered into the pane, not just flashed in the modeline: an
+        // empty diff pane beside an error that has already scrolled past
+        // reads as "these refs are identical", which is a completely
+        // different answer from "one of those isn't a ref".
         match fenix_git::diff_refs(&repo_root, &base, &head, three_dot) {
             Ok(diff) => self.set_diff_buffer(diff_buffer, Some(&diff), DiffSource::ReadOnly, &repo_root),
             Err(err) => {
-                self.set_diff_buffer(diff_buffer, None, DiffSource::ReadOnly, &repo_root);
+                let mut rows = vec![(format!("couldn't compare {base}{dots}{head}"), diff_view::DiffStyle::Removed)];
+                rows.extend(err.trim().lines().map(|l| (format!("  {l}"), diff_view::DiffStyle::Meta)));
+                self.set_diff_buffer_message(diff_buffer, &rows, &repo_root);
                 self.set_error(err.trim().to_string());
             }
         }
@@ -17643,11 +17693,24 @@ impl App {
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
-                Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE AGAINST", picker_len(picker)),
+                Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
                 None => ("PICKER", 0),
             };
-            return (label, format!("│ {count} matches "));
+            // Which half of a two-step comparison you're on, spelled
+            // out. "base" and "head" alone don't say which direction the
+            // result reads in, and picking them the wrong way round
+            // silently answers the opposite question.
+            let suffix = match &self.active_picker {
+                Some(ActivePicker::CompareBase(_)) => {
+                    format!("│ {count} refs   pick the ref to compare *against* (the base) ")
+                }
+                Some(ActivePicker::CompareHead { base, .. }) => {
+                    format!("│ {count} refs   {base}...?   pick the ref whose changes you want to see ")
+                }
+                _ => format!("│ {count} matches "),
+            };
+            return (label, suffix);
         }
         let ob = self.open();
         let filename = self.buffer_display_name(self.focused_buffer_id());
@@ -27894,6 +27957,76 @@ mod tests {
             }
             _ => panic!("expected the compare-base picker"),
         }
+    }
+
+    #[test]
+    fn the_compare_picker_leads_with_master_when_there_is_no_main() {
+        // The trap this closes: with the default base of `main` absent,
+        // the list led with `HEAD`, so Enter-Enter compared HEAD against
+        // HEAD and reported nothing -- which reads as broken rather than
+        // as "you compared a ref with itself".
+        let dir = diverged_repo("compare_base_master");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["branch", "-m", "main", "master"]);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.start_compare_picker();
+
+        match &app.active_picker {
+            Some(ActivePicker::CompareBase(state)) => {
+                let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
+                assert_eq!(labels[0], "master", "a repo on master should lead with it: {labels:?}");
+            }
+            _ => panic!("expected the compare-base picker"),
+        }
+    }
+
+    #[test]
+    fn the_compare_pickers_say_which_side_is_being_chosen() {
+        let dir = diverged_repo("compare_prompts");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.start_compare_picker();
+        let (_, suffix) = app.modeline_pieces();
+        assert!(suffix.contains("compare *against*"), "the base step must say which side it is: {suffix}");
+
+        app.compare_pick_head("main".to_string());
+        let (_, suffix) = app.modeline_pieces();
+        assert!(suffix.contains("main...?"), "the head step echoes the chosen base: {suffix}");
+        assert!(suffix.contains("changes you want to see"), "{suffix}");
+    }
+
+    #[test]
+    fn comparing_against_a_ref_that_does_not_exist_says_so_in_the_pane() {
+        // Not just in the modeline: an empty diff beside a message that
+        // has already scrolled past reads as "identical", which is a
+        // completely different answer from "that isn't a ref".
+        let dir = diverged_repo("compare_bad_ref");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_compare_view("main".to_string(), "no-such-branch".to_string());
+
+        let diff = app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text();
+        assert!(diff.contains("couldn't compare main...no-such-branch"), "got:\n{diff}");
+        assert!(!diff.contains("(no changes)"), "must not claim the two sides match:\n{diff}");
+    }
+
+    #[test]
+    fn the_compare_header_carries_the_commit_count() {
+        let dir = diverged_repo("compare_count");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.open_compare_view("main".to_string(), "side".to_string());
+
+        let commits = app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text();
+        assert!(commits.contains("(1 commits)"), "got:\n{commits}");
     }
 
     #[test]

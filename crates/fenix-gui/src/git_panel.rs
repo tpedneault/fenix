@@ -403,9 +403,16 @@ fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
 /// then one row per commit `head` has that `base` doesn't. Reuses the
 /// Commits pane's own row shape (`[short hash] subject`) so the two
 /// listings read identically.
-pub fn render_compare(range: &str, commits: &[Commit]) -> GitPanel {
+pub fn render_compare(range: &str, commits: &[Commit], truncated: bool) -> GitPanel {
     let mut b = Builder::new();
-    b.push(&format!("  {range}"), Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }));
+    // The count belongs in the header: without it a truncated list looks
+    // like the whole answer, and "how far apart are these two" is half
+    // the reason to run a comparison at all.
+    let count = if truncated { format!("{}+ commits", commits.len()) } else { format!("{} commits", commits.len()) };
+    b.push(
+        &format!("  {range}   ({count})"),
+        Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }),
+    );
     if commits.is_empty() {
         let (text, meta) = empty_line("No commits between these refs");
         b.push(&text, meta);
@@ -644,8 +651,10 @@ mod tests {
 
     #[test]
     fn render_compare_heads_the_list_with_the_range_and_lists_each_commit() {
-        let panel = render_compare("main...side", &[commit("abcdef123", "abcdef1", "on side")]);
+        let panel = render_compare("main...side", &[commit("abcdef123", "abcdef1", "on side")], false);
         assert!(panel.text.starts_with("  main...side"));
+        assert!(panel.text.contains("(1 commits)"), "the header carries the count:
+{}", panel.text);
         assert!(panel.text.contains("[abcdef1] on side"));
         let entries: Vec<_> = panel.lines.iter().flatten().filter_map(|l| l.entry.as_ref()).collect();
         assert_eq!(entries[0], &GitEntry::Commit("abcdef123".to_string()));
@@ -654,8 +663,17 @@ mod tests {
 
     #[test]
     fn render_compare_with_nothing_between_the_refs_says_so() {
-        let panel = render_compare("main...main", &[]);
+        let panel = render_compare("main...main", &[], false);
         assert!(panel.text.contains("No commits between these refs"));
+        assert!(panel.text.contains("(0 commits)"));
+    }
+
+    #[test]
+    fn render_compare_marks_a_truncated_list_so_it_is_not_read_as_the_whole_answer() {
+        let commits: Vec<Commit> = (0..3).map(|i| commit(&format!("hash{i}"), &format!("h{i}"), "work")).collect();
+        let panel = render_compare("main...side", &commits, true);
+        assert!(panel.text.contains("(3+ commits)"), "got:
+{}", panel.text);
     }
 
     #[test]

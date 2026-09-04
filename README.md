@@ -288,8 +288,10 @@ for anyone curious to poke around or build on it.
   difference between the two trees, including what the base gained
   meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g C`
   closes. The base picker leads with `[git] base_branch` from
-  `config.ini` (default `main`), so "how does this differ from develop"
-  is two keys and an Enter.
+  `config.ini`, falling back to whichever of `main`/`master` the repo
+  actually has, so "how does this differ from the mainline" is two keys
+  and an Enter; each step says which side it's asking for, and the
+  second echoes the base you already chose (`master...?`).
 - **JIRA dashboard** (`SPC j ...`): track projects and users by hand
   (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
   then `SPC j j` opens a four-pane workspace -- Projects | Users |
@@ -1138,7 +1140,7 @@ window2 = 4480,0,1920,1040|true
 | `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
 | `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
 | `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
-| `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset means `main` |
+| `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
