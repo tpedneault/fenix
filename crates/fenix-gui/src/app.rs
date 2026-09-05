@@ -3046,6 +3046,10 @@ enum PromptKind {
     /// to do at all: reaching `\\nas\media\projects\2026` meant walking
     /// there one `Enter` at a time from wherever you happened to start.
     GoToPath,
+    /// Narrows the listing as you type. Unlike every other prompt here
+    /// it acts on each keystroke rather than on Enter -- a filter you
+    /// cannot see the effect of while typing is just a slower search.
+    Filter,
     ConfirmDelete,
     Rename,
     CreateFile,
@@ -3059,6 +3063,7 @@ impl PromptKind {
     fn past_tense(self) -> &'static str {
         match self {
             PromptKind::GoToPath => "opened",
+            PromptKind::Filter => "filtered",
             PromptKind::ConfirmDelete => "deleted",
             PromptKind::Rename => "renamed",
             PromptKind::CreateFile => "created",
@@ -4643,6 +4648,11 @@ fn explorer_header(state: &ExplorerState, waiting_on: Option<&Path>) -> String {
         header.push_str(&format!(", {} marked", state.marks.len()));
     }
     header.push_str(&format!("  --  {}", state.sort.label()));
+    if !state.filter.is_empty() {
+        // Said out loud, because a listing that is quietly narrowed is a
+        // listing that appears to have lost files.
+        header.push_str(&format!("  --  filtered: {}", state.filter));
+    }
     if state.show_hidden {
         header.push_str("  --  hidden shown");
     }
@@ -18586,6 +18596,11 @@ impl App {
             ExplorerAction::MarkAll => self.active_explorer_mut().unwrap().mark_all(),
             ExplorerAction::UnmarkAll => self.active_explorer_mut().unwrap().unmark_all(),
             ExplorerAction::ToggleAllMarks => self.active_explorer_mut().unwrap().toggle_all_marks(),
+            ExplorerAction::BeginFilter => {
+                let seed = self.active_explorer().map(|e| e.filter.clone()).unwrap_or_default();
+                self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::Filter, input: seed });
+            }
+            ExplorerAction::BeginFind => self.explorer_find_under_here(),
             ExplorerAction::ToggleHidden => {
                 self.active_explorer_mut().unwrap().toggle_hidden();
                 self.explorer_relist();
@@ -18772,7 +18787,16 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.explorer_prompt = None,
+            KeyCode::Named(FenixNamedKey::Escape) => {
+                // Cancelling a filter widens the listing back out --
+                // leaving it narrowed after Escape would be a filter you
+                // cannot remember setting.
+                let was_filtering = prompt.kind == PromptKind::Filter;
+                self.explorer_prompt = None;
+                if was_filtering {
+                    self.explorer_set_filter("");
+                }
+            }
             KeyCode::Named(FenixNamedKey::Enter) => {
                 let ExplorerPrompt { kind, input } = self.explorer_prompt.take().unwrap();
                 self.explorer_completions.clear();
@@ -18781,10 +18805,12 @@ impl App {
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 prompt.input.pop();
                 self.refresh_path_completions();
+                self.apply_live_filter();
             }
             KeyCode::Char(c) => {
                 prompt.input.push(c);
                 self.refresh_path_completions();
+                self.apply_live_filter();
             }
             _ => {}
         }
@@ -18804,6 +18830,42 @@ impl App {
         self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::GoToPath, input: seed });
         self.refresh_path_completions();
         self.wake_caret();
+    }
+
+    /// Narrows the listing to whatever is currently typed, if what is
+    /// being typed is a filter.
+    fn apply_live_filter(&mut self) {
+        let Some(prompt) = self.explorer_prompt.as_ref().filter(|p| p.kind == PromptKind::Filter) else { return };
+        let text = prompt.input.clone();
+        self.explorer_set_filter(&text);
+    }
+
+    /// Applies a filter to whichever listing is active and re-renders.
+    /// No I/O -- narrowing is a view over rows already in hand, which is
+    /// what keeps it instant on a share.
+    fn explorer_set_filter(&mut self, filter: &str) {
+        let Some(explorer) = self.active_explorer_mut() else { return };
+        explorer.set_filter(filter);
+        if let Some(buffer) = self.focused_dired_buffer() {
+            self.render_dired(buffer, false);
+        }
+    }
+
+    /// `F` in a listing: fuzzy-find by name through everything under the
+    /// directory being browsed, not just its immediate children.
+    ///
+    /// Reuses the project file picker's own candidate list, rooted here
+    /// instead of at a project -- including files `.gitignore` would
+    /// hide, because a file manager has no business pretending a build
+    /// artifact does not exist.
+    fn explorer_find_under_here(&mut self) {
+        let Some(root) = self.active_explorer().map(|e| e.cwd.clone()) else { return };
+        let candidates = Self::find_file_candidates_all(&root);
+        if candidates.is_empty() {
+            self.set_message(format!("nothing under {}", readable_path(&root)));
+            return;
+        }
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Recomputes what the current text could become. Cheap enough to
@@ -19086,6 +19148,7 @@ impl App {
                 }
             }
             PromptKind::GoToPath => format!("Go to: {}", prompt.input),
+            PromptKind::Filter => format!("Filter: {}", prompt.input),
             PromptKind::Rename => format!("Rename to: {}", prompt.input),
             PromptKind::CreateFile => format!("Create file: {}", prompt.input),
             PromptKind::CreateDir => format!("Create directory: {}", prompt.input),
@@ -19118,6 +19181,9 @@ impl App {
                 }
                 self.explorer_transfer(kind, &targets, &dest, fenix_fs::OnConflict::KeepBoth)
             }
+            // Already applied on every keystroke -- Enter just closes
+            // the prompt and leaves the listing narrowed.
+            PromptKind::Filter => return,
             PromptKind::ConfirmDelete => return, // handled in explorer_prompt_key via y/n, not Enter
         };
         self.report_explorer_outcomes(kind.past_tense(), outcomes);
@@ -28339,6 +28405,122 @@ configure_board stm32
         app.mib_refresh_index();
 
         assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
+    }
+
+    // -- Narrowing a listing, and searching under it ---------------------
+
+    #[test]
+    fn a_filter_narrows_the_listing_as_it_is_typed() {
+        // Not on Enter: a filter you cannot see the effect of while
+        // typing is just a slower search.
+        let dir = TempDir::new("gui_filter_live");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        dir.touch("alpine.rs");
+        let mut app = app_with_places("filter_live", dir.path());
+
+        app.dired_handle_action(ExplorerAction::BeginFilter);
+        for c in "alp".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+
+        let names = explorer_row_names(&app.open().buffer.text());
+        assert_eq!(names, ["alpha.txt", "alpine.rs"]);
+    }
+
+    #[test]
+    fn a_narrowed_listing_says_so_in_its_header() {
+        // A listing that is quietly narrowed is a listing that appears
+        // to have lost files.
+        let dir = TempDir::new("gui_filter_header");
+        dir.touch("alpha.txt");
+        let mut app = app_with_places("filter_header", dir.path());
+
+        app.dired_handle_action(ExplorerAction::BeginFilter);
+        app.explorer_prompt_key(KeyPress::char('a'));
+
+        assert!(app.open().buffer.text().lines().next().unwrap().contains("filtered: a"));
+    }
+
+    #[test]
+    fn escape_widens_the_listing_back_out() {
+        // Leaving it narrowed after cancelling would be a filter you
+        // cannot remember setting.
+        let dir = TempDir::new("gui_filter_escape");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        let mut app = app_with_places("filter_escape", dir.path());
+        app.dired_handle_action(ExplorerAction::BeginFilter);
+        for c in "alp".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+        assert_eq!(app.active_explorer().unwrap().entries.len(), 1);
+
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert_eq!(app.active_explorer().unwrap().entries.len(), 2);
+        assert!(app.active_explorer().unwrap().filter.is_empty());
+    }
+
+    #[test]
+    fn enter_keeps_the_filter_and_closes_the_prompt() {
+        // So you can act on what you narrowed to.
+        let dir = TempDir::new("gui_filter_enter");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        let mut app = app_with_places("filter_enter", dir.path());
+        app.dired_handle_action(ExplorerAction::BeginFilter);
+        for c in "alp".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(app.explorer_prompt.is_none());
+        assert_eq!(app.active_explorer().unwrap().entries.len(), 1);
+    }
+
+    #[test]
+    fn an_operation_on_a_narrowed_listing_cannot_reach_what_is_hidden() {
+        // The invariant that makes filtering safe rather than alarming.
+        let dir = TempDir::new("gui_filter_targets");
+        dir.touch("keep.txt");
+        dir.touch("other.txt");
+        let mut app = app_with_places("filter_targets", dir.path());
+        app.dired_handle_action(ExplorerAction::BeginFilter);
+        for c in "keep".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        app.dired_handle_action(ExplorerAction::MarkAll);
+
+        assert_eq!(app.active_explorer().unwrap().target_paths(), vec![dir.path().join("keep.txt")]);
+    }
+
+    #[test]
+    fn find_searches_everything_under_the_directory_not_just_its_children() {
+        let dir = TempDir::new("gui_find");
+        let deep = dir.mkdir("one/two/three");
+        std::fs::write(deep.join("buried.txt"), "x").unwrap();
+        let mut app = app_with_places("find", dir.path());
+
+        app.dired_handle_action(ExplorerAction::BeginFind);
+
+        let labels: Vec<String> =
+            picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, 50).into_iter().map(|(_, l)| l).collect();
+        assert!(labels.iter().any(|l| l.contains("buried.txt")), "got: {labels:?}");
+    }
+
+    #[test]
+    fn find_in_an_empty_directory_says_so_rather_than_opening_an_empty_picker() {
+        let dir = TempDir::new("gui_find_empty");
+        let mut app = app_with_places("find_empty", dir.path());
+
+        app.dired_handle_action(ExplorerAction::BeginFind);
+
+        assert!(app.active_picker.is_none());
+        assert!(app.modeline_pieces().1.contains("nothing under"), "got: {}", app.modeline_pieces().1);
     }
 
     // -- Getting somewhere without walking there -------------------------

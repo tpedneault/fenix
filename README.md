@@ -980,6 +980,7 @@ popup shows what keys continue it.
 | `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
 | `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `f` / `F` | Filter the listing / find by name under here |
 | `r` / `g r` | Refresh |
 | `S` | Select this directory (when picking a project root) |
 | `q` / `Esc` | Quit |
@@ -1002,6 +1003,8 @@ sidebar reads -- only `j`/`k` differ, because here they are the cursor.
 | `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
 | `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `f` | Filter the listing as you type (`Esc` widens it back out) |
+| `F` | Find by name through everything under here |
 | `r` | Refresh |
 | `Esc` | Stop waiting for a directory that isn't answering |
 

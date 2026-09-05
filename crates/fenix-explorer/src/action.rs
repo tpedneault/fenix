@@ -31,6 +31,11 @@ pub enum ExplorerAction {
     BeginCreateDir,
     BeginCopy,
     BeginMove,
+    /// Narrow the listing to names containing what you type -- the
+    /// answer to a folder with four hundred things in it.
+    BeginFilter,
+    /// Search this directory and everything under it, by name.
+    BeginFind,
     ToggleHidden,
     /// Cycle what the listing is ordered by; `ReverseSort` flips the
     /// direction of whatever that currently is. Two keys rather than
@@ -91,6 +96,8 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         t.insert(&[KeyPress::char('C')], "copy to...", ExplorerAction::BeginCopy);
         t.insert(&[KeyPress::char('M')], "move to...", ExplorerAction::BeginMove);
 
+        t.insert(&[KeyPress::char('f')], "filter", ExplorerAction::BeginFilter);
+        t.insert(&[KeyPress::char('F')], "find under here", ExplorerAction::BeginFind);
         t.insert(&[KeyPress::char('.')], "toggle hidden", ExplorerAction::ToggleHidden);
         t.insert(&[KeyPress::char('o')], "sort by...", ExplorerAction::CycleSort);
         t.insert(&[KeyPress::char('O')], "reverse sort", ExplorerAction::ReverseSort);

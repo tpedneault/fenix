@@ -104,7 +104,17 @@ pub fn read_listing(path: &Path, show_hidden: bool) -> io::Result<Listing> {
 /// path that read has to happen off-thread.
 pub struct ExplorerState {
     pub cwd: PathBuf,
+    /// The rows currently on screen. Everything else -- selection,
+    /// marks, `targets()` -- works against this and only this, so
+    /// nothing can ever be acted on that is not visible.
     pub entries: Vec<Entry>,
+    /// Everything that was read, before filtering. Kept so narrowing
+    /// and widening the filter are instant and never touch the disk,
+    /// which matters when the disk is a share.
+    all_entries: Vec<Entry>,
+    /// Narrows the listing to names containing this, case-insensitively.
+    /// Empty means everything.
+    pub filter: String,
     pub selected: usize,
     pub marks: HashSet<PathBuf>,
     pub show_hidden: bool,
@@ -124,6 +134,8 @@ impl ExplorerState {
         Self {
             cwd: path.to_path_buf(),
             entries: Vec::new(),
+            all_entries: Vec::new(),
+            filter: String::new(),
             selected: 0,
             marks: HashSet::new(),
             show_hidden: false,
@@ -154,7 +166,8 @@ impl ExplorerState {
     pub fn apply_listing(&mut self, listing: Listing) {
         let selected_path = self.entries.get(self.selected).map(|e| e.path.clone());
         self.cwd = listing.cwd;
-        self.entries = listing.entries;
+        self.all_entries = listing.entries;
+        self.apply_filter();
         self.sort_in_place();
         git::annotate_entries(&mut self.entries, &self.git_statuses);
         self.marks.retain(|p| self.entries.iter().any(|e| &e.path == p));
@@ -178,6 +191,36 @@ impl ExplorerState {
         self.apply_listing(listing);
         self.apply_git_statuses(git::status_for_dir(&self.cwd));
         Ok(())
+    }
+
+    /// Narrows the listing to names containing `filter`.
+    ///
+    /// Purely a view over what was already read: no I/O, so typing in
+    /// the filter stays instant even on a share. Clears any subtree
+    /// expansion, because a child shown without the parent it belongs
+    /// to is worse than not shown -- and the point of filtering is to
+    /// get a flat list of what you were looking for.
+    pub fn set_filter(&mut self, filter: &str) {
+        let selected_path = self.entries.get(self.selected).map(|e| e.path.clone());
+        filter.clone_into(&mut self.filter);
+        self.apply_filter();
+        self.sort_in_place();
+        self.selected =
+            selected_path.and_then(|p| self.entries.iter().position(|e| e.path == p)).unwrap_or(0).min(self.entries.len().saturating_sub(1));
+    }
+
+    fn apply_filter(&mut self) {
+        if self.filter.is_empty() {
+            self.entries = self.all_entries.clone();
+            return;
+        }
+        let needle = self.filter.to_lowercase();
+        self.entries = self
+            .all_entries
+            .iter()
+            .filter(|entry| entry.depth == 0 && entry.name.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
     }
 
     /// Flips hidden-entry visibility. The caller re-lists afterwards --
@@ -324,6 +367,7 @@ impl ExplorerState {
             end += 1;
         }
         self.entries.drain(start..end);
+        self.all_entries = self.entries.clone();
         true
     }
 
@@ -331,6 +375,12 @@ impl ExplorerState {
     /// `index` -- the half of `toggle_expand` that does no I/O, for a
     /// host that read the children off-thread.
     pub fn expand_with(&mut self, index: usize, children: Vec<Entry>) {
+        // Expansion is a view of the unfiltered listing; a filter
+        // flattens it away (see `set_filter`), so the two never apply at
+        // once and this only has to keep `all_entries` in step.
+        if !self.filter.is_empty() {
+            return;
+        }
         let Some(parent) = self.entries.get(index) else { return };
         let depth = parent.depth;
         let mut children: Vec<Entry> = children
@@ -346,6 +396,7 @@ impl ExplorerState {
             self.entries.insert(insert_at + i, child);
         }
         git::annotate_entries(&mut self.entries, &self.git_statuses);
+        self.all_entries = self.entries.clone();
     }
 
     /// Creates an empty file at `name`, which may include directory
@@ -649,6 +700,98 @@ mod tests {
             ],
             "children stay under `a`, and are themselves reversed"
         );
+    }
+
+    // -- Filtering -------------------------------------------------------
+
+    #[test]
+    fn a_filter_narrows_the_listing_to_matching_names() {
+        let dir = TempDir::new("filter_narrow");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        dir.touch("alpine.rs");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+
+        state.set_filter("alp");
+
+        let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha.txt", "alpine.rs"]);
+    }
+
+    #[test]
+    fn a_filter_ignores_case() {
+        let dir = TempDir::new("filter_case");
+        dir.touch("README.md");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.set_filter("readme");
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn clearing_the_filter_brings_everything_back_without_re_reading() {
+        let dir = TempDir::new("filter_clear");
+        dir.touch("a.txt");
+        dir.touch("b.txt");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.set_filter("a");
+        assert_eq!(state.entries.len(), 1);
+
+        state.set_filter("");
+
+        assert_eq!(state.entries.len(), 2);
+    }
+
+    #[test]
+    fn nothing_hidden_by_a_filter_can_be_acted_on() {
+        // The invariant the whole design rests on: `targets()` names
+        // rows, and a row you cannot see is not one you meant.
+        let dir = TempDir::new("filter_targets");
+        dir.touch("keep.txt");
+        dir.touch("other.txt");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.set_filter("keep");
+
+        state.mark_all();
+
+        assert_eq!(state.target_paths(), vec![dir.path().join("keep.txt")]);
+    }
+
+    #[test]
+    fn a_filter_keeps_the_selection_on_the_same_entry_when_it_survives() {
+        let dir = TempDir::new("filter_selection");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.select_path(&dir.path().join("beta.txt"));
+
+        state.set_filter("bet");
+
+        assert_eq!(state.selected_entry().unwrap().name, "beta.txt");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_leaves_an_empty_listing_rather_than_everything() {
+        let dir = TempDir::new("filter_empty");
+        dir.touch("a.txt");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.set_filter("zzz");
+        assert!(state.entries.is_empty());
+        assert!(state.selected_entry().is_none());
+    }
+
+    #[test]
+    fn re_listing_keeps_the_filter_applied() {
+        // Otherwise every operation would silently widen the view back
+        // out from under you.
+        let dir = TempDir::new("filter_survives_refresh");
+        dir.touch("alpha.txt");
+        dir.touch("beta.txt");
+        let mut state = ExplorerState::opened(dir.path()).unwrap();
+        state.set_filter("alp");
+
+        state.refresh().unwrap();
+
+        assert_eq!(state.entries.len(), 1);
     }
 
     // -- Expansion -------------------------------------------------------
