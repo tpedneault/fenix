@@ -3247,6 +3247,11 @@ fn readable_path(path: &Path) -> String {
     }
 }
 
+/// A path's own name, for a message that has already said where.
+fn file_label(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(path))
+}
+
 /// One line of everything a listing column cannot hold.
 fn describe_properties(props: &fenix_fs::Properties) -> String {
     let name = props.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&props.path));
@@ -5565,6 +5570,9 @@ pub struct App {
     /// number that got recycled would point at a different shell than
     /// the one you remembered.
     terminal_buffer_labels: HashMap<BufferId, String>,
+    /// Where each pane-resident shell was started, for the ones opened
+    /// somewhere in particular (`SPC e T`).
+    terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
     /// How many pane-resident terminals have ever been opened -- the
     /// source of the numbers in `terminal_buffer_labels`.
     terminal_buffers_opened: usize,
@@ -5584,6 +5592,10 @@ pub struct App {
     /// A bulk rename worked out and waiting to be confirmed -- nothing
     /// has been renamed while this is `Some`.
     rename_confirm: Option<Vec<fenix_explorer::Rename>>,
+    /// Where the next search should look, when it was started from a
+    /// listing rather than from the project. Consumed by the search it
+    /// was set for -- see `run_grep`.
+    grep_root: Option<PathBuf>,
     /// The long file operation currently running, if any -- see
     /// `ExplorerJob`. At most one: two copies competing for the same
     /// disk finish no sooner than one after the other, and a single
@@ -6598,6 +6610,7 @@ impl App {
             terminal_buffer_focused: None,
             terminal_buffers_spawning: HashSet::new(),
             terminal_buffer_labels: HashMap::new(),
+            terminal_buffer_cwds: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
             explorer_purpose: ExplorerPurpose::Browse,
@@ -6605,6 +6618,7 @@ impl App {
             explorer_conflict: None,
             rename_confirm: None,
             explorer_job: None,
+            grep_root: None,
             explorer_completions: Vec::new(),
             rename_mode: HashMap::new(),
             volumes: Vec::new(),
@@ -9564,6 +9578,12 @@ impl App {
     /// accumulated shells every time you meant the second thing would
     /// leave processes running behind panes you never look at.
     pub(crate) fn open_terminal_buffer(&mut self) {
+        self.open_terminal_buffer_in(None);
+    }
+
+    /// `open_terminal_buffer`, starting the shell somewhere in
+    /// particular -- `SPC e T`'s "a shell *here*".
+    pub(crate) fn open_terminal_buffer_in(&mut self, cwd: Option<PathBuf>) {
         let focused_buffer = self.focused_buffer_id();
         if self.terminal_buffers_spawning.contains(&focused_buffer) {
             self.focus_terminal_buffer(focused_buffer);
@@ -9589,6 +9609,9 @@ impl App {
         let id = self.buffers.open_terminal();
         self.terminal_buffers_opened += 1;
         self.terminal_buffer_labels.insert(id, format!("*terminal {}*", self.terminal_buffers_opened));
+        if let Some(cwd) = &cwd {
+            self.terminal_buffer_cwds.insert(id, cwd.clone());
+        }
         self.open_buffer_in_focused_pane(id);
         self.spawn_terminal_for(id);
         self.wake_caret();
@@ -9601,18 +9624,21 @@ impl App {
     fn spawn_terminal_for(&mut self, id: BufferId) {
         let pane = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&id)).unwrap_or(self.focused_pane_id());
         let (rows, cols) = self.terminal_pane_size(pane);
+        // Remembered rather than passed once, so a shell respawned after
+        // `exit` comes back where it was rather than somewhere else.
+        let cwd = self.terminal_buffer_cwds.get(&id).cloned();
         self.terminal_buffers_spawning.insert(id);
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let result = fenix_terminal::Terminal::spawn(rows, cols);
+                    let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
                     let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), TerminalSpawnResult(result)));
                 });
             }
             None => {
                 // No event loop to report back through (every test) --
                 // run synchronously, same posture as `toggle_terminal`.
-                let result = fenix_terminal::Terminal::spawn(rows, cols);
+                let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
                 self.apply_terminal_buffer_spawned(id, result);
             }
         }
@@ -9739,6 +9765,7 @@ impl App {
         self.terminal_buffers.remove(&id);
         self.terminal_buffers_spawning.remove(&id);
         self.terminal_buffer_labels.remove(&id);
+        self.terminal_buffer_cwds.remove(&id);
         if self.terminal_buffer_focused == Some(id) {
             self.terminal_buffer_focused = None;
         }
@@ -11382,7 +11409,15 @@ impl App {
     }
 
     fn run_grep(&mut self, query: &str) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        // A search started from a listing searches *that* directory,
+        // once. Taken rather than read so the next `SPC s p` goes back
+        // to searching the project, which is what an unqualified search
+        // should mean.
+        let root = self
+            .grep_root
+            .take()
+            .or_else(|| self.project_root.clone())
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         match fenix_project::grep_project(&root, query) {
             Ok(matches) => {
                 // Kept around as `quickfix` after the picker itself
@@ -19763,6 +19798,112 @@ impl App {
             if total.directories == 1 { "" } else { "s" },
         ));
         self.wake_caret();
+    }
+
+    // -- Handing things back to the rest of the system -------------------
+
+    /// `SPC e o`: open the entry at point with whatever the system
+    /// associates with it.
+    ///
+    /// The answer to a `.xlsx` is Excel, not a hex dump. A file fenix
+    /// can edit still opens in fenix on `Enter`; this is the other key,
+    /// for when it should not.
+    pub(crate) fn explorer_open_externally(&mut self) {
+        let Some(path) = self.explorer_selected_path() else { return };
+        match fenix_fs::open_with_default(&path) {
+            Ok(()) => self.set_message(format!("opened {}", file_label(&path))),
+            Err(err) => self.set_error(err.to_string()),
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC e O`: show the entry at point in Explorer, selected.
+    ///
+    /// The escape hatch. Being unable to leave is not the same as not
+    /// needing to, and a file manager you can always step out of is one
+    /// it is easy to start trusting.
+    pub(crate) fn explorer_reveal(&mut self) {
+        let Some(path) = self.explorer_selected_path() else { return };
+        match fenix_fs::reveal(&path) {
+            Ok(()) => self.set_message(format!("showed {} in Explorer", file_label(&path))),
+            Err(err) => self.set_error(err.to_string()),
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC e y`: put the entry's full path on the clipboard.
+    ///
+    /// The whole path, not the name: a path is what you paste into a
+    /// terminal, a chat message or another program's open dialog, and
+    /// a bare filename is not useful in any of those.
+    pub(crate) fn explorer_yank_path(&mut self) {
+        let Some(path) = self.explorer_selected_path() else { return };
+        let text = readable_path(&path);
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            let _ = clipboard.set_text(text.clone());
+        }
+        self.set_message(format!("copied {text}"));
+        self.wake_caret();
+    }
+
+    /// `SPC e T`: a shell in the directory being browsed.
+    ///
+    /// The integration the pane-terminal work made possible: without a
+    /// working directory it would be a shell somewhere else, and the
+    /// first thing anyone types is a `cd`.
+    pub(crate) fn explorer_terminal_here(&mut self) {
+        let Some(cwd) = self.active_explorer().map(|e| e.cwd.clone()) else {
+            self.set_error("no directory open");
+            return;
+        };
+        self.open_terminal_buffer_in(Some(cwd));
+    }
+
+    /// `SPC e g`: search this directory and everything under it.
+    pub(crate) fn explorer_grep_here(&mut self) {
+        let Some(cwd) = self.active_explorer().map(|e| e.cwd.clone()) else {
+            self.set_error("no directory open");
+            return;
+        };
+        self.grep_root = Some(cwd);
+        self.picker_grep_prompt();
+    }
+
+    /// `SPC e G`: treat this directory as the project, then open the
+    /// Git panel on it.
+    ///
+    /// Moving the project root rather than teaching the Git panel a
+    /// second notion of "where": once the root is here, `SPC g g`,
+    /// `SPC p f` and `SPC s p` all follow, which is what somebody
+    /// browsing another repository actually wants -- not one panel
+    /// pointed elsewhere while everything around it looks at the old
+    /// project.
+    pub(crate) fn explorer_git_here(&mut self) {
+        let Some(cwd) = self.active_explorer().map(|e| e.cwd.clone()) else {
+            self.set_error("no directory open");
+            return;
+        };
+        let root = fenix_project::find_project_root(&cwd).unwrap_or(cwd);
+        if self.git_session.is_some() {
+            // A panel already open is pointed at the old root and would
+            // simply refresh against it, which looks like the key did
+            // nothing.
+            self.git_session_close();
+        }
+        self.project_root = Some(root.clone());
+        self.open_git_panel();
+        // Set again afterwards: opening the panel focuses a pathless
+        // buffer, and `refresh_project_root` derives the root from
+        // whatever the focused buffer's path is -- which for a panel is
+        // nothing, so it would clear what was just chosen.
+        self.project_root = Some(root.clone());
+        self.set_message(format!("project is now {}", readable_path(&root)));
+    }
+
+    /// The path an entry-scoped action should act on.
+    fn explorer_selected_path(&mut self) -> Option<PathBuf> {
+        self.sync_dired_selection_from_cursor();
+        self.active_explorer()?.selected_entry().map(|e| e.path.clone())
     }
 
     /// `SPC e k`: stop the running operation.
@@ -29022,6 +29163,169 @@ configure_board stm32
     }
 
     // -- Renaming by editing the listing ---------------------------------
+
+    // -- Handing things back to the rest of the system -------------------
+
+    #[test]
+    fn copying_a_path_puts_the_whole_thing_on_the_clipboard() {
+        // The whole path, not the name: a path is what you paste into a
+        // terminal or another program's open dialog.
+        let dir = TempDir::new("last_mile_yank");
+        let file = dir.write("a.txt", "x");
+        let mut app = app_with_places("last_mile_yank", dir.path());
+        put_cursor_on(&mut app, "a.txt");
+
+        app.explorer_yank_path();
+
+        assert!(app.modeline_pieces().1.contains(&format!("copied {}", file.display())), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn opening_something_that_vanished_says_so_rather_than_launching_nothing() {
+        let dir = TempDir::new("last_mile_open_gone");
+        let file = dir.write("a.txt", "x");
+        let mut app = app_with_places("last_mile_open_gone", dir.path());
+        put_cursor_on(&mut app, "a.txt");
+        std::fs::remove_file(&file).unwrap();
+
+        app.explorer_open_externally();
+
+        assert!(app.modeline_pieces().1.contains("is not there"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_shell_opened_here_starts_here() {
+        // Without a working directory the first thing anybody types is
+        // a `cd`, which is the whole point of the key.
+        let dir = TempDir::new("last_mile_terminal");
+        let mut app = app_with_places("last_mile_terminal", dir.path());
+
+        app.explorer_terminal_here();
+
+        let id = app.focused_buffer_id();
+        assert_eq!(app.terminal_buffer_cwds.get(&id), Some(&dir.path().to_path_buf()));
+        assert!(app.terminal_buffers.contains_key(&id), "and a real shell is running in it");
+    }
+
+    #[test]
+    fn a_respawned_shell_comes_back_where_it_was() {
+        // Remembered rather than passed once: after `exit`, reopening
+        // should not silently land somewhere else.
+        let dir = TempDir::new("last_mile_terminal_respawn");
+        let mut app = app_with_places("last_mile_terminal_respawn", dir.path());
+        app.explorer_terminal_here();
+        let id = app.focused_buffer_id();
+        app.terminal_buffers.get_mut(&id).unwrap().session.kill();
+
+        app.open_terminal_buffer();
+
+        assert_eq!(app.terminal_buffer_cwds.get(&id), Some(&dir.path().to_path_buf()));
+        assert!(app.terminal_buffers.get_mut(&id).unwrap().session.is_alive());
+    }
+
+    #[test]
+    fn closing_a_terminal_forgets_where_it_was() {
+        let dir = TempDir::new("last_mile_terminal_close");
+        let mut app = app_with_places("last_mile_terminal_close", dir.path());
+        app.explorer_terminal_here();
+        let id = app.focused_buffer_id();
+
+        app.kill_buffer();
+
+        assert!(!app.terminal_buffer_cwds.contains_key(&id));
+    }
+
+    #[test]
+    fn searching_from_a_listing_searches_that_directory_once() {
+        // Once: the next unqualified search should go back to meaning
+        // the project.
+        let dir = TempDir::new("last_mile_grep");
+        let mut app = app_with_places("last_mile_grep", dir.path());
+        app.project_root = Some(PathBuf::from(r"C:\somewhere\else"));
+
+        app.explorer_grep_here();
+
+        assert_eq!(app.grep_root.as_deref(), Some(dir.path()));
+        app.grep_query_key(KeyPress::named(FenixNamedKey::Escape));
+    }
+
+    #[test]
+    fn making_this_the_project_moves_everything_else_with_it() {
+        // Rather than pointing one panel elsewhere while `SPC p f` and
+        // `SPC s p` still look at the old project.
+        let dir = TempDir::new("last_mile_git_here");
+        let repo = dir.mkdir("repo");
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        let inner = dir.mkdir("repo/src");
+        let mut app = app_with_places("last_mile_git_here", &inner);
+
+        app.explorer_git_here();
+
+        // The repository root, not the directory that happened to be open.
+        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()));
+        assert!(app.modeline_pieces().1.contains("project is now") || app.git_session.is_some());
+    }
+
+    #[test]
+    fn a_directory_with_no_project_markers_becomes_the_project_itself() {
+        let dir = TempDir::new("last_mile_git_here_plain");
+        let mut app = app_with_places("last_mile_git_here_plain", dir.path());
+
+        app.explorer_git_here();
+
+        assert_eq!(app.project_root.as_deref(), Some(dir.path()));
+    }
+
+    // -- Links --------------------------------------------------------------
+
+    #[test]
+    fn a_link_is_shown_as_a_link_rather_than_as_what_it_points_at() {
+        // Following one into a tree you did not expect to be in is
+        // exactly the surprise this prevents.
+        let dir = TempDir::new("last_mile_link");
+        let real = dir.mkdir("real");
+        let link = dir.path().join("shortcut");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        if !made {
+            return; // no permission to create links here
+        }
+        let mut app = app_with_places("last_mile_link", dir.path());
+
+        let text = app.open().buffer.text();
+        let row = text.lines().find(|l| l.contains("shortcut")).expect("the link is listed");
+        assert!(row.contains("shortcut/@"), "marked as a link, not just a folder: {row:?}");
+
+        // And its own row colour differs from a real directory's.
+        let id = app.focused_buffer_id();
+        let rows = app.dired_lines[&id].clone();
+        let link_row = rows.iter().flatten().find(|r| app.dired_states[&id].entries[r.entry].name == "shortcut").unwrap();
+        let real_row = rows.iter().flatten().find(|r| app.dired_states[&id].entries[r.entry].name == "real").unwrap();
+        assert!(link_row.kind.is_link());
+        assert!(!real_row.kind.is_link());
+    }
+
+    #[test]
+    fn properties_say_where_a_link_points() {
+        let dir = TempDir::new("last_mile_link_props");
+        let real = dir.mkdir("real");
+        let link = dir.path().join("shortcut");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        if !made {
+            return;
+        }
+        let mut app = app_with_places("last_mile_link_props", dir.path());
+        put_cursor_on(&mut app, "shortcut");
+
+        app.dired_handle_action(ExplorerAction::ShowProperties);
+
+        assert!(app.modeline_pieces().1.contains("links to"), "got: {}", app.modeline_pieces().1);
+    }
 
     // -- Big operations, archives, properties ----------------------------
 

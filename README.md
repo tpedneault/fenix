@@ -179,6 +179,25 @@ for anyone curious to poke around or build on it.
   listing cannot show without walking the whole tree. `w` flips
   read-only, the attribute that stops an ordinary save.
 
+  **The last mile** is the set of things that make trusting all of this
+  easy. `SPC e o` opens the entry with whatever the system associates
+  with it, because the answer to a `.xlsx` is Excel and not a hex dump.
+  `SPC e O` shows it in Explorer, selected -- being unable to leave is
+  not the same as not needing to. `SPC e y` copies the full path (the
+  path, not the name: a path is what you paste into a terminal or
+  another program's open dialog). `SPC e T` opens a shell *here*, which
+  is what the pane-terminal work made possible -- without a working
+  directory the first thing anybody types is a `cd`. `SPC e g` searches
+  this directory once, leaving the next unqualified search meaning the
+  project again, and `SPC e G` makes this the project and opens the Git
+  panel on it, so `SPC p f` and `SPC s p` follow rather than one panel
+  pointing somewhere the rest of the editor is not.
+
+  Links and junctions are shown as links (`name/@`) and coloured
+  differently from real directories, because following one into a tree
+  you did not expect to be in is exactly the surprise worth preventing;
+  `i` says where one points.
+
   Deleting means the **Recycle Bin**, so a mistake is recoverable
   through Windows' own restore. Copying or moving onto something that
   already exists asks first -- overwrite, skip, or keep both -- rather
@@ -881,6 +900,11 @@ popup shows what keys continue it.
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e d` | Two listings side by side (copy/move default to the other one) |
+| `SPC e o` / `SPC e O` | Open with the system's default app / show it in Explorer |
+| `SPC e y` | Copy the full path |
+| `SPC e T` | Open a shell in this directory |
+| `SPC e g` | Search this directory |
+| `SPC e G` | Make this the project and open the Git panel |
 | `SPC e k` | Stop the running file operation |
 | `SPC e w` | Edit the listing's names as text |
 | `SPC e W` | Apply the edited names |

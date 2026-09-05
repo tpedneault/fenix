@@ -94,6 +94,12 @@ impl CommandRegistry {
         registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
         registry.register("explorer.dual_pane", "Two listings side by side", cmd_explorer_dual_pane);
         registry.register("explorer.cancel", "Stop the running file operation", cmd_explorer_cancel);
+        registry.register("explorer.open_external", "Open with the system's default application", cmd_explorer_open_external);
+        registry.register("explorer.reveal", "Show this in Explorer", cmd_explorer_reveal);
+        registry.register("explorer.yank_path", "Copy the full path", cmd_explorer_yank_path);
+        registry.register("explorer.terminal_here", "Open a shell in this directory", cmd_explorer_terminal_here);
+        registry.register("explorer.grep_here", "Search this directory", cmd_explorer_grep_here);
+        registry.register("explorer.git_here", "Make this the project and open the Git panel", cmd_explorer_git_here);
         registry.register("explorer.rename_mode", "Edit the listing's names as text", cmd_explorer_rename_mode);
         registry.register("explorer.rename_apply", "Apply the edited names", cmd_explorer_rename_apply);
         registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);
@@ -423,6 +429,30 @@ fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {
 
 fn cmd_explorer_cancel(ctx: &mut CommandCtx) {
     ctx.app.cancel_explorer_job();
+}
+
+fn cmd_explorer_open_external(ctx: &mut CommandCtx) {
+    ctx.app.explorer_open_externally();
+}
+
+fn cmd_explorer_reveal(ctx: &mut CommandCtx) {
+    ctx.app.explorer_reveal();
+}
+
+fn cmd_explorer_yank_path(ctx: &mut CommandCtx) {
+    ctx.app.explorer_yank_path();
+}
+
+fn cmd_explorer_terminal_here(ctx: &mut CommandCtx) {
+    ctx.app.explorer_terminal_here();
+}
+
+fn cmd_explorer_grep_here(ctx: &mut CommandCtx) {
+    ctx.app.explorer_grep_here();
+}
+
+fn cmd_explorer_git_here(ctx: &mut CommandCtx) {
+    ctx.app.explorer_git_here();
 }
 
 fn cmd_explorer_rename_mode(ctx: &mut CommandCtx) {

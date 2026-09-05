@@ -14,6 +14,7 @@ mod pathbar;
 mod places;
 mod properties;
 mod recycle;
+mod shell;
 mod transfer;
 
 #[cfg(test)]
@@ -24,6 +25,7 @@ pub use archive::{
 };
 pub use listing::{list_dir, Attributes, DirEntryInfo, EntryKind};
 pub use properties::{measure_tree, properties, set_readonly, Properties, Total};
+pub use shell::{open_with_default, reveal};
 pub use recycle::{permanently, to_recycle_bin, Outcome};
 pub use pathbar::{common_prefix, complete, expand};
 pub use places::{shares, volumes, Volume, VolumeKind};
