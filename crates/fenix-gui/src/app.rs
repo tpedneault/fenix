@@ -2172,6 +2172,20 @@ pub enum FenixUserEvent {
     /// (kept single-threaded on purpose, see `TerminalReader`'s own doc
     /// comment).
     TerminalOutput(TerminalTarget, Vec<u8>),
+    /// A directory read finished, from the thread `explorer_navigate`
+    /// spawned. Carries `request` so a result that has been superseded
+    /// (or abandoned) can be dropped rather than yanking the pane to a
+    /// directory the user has already navigated away from.
+    ///
+    /// The error is a `String`, not an `io::Error`: by the time it
+    /// reaches here the only thing anyone can do with it is show it.
+    ExplorerListed { buffer: BufferId, request: u64, result: Result<fenix_explorer::Listing, String> },
+    /// The `git status` pass for a listing that already arrived -- the
+    /// second half of the same background thread. Deliberately separate
+    /// so badges never hold up the listing itself, which is the whole
+    /// difference between a directory appearing at once and appearing
+    /// after a subprocess has walked the repo.
+    ExplorerGitStatus { buffer: BufferId, request: u64, statuses: HashMap<PathBuf, fenix_explorer::GitStatus> },
     /// The result of `fenix_terminal::Terminal::spawn`, from the one-
     /// shot background thread `toggle_terminal` spawns it on -- see
     /// that function's own doc comment for why spawning can't happen
@@ -3033,6 +3047,37 @@ struct ExplorerPrompt {
     input: String,
 }
 
+/// How long a directory may take to answer before the explorer says
+/// what it is waiting on.
+///
+/// A local directory answers in single-digit milliseconds. Anything past
+/// this is a network share, a disk spinning up, or a path that is never
+/// going to answer -- and in every one of those cases a pane that simply
+/// sits there is indistinguishable from a hung editor.
+const SLOW_LISTING_AFTER: Duration = Duration::from_millis(300);
+
+/// One directory read, in flight or just finished, for one explorer
+/// buffer.
+///
+/// The `id` is what makes abandoning possible. A blocking `read_dir` on
+/// a share that has gone away **cannot be cancelled** -- the thread sits
+/// in the kernel until SMB gives up, minutes later, and nothing can
+/// shorten that. So nothing tries: pressing Escape bumps the id, which
+/// makes whatever that thread eventually returns arrive stale and get
+/// dropped, and the thread is left to finish and exit on its own. The
+/// editor moves on immediately; the corpse cleans itself up.
+struct ExplorerRequest {
+    id: u64,
+    /// Where this read is aimed -- named in the "still reading" line, so
+    /// the user can see it is the share and not fenix.
+    path: PathBuf,
+    started: Instant,
+    /// `true` once the listing has been applied. The record outlives it
+    /// so the git-status second pass, which arrives later, can still
+    /// check it is talking about the same read.
+    done: bool,
+}
+
 /// A copy or move that has been asked for, found to collide with
 /// something already at the destination, and is waiting for the user to
 /// say what to do about it.
@@ -3054,6 +3099,41 @@ struct ExplorerConflict {
     /// What is already there, for naming it in the prompt. Showing the
     /// first one and a count beats "some files already exist".
     conflicts: Vec<PathBuf>,
+}
+
+/// Which explorer operation, if any, a single keypress means inside a
+/// buffer-backed listing.
+///
+/// Resolved through `explorer_trie` -- the same table the sidebar reads
+/// -- rather than a second hand-written match, so a binding cannot exist
+/// in one form of the explorer and not the other. Two things are
+/// filtered out: navigation, which Vim's own cursor already does, and
+/// anything needing more than one key, because a `g` prefix here would
+/// have to fight `gg`/`G`, which are genuinely useful in a long
+/// directory (`explorer_trie` carries a single-key alias for the one
+/// action that needed it).
+fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
+    if keypress.mods != Mods::default() {
+        return None;
+    }
+    let mut matcher = fenix_explorer::explorer_trie().matcher();
+    match matcher.feed(keypress) {
+        fenix_keymap::Step::Matched(action) if !action.is_navigation() => Some(*action),
+        _ => None,
+    }
+}
+
+/// Whether `path` names a network location by its own spelling --
+/// `\\\\server\\share\\...`.
+///
+/// Only catches paths written that way: a share mapped to a drive
+/// letter looks exactly like a local disk from here, and telling those
+/// apart needs a real drive-type lookup. Used to skip work that is
+/// merely slow over a network, never to decide anything that would be
+/// *wrong* if the guess missed.
+fn is_unc(path: &Path) -> bool {
+    let s = path.as_os_str().to_string_lossy();
+    s.starts_with("\\\\") || s.starts_with("//")
 }
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
@@ -4366,13 +4446,19 @@ fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
 /// icon/color spans (the sidebar/full-buffer *overlay*'s own rendering,
 /// unchanged and untouched by this) -- this has to be real, plain rope
 /// text a Vim buffer can navigate/search, not colored display-only spans.
-fn explorer_dired_text(state: &ExplorerState) -> (String, Vec<Option<usize>>) {
-    let mut text = String::new();
-    let mut lines = Vec::with_capacity(state.entries.len());
-    for (i, entry) in state.entries.iter().enumerate() {
-        if i > 0 {
-            text.push('\n');
-        }
+/// The explorer buffer's own text, plus which entry each line maps back
+/// to (`None` for the header, which is not an entry).
+///
+/// `waiting_on` is the directory currently being read, if any -- shown
+/// in the header rather than replacing the listing, so a pane keeps
+/// showing where you are until the new directory is ready, and a slow
+/// or unreachable path costs you nothing but a wait you can walk away
+/// from.
+fn explorer_dired_text(state: &ExplorerState, waiting_on: Option<&Path>) -> (String, Vec<Option<usize>>) {
+    let mut text = explorer_header(state, waiting_on);
+    let mut lines = vec![None];
+    for entry in state.entries.iter() {
+        text.push('\n');
         text.push_str(&"  ".repeat(entry.depth));
         text.push_str(&entry.name);
         if entry.is_dir() {
@@ -4382,9 +4468,39 @@ fn explorer_dired_text(state: &ExplorerState) -> (String, Vec<Option<usize>>) {
             text.push_str("  ");
             text.push_str(git_status_marker(status));
         }
-        lines.push(Some(i));
+        lines.push(None);
+    }
+    // Entry indices are filled in afterwards so the header's `None`
+    // stays row 0 no matter how the rows above are built.
+    for (row, slot) in lines.iter_mut().skip(1).enumerate() {
+        *slot = Some(row);
     }
     (text, lines)
+}
+
+/// The one non-entry row: where you are, how much is here, how it is
+/// ordered, and -- when a read is outstanding -- what is being waited
+/// on.
+///
+/// Naming the path being read is the point. "Reading..." on its own is
+/// what a frozen pane looks like; "reading \\nas\media" is a share that
+/// has not answered yet, which is a different problem with a different
+/// answer (wait, or press Escape and go elsewhere).
+fn explorer_header(state: &ExplorerState, waiting_on: Option<&Path>) -> String {
+    let mut header = state.cwd.display().to_string();
+    header.push_str("  --  ");
+    header.push_str(&format!("{} item{}", state.entries.len(), if state.entries.len() == 1 { "" } else { "s" }));
+    if !state.marks.is_empty() {
+        header.push_str(&format!(", {} marked", state.marks.len()));
+    }
+    header.push_str(&format!("  --  {}", state.sort.label()));
+    if state.show_hidden {
+        header.push_str("  --  hidden shown");
+    }
+    if let Some(path) = waiting_on {
+        header.push_str(&format!("  --  reading {} (Esc to stop waiting)", path.display()));
+    }
+    header
 }
 
 /// Groups `fenix_project::grep_project`'s raw per-*match* results into
@@ -5266,6 +5382,15 @@ pub struct App {
     /// lines`' exact role, just for `explorer_dired_text`'s output
     /// instead of `dashboard::render`'s.
     dired_lines: HashMap<BufferId, Vec<Option<usize>>>,
+    /// The newest directory read for each explorer buffer -- see
+    /// `ExplorerRequest`. At most one per buffer: asking for a different
+    /// directory supersedes whatever was being read, rather than
+    /// queueing behind it.
+    explorer_requests: HashMap<BufferId, ExplorerRequest>,
+    /// Source of `ExplorerRequest::id`. Global rather than per-buffer so
+    /// an id is never reused across buffers, which keeps a late result
+    /// from a closed buffer from ever matching a live request.
+    next_explorer_request: u64,
 
     /// Per-line metadata for every real `BufferKind::Docker` buffer
     /// currently open (`SPC d d`), keyed by `BufferId` -- same per-buffer-
@@ -6123,6 +6248,8 @@ impl App {
             dashboard_lines,
             dired_states: HashMap::new(),
             dired_lines: HashMap::new(),
+            explorer_requests: HashMap::new(),
+            next_explorer_request: 0,
             docker_lines: HashMap::new(),
             docker_confirm_remove: None,
             docker_menu_open: false,
@@ -8329,44 +8456,226 @@ impl App {
     /// file) and tests (which just want a specific directory) -- opens a
     /// fresh dired buffer at `dir` in the focused pane.
     fn open_dired_at(&mut self, dir: &Path) {
-        let state = match ExplorerState::opened(dir) {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("fenix: couldn't list {} ({err})", dir.display());
-                return;
-            }
-        };
-        let (text, lines) = explorer_dired_text(&state);
+        // Opens empty and fills in when the read lands. A fresh buffer
+        // has nothing to keep showing in the meantime, unlike a pane
+        // that is navigating from somewhere -- so this is the one case
+        // where a pending listing really is blank.
+        let state = ExplorerState::pending_at(dir);
+        let (text, lines) = explorer_dired_text(&state, Some(dir));
         let id = self.buffers.open_explorer(&text);
         self.dired_states.insert(id, state);
         self.dired_lines.insert(id, lines);
         self.open_buffer_in_focused_pane(id);
+        self.explorer_navigate(id, dir);
         self.wake_caret();
     }
 
-    /// Replaces `id`'s dired state with `new_state` and regenerates its
-    /// buffer's rope text to match in one atomic step (`Buffer::
-    /// replace_range` over the whole content -- same "rewrite the whole
-    /// affected span as one step" tool `:s` substitute already uses),
-    /// then resets every pane currently showing `id` back to the top --
-    /// the old cursor/scroll position is meaningless against entirely
-    /// different content (a different directory's listing).
-    fn set_dired_state(&mut self, id: BufferId, new_state: ExplorerState) {
-        let (text, lines) = explorer_dired_text(&new_state);
-        self.dired_states.insert(id, new_state);
-        self.dired_lines.insert(id, lines);
-        if let Some(ob) = self.buffers.get_mut(id) {
+    // -- Reading a directory without freezing the editor -----------------
+
+    /// Points `buffer`'s listing at `path`, reading it off the main
+    /// thread.
+    ///
+    /// The pane keeps showing where it already is until the new listing
+    /// arrives. That is deliberate on two counts: it is what a file
+    /// manager should do anyway (you can still read the directory you
+    /// are leaving), and it means a path that never answers costs you
+    /// nothing at all -- Escape abandons the wait and you are still
+    /// where you were, rather than sitting in an empty pane.
+    ///
+    /// Git status follows as a separate event on the same thread, so
+    /// badges never delay the listing. It is skipped outright for UNC
+    /// paths: running a `git status` subprocess across a share is slow
+    /// and almost never what anyone wants. (A network drive mapped to a
+    /// letter is not detected here -- telling those apart needs the
+    /// drive-type lookup that comes with the Places work.)
+    fn explorer_navigate(&mut self, buffer: BufferId, path: &Path) {
+        let show_hidden = self.dired_states.get(&buffer).is_some_and(|s| s.show_hidden);
+        self.next_explorer_request += 1;
+        let request = self.next_explorer_request;
+        let path = path.to_path_buf();
+        self.explorer_requests.insert(buffer, ExplorerRequest { id: request, path: path.clone(), started: Instant::now(), done: false });
+
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = fenix_explorer::read_listing(&path, show_hidden).map_err(|err| err.to_string());
+                    let worth_annotating = result.is_ok() && !is_unc(&path);
+                    if proxy.send_event(FenixUserEvent::ExplorerListed { buffer, request, result }).is_err() {
+                        return;
+                    }
+                    if worth_annotating {
+                        let statuses = fenix_explorer::status_for_dir(&path);
+                        let _ = proxy.send_event(FenixUserEvent::ExplorerGitStatus { buffer, request, statuses });
+                    }
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // read and apply inline, same posture as every other
+                // background call in this file.
+                let result = fenix_explorer::read_listing(&path, show_hidden).map_err(|err| err.to_string());
+                let worth_annotating = result.is_ok() && !is_unc(&path);
+                self.apply_explorer_listed(buffer, request, result);
+                if worth_annotating {
+                    let statuses = fenix_explorer::status_for_dir(&path);
+                    self.apply_explorer_git_status(buffer, request, statuses);
+                }
+            }
+        }
+        self.render_dired(buffer, false);
+    }
+
+    /// `FenixUserEvent::ExplorerListed`: swaps in a listing, unless it
+    /// has been superseded by a newer request or abandoned outright, or
+    /// its buffer has since been closed.
+    fn apply_explorer_listed(&mut self, buffer: BufferId, request: u64, result: Result<fenix_explorer::Listing, String>) {
+        if !self.explorer_request_is_current(buffer, request) {
+            return;
+        }
+        match result {
+            Ok(listing) => {
+                let path = listing.cwd.clone();
+                if let Some(state) = self.dired_states.get_mut(&buffer) {
+                    state.apply_listing(listing);
+                }
+                self.mark_explorer_request_done(buffer, request);
+                self.render_dired(buffer, true);
+                self.remember_visited_directory(&path);
+            }
+            Err(err) => {
+                // The pane stays where it was, which is the useful place
+                // to be left after a directory refuses to open.
+                self.mark_explorer_request_done(buffer, request);
+                self.set_error(err);
+                self.render_dired(buffer, false);
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `FenixUserEvent::ExplorerGitStatus`: the second pass, applied on
+    /// top of a listing that is already on screen.
+    fn apply_explorer_git_status(&mut self, buffer: BufferId, request: u64, statuses: HashMap<PathBuf, fenix_explorer::GitStatus>) {
+        // Checked against the request the *listing* came from: badges
+        // computed for one directory must never decorate another.
+        if self.explorer_requests.get(&buffer).map(|r| r.id) != Some(request) {
+            return;
+        }
+        if let Some(state) = self.dired_states.get_mut(&buffer) {
+            state.apply_git_statuses(statuses);
+        }
+        self.render_dired(buffer, false);
+        self.wake_caret();
+    }
+
+    /// Whether `request` is still the read `buffer` is waiting for.
+    fn explorer_request_is_current(&self, buffer: BufferId, request: u64) -> bool {
+        self.buffers.get(buffer).is_some() && self.explorer_requests.get(&buffer).is_some_and(|r| r.id == request && !r.done)
+    }
+
+    fn mark_explorer_request_done(&mut self, buffer: BufferId, request: u64) {
+        if let Some(r) = self.explorer_requests.get_mut(&buffer) {
+            if r.id == request {
+                r.done = true;
+            }
+        }
+    }
+
+    /// Which directory `buffer` is currently waiting on, if the wait has
+    /// gone on long enough to be worth mentioning. Below
+    /// `SLOW_LISTING_AFTER` this stays `None`, so an ordinary local
+    /// directory never flashes a "reading..." line on its way in.
+    fn explorer_waiting_on(&self, buffer: BufferId) -> Option<&Path> {
+        let request = self.explorer_requests.get(&buffer)?;
+        (!request.done && request.started.elapsed() >= SLOW_LISTING_AFTER).then_some(request.path.as_path())
+    }
+
+    /// Escape on an explorer buffer with a read outstanding: stop
+    /// waiting for it.
+    ///
+    /// Bumping the id is the whole mechanism -- the thread cannot be
+    /// killed and is not asked to be (see `ExplorerRequest`); its result
+    /// simply arrives stale and is dropped. Returns whether there was
+    /// anything to abandon, so the key falls through when there was not.
+    fn explorer_abandon_listing(&mut self, buffer: BufferId) -> bool {
+        let Some(request) = self.explorer_requests.get(&buffer) else { return false };
+        if request.done {
+            return false;
+        }
+        let path = request.path.clone();
+        self.explorer_requests.remove(&buffer);
+        self.set_message(format!("stopped waiting for {}", path.display()));
+        self.render_dired(buffer, false);
+        self.wake_caret();
+        true
+    }
+
+    /// Regenerates `buffer`'s text from its state in one atomic step
+    /// (`Buffer::replace_range` over the whole content -- the same
+    /// "rewrite the affected span as one step" tool `:s` already uses).
+    ///
+    /// `reset_cursor` is for arriving in a *different* directory, where
+    /// the old cursor position means nothing against entirely different
+    /// content. A re-render of the same listing (a git badge landing, a
+    /// pending note appearing) leaves the cursor where the user put it.
+    fn render_dired(&mut self, buffer: BufferId, reset_cursor: bool) {
+        let waiting = self.explorer_waiting_on(buffer).map(Path::to_path_buf);
+        let Some(state) = self.dired_states.get(&buffer) else { return };
+        let (text, lines) = explorer_dired_text(state, waiting.as_deref());
+        self.dired_lines.insert(buffer, lines);
+
+        // Which *line* each pane is on, remembered across the rewrite.
+        // A character index would not survive it: the header changes
+        // length whenever the counts in it change, so marking a file
+        // would silently slide every cursor showing this listing
+        // backwards -- and the next operation would act on a different
+        // row than the one being looked at.
+        let panes: Vec<fenix_window::WindowId> =
+            self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
+        let lines_before: Vec<usize> = panes
+            .iter()
+            .map(|&pane| {
+                let cursor = self.pane_state(pane).cursor;
+                self.buffers.get(buffer).map(|ob| ob.buffer.line_col(&cursor).0).unwrap_or(0)
+            })
+            .collect();
+
+        if let Some(ob) = self.buffers.get_mut(buffer) {
             let end = ob.buffer.len_chars();
             let mut scratch_cursor = Cursor::at_start();
             ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
         }
-        for pane in self.windows().windows() {
-            if self.windows().content(pane) == Some(&id) {
-                let ps = self.pane_state_mut(pane);
-                *ps = PaneState::seeded_at(Cursor::at_start());
+
+        if !reset_cursor {
+            let last_line = self.buffers.get(buffer).map(|ob| ob.buffer.line_count().saturating_sub(1)).unwrap_or(0);
+            for (&pane, &line) in panes.iter().zip(&lines_before) {
+                // Clamped, because a listing can get shorter -- deleting
+                // the last row has to leave the cursor somewhere real.
+                let line = line.min(last_line);
+                let char_idx = self.buffers.get(buffer).map(|ob| ob.buffer.line_start_char(line)).unwrap_or(0);
+                self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+            }
+        }
+
+        if reset_cursor {
+            // Line 0 is the header, which is not an entry -- starting
+            // there would mean the first `Enter` of every directory does
+            // nothing. Land on the first real row instead.
+            let first_entry = self.buffers.get(buffer).map(|ob| ob.buffer.line_start_char(1)).unwrap_or(0);
+            for pane in self.windows().windows() {
+                if self.windows().content(pane) == Some(&buffer) {
+                    let ps = self.pane_state_mut(pane);
+                    *ps = PaneState::seeded_at(Cursor { char_idx: first_entry, sticky_col: 0 });
+                }
             }
         }
     }
+
+    /// Hook for the recent-directories list the Places work will read.
+    /// Deliberately a no-op for now rather than a `TODO` comment: the
+    /// one call site that should record a visit is here, and finding it
+    /// later is the part that goes wrong.
+    fn remember_visited_directory(&mut self, _path: &Path) {}
 
     /// `Enter` on a dired buffer: opens the file at the cursor's line
     /// into the focused pane, or navigates into the directory at that
@@ -8381,49 +8690,36 @@ impl App {
         };
         let Some(entry) = self.dired_states.get(&id).and_then(|s| s.entries.get(entry_idx)) else { return };
         let path = entry.path.clone();
-        if entry.is_dir() {
-            match ExplorerState::opened(&path) {
-                Ok(new_state) => self.set_dired_state(id, new_state),
-                Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
-            }
+        let is_dir = entry.is_dir();
+        if is_dir {
+            self.explorer_navigate(id, &path);
         } else {
             self.open_file_from_picker(&path);
         }
     }
 
-    /// `-` on a dired buffer: navigates up to the parent of the
-    /// directory currently being browsed, in place.
-    fn dired_parent_dir(&mut self) {
-        let id = self.focused_buffer_id();
-        let Some(parent) = self.dired_states.get(&id).and_then(|s| s.cwd.parent()).map(Path::to_path_buf) else {
-            return;
-        };
-        match ExplorerState::opened(&parent) {
-            Ok(new_state) => self.set_dired_state(id, new_state),
-            Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
+    /// Runs one `ExplorerAction` against the focused explorer buffer.
+    ///
+    /// Reconciles the cursor with the listing's own selection first, so
+    /// every operation acts on the row the user is actually looking at,
+    /// then re-renders, because almost all of them change what the text
+    /// should say (a mark appearing, a count in the header moving).
+    fn dired_handle_action(&mut self, action: ExplorerAction) {
+        let Some(buffer) = self.focused_dired_buffer() else { return };
+        self.sync_dired_selection_from_cursor();
+        match action {
+            // `Enter`/`l` on a file opens it into the pane, which is not
+            // what the overlay's `Open` does (it has its own
+            // return-to-editor dance), so this one stays local.
+            ExplorerAction::Open => self.dired_activate_selected(),
+            other => self.explorer_handle_action(other),
         }
-    }
-
-    /// `R` on a dired buffer: re-lists the same directory (picks up
-    /// files created/removed/renamed since it was opened).
-    fn dired_refresh(&mut self) {
-        let id = self.focused_buffer_id();
-        let Some(mut state) = self.dired_states.remove(&id) else { return };
-        if let Err(err) = state.refresh() {
-            eprintln!("fenix: couldn't refresh ({err})");
+        // A navigation action has already re-rendered through
+        // `explorer_navigate`; re-rendering again here would be
+        // harmless but would also undo a cursor reset it just made.
+        if self.dired_states.contains_key(&buffer) && !matches!(action, ExplorerAction::Open | ExplorerAction::ParentDir | ExplorerAction::Refresh | ExplorerAction::ToggleHidden) {
+            self.render_dired(buffer, false);
         }
-        self.set_dired_state(id, state);
-    }
-
-    /// `.` on a dired buffer: toggles dotfile visibility and re-lists.
-    fn dired_toggle_hidden(&mut self) {
-        let id = self.focused_buffer_id();
-        let Some(mut state) = self.dired_states.remove(&id) else { return };
-        state.toggle_hidden();
-        if let Err(err) = state.refresh() {
-            self.set_error(format!("couldn't list {}: {err}", state.cwd.display()));
-        }
-        self.set_dired_state(id, state);
     }
 
     /// `SPC e t`: toggles the sidebar open/closed. Opening focuses it
@@ -17956,7 +18252,11 @@ impl App {
         } else if self.sidebar_focused {
             self.sidebar.as_ref()
         } else {
-            None
+            // The buffer-backed listing, which until now could not
+            // reach any of this -- marks, delete, rename, create, copy
+            // and move all existed and were simply unreachable from the
+            // one form of the explorer that composes with splits.
+            self.dired_states.get(&self.focused_dired_buffer()?)
         }
     }
 
@@ -17966,7 +18266,32 @@ impl App {
         } else if self.sidebar_focused {
             self.sidebar.as_mut()
         } else {
-            None
+            let buffer = self.focused_dired_buffer()?;
+            self.dired_states.get_mut(&buffer)
+        }
+    }
+
+    /// The explorer buffer the focused pane is showing, if it is showing
+    /// one.
+    fn focused_dired_buffer(&self) -> Option<BufferId> {
+        let id = *self.windows().content(self.focused_pane_id())?;
+        (self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::Explorer) && self.dired_states.contains_key(&id)).then_some(id)
+    }
+
+    /// Points the active listing's own `selected` at whatever the Vim
+    /// cursor is on, for a buffer-backed listing.
+    ///
+    /// The two have to be reconciled somewhere. `ExplorerState` tracks a
+    /// selection because the sidebar has no cursor; a buffer has a real
+    /// one, and it is the real one the user is looking at. Doing this
+    /// once, immediately before an action runs, is what stops `D` from
+    /// deleting a row other than the one under the cursor.
+    fn sync_dired_selection_from_cursor(&mut self) {
+        let Some(buffer) = self.focused_dired_buffer() else { return };
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let entry = self.dired_lines.get(&buffer).and_then(|lines| lines.get(line)).copied().flatten();
+        if let (Some(index), Some(state)) = (entry, self.dired_states.get_mut(&buffer)) {
+            state.select_index(index);
         }
     }
 
@@ -18009,22 +18334,27 @@ impl App {
             ExplorerAction::ToggleAllMarks => self.active_explorer_mut().unwrap().toggle_all_marks(),
             ExplorerAction::ToggleHidden => {
                 self.active_explorer_mut().unwrap().toggle_hidden();
-                if let Err(err) = self.active_explorer_mut().unwrap().refresh() {
-                    eprintln!("fenix: couldn't refresh ({err})");
-                }
+                self.explorer_relist();
             }
-            ExplorerAction::Refresh => {
-                if let Err(err) = self.active_explorer_mut().unwrap().refresh() {
-                    eprintln!("fenix: couldn't refresh ({err})");
-                }
+            ExplorerAction::CycleSort => {
+                let next = match self.active_explorer().unwrap().sort.key {
+                    fenix_explorer::SortKey::Name => fenix_explorer::SortKey::Size,
+                    fenix_explorer::SortKey::Size => fenix_explorer::SortKey::Modified,
+                    fenix_explorer::SortKey::Modified => fenix_explorer::SortKey::Extension,
+                    fenix_explorer::SortKey::Extension => fenix_explorer::SortKey::Name,
+                };
+                let sort = fenix_explorer::Sort { key: next, ..self.active_explorer().unwrap().sort };
+                self.explorer_set_sort(sort);
             }
+            ExplorerAction::ReverseSort => {
+                let sort = self.active_explorer().unwrap().sort;
+                self.explorer_set_sort(fenix_explorer::Sort { descending: !sort.descending, ..sort });
+            }
+            ExplorerAction::Refresh => self.explorer_relist(),
             ExplorerAction::ParentDir => {
                 let parent = self.active_explorer().unwrap().cwd.parent().map(Path::to_path_buf);
                 if let Some(parent) = parent {
-                    match ExplorerState::opened(&parent) {
-                        Ok(new_state) => self.set_active_explorer(new_state),
-                        Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
-                    }
+                    self.explorer_go_to(&parent);
                 }
             }
             ExplorerAction::Open => self.explorer_open_selected(),
@@ -18326,13 +18656,50 @@ impl App {
         }
     }
 
-    /// Re-reads whichever listing an operation just changed.
+    /// Re-reads whichever listing is active.
+    ///
+    /// A buffer-backed listing goes through the off-thread path, because
+    /// that is the one that might be pointed at a share. The sidebar and
+    /// the directory-picking overlay still read inline: both are
+    /// deliberately rooted in local project directories, and giving them
+    /// the same treatment is the last step of this milestone rather than
+    /// something to half-do here.
     fn explorer_relist(&mut self) {
+        if let Some(buffer) = self.focused_dired_buffer() {
+            let Some(cwd) = self.dired_states.get(&buffer).map(|s| s.cwd.clone()) else { return };
+            self.explorer_navigate(buffer, &cwd);
+            return;
+        }
         if let Some(explorer) = self.active_explorer_mut() {
             if let Err(err) = explorer.refresh() {
                 let cwd = explorer.cwd.clone();
                 self.set_error(format!("couldn't list {}: {err}", cwd.display()));
             }
+        }
+    }
+
+    /// Points the active listing at `path`, whichever form it is.
+    fn explorer_go_to(&mut self, path: &Path) {
+        if let Some(buffer) = self.focused_dired_buffer() {
+            self.explorer_navigate(buffer, path);
+            return;
+        }
+        match ExplorerState::opened(path) {
+            Ok(new_state) => self.set_active_explorer(new_state),
+            Err(err) => self.set_error(format!("couldn't list {}: {err}", path.display())),
+        }
+    }
+
+    /// Reorders the active listing. No re-read: rows are already in
+    /// hand, and re-listing to change the order would be a needless
+    /// round trip to a disk that might be slow.
+    fn explorer_set_sort(&mut self, sort: fenix_explorer::Sort) {
+        let Some(explorer) = self.active_explorer_mut() else { return };
+        explorer.set_sort(sort);
+        let label = explorer.sort.label();
+        self.set_message(format!("sorted by {label}"));
+        if let Some(buffer) = self.focused_dired_buffer() {
+            self.render_dired(buffer, false);
         }
     }
 
@@ -18896,6 +19263,8 @@ impl App {
             FenixUserEvent::GitFetched { result } => self.apply_git_fetched(result),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
+            FenixUserEvent::ExplorerListed { buffer, request, result } => self.apply_explorer_listed(buffer, request, result),
+            FenixUserEvent::ExplorerGitStatus { buffer, request, statuses } => self.apply_explorer_git_status(buffer, request, statuses),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::JiraIssuesReady { request_id, issues } => self.apply_jira_issues(request_id, issues),
@@ -19342,39 +19711,35 @@ impl App {
             return;
         }
 
-        // A dired buffer is likewise real Vim-navigable text -- ordinary
-        // motions (`hjkl`, `gg`/`G`, `/` search, ...) reach Vim below
-        // unchanged. Only a small set of action keys are claimed here
-        // first (mirroring the Dashboard's own single-key interception
-        // above): none of them have a meaningful "edit this text"
-        // purpose on a directory listing anyway, so claiming them costs
-        // nothing real Vim editing would otherwise offer here. Marking/
-        // rename/create/delete/copy/move aren't wired for this buffer-
-        // backed form yet -- still available via the sidebar (`SPC e
-        // t`), which this doesn't touch.
+        // A dired buffer is real Vim-navigable text -- ordinary motions
+        // (`hjkl`, `gg`/`G`, `/` search, ...) reach Vim below unchanged.
+        // The *operations* are claimed here first, resolved through the
+        // same `explorer_trie` the sidebar reads, so the two forms of
+        // the explorer cannot disagree about what a key does. Only
+        // navigation actions are left to Vim (see `ExplorerAction::
+        // is_navigation`): `j`/`k` are the cursor here, and the cursor
+        // is the selection.
+        //
+        // This is what closes the gap the buffer form shipped with --
+        // marks, delete, rename, create, copy and move all existed and
+        // were reachable only from the sidebar, which cannot be split.
         if self.open().kind == BufferKind::Explorer {
-            match keypress.code {
-                KeyCode::Named(FenixNamedKey::Enter) => {
-                    self.dired_activate_selected();
-                    self.wake_caret();
+            // Escape stops waiting for a directory that is not
+            // answering, and does nothing at all otherwise -- claiming
+            // it unconditionally would take a key away from Vim for a
+            // situation that is not happening (see `explorer_abandon_
+            // listing` for why stopping the wait is all that is on
+            // offer: the read itself cannot be cancelled).
+            if keypress.code == KeyCode::Named(FenixNamedKey::Escape) {
+                let id = self.focused_buffer_id();
+                if self.explorer_abandon_listing(id) {
                     return;
                 }
-                KeyCode::Char('-') if keypress.mods == Mods::default() => {
-                    self.dired_parent_dir();
-                    self.wake_caret();
-                    return;
-                }
-                KeyCode::Char('R') if keypress.mods == Mods::default() => {
-                    self.dired_refresh();
-                    self.wake_caret();
-                    return;
-                }
-                KeyCode::Char('.') if keypress.mods == Mods::default() => {
-                    self.dired_toggle_hidden();
-                    self.wake_caret();
-                    return;
-                }
-                _ => {}
+            }
+            if let Some(action) = dired_action_for(keypress) {
+                self.dired_handle_action(action);
+                self.wake_caret();
+                return;
             }
         }
 
@@ -24150,6 +24515,16 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // has no other reason to wake up.
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         let wait_until = wait_until.min(self.next_disk_check);
+        // A pending listing has no other reason to wake the loop: nothing
+        // is animating and no key was pressed, so without this the "still
+        // reading" line would never appear and a slow share would look
+        // exactly like a frozen pane.
+        let wait_until = self
+            .explorer_requests
+            .values()
+            .filter(|r| !r.done)
+            .map(|r| r.started + SLOW_LISTING_AFTER)
+            .fold(wait_until, |acc, deadline| acc.min(deadline));
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }
@@ -27443,26 +27818,416 @@ configure_board stm32
         assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
     }
 
+    // -- The buffer-backed listing can now do things ---------------------
+    //
+    // Everything below was reachable only from the sidebar, which cannot
+    // be split. `app.rs` said so itself: "Marking/rename/create/delete/
+    // copy/move aren't wired for this buffer-backed form yet."
+
+    /// An explorer buffer open on a directory with three files, cursor
+    /// on the first entry.
+    fn app_with_a_listing(name: &str) -> (TempDir, App) {
+        let dir = TempDir::new(name);
+        dir.write("a.txt", "a");
+        dir.write("b.txt", "b");
+        dir.write("c.txt", "c");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        (dir, app)
+    }
+
+    /// The entry the listing would act on right now.
+    fn selected_name(app: &App) -> String {
+        app.active_explorer().unwrap().selected_entry().unwrap().name.clone()
+    }
+
     #[test]
-    fn explorer_dired_text_lists_one_line_per_entry_with_directory_slashes() {
+    fn the_focused_explorer_buffer_is_the_active_listing() {
+        let (dir, app) = app_with_a_listing("buffer_is_active");
+        assert_eq!(app.active_explorer().map(|e| e.cwd.clone()), Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn an_operation_acts_on_the_row_the_cursor_is_on() {
+        // The listing keeps its own `selected` because the sidebar has
+        // no cursor; a buffer has a real one, and it is the real one the
+        // user is looking at. Reconciling them is what stops an
+        // operation from acting on a different row than the visible one.
+        let (_dir, mut app) = app_with_a_listing("cursor_is_selection");
+        app.test_vim_key(KeyPress::char('j')); // onto the second entry
+
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+
+        assert_eq!(app.active_explorer().unwrap().marks.len(), 1);
+        assert!(app.active_explorer().unwrap().marks.iter().any(|p| p.ends_with("b.txt")));
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_own_row_when_the_listing_is_re_rendered() {
+        // Regression: the header changes length whenever the counts in
+        // it change, so remembering the cursor as a character index slid
+        // it backwards on every mark -- and the next operation then
+        // acted on a different row than the one being looked at.
+        let (_dir, mut app) = app_with_a_listing("render_keeps_cursor");
+        app.test_vim_key(KeyPress::char('j')); // b.txt
+        let line_before = app.open().buffer.line_col(&app.test_cursor()).0;
+
+        app.dired_handle_action(ExplorerAction::ToggleMark); // grows the header
+
+        assert_eq!(app.open().buffer.line_col(&app.test_cursor()).0, line_before);
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+        assert!(app.active_explorer().unwrap().marks.is_empty(), "the second press un-marked the same row");
+    }
+
+    #[test]
+    fn marking_shows_up_in_the_header_count() {
+        let (_dir, mut app) = app_with_a_listing("mark_header");
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+        assert!(app.open().buffer.text().lines().next().unwrap().contains("1 marked"));
+    }
+
+    #[test]
+    fn deleting_from_the_buffer_asks_first_and_then_bins_the_marked_set() {
+        let (dir, mut app) = app_with_a_listing("buffer_delete");
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+        app.test_vim_key(KeyPress::char('j'));
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+
+        app.dired_handle_action(ExplorerAction::BeginDelete);
+        assert!(app.active_prompt_text().unwrap().contains("Recycle Bin"), "it asks, and says where they go");
+        app.explorer_prompt_key(KeyPress::char('y'));
+
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(!dir.path().join("b.txt").exists());
+        assert!(dir.path().join("c.txt").exists(), "and left the unmarked one alone");
+        assert_eq!(app.active_explorer().unwrap().entries.len(), 1, "the listing caught up");
+    }
+
+    #[test]
+    fn creating_a_file_from_the_buffer_lands_in_the_listing() {
+        let (dir, mut app) = app_with_a_listing("buffer_create");
+
+        app.dired_handle_action(ExplorerAction::BeginCreateFile);
+        for c in "new.txt".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(dir.path().join("new.txt").exists());
+        assert!(app.open().buffer.text().contains("new.txt"), "and the pane shows it without a manual refresh");
+    }
+
+    #[test]
+    fn renaming_from_the_buffer_renames_the_row_under_the_cursor() {
+        let (dir, mut app) = app_with_a_listing("buffer_rename");
+        app.test_vim_key(KeyPress::char('j')); // b.txt
+
+        app.dired_handle_action(ExplorerAction::BeginRename);
+        assert_eq!(selected_name(&app), "b.txt", "the action reconciled the cursor with the listing");
+        // The prompt is seeded with the current name; clear it first.
+        for _ in 0.."b.txt".len() {
+            app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
+        }
+        for c in "renamed.txt".chars() {
+            app.explorer_prompt_key(KeyPress::char(c));
+        }
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+
+        assert!(dir.path().join("renamed.txt").exists());
+        assert!(!dir.path().join("b.txt").exists());
+        assert!(dir.path().join("a.txt").exists(), "and nothing else moved");
+    }
+
+    #[test]
+    fn sorting_from_the_buffer_reorders_the_rows_without_re_reading() {
+        let dir = TempDir::new("buffer_sort");
+        dir.write("small.txt", "x");
+        dir.write("big.txt", "0123456789");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+
+        app.dired_handle_action(ExplorerAction::CycleSort); // name -> size
+
+        let text = app.open().buffer.text();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows, ["small.txt", "big.txt"]);
+        assert!(app.open().buffer.text().lines().next().unwrap().contains("size"), "the header says how it is ordered");
+    }
+
+    #[test]
+    fn reversing_the_sort_flips_it() {
+        let (_dir, mut app) = app_with_a_listing("buffer_sort_reverse");
+        app.dired_handle_action(ExplorerAction::ReverseSort);
+        let text = app.open().buffer.text();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(rows, ["c.txt", "b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn vim_motions_are_left_alone_because_the_cursor_is_the_selection() {
+        // `j`/`k` must never be claimed here: they are two of the most
+        // used motions in the editor, and in a listing they already do
+        // exactly the right thing.
+        assert_eq!(dired_action_for(KeyPress::char('j')), None);
+        assert_eq!(dired_action_for(KeyPress::char('k')), None);
+        assert_eq!(dired_action_for(KeyPress::char('D')), Some(ExplorerAction::BeginDelete));
+        assert_eq!(dired_action_for(KeyPress::char('m')), Some(ExplorerAction::ToggleMark));
+        // A modified key is somebody else's (`Ctrl-V` paste, and every
+        // global chord).
+        assert_eq!(dired_action_for(KeyPress::char('m').with_ctrl()), None);
+    }
+
+    #[test]
+    fn the_two_forms_of_the_explorer_read_the_same_key_table() {
+        // The bug this prevents: a binding that exists in the sidebar and
+        // not in the buffer, or means two different things.
+        for key in ['D', 'R', 'c', 'C', 'M', 'm', 'u', 'U', 't', '.', 'r', 'o', 'O'] {
+            let from_buffer = dired_action_for(KeyPress::char(key));
+            let mut matcher = fenix_explorer::explorer_trie().matcher();
+            let from_trie = match matcher.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(action) => Some(*action),
+                _ => None,
+            };
+            assert_eq!(from_buffer, from_trie, "{key} means different things in the two forms");
+        }
+    }
+
+    // -- Reading a directory off the main thread -------------------------
+    //
+    // The whole point of this machinery is a share that does not answer.
+    // That cannot be staged in a unit test (a made-up hostname is the
+    // live check, in the plan's verification), so what is pinned here is
+    // everything around it: which results are allowed to land, what
+    // happens to the ones that are not, and that abandoning leaves the
+    // pane usable. With no `event_proxy` the read runs inline, so by the
+    // time a call returns the result has already been applied.
+
+    #[test]
+    fn opening_a_directory_lists_it() {
+        let dir = TempDir::new("async_open");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+
+        app.open_dired_at(dir.path());
+
+        let id = app.focused_buffer_id();
+        assert_eq!(app.dired_states[&id].entries.len(), 1);
+        assert!(app.open().buffer.text().contains("a.txt"));
+    }
+
+    #[test]
+    fn a_listing_that_was_superseded_is_dropped_rather_than_yanking_the_pane_back() {
+        // Navigate away while a slow read is in flight and the slow one
+        // eventually answers. It must not drag you back to the directory
+        // you already left.
+        let first = TempDir::new("async_stale_first");
+        first.touch("in-first.txt");
+        let second = TempDir::new("async_stale_second");
+        second.touch("in-second.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(first.path());
+        let id = app.focused_buffer_id();
+        let stale = app.explorer_requests[&id].id;
+
+        app.explorer_navigate(id, second.path());
+        // The first read finally answers, long after it stopped mattering.
+        let late = fenix_explorer::read_listing(first.path(), false).unwrap();
+        app.apply_explorer_listed(id, stale, Ok(late));
+
+        assert_eq!(app.dired_states[&id].cwd, second.path());
+        assert!(app.open().buffer.text().contains("in-second.txt"));
+        assert!(!app.open().buffer.text().contains("in-first.txt"));
+    }
+
+    #[test]
+    fn a_listing_for_a_buffer_that_was_closed_is_dropped() {
+        let dir = TempDir::new("async_closed");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+        let request = app.explorer_requests[&id].id;
+        app.kill_buffer();
+
+        let listing = fenix_explorer::read_listing(dir.path(), false).unwrap();
+        app.apply_explorer_listed(id, request, Ok(listing));
+
+        assert!(app.buffers.get(id).is_none(), "and nothing panicked on the way");
+    }
+
+    #[test]
+    fn a_directory_that_refuses_to_open_says_so_and_leaves_you_where_you_were() {
+        // Being dumped into an empty pane is the worst possible place to
+        // be left after a share denies access.
+        let dir = TempDir::new("async_error");
+        dir.touch("still-here.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+
+        app.explorer_navigate(id, &dir.path().join("does-not-exist"));
+
+        assert_eq!(app.dired_states[&id].cwd, dir.path(), "still in the directory that works");
+        assert!(app.open().buffer.text().contains("still-here.txt"));
+        assert!(!app.modeline_pieces().1.is_empty(), "and it said something");
+    }
+
+    #[test]
+    fn abandoning_a_pending_read_leaves_the_pane_where_it_was() {
+        let dir = TempDir::new("async_abandon");
+        dir.touch("still-here.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+        // Stage a read that has not answered, the way a dead share
+        // leaves one.
+        app.next_explorer_request += 1;
+        let pending = app.next_explorer_request;
+        app.explorer_requests.insert(
+            id,
+            ExplorerRequest { id: pending, path: PathBuf::from(r"\\nas\media"), started: Instant::now(), done: false },
+        );
+
+        assert!(app.explorer_abandon_listing(id));
+
+        assert!(app.modeline_pieces().1.contains("stopped waiting"), "got: {}", app.modeline_pieces().1);
+        assert_eq!(app.dired_states[&id].cwd, dir.path());
+        assert!(app.open().buffer.text().contains("still-here.txt"), "the listing you had is still there");
+    }
+
+    #[test]
+    fn a_read_that_was_abandoned_is_dropped_when_it_finally_answers() {
+        // The thread cannot be killed, so the guarantee is that whatever
+        // it eventually returns changes nothing.
+        let first = TempDir::new("async_abandon_late_first");
+        first.touch("in-first.txt");
+        let other = TempDir::new("async_abandon_late_other");
+        other.touch("in-other.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(first.path());
+        let id = app.focused_buffer_id();
+        app.next_explorer_request += 1;
+        let abandoned = app.next_explorer_request;
+        app.explorer_requests.insert(
+            id,
+            ExplorerRequest { id: abandoned, path: other.path().to_path_buf(), started: Instant::now(), done: false },
+        );
+        app.explorer_abandon_listing(id);
+
+        let late = fenix_explorer::read_listing(other.path(), false).unwrap();
+        app.apply_explorer_listed(id, abandoned, Ok(late));
+
+        assert_eq!(app.dired_states[&id].cwd, first.path());
+    }
+
+    #[test]
+    fn abandoning_does_nothing_when_no_read_is_outstanding() {
+        // So Escape keeps its ordinary meaning the rest of the time.
+        let dir = TempDir::new("async_abandon_none");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        assert!(!app.explorer_abandon_listing(app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn a_fast_directory_never_flashes_a_reading_line() {
+        // The note is for a wait worth mentioning; showing it for every
+        // local directory would be noise on the common path.
+        let dir = TempDir::new("async_fast");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        assert!(app.explorer_waiting_on(app.focused_buffer_id()).is_none());
+    }
+
+    #[test]
+    fn a_read_that_has_been_waiting_long_enough_is_named() {
+        let dir = TempDir::new("async_slow");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+        app.next_explorer_request += 1;
+        let request = app.next_explorer_request;
+        app.explorer_requests.insert(
+            id,
+            ExplorerRequest {
+                id: request,
+                path: PathBuf::from(r"\\nas\media"),
+                started: Instant::now() - SLOW_LISTING_AFTER - Duration::from_millis(1),
+                done: false,
+            },
+        );
+
+        assert_eq!(app.explorer_waiting_on(id), Some(Path::new(r"\\nas\media")));
+    }
+
+    #[test]
+    fn git_badges_that_belong_to_another_read_are_dropped() {
+        // Badges computed for one directory decorating another would be
+        // worse than no badges at all.
+        let dir = TempDir::new("async_git_stale");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+        let stale = app.explorer_requests[&id].id - 1;
+
+        let mut statuses = HashMap::new();
+        statuses.insert(dir.path().join("a.txt"), fenix_explorer::GitStatus::Modified);
+        app.apply_explorer_git_status(id, stale, statuses);
+
+        assert_eq!(app.dired_states[&id].entries[0].git_status, None);
+    }
+
+    #[test]
+    fn a_network_path_is_recognised_by_its_own_spelling() {
+        assert!(is_unc(Path::new(r"\\nas\media")));
+        assert!(is_unc(Path::new("//nas/media")));
+        assert!(!is_unc(Path::new(r"C:\Users")));
+        assert!(!is_unc(Path::new("/home/thoma")));
+    }
+
+    #[test]
+    fn explorer_dired_text_lists_one_line_per_entry_under_a_header() {
         let dir = TempDir::new("dired_text_basic");
         dir.touch("a.txt");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let explorer = ExplorerState::opened(dir.path()).unwrap();
 
-        let (text, lines) = explorer_dired_text(&explorer);
-        // Sorted directories-first: "sub/" then "a.txt".
-        assert_eq!(text, "sub/\na.txt");
-        assert_eq!(lines, vec![Some(0), Some(1)]);
+        let (text, lines) = explorer_dired_text(&explorer, None);
+
+        let rows: Vec<&str> = text.lines().collect();
+        // Sorted directories-first: "sub/" then "a.txt", under a header.
+        assert_eq!(&rows[1..], ["sub/", "a.txt"]);
+        assert!(rows[0].contains("2 items"), "the header counts what is here: {}", rows[0]);
+        // Row 0 is the header, which is not an entry -- this mapping is
+        // what `Enter` uses to find what is under the cursor.
+        assert_eq!(lines, vec![None, Some(0), Some(1)]);
     }
 
     #[test]
-    fn explorer_dired_text_is_empty_for_an_empty_directory() {
+    fn explorer_dired_text_still_says_where_you_are_in_an_empty_directory() {
+        // An empty pane with no header would be indistinguishable from a
+        // listing that failed.
         let dir = TempDir::new("dired_text_empty");
         let explorer = ExplorerState::opened(dir.path()).unwrap();
-        let (text, lines) = explorer_dired_text(&explorer);
-        assert_eq!(text, "");
-        assert!(lines.is_empty());
+
+        let (text, lines) = explorer_dired_text(&explorer, None);
+
+        assert!(text.contains("0 items"), "got: {text}");
+        assert!(text.contains(&dir.path().display().to_string()));
+        assert_eq!(lines, vec![None]);
+    }
+
+    #[test]
+    fn the_header_names_the_directory_being_waited_on_and_how_to_stop() {
+        // "Reading..." alone is what a frozen pane looks like; naming the
+        // share is what tells you it is the share and not fenix.
+        let dir = TempDir::new("dired_text_waiting");
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
+
+        let (text, _) = explorer_dired_text(&explorer, Some(Path::new(r"\\nas\media")));
+
+        assert!(text.contains(r"reading \\nas\media"), "got: {text}");
+        assert!(text.contains("Esc to stop waiting"), "got: {text}");
     }
 
     #[test]
@@ -27556,9 +28321,13 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.open_dired_at(dir.path());
 
-        assert_eq!(app.test_cursor().char_idx, 0);
+        // Starts on the first entry, not the header (see `render_dired`).
+        let start = app.test_cursor().char_idx;
+        assert_eq!(app.open().buffer.line_col(&app.test_cursor()).0, 1);
+
         app.test_vim_key(KeyPress::char('j')); // plain Vim motion, not an ExplorerAction
-        assert_ne!(app.test_cursor().char_idx, 0, "j should move the real cursor down a line");
+
+        assert_ne!(app.test_cursor().char_idx, start, "j should move the real cursor down a line");
     }
 
     #[test]
@@ -27588,7 +28357,7 @@ configure_board stm32
 
         assert_eq!(app.focused_buffer_id(), dired_id, "same buffer, not a new one");
         assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, sub);
-        assert_eq!(app.open().buffer.text(), "inner.txt");
+        assert_eq!(app.open().buffer.text().lines().nth(1), Some("inner.txt"));
     }
 
     #[test]
@@ -27600,7 +28369,7 @@ configure_board stm32
         app.open_dired_at(&sub);
         let dired_id = app.focused_buffer_id();
 
-        app.dired_parent_dir();
+        app.dired_handle_action(ExplorerAction::ParentDir);
 
         assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, dir.path());
     }

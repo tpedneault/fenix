@@ -102,13 +102,32 @@ for anyone curious to poke around or build on it.
   list continuation/checkbox toggling: `#` means "comment," not
   "heading," in half the languages this editor highlights.
 - **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
-  buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
-  `Enter` opens a file or navigates into a directory, `-` goes up, `R`
-  refreshes, `.` toggles hidden files; ordinary motions (`j k gg G /`)
-  work for free since it's real text. A persistent sidebar (`SPC e t`)
-  is also available, with the fuller dired feature set (git-status
-  badges, marking, batch create/rename/copy/move/delete, inline subtree
-  expansion) -- those aren't yet wired up for the buffer-backed form.
+  buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) with
+  the whole feature set -- marks, batch create/rename/copy/move/delete,
+  git-status badges, subtree expansion, sorting by name/size/date/type;
+  ordinary motions (`j k gg G /`) work for free since it's real text,
+  and the cursor *is* the selection, so operations always act on the row
+  you are looking at. A persistent sidebar (`SPC e t`) shows the same
+  listing in a strip, reading the same key table, so a binding can never
+  mean two different things in the two forms.
+
+  Reading a directory happens **off the main thread**. A slow path --
+  a network share, a disk waking up -- leaves the editor completely
+  usable, and the pane keeps showing where you are until the new listing
+  arrives; after a moment the header names what it is waiting on and
+  `Esc` stops waiting and leaves you where you were. (Nothing tries to
+  cancel the read itself: a blocked `read_dir` on a share that has gone
+  away sits in the kernel until SMB gives up, minutes later, and no
+  amount of asking shortens that. Its result simply arrives stale and is
+  dropped.) Git badges follow as a separate pass, so they never hold up
+  the listing, and are skipped for `\\server\share` paths where running
+  `git status` across the wire would cost more than it is worth.
+
+  Deleting means the **Recycle Bin**, so a mistake is recoverable
+  through Windows' own restore. Copying or moving onto something that
+  already exists asks first -- overwrite, skip, or keep both -- rather
+  than silently destroying it, and skipping a *move* leaves the source
+  where it was.
   `SPC f e` starts that same fuller explorer at your home directory
   instead of the current file's -- for a file that isn't in any project
   and isn't worth typing an absolute path for (something in
@@ -939,21 +958,34 @@ popup shows what keys continue it.
 | `c` / `+` | Create file / directory |
 | `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
-| `g r` | Refresh |
+| `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `r` / `g r` | Refresh |
 | `S` | Select this directory (when picking a project root) |
 | `q` / `Esc` | Quit |
 
-### Dired buffer (`SPC f j`)
+### File explorer buffer (`SPC f j`)
 
-A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`).
-Only these are special:
+A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`)
+and the cursor is the selection. The keys below are the same table the
+sidebar reads -- only `j`/`k` differ, because here they are the cursor.
 
 | Keys | Action |
 |---|---|
-| `Enter` | Open the file, or navigate into the directory, at point |
+| `Enter` / `l` | Open the file, or navigate into the directory, at point |
 | `-` | Go to the parent directory |
-| `R` | Refresh |
+| `Tab` | Expand / collapse a directory in place |
+| `m` / `u` / `U` / `t` | Mark / unmark / unmark all / toggle all marks |
+| `D` | Delete to the Recycle Bin (marked, or entry under cursor) |
+| `R` | Rename |
+| `c` / `+` | Create file / directory (either may include `/`, and missing parents are created) |
+| `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
+| `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `r` | Refresh |
+| `Esc` | Stop waiting for a directory that isn't answering |
+
+Operations act on the marked set if there is one, and on the row under
+the cursor otherwise -- dired's own convention.
 
 ### Table view (`SPC f t`)
 
