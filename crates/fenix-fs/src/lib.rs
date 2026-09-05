@@ -9,6 +9,8 @@
 //! rendering, windows, or fenix at all.
 
 mod listing;
+mod pathbar;
+mod places;
 mod recycle;
 mod transfer;
 
@@ -17,4 +19,6 @@ mod test_util;
 
 pub use listing::{list_dir, Attributes, DirEntryInfo, EntryKind};
 pub use recycle::{permanently, to_recycle_bin, Outcome};
+pub use pathbar::{common_prefix, complete, expand};
+pub use places::{shares, volumes, Volume, VolumeKind};
 pub use transfer::{conflicts_in, copy_into, move_into, OnConflict};
