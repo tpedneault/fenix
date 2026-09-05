@@ -4446,34 +4446,114 @@ fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
 /// icon/color spans (the sidebar/full-buffer *overlay*'s own rendering,
 /// unchanged and untouched by this) -- this has to be real, plain rope
 /// text a Vim buffer can navigate/search, not colored display-only spans.
-/// The explorer buffer's own text, plus which entry each line maps back
-/// to (`None` for the header, which is not an entry).
+/// What one rendered explorer row is, for coloring it. Carried per row
+/// rather than re-derived from the text, so the highlight pass never has
+/// to parse back the columns it just laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExplorerLine {
+    /// Index into `ExplorerState::entries` -- what `Enter` and every
+    /// operation resolve the cursor through.
+    entry: usize,
+    kind: fenix_explorer::EntryKind,
+    /// `false` when the entry could not be stat'd. Its name is still
+    /// listed and still deletable; the row just reads as uncertain
+    /// rather than claiming a confident `0 B`.
+    readable: bool,
+    marked: bool,
+    /// Character offset where the size/date columns begin -- everything
+    /// from here to the git badge is secondary and rendered dim, so the
+    /// names stay the thing the eye lands on.
+    meta_from: usize,
+    /// `(offset, length, status)` of the git badge, when there is one.
+    badge: Option<(usize, usize, fenix_explorer::GitStatus)>,
+}
+
+/// Widths of the two right-hand columns. Fixed, so names all end at the
+/// same place and the eye can run straight down them; `format_size` and
+/// `format_age` are both built to fit.
+const EXPLORER_SIZE_WIDTH: usize = 8;
+const EXPLORER_AGE_WIDTH: usize = 5;
+/// Below this there is no room for columns at all, and a name squeezed
+/// to nothing is worse than no size column -- a narrow pane gets names
+/// and git badges only.
+const EXPLORER_MIN_WIDTH_FOR_COLUMNS: usize = 44;
+
+/// The explorer buffer's own text, plus per-row metadata (`None` for the
+/// header, which is not an entry).
 ///
 /// `waiting_on` is the directory currently being read, if any -- shown
 /// in the header rather than replacing the listing, so a pane keeps
 /// showing where you are until the new directory is ready, and a slow
 /// or unreachable path costs you nothing but a wait you can walk away
 /// from.
-fn explorer_dired_text(state: &ExplorerState, waiting_on: Option<&Path>) -> (String, Vec<Option<usize>>) {
+///
+/// `width` is the pane's real character width, so the columns line up
+/// against the pane they are going into rather than a fixed guess.
+fn explorer_dired_text(state: &ExplorerState, waiting_on: Option<&Path>, width: usize) -> (String, Vec<Option<ExplorerLine>>) {
+    let columns = width >= EXPLORER_MIN_WIDTH_FOR_COLUMNS;
+    // Everything the name has to share the row with: the mark column,
+    // a gap before each of the two right-hand columns, the columns
+    // themselves, and a space plus the widest git badge.
+    //
+    // Counted rather than estimated, because being one character over
+    // is not a rounding error here -- the row runs past the pane and the
+    // rightmost column is clipped, which is exactly how it looked before
+    // this was worked out properly.
+    const BADGE_ROOM: usize = 1 + 2;
+    let overhead = 2 + 2 + EXPLORER_SIZE_WIDTH + 2 + EXPLORER_AGE_WIDTH + BADGE_ROOM;
+    let name_width = if columns { width.saturating_sub(overhead) } else { width.saturating_sub(2 + BADGE_ROOM) };
+
     let mut text = explorer_header(state, waiting_on);
-    let mut lines = vec![None];
-    for entry in state.entries.iter() {
+    let mut lines: Vec<Option<ExplorerLine>> = vec![None];
+    for (index, entry) in state.entries.iter().enumerate() {
         text.push('\n');
-        text.push_str(&"  ".repeat(entry.depth));
-        text.push_str(&entry.name);
+        let row_start = text.chars().count() - text.lines().next_back().map(|l| l.chars().count()).unwrap_or(0);
+        let _ = row_start;
+        let mut row = String::new();
+
+        let marked = state.marks.contains(&entry.path);
+        // A column rather than a suffix: marks have to be scannable down
+        // the left edge, which is the whole reason dired puts them there.
+        row.push_str(if marked { "* " } else { "  " });
+
+        let mut name = format!("{}{}", "  ".repeat(entry.depth), entry.name);
         if entry.is_dir() {
-            text.push('/');
+            name.push('/');
         }
-        if let Some(status) = entry.git_status {
-            text.push_str("  ");
-            text.push_str(git_status_marker(status));
+        if entry.kind.is_link() {
+            name.push('@');
         }
-        lines.push(None);
-    }
-    // Entry indices are filled in afterwards so the header's `None`
-    // stays row 0 no matter how the rows above are built.
-    for (row, slot) in lines.iter_mut().skip(1).enumerate() {
-        *slot = Some(row);
+        let name_chars = name.chars().count();
+        if name_chars > name_width && name_width > 1 {
+            // Truncated from the *end*, keeping the start: the beginning
+            // of a filename is what distinguishes it.
+            name = name.chars().take(name_width - 1).collect::<String>() + "\u{2026}";
+        }
+        row.push_str(&name);
+
+        let mut meta_from = row.chars().count();
+        if columns {
+            let pad = name_width.saturating_sub(name.chars().count());
+            row.push_str(&" ".repeat(pad + 2));
+            // After the padding, so every row's dim region starts at the
+            // same column -- which is what lets the eye run straight down
+            // the sizes instead of following a ragged edge.
+            meta_from = row.chars().count();
+            let size = if entry.is_dir() { String::new() } else { format_size(entry.size) };
+            row.push_str(&format!("{size:>EXPLORER_SIZE_WIDTH$}  "));
+            row.push_str(&format!("{:>EXPLORER_AGE_WIDTH$}", format_age(entry.modified)));
+        }
+
+        let badge = entry.git_status.map(|status| {
+            let marker = git_status_marker(status);
+            row.push(' ');
+            let at = row.chars().count();
+            row.push_str(marker);
+            (at, marker.chars().count(), status)
+        });
+
+        text.push_str(&row);
+        lines.push(Some(ExplorerLine { entry: index, kind: entry.kind, readable: entry.readable, marked, meta_from, badge }));
     }
     (text, lines)
 }
@@ -4501,6 +4581,61 @@ fn explorer_header(state: &ExplorerState, waiting_on: Option<&Path>) -> String {
         header.push_str(&format!("  --  reading {} (Esc to stop waiting)", path.display()));
     }
     header
+}
+
+/// Resolves a real `BufferKind::Explorer` buffer's per-line highlight
+/// ranges from its cached `ExplorerLine` metadata -- mirrors
+/// `git_highlights_for_visible_range`'s shape exactly.
+///
+/// Three jobs: make directories findable at a glance, push the
+/// size/date columns into the background so names stay the thing you
+/// read, and keep git badges the same colors they are everywhere else in
+/// the editor.
+fn explorer_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<ExplorerLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        let Some(slot) = lines.get(line) else { continue };
+        let Some(meta) = slot else {
+            // The header -- the only row that is not an entry.
+            ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            continue;
+        };
+        let name_color = if !meta.readable {
+            // Dim, because everything the row says about it beyond the
+            // name is a guess.
+            theme.gutter_fg
+        } else if meta.kind.is_link() {
+            theme.syntax_string
+        } else if meta.kind.is_dir_like() {
+            theme.icon_folder
+        } else {
+            theme.icon_file
+        };
+        ranges.push((line_start_byte..line_end_byte, name_color));
+        if meta.marked {
+            ranges.push((line_start_byte..ob.buffer.char_to_byte(start + 1), theme.syntax_keyword));
+        }
+        let meta_start_byte = ob.buffer.char_to_byte(start + meta.meta_from.min(len));
+        ranges.push((meta_start_byte..line_end_byte, theme.gutter_fg));
+        if let Some((at, badge_len, status)) = meta.badge {
+            let badge_start = ob.buffer.char_to_byte(start + at.min(len));
+            let badge_end = ob.buffer.char_to_byte((start + at + badge_len).min(start + len));
+            ranges.push((badge_start..badge_end, theme.git_status_color(status)));
+        }
+    }
+    ranges
 }
 
 /// Groups `fenix_project::grep_project`'s raw per-*match* results into
@@ -5381,7 +5516,7 @@ pub struct App {
     /// buffer's real rope text corresponds to -- mirrors `dashboard_
     /// lines`' exact role, just for `explorer_dired_text`'s output
     /// instead of `dashboard::render`'s.
-    dired_lines: HashMap<BufferId, Vec<Option<usize>>>,
+    dired_lines: HashMap<BufferId, Vec<Option<ExplorerLine>>>,
     /// The newest directory read for each explorer buffer -- see
     /// `ExplorerRequest`. At most one per buffer: asking for a different
     /// directory supersedes whatever was being read, rather than
@@ -8461,7 +8596,7 @@ impl App {
         // that is navigating from somewhere -- so this is the one case
         // where a pending listing really is blank.
         let state = ExplorerState::pending_at(dir);
-        let (text, lines) = explorer_dired_text(&state, Some(dir));
+        let (text, lines) = explorer_dired_text(&state, Some(dir), crate::wrap::DEFAULT_WRAP_WIDTH);
         let id = self.buffers.open_explorer(&text);
         self.dired_states.insert(id, state);
         self.dired_lines.insert(id, lines);
@@ -8620,8 +8755,17 @@ impl App {
     /// pending note appearing) leaves the cursor where the user put it.
     fn render_dired(&mut self, buffer: BufferId, reset_cursor: bool) {
         let waiting = self.explorer_waiting_on(buffer).map(Path::to_path_buf);
+        // Laid out against whichever pane is showing this listing, so
+        // the columns line up with the space they actually have.
+        let width = self
+            .windows()
+            .windows()
+            .into_iter()
+            .find(|&p| self.windows().content(p) == Some(&buffer))
+            .map(|pane| self.pane_cols_or(pane, crate::wrap::DEFAULT_WRAP_WIDTH))
+            .unwrap_or(crate::wrap::DEFAULT_WRAP_WIDTH);
         let Some(state) = self.dired_states.get(&buffer) else { return };
-        let (text, lines) = explorer_dired_text(state, waiting.as_deref());
+        let (text, lines) = explorer_dired_text(state, waiting.as_deref(), width);
         self.dired_lines.insert(buffer, lines);
 
         // Which *line* each pane is on, remembered across the rewrite.
@@ -8685,9 +8829,10 @@ impl App {
     fn dired_activate_selected(&mut self) {
         let id = self.focused_buffer_id();
         let line = self.open().buffer.line_col(&self.cursor()).0;
-        let Some(Some(entry_idx)) = self.dired_lines.get(&id).and_then(|lines| lines.get(line)).copied() else {
+        let Some(Some(row)) = self.dired_lines.get(&id).and_then(|lines| lines.get(line)).copied() else {
             return;
         };
+        let entry_idx = row.entry;
         let Some(entry) = self.dired_states.get(&id).and_then(|s| s.entries.get(entry_idx)) else { return };
         let path = entry.path.clone();
         let is_dir = entry.is_dir();
@@ -18290,8 +18435,8 @@ impl App {
         let Some(buffer) = self.focused_dired_buffer() else { return };
         let line = self.open().buffer.line_col(&self.cursor()).0;
         let entry = self.dired_lines.get(&buffer).and_then(|lines| lines.get(line)).copied().flatten();
-        if let (Some(index), Some(state)) = (entry, self.dired_states.get_mut(&buffer)) {
-            state.select_index(index);
+        if let (Some(row), Some(state)) = (entry, self.dired_states.get_mut(&buffer)) {
+            state.select_index(row.entry);
         }
     }
 
@@ -21599,6 +21744,7 @@ impl App {
         let diff_lines = self.diff_lines.get(&id).cloned();
         let graph_lines = self.graph_lines.get(&id).cloned();
         let merge_lines = self.merge_lines.get(&id).cloned();
+        let dired_lines = self.dired_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -21652,6 +21798,9 @@ impl App {
         }
         if ob.kind == BufferKind::Merge {
             return merge_highlights_for_visible_range(ob, merge_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Explorer {
+            return explorer_highlights_for_visible_range(ob, dired_lines.as_deref(), render_base_line, rows, theme);
         }
 
         // Conflict markers, in an ordinary file. A conflicted file opens
@@ -27836,6 +27985,12 @@ configure_board stm32
         (dir, app)
     }
 
+    /// Just the names out of a rendered listing, without the mark
+    /// column or the size/date columns around them.
+    fn explorer_row_names(text: &str) -> Vec<String> {
+        text.lines().skip(1).map(|row| row[2..].split("  ").next().unwrap_or("").trim().to_string()).collect()
+    }
+
     /// The entry the listing would act on right now.
     fn selected_name(app: &App) -> String {
         app.active_explorer().unwrap().selected_entry().unwrap().name.clone()
@@ -27949,18 +28104,17 @@ configure_board stm32
         app.dired_handle_action(ExplorerAction::CycleSort); // name -> size
 
         let text = app.open().buffer.text();
-        let rows: Vec<&str> = text.lines().skip(1).collect();
-        assert_eq!(rows, ["small.txt", "big.txt"]);
-        assert!(app.open().buffer.text().lines().next().unwrap().contains("size"), "the header says how it is ordered");
+        let names = explorer_row_names(&text);
+        assert_eq!(names, ["small.txt", "big.txt"]);
+        assert!(text.lines().next().unwrap().contains("size"), "the header says how it is ordered");
     }
 
     #[test]
     fn reversing_the_sort_flips_it() {
         let (_dir, mut app) = app_with_a_listing("buffer_sort_reverse");
         app.dired_handle_action(ExplorerAction::ReverseSort);
-        let text = app.open().buffer.text();
-        let rows: Vec<&str> = text.lines().skip(1).collect();
-        assert_eq!(rows, ["c.txt", "b.txt", "a.txt"]);
+        let names = explorer_row_names(&app.open().buffer.text());
+        assert_eq!(names, ["c.txt", "b.txt", "a.txt"]);
     }
 
     #[test]
@@ -28192,15 +28346,91 @@ configure_board stm32
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let explorer = ExplorerState::opened(dir.path()).unwrap();
 
-        let (text, lines) = explorer_dired_text(&explorer, None);
+        let (text, lines) = explorer_dired_text(&explorer, None, 100);
 
         let rows: Vec<&str> = text.lines().collect();
         // Sorted directories-first: "sub/" then "a.txt", under a header.
-        assert_eq!(&rows[1..], ["sub/", "a.txt"]);
+        assert!(rows[1].contains("sub/"), "got: {}", rows[1]);
+        assert!(rows[2].contains("a.txt"), "got: {}", rows[2]);
         assert!(rows[0].contains("2 items"), "the header counts what is here: {}", rows[0]);
         // Row 0 is the header, which is not an entry -- this mapping is
         // what `Enter` uses to find what is under the cursor.
-        assert_eq!(lines, vec![None, Some(0), Some(1)]);
+        assert!(lines[0].is_none());
+        assert_eq!(lines[1].unwrap().entry, 0);
+        assert_eq!(lines[2].unwrap().entry, 1);
+    }
+
+    #[test]
+    fn a_wide_pane_gets_size_and_date_columns_lined_up() {
+        // `Entry` has carried a size and a timestamp since the beginning
+        // and nothing ever rendered them.
+        let dir = TempDir::new("dired_columns");
+        dir.write("small.txt", "x");
+        dir.write("bigger.txt", "0123456789");
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
+
+        let (text, lines) = explorer_dired_text(&explorer, None, 100);
+
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        assert!(rows[0].contains("     10B"), "a right-aligned size column: {}", rows[0]);
+        assert!(rows[1].contains("      1B"), "a right-aligned size column: {}", rows[1]);
+        // Both rows put their metadata at the same column, which is what
+        // makes the listing scannable down a column rather than ragged.
+        assert_eq!(lines[1].unwrap().meta_from, lines[2].unwrap().meta_from);
+    }
+
+    #[test]
+    fn no_rendered_row_is_wider_than_the_pane_it_was_laid_out_for() {
+        // Being one character over is not a rounding error: the row runs
+        // past the pane and the rightmost column is silently clipped.
+        // A git badge is the case that used to do it.
+        let dir = TempDir::new("dired_row_width");
+        dir.write("a-fairly-long-file-name-here.txt", "0123456789");
+        dir.write("short.txt", "x");
+        std::fs::create_dir(dir.path().join("a-directory-with-a-long-name")).unwrap();
+        let mut explorer = ExplorerState::opened(dir.path()).unwrap();
+        explorer.toggle_mark();
+        let mut statuses = HashMap::new();
+        for entry in &explorer.entries {
+            statuses.insert(entry.path.clone(), fenix_explorer::GitStatus::Conflicted);
+        }
+        explorer.apply_git_statuses(statuses);
+
+        for width in [44, 60, 80, 120, 200] {
+            let (text, _) = explorer_dired_text(&explorer, None, width);
+            for row in text.lines().skip(1) {
+                assert!(row.chars().count() <= width, "a {}-char row in a {width}-char pane: {row:?}", row.chars().count());
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_pane_keeps_the_names_and_drops_the_columns() {
+        // A name squeezed to nothing is worse than no size column.
+        let dir = TempDir::new("dired_narrow");
+        dir.write("twenty-char-name.txt", "x");
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
+
+        let (text, _) = explorer_dired_text(&explorer, None, 30);
+
+        // With columns reserved there would be eight characters of room
+        // for a twenty-character name; without them it fits whole.
+        assert!(text.lines().nth(1).unwrap().contains("twenty-char-name.txt"), "got: {:?}", text.lines().nth(1));
+    }
+
+    #[test]
+    fn a_marked_row_says_so_in_a_column_of_its_own() {
+        // Down the left edge, where marks can be scanned -- which is the
+        // whole reason dired puts them there.
+        let dir = TempDir::new("dired_mark_column");
+        dir.touch("a.txt");
+        let mut explorer = ExplorerState::opened(dir.path()).unwrap();
+        explorer.toggle_mark();
+
+        let (text, lines) = explorer_dired_text(&explorer, None, 100);
+
+        assert!(text.lines().nth(1).unwrap().starts_with("* "), "got: {:?}", text.lines().nth(1));
+        assert!(lines[1].unwrap().marked);
     }
 
     #[test]
@@ -28210,11 +28440,12 @@ configure_board stm32
         let dir = TempDir::new("dired_text_empty");
         let explorer = ExplorerState::opened(dir.path()).unwrap();
 
-        let (text, lines) = explorer_dired_text(&explorer, None);
+        let (text, lines) = explorer_dired_text(&explorer, None, 100);
 
         assert!(text.contains("0 items"), "got: {text}");
         assert!(text.contains(&dir.path().display().to_string()));
-        assert_eq!(lines, vec![None]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].is_none());
     }
 
     #[test]
@@ -28224,7 +28455,7 @@ configure_board stm32
         let dir = TempDir::new("dired_text_waiting");
         let explorer = ExplorerState::opened(dir.path()).unwrap();
 
-        let (text, _) = explorer_dired_text(&explorer, Some(Path::new(r"\\nas\media")));
+        let (text, _) = explorer_dired_text(&explorer, Some(Path::new(r"\\nas\media")), 100);
 
         assert!(text.contains(r"reading \\nas\media"), "got: {text}");
         assert!(text.contains("Esc to stop waiting"), "got: {text}");
@@ -28357,7 +28588,7 @@ configure_board stm32
 
         assert_eq!(app.focused_buffer_id(), dired_id, "same buffer, not a new one");
         assert_eq!(app.dired_states.get(&dired_id).unwrap().cwd, sub);
-        assert_eq!(app.open().buffer.text().lines().nth(1), Some("inner.txt"));
+        assert!(app.open().buffer.text().lines().nth(1).unwrap().contains("inner.txt"));
     }
 
     #[test]
