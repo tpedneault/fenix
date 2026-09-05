@@ -3014,9 +3014,46 @@ enum PromptKind {
     MoveTo,
 }
 
+impl PromptKind {
+    /// How to describe what just happened, for the status line.
+    fn past_tense(self) -> &'static str {
+        match self {
+            PromptKind::ConfirmDelete => "deleted",
+            PromptKind::Rename => "renamed",
+            PromptKind::CreateFile => "created",
+            PromptKind::CreateDir => "created",
+            PromptKind::CopyTo => "copied",
+            PromptKind::MoveTo => "moved",
+        }
+    }
+}
+
 struct ExplorerPrompt {
     kind: PromptKind,
     input: String,
+}
+
+/// A copy or move that has been asked for, found to collide with
+/// something already at the destination, and is waiting for the user to
+/// say what to do about it.
+///
+/// The collision is found before anything is written (`fenix_fs::
+/// conflicts_in`), so nothing has happened yet and every answer --
+/// including cancelling outright -- is still available. The explorer
+/// this replaces simply overwrote, with no prompt and nothing in the
+/// Recycle Bin afterwards.
+struct ExplorerConflict {
+    /// Which operation was asked for: the answer applies to it, not to
+    /// some remembered general preference.
+    kind: PromptKind,
+    /// Everything the operation was going to act on, not only the
+    /// colliding ones -- the non-colliding files still have to be
+    /// copied once the question is answered.
+    targets: Vec<PathBuf>,
+    dest: PathBuf,
+    /// What is already there, for naming it in the prompt. Showing the
+    /// first one and a count beats "some files already exist".
+    conflicts: Vec<PathBuf>,
 }
 
 /// Smallest adjustment to `scroll_line` that brings `cursor_line` into the
@@ -4338,7 +4375,7 @@ fn explorer_dired_text(state: &ExplorerState) -> (String, Vec<Option<usize>>) {
         }
         text.push_str(&"  ".repeat(entry.depth));
         text.push_str(&entry.name);
-        if entry.is_dir {
+        if entry.is_dir() {
             text.push('/');
         }
         if let Some(status) = entry.git_status {
@@ -4441,7 +4478,11 @@ fn format_size(bytes: u64) -> String {
 /// Coarse relative age (`"3m"`, `"5h"`, `"2d"`) since `modified` --
 /// avoids pulling in a date/time crate just to show a calendar date;
 /// elapsed-duration bucketing needs no calendar math at all.
-fn format_age(modified: std::time::SystemTime) -> String {
+fn format_age(modified: Option<std::time::SystemTime>) -> String {
+    // Blank, not a fabricated date: an entry whose metadata could not be
+    // read has no timestamp, and inventing one would be a lie the user
+    // cannot tell from a real answer.
+    let Some(modified) = modified else { return String::new() };
     let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified) else { return "now".to_string() };
     let secs = elapsed.as_secs();
     if secs < 60 {
@@ -5088,6 +5129,14 @@ pub struct App {
     /// own doc comment.
     explorer_purpose: ExplorerPurpose,
     explorer_prompt: Option<ExplorerPrompt>,
+    /// A copy/move waiting on an answer about what to overwrite -- see
+    /// `ExplorerConflict`. Capturing, like `explorer_prompt`.
+    explorer_conflict: Option<ExplorerConflict>,
+    /// Whether the delete being confirmed right now is the permanent
+    /// one (`D!`) rather than the Recycle Bin one (`D`). Read when the
+    /// confirmation is answered, so the prompt and the action can never
+    /// disagree about which was asked for.
+    explorer_delete_permanently: bool,
     /// Topmost visible row of the full-buffer/sidebar listings. Plain
     /// integers, not eased like `rendered_scroll` -- a directory listing
     /// doesn't get the smooth-scroll treatment the editor buffer does,
@@ -6057,6 +6106,8 @@ impl App {
             cursor_pos: None,
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
+            explorer_conflict: None,
+            explorer_delete_permanently: false,
             explorer_scroll: 0,
             sidebar_scroll: 0,
             picker_scroll: 0,
@@ -8278,7 +8329,7 @@ impl App {
     /// file) and tests (which just want a specific directory) -- opens a
     /// fresh dired buffer at `dir` in the focused pane.
     fn open_dired_at(&mut self, dir: &Path) {
-        let state = match ExplorerState::open(dir) {
+        let state = match ExplorerState::opened(dir) {
             Ok(s) => s,
             Err(err) => {
                 eprintln!("fenix: couldn't list {} ({err})", dir.display());
@@ -8330,8 +8381,8 @@ impl App {
         };
         let Some(entry) = self.dired_states.get(&id).and_then(|s| s.entries.get(entry_idx)) else { return };
         let path = entry.path.clone();
-        if entry.is_dir {
-            match ExplorerState::open(&path) {
+        if entry.is_dir() {
+            match ExplorerState::opened(&path) {
                 Ok(new_state) => self.set_dired_state(id, new_state),
                 Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
             }
@@ -8347,7 +8398,7 @@ impl App {
         let Some(parent) = self.dired_states.get(&id).and_then(|s| s.cwd.parent()).map(Path::to_path_buf) else {
             return;
         };
-        match ExplorerState::open(&parent) {
+        match ExplorerState::opened(&parent) {
             Ok(new_state) => self.set_dired_state(id, new_state),
             Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
         }
@@ -8368,8 +8419,9 @@ impl App {
     fn dired_toggle_hidden(&mut self) {
         let id = self.focused_buffer_id();
         let Some(mut state) = self.dired_states.remove(&id) else { return };
-        if let Err(err) = state.toggle_hidden() {
-            eprintln!("fenix: couldn't refresh ({err})");
+        state.toggle_hidden();
+        if let Err(err) = state.refresh() {
+            self.set_error(format!("couldn't list {}: {err}", state.cwd.display()));
         }
         self.set_dired_state(id, state);
     }
@@ -8384,7 +8436,7 @@ impl App {
             self.sidebar = None;
         } else {
             let dir = self.explorer_start_dir();
-            match ExplorerState::open(&dir) {
+            match ExplorerState::opened(&dir) {
                 Ok(explorer) => {
                     self.sidebar = Some(explorer);
                     self.sidebar_open = true;
@@ -10292,7 +10344,7 @@ impl App {
     /// same as leaving the explorer any other time.
     pub(crate) fn picker_add_project_prompt(&mut self) {
         let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let explorer = match ExplorerState::open(&start) {
+        let explorer = match ExplorerState::opened(&start) {
             Ok(e) => e,
             Err(err) => {
                 eprintln!("fenix: couldn't list {} ({err})", start.display());
@@ -10333,7 +10385,7 @@ impl App {
     /// `start_find_from_here`). `q`/`Escape` cancels.
     pub(crate) fn start_explore_from_home(&mut self) {
         let start = dirs::home_dir().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let explorer = match ExplorerState::open(&start) {
+        let explorer = match ExplorerState::opened(&start) {
             Ok(e) => e,
             Err(err) => {
                 eprintln!("fenix: couldn't list {} ({err})", start.display());
@@ -10528,7 +10580,7 @@ impl App {
     /// (a MIB root needs a label, a project root doesn't).
     pub(crate) fn picker_add_mib_root_prompt(&mut self) {
         let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let explorer = match ExplorerState::open(&start) {
+        let explorer = match ExplorerState::opened(&start) {
             Ok(e) => e,
             Err(err) => {
                 eprintln!("fenix: couldn't list {} ({err})", start.display());
@@ -17956,7 +18008,8 @@ impl App {
             ExplorerAction::UnmarkAll => self.active_explorer_mut().unwrap().unmark_all(),
             ExplorerAction::ToggleAllMarks => self.active_explorer_mut().unwrap().toggle_all_marks(),
             ExplorerAction::ToggleHidden => {
-                if let Err(err) = self.active_explorer_mut().unwrap().toggle_hidden() {
+                self.active_explorer_mut().unwrap().toggle_hidden();
+                if let Err(err) = self.active_explorer_mut().unwrap().refresh() {
                     eprintln!("fenix: couldn't refresh ({err})");
                 }
             }
@@ -17968,7 +18021,7 @@ impl App {
             ExplorerAction::ParentDir => {
                 let parent = self.active_explorer().unwrap().cwd.parent().map(Path::to_path_buf);
                 if let Some(parent) = parent {
-                    match ExplorerState::open(&parent) {
+                    match ExplorerState::opened(&parent) {
                         Ok(new_state) => self.set_active_explorer(new_state),
                         Err(err) => eprintln!("fenix: couldn't list {} ({err})", parent.display()),
                     }
@@ -18035,7 +18088,7 @@ impl App {
         let Some(explorer) = self.active_explorer() else { return };
         let Some(entry) = explorer.selected_entry() else { return };
         let path = entry.path.clone();
-        let is_dir = entry.is_dir;
+        let is_dir = entry.is_dir();
 
         if !is_dir
             && self.main_view == MainView::Explorer
@@ -18045,7 +18098,7 @@ impl App {
         }
 
         if is_dir {
-            match ExplorerState::open(&path) {
+            match ExplorerState::opened(&path) {
                 Ok(new_state) => self.set_active_explorer(new_state),
                 Err(err) => eprintln!("fenix: couldn't list {} ({err})", path.display()),
             }
@@ -18095,16 +18148,20 @@ impl App {
     /// bare y/n for delete confirmation, or free-text input (with
     /// Backspace/Enter/Escape) for rename/create/copy/move.
     fn explorer_prompt_key(&mut self, key: KeyPress) {
+        // A pending collision owns the keyboard until it is answered:
+        // the operation is half-specified until then, and letting other
+        // keys through would leave it in that state indefinitely.
+        if self.explorer_conflict.is_some() {
+            self.explorer_conflict_key(key);
+            return;
+        }
+
         let Some(prompt) = &mut self.explorer_prompt else { return };
 
         if prompt.kind == PromptKind::ConfirmDelete {
             if key.code == KeyCode::Char('y') || key.code == KeyCode::Char('Y') {
                 self.explorer_prompt = None;
-                if let Some(explorer) = self.active_explorer_mut() {
-                    if let Err(err) = explorer.delete_targets() {
-                        eprintln!("fenix: delete failed: {err}");
-                    }
-                }
+                self.explorer_delete_targets();
             } else {
                 self.explorer_prompt = None;
             }
@@ -18136,6 +18193,35 @@ impl App {
         self.wake_caret();
     }
 
+    /// One keystroke's answer to "something is already there".
+    ///
+    /// Four single keys rather than a typed word: this appears in the
+    /// middle of an operation the user already asked for, and the whole
+    /// point of asking is that it costs almost nothing.
+    fn explorer_conflict_key(&mut self, key: KeyPress) {
+        let on_conflict = match key.code {
+            KeyCode::Char('o') | KeyCode::Char('O') => fenix_fs::OnConflict::Overwrite,
+            KeyCode::Char('s') | KeyCode::Char('S') => fenix_fs::OnConflict::Skip,
+            KeyCode::Char('b') | KeyCode::Char('B') => fenix_fs::OnConflict::KeepBoth,
+            // Anything else -- Escape, `c`, a stray keystroke -- cancels.
+            // Nothing has been written yet, so cancelling really does
+            // leave both sides exactly as they were, and defaulting an
+            // unrecognised key to "do nothing" is the only safe reading
+            // of it.
+            _ => {
+                self.explorer_conflict = None;
+                self.set_message("cancelled");
+                self.wake_caret();
+                return;
+            }
+        };
+        let Some(ExplorerConflict { kind, targets, dest, .. }) = self.explorer_conflict.take() else { return };
+        let outcomes = self.explorer_transfer(kind, &targets, &dest, on_conflict);
+        self.report_explorer_outcomes(kind.past_tense(), outcomes);
+        self.explorer_relist();
+        self.wake_caret();
+    }
+
     /// What to show in place of the modeline while `explorer_prompt` is
     /// active -- previously nothing rendered it at all, so typing a
     /// rename/create/copy/move was invisible (the state was captured
@@ -18143,11 +18229,30 @@ impl App {
     /// even open). Mirrors `:`/`/`'s own "the modeline becomes the
     /// prompt" convention.
     fn explorer_prompt_text(&self) -> Option<String> {
+        if let Some(conflict) = &self.explorer_conflict {
+            // Names the first collision and counts the rest: "some files
+            // already exist" is not enough to decide on.
+            let first = conflict.conflicts.first().map(|p| p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned());
+            let what = match (first, conflict.conflicts.len()) {
+                (Some(name), 1) => format!("{name} already exists"),
+                (Some(name), n) => format!("{name} and {} more already exist", n - 1),
+                (None, n) => format!("{n} already exist"),
+            };
+            return Some(format!("{what}: [o]verwrite  [s]kip  keep [b]oth  Esc to cancel"));
+        }
         let prompt = self.explorer_prompt.as_ref()?;
         Some(match prompt.kind {
             PromptKind::ConfirmDelete => {
                 let n = self.active_explorer().map(|e| e.targets().len()).unwrap_or(0);
-                format!("Delete {n} item{}? (y/n)", if n == 1 { "" } else { "s" })
+                let items = format!("{n} item{}", if n == 1 { "" } else { "s" });
+                // The two deletes are not the same act and must never
+                // read the same: one is undoable from the Recycle Bin,
+                // the other is not.
+                if self.explorer_delete_permanently {
+                    format!("PERMANENTLY delete {items}? This cannot be undone. (y/n)")
+                } else {
+                    format!("Move {items} to the Recycle Bin? (y/n)")
+                }
             }
             PromptKind::Rename => format!("Rename to: {}", prompt.input),
             PromptKind::CreateFile => format!("Create file: {}", prompt.input),
@@ -18158,17 +18263,76 @@ impl App {
     }
 
     fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
-        let Some(explorer) = self.active_explorer_mut() else { return };
-        let result = match kind {
-            PromptKind::Rename => explorer.rename_selected(input),
-            PromptKind::CreateFile => explorer.create_file(input),
-            PromptKind::CreateDir => explorer.create_dir(input),
-            PromptKind::CopyTo => explorer.copy_targets_to(Path::new(input)),
-            PromptKind::MoveTo => explorer.move_targets_to(Path::new(input)),
+        let Some(explorer) = self.active_explorer() else { return };
+        let outcomes = match kind {
+            PromptKind::Rename => vec![explorer.rename_selected(input).map(|_| ()).map_err(|e| e.to_string())],
+            PromptKind::CreateFile => vec![explorer.create_file(input).map(|_| ()).map_err(|e| e.to_string())],
+            PromptKind::CreateDir => vec![explorer.create_dir(input).map(|_| ()).map_err(|e| e.to_string())],
+            // Copy and move ask about collisions *before* touching
+            // anything -- the explorer this replaces overwrote silently.
+            PromptKind::CopyTo | PromptKind::MoveTo => {
+                let targets = explorer.target_paths();
+                let dest = PathBuf::from(input);
+                let conflicts = fenix_fs::conflicts_in(&targets, &dest);
+                if !conflicts.is_empty() {
+                    self.explorer_conflict = Some(ExplorerConflict { kind, targets, dest, conflicts });
+                    self.wake_caret();
+                    return;
+                }
+                self.explorer_transfer(kind, &targets, &dest, fenix_fs::OnConflict::KeepBoth)
+            }
             PromptKind::ConfirmDelete => return, // handled in explorer_prompt_key via y/n, not Enter
         };
-        if let Err(err) = result {
-            eprintln!("fenix: operation failed: {err}");
+        self.report_explorer_outcomes(kind.past_tense(), outcomes);
+        self.explorer_relist();
+    }
+
+    /// Runs a copy or a move now that its collisions have been settled,
+    /// reporting each path's fate rather than only the first failure --
+    /// a batch where two of ten files failed should say so.
+    fn explorer_transfer(&mut self, kind: PromptKind, targets: &[PathBuf], dest: &Path, on_conflict: fenix_fs::OnConflict) -> Vec<Result<(), String>> {
+        let outcomes = match kind {
+            PromptKind::MoveTo => fenix_fs::move_into(targets, dest, on_conflict),
+            _ => fenix_fs::copy_into(targets, dest, on_conflict),
+        };
+        outcomes.into_iter().map(|o| o.error.map_or(Ok(()), Err)).collect()
+    }
+
+    /// Moves the marked set (or the entry at point) to the Recycle Bin,
+    /// so a mistake is recoverable through Windows' own restore rather
+    /// than being final. `permanent` is the explicit `!` variant.
+    fn explorer_delete_targets(&mut self) {
+        let Some(explorer) = self.active_explorer() else { return };
+        let targets = explorer.target_paths();
+        let permanent = self.explorer_delete_permanently;
+        let outcomes = if permanent { fenix_fs::permanently(&targets) } else { fenix_fs::to_recycle_bin(&targets) };
+        let verb = if permanent { "deleted" } else { "moved to the Recycle Bin" };
+        let outcomes: Vec<Result<(), String>> = outcomes.into_iter().map(|o| o.error.map_or(Ok(()), Err)).collect();
+        self.report_explorer_outcomes(verb, outcomes);
+        self.explorer_relist();
+    }
+
+    /// One status line for a whole batch: how many worked, and what went
+    /// wrong with the first that did not. Silent failure is what the
+    /// explorer this replaces did (an `eprintln!` nobody sees).
+    fn report_explorer_outcomes(&mut self, verb: &str, outcomes: Vec<Result<(), String>>) {
+        let total = outcomes.len();
+        let failures: Vec<String> = outcomes.into_iter().filter_map(|o| o.err()).collect();
+        match failures.first() {
+            None if total == 1 => self.set_message(format!("1 item {verb}")),
+            None => self.set_message(format!("{total} items {verb}")),
+            Some(first) if failures.len() == total => self.set_error(first.clone()),
+            Some(first) => self.set_error(format!("{} of {total} failed -- {first}", failures.len())),
+        }
+    }
+
+    /// Re-reads whichever listing an operation just changed.
+    fn explorer_relist(&mut self) {
+        if let Some(explorer) = self.active_explorer_mut() {
+            if let Err(err) = explorer.refresh() {
+                let cwd = explorer.cwd.clone();
+                self.set_error(format!("couldn't list {}: {err}", cwd.display()));
+            }
         }
     }
 
@@ -18930,11 +19094,14 @@ impl App {
             return;
         }
 
-        // An active prompt (rename/create-name/confirm-delete) captures
-        // every keystroke until it resolves -- takes priority over
-        // everything else, including global Ctrl-chords, so e.g. Ctrl-S
-        // can't accidentally interrupt an in-progress rename.
-        if self.explorer_prompt.is_some() {
+        // An active prompt (rename/create-name/confirm-delete), or an
+        // unanswered "something is already there", captures every
+        // keystroke until it resolves -- taking priority over everything
+        // else, including global Ctrl-chords, so e.g. Ctrl-S can't
+        // accidentally interrupt an in-progress rename, and a half-
+        // specified copy can't be left pending while you go and edit
+        // something.
+        if self.explorer_prompt.is_some() || self.explorer_conflict.is_some() {
             self.explorer_prompt_key(keypress);
             return;
         }
@@ -21910,15 +22077,15 @@ impl App {
             }
 
             let expanded =
-                entry.is_dir && explorer.entries.get(idx + 1).is_some_and(|next| next.depth > entry.depth);
-            let icon_color = if entry.is_dir { theme.icon_folder } else { theme.icon_file };
-            spans.push((icon::icon_for(&entry.name, entry.is_dir, expanded).to_string(), icon_color, true));
+                entry.is_dir() && explorer.entries.get(idx + 1).is_some_and(|next| next.depth > entry.depth);
+            let icon_color = if entry.is_dir() { theme.icon_folder } else { theme.icon_file };
+            spans.push((icon::icon_for(&entry.name, entry.is_dir(), expanded).to_string(), icon_color, true));
             spans.push((format!(" {}", entry.name), theme.fg, false));
 
             if let Some(status) = entry.git_status {
                 spans.push((format!("  {}", git_status_marker(status)), theme.git_status_color(status), false));
             }
-            if show_attrs && !entry.is_dir {
+            if show_attrs && !entry.is_dir() {
                 spans.push((format!("  {}  {}", format_size(entry.size), format_age(entry.modified)), theme.gutter_fg, false));
             }
 
@@ -24671,7 +24838,7 @@ mod tests {
         let mut app = App::with_file(None);
         let (_left_panes, right, right_panes) = two_frames_side_by_side(&mut app);
         // The right-hand window has its own sidebar open.
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         app.windows_mut().focus(right_panes[0]);
 
@@ -25730,7 +25897,7 @@ configure_board stm32
         let file = jump_dir.touch("a.txt");
 
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(sidebar_dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(sidebar_dir.path()).unwrap());
         app.sidebar_open = true;
         app.sidebar_focused = false;
 
@@ -27281,7 +27448,7 @@ configure_board stm32
         let dir = TempDir::new("dired_text_basic");
         dir.touch("a.txt");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
-        let explorer = ExplorerState::open(dir.path()).unwrap();
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
 
         let (text, lines) = explorer_dired_text(&explorer);
         // Sorted directories-first: "sub/" then "a.txt".
@@ -27292,7 +27459,7 @@ configure_board stm32
     #[test]
     fn explorer_dired_text_is_empty_for_an_empty_directory() {
         let dir = TempDir::new("dired_text_empty");
-        let explorer = ExplorerState::open(dir.path()).unwrap();
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
         let (text, lines) = explorer_dired_text(&explorer);
         assert_eq!(text, "");
         assert!(lines.is_empty());
@@ -27303,7 +27470,7 @@ configure_board stm32
         let dir = TempDir::new("row_spans_icon_selected");
         dir.touch("main.rs");
         let app = App::with_file(None);
-        let explorer = ExplorerState::open(dir.path()).unwrap(); // selected = "main.rs" (only entry)
+        let explorer = ExplorerState::opened(dir.path()).unwrap(); // selected = "main.rs" (only entry)
 
         let (spans, selected_row, marked_rows) = app.explorer_row_spans(&explorer, 0, 5, true);
         assert_eq!(selected_row, Some(0));
@@ -27321,7 +27488,7 @@ configure_board stm32
         dir.touch("a");
         dir.touch("b");
         let app = App::with_file(None);
-        let mut explorer = ExplorerState::open(dir.path()).unwrap();
+        let mut explorer = ExplorerState::opened(dir.path()).unwrap();
         explorer.marks.insert(dir.path().join("b"));
 
         let (_, _, marked_rows) = app.explorer_row_spans(&explorer, 0, 5, true);
@@ -27335,7 +27502,7 @@ configure_board stm32
             dir.touch(name);
         }
         let app = App::with_file(None);
-        let explorer = ExplorerState::open(dir.path()).unwrap();
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
 
         // Scrolled to start at index 2 ("c"), showing only 2 rows.
         let (spans, _, _) = app.explorer_row_spans(&explorer, 2, 2, true);
@@ -27351,7 +27518,7 @@ configure_board stm32
         let dir = TempDir::new("row_spans_attrs");
         dir.touch("a.txt");
         let app = App::with_file(None);
-        let explorer = ExplorerState::open(dir.path()).unwrap();
+        let explorer = ExplorerState::opened(dir.path()).unwrap();
 
         let (with_attrs, _, _) = app.explorer_row_spans(&explorer, 0, 5, true);
         let (without_attrs, _, _) = app.explorer_row_spans(&explorer, 0, 5, false);
@@ -27949,7 +28116,7 @@ configure_board stm32
     fn frame_geometry_places_sidebar_terminal_and_pane_rects_consistently() {
         let dir = TempDir::new("frame_geometry");
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         app.terminal_open = true;
 
@@ -27985,7 +28152,7 @@ configure_board stm32
     fn click_on_the_sidebar_focuses_it_and_clears_terminal_focus() {
         let dir = TempDir::new("click_sidebar");
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         app.terminal_open = true;
         app.terminal_focused = true;
@@ -28071,7 +28238,7 @@ configure_board stm32
         }
         let mut app = App::with_file(None);
         app.main_view = MainView::Explorer;
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         let pane = app.windows().focused_id();
 
         let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
@@ -28090,7 +28257,7 @@ configure_board stm32
             dir.touch(&format!("f{i}.txt"));
         }
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         assert!(!app.sidebar_focused);
 
@@ -28212,7 +28379,7 @@ configure_board stm32
     fn navigate_window_left_from_the_leftmost_pane_focuses_an_open_sidebar() {
         let dir = TempDir::new("nav_left_into_sidebar");
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         assert!(!app.sidebar_focused);
 
@@ -28226,7 +28393,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         let left = app.windows().focused_id();
         app.split_vertical(); // new pane to the right, becomes focused
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
 
         app.navigate_window(fenix_window::NavDirection::Left);
@@ -28764,7 +28931,7 @@ configure_board stm32
         let dir = TempDir::new("open_dir");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_open_selected(); // selected = "sub" (only entry)
@@ -28777,7 +28944,7 @@ configure_board stm32
         let dir = TempDir::new("open_file_full");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_open_selected();
@@ -28791,7 +28958,7 @@ configure_board stm32
         let dir = TempDir::new("open_file_sidebar");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_open = true;
         app.sidebar_focused = true;
 
@@ -28808,7 +28975,7 @@ configure_board stm32
         dir.touch("a");
         dir.touch("b");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::Down);
@@ -28822,7 +28989,7 @@ configure_board stm32
         let dir = TempDir::new("rename_prompt_flow");
         dir.touch("old.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginRename);
@@ -28846,7 +29013,7 @@ configure_board stm32
         let dir = TempDir::new("delete_prompt_cancel");
         dir.touch("keep.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
@@ -28860,7 +29027,7 @@ configure_board stm32
         let dir = TempDir::new("delete_prompt_confirm");
         dir.touch("gone.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
@@ -28877,7 +29044,7 @@ configure_board stm32
         let dir = TempDir::new("rename_prompt_modeline");
         dir.touch("old.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginRename);
@@ -28891,18 +29058,164 @@ configure_board stm32
         let dir = TempDir::new("delete_prompt_modeline");
         dir.touch("a.txt");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.main_view = MainView::Explorer;
 
         app.explorer_handle_action(ExplorerAction::BeginDelete);
-        assert_eq!(app.active_prompt_text(), Some("Delete 1 item? (y/n)".to_string()));
+        assert_eq!(app.active_prompt_text(), Some("Move 1 item to the Recycle Bin? (y/n)".to_string()));
+    }
+
+    #[test]
+    fn the_permanent_delete_confirmation_does_not_read_like_the_recoverable_one() {
+        // Two different acts: one is undoable from the Recycle Bin, one
+        // is not, and a prompt that read the same for both would be the
+        // last thing between the user and losing work.
+        let dir = TempDir::new("delete_prompt_permanent");
+        dir.touch("a.txt");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
+        app.main_view = MainView::Explorer;
+        app.explorer_delete_permanently = true;
+
+        app.explorer_handle_action(ExplorerAction::BeginDelete);
+
+        let text = app.active_prompt_text().unwrap();
+        assert!(text.contains("PERMANENTLY"), "got: {text}");
+        assert!(text.contains("cannot be undone"), "got: {text}");
+    }
+
+    // -- Copying onto something that already exists ---------------------
+    //
+    // The explorer this replaces overwrote silently: its own
+    // `copy_targets_to` doc comment said the GUI was expected to check
+    // first, and the GUI did not. These pin that it now asks, and that
+    // every answer leaves the filesystem in the state the answer named.
+
+    /// An explorer at `src` with `a.txt` marked, and a `dest` that
+    /// already has an `a.txt` of its own.
+    fn app_with_a_pending_collision(name: &str) -> (TempDir, TempDir, App) {
+        let src = TempDir::new(&format!("{name}_src"));
+        let dest = TempDir::new(&format!("{name}_dest"));
+        src.write("a.txt", "new");
+        dest.write("a.txt", "old");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::opened(src.path()).unwrap());
+        app.main_view = MainView::Explorer;
+        (src, dest, app)
+    }
+
+    fn answer_collision(app: &mut App, dest: &TempDir, kind: PromptKind, key: char) {
+        app.explorer_prompt = Some(ExplorerPrompt { kind, input: dest.path().to_string_lossy().into_owned() });
+        let ExplorerPrompt { kind, input } = app.explorer_prompt.take().unwrap();
+        app.explorer_prompt_submit(kind, &input);
+        assert!(app.explorer_conflict.is_some(), "expected to be asked before anything was written");
+        app.explorer_prompt_key(KeyPress::char(key));
+    }
+
+    #[test]
+    fn a_copy_onto_an_existing_file_asks_before_writing_anything() {
+        let (_src, dest, mut app) = app_with_a_pending_collision("collision_asks");
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CopyTo, input: dest.path().to_string_lossy().into_owned() });
+        let ExplorerPrompt { kind, input } = app.explorer_prompt.take().unwrap();
+
+        app.explorer_prompt_submit(kind, &input);
+
+        assert!(app.explorer_conflict.is_some());
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old", "nothing written yet");
+        let text = app.active_prompt_text().unwrap();
+        assert!(text.contains("a.txt already exists"), "the prompt names what is in the way: {text}");
+        assert!(text.contains("[o]verwrite") && text.contains("[s]kip") && text.contains("[b]oth"), "got: {text}");
+    }
+
+    #[test]
+    fn overwrite_replaces_the_file_that_was_there() {
+        let (_src, dest, mut app) = app_with_a_pending_collision("collision_overwrite");
+        answer_collision(&mut app, &dest, PromptKind::CopyTo, 'o');
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "new");
+        assert!(app.explorer_conflict.is_none());
+    }
+
+    #[test]
+    fn skip_leaves_both_sides_exactly_as_they_were() {
+        let (src, dest, mut app) = app_with_a_pending_collision("collision_skip");
+        answer_collision(&mut app, &dest, PromptKind::CopyTo, 's');
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(src.path().join("a.txt")).unwrap(), "new");
+    }
+
+    #[test]
+    fn keep_both_lands_a_numbered_copy_beside_the_original() {
+        let (_src, dest, mut app) = app_with_a_pending_collision("collision_both");
+        answer_collision(&mut app, &dest, PromptKind::CopyTo, 'b');
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(dest.path().join("a (2).txt")).unwrap(), "new");
+    }
+
+    #[test]
+    fn cancelling_a_collision_writes_nothing_and_says_so() {
+        // Escape, or any key that is not one of the three answers --
+        // the safe reading of an unrecognised keystroke in the middle of
+        // an operation is "do nothing".
+        let (src, dest, mut app) = app_with_a_pending_collision("collision_cancel");
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::CopyTo, input: dest.path().to_string_lossy().into_owned() });
+        let ExplorerPrompt { kind, input } = app.explorer_prompt.take().unwrap();
+        app.explorer_prompt_submit(kind, &input);
+
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(app.explorer_conflict.is_none());
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+        assert!(src.path().join("a.txt").exists());
+        assert!(app.modeline_pieces().1.contains("cancelled"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn a_move_that_is_skipped_does_not_delete_the_source() {
+        // The one outcome a move must never produce: deciding not to
+        // write, and deleting anyway.
+        let (src, dest, mut app) = app_with_a_pending_collision("collision_move_skip");
+        answer_collision(&mut app, &dest, PromptKind::MoveTo, 's');
+        assert!(src.path().join("a.txt").exists(), "the source survived the skip");
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+    }
+
+    #[test]
+    fn a_copy_with_nothing_in_the_way_does_not_ask() {
+        // The common case has to stay a single keystroke.
+        let src = TempDir::new("collision_none_src");
+        let dest = TempDir::new("collision_none_dest");
+        src.write("a.txt", "new");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::opened(src.path()).unwrap());
+        app.main_view = MainView::Explorer;
+
+        app.explorer_prompt_submit(PromptKind::CopyTo, &dest.path().to_string_lossy());
+
+        assert!(app.explorer_conflict.is_none());
+        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_batch_reports_how_many_worked_rather_than_only_the_first_failure() {
+        let src = TempDir::new("batch_report_src");
+        let dest = TempDir::new("batch_report_dest");
+        src.write("a.txt", "x");
+        src.write("b.txt", "x");
+        let mut app = App::with_file(None);
+        app.explorer = Some(ExplorerState::opened(src.path()).unwrap());
+        app.main_view = MainView::Explorer;
+        app.explorer_handle_action(ExplorerAction::MarkAll);
+
+        app.explorer_prompt_submit(PromptKind::CopyTo, &dest.path().to_string_lossy());
+
+        assert!(app.modeline_pieces().1.contains("2 items copied"), "got: {}", app.modeline_pieces().1);
     }
 
     #[test]
     fn prompt_popup_shows_the_create_file_prompt_from_the_sidebar_too() {
         let dir = TempDir::new("create_prompt_sidebar");
         let mut app = App::with_file(None);
-        app.sidebar = Some(ExplorerState::open(dir.path()).unwrap());
+        app.sidebar = Some(ExplorerState::opened(dir.path()).unwrap());
         app.sidebar_focused = true;
 
         app.explorer_handle_action(ExplorerAction::BeginCreateFile);
@@ -29269,7 +29582,7 @@ configure_board stm32
         let known_dir = TempDir::new("select_cwd_browse_noop_known");
         let mut app = App::with_file(None);
         app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.explorer_purpose = ExplorerPurpose::Browse;
         app.main_view = MainView::Explorer;
 
@@ -29333,7 +29646,7 @@ configure_board stm32
         dir.write("top.txt", "x");
         dir.write("sub/nested.txt", "x");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.explorer_purpose = ExplorerPurpose::FindFrom;
         app.main_view = MainView::Explorer;
 
@@ -29356,7 +29669,7 @@ configure_board stm32
     fn select_cwd_in_browse_mode_does_not_open_a_picker() {
         let dir = TempDir::new("find_from_select_cwd_browse_noop");
         let mut app = App::with_file(None);
-        app.explorer = Some(ExplorerState::open(dir.path()).unwrap());
+        app.explorer = Some(ExplorerState::opened(dir.path()).unwrap());
         app.explorer_purpose = ExplorerPurpose::Browse;
         app.main_view = MainView::Explorer;
 

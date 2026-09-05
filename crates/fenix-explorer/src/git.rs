@@ -11,7 +11,7 @@ use crate::entry::{Entry, GitStatus};
 /// listing itself goes). Empty map -- not an error -- outside a git repo
 /// or without `git` on `PATH`; git status is an annotation on top of the
 /// listing, not something the listing should fail over.
-pub(crate) fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
+pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
     let Ok(output) =
         Command::new("git").args(["status", "--porcelain=v1", "--ignored", "--", "."]).current_dir(dir).output()
     else {
@@ -62,7 +62,7 @@ fn parse_status(xy: &str) -> Option<GitStatus> {
 pub(crate) fn annotate_entries(entries: &mut [Entry], statuses: &HashMap<PathBuf, GitStatus>) {
     for entry in entries.iter_mut() {
         entry.git_status = statuses.get(&entry.path).copied().or_else(|| {
-            if entry.is_dir && statuses.keys().any(|p| p != &entry.path && p.starts_with(&entry.path)) {
+            if entry.is_dir() && statuses.keys().any(|p| p != &entry.path && p.starts_with(&entry.path)) {
                 Some(GitStatus::Modified)
             } else {
                 None
@@ -120,9 +120,11 @@ mod tests {
         let mut entries = vec![Entry {
             name: "sub".to_string(),
             path: PathBuf::from("/repo/sub"),
-            is_dir: true,
+            kind: crate::EntryKind::Dir,
             size: 0,
-            modified: std::time::SystemTime::UNIX_EPOCH,
+            modified: None,
+            attributes: crate::Attributes::default(),
+            readable: true,
             depth: 0,
             git_status: None,
         }];
@@ -138,9 +140,11 @@ mod tests {
         let mut entries = vec![Entry {
             name: "clean.txt".to_string(),
             path: PathBuf::from("/repo/clean.txt"),
-            is_dir: false,
+            kind: crate::EntryKind::File,
             size: 0,
-            modified: std::time::SystemTime::UNIX_EPOCH,
+            modified: None,
+            attributes: crate::Attributes::default(),
+            readable: true,
             depth: 0,
             git_status: None,
         }];

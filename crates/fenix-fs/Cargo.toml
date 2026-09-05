@@ -1,0 +1,11 @@
+[package]
+name = "fenix-fs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Moves files to the platform's real Recycle Bin (Windows' own
+# IFileOperation), so a delete stays recoverable through the restore UI
+# the user already knows -- see `recycle` for why nothing here falls
+# back to permanent deletion on its own.
+trash = "5.2"
