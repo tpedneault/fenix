@@ -4670,6 +4670,14 @@ fn explorer_header(state: &ExplorerState, waiting_on: Option<&Path>) -> String {
 /// size/date columns into the background so names stay the thing you
 /// read, and keep git badges the same colors they are everywhere else in
 /// the editor.
+///
+/// **Every range is disjoint, and they are emitted in order.** That is
+/// not a tidiness preference: the span builder these feed turns each
+/// range into its own piece of text, so a range nested inside another
+/// one draws its characters a second time. Overlapping them printed the
+/// size and date columns twice -- once in place and once again past the
+/// end of the row, clipped at the pane's edge -- which looked like a
+/// layout bug and was really this.
 fn explorer_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<ExplorerLine>]>,
@@ -4683,14 +4691,22 @@ fn explorer_highlights_for_visible_range(
     for line in render_base_line..(render_base_line + rows).min(visual_lines) {
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);
-        let line_start_byte = ob.buffer.char_to_byte(start);
-        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        let byte_at = |chars: usize| ob.buffer.char_to_byte(start + chars.min(len));
         let Some(slot) = lines.get(line) else { continue };
         let Some(meta) = slot else {
             // The header -- the only row that is not an entry.
-            ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            ranges.push((byte_at(0)..byte_at(len), theme.syntax_keyword));
             continue;
         };
+
+        // The row, left to right, as a sequence of adjoining pieces.
+        let mark_end = 1.min(len);
+        let meta_from = meta.meta_from.clamp(mark_end, len);
+        let (badge_from, badge_to) = match meta.badge {
+            Some((at, badge_len, _)) => (at.clamp(meta_from, len), (at + badge_len).clamp(meta_from, len)),
+            None => (len, len),
+        };
+
         let name_color = if !meta.readable {
             // Dim, because everything the row says about it beyond the
             // name is a guess.
@@ -4702,16 +4718,19 @@ fn explorer_highlights_for_visible_range(
         } else {
             theme.icon_file
         };
-        ranges.push((line_start_byte..line_end_byte, name_color));
+
         if meta.marked {
-            ranges.push((line_start_byte..ob.buffer.char_to_byte(start + 1), theme.syntax_keyword));
+            ranges.push((byte_at(0)..byte_at(mark_end), theme.syntax_keyword));
+        } else {
+            ranges.push((byte_at(0)..byte_at(mark_end), name_color));
         }
-        let meta_start_byte = ob.buffer.char_to_byte(start + meta.meta_from.min(len));
-        ranges.push((meta_start_byte..line_end_byte, theme.gutter_fg));
-        if let Some((at, badge_len, status)) = meta.badge {
-            let badge_start = ob.buffer.char_to_byte(start + at.min(len));
-            let badge_end = ob.buffer.char_to_byte((start + at + badge_len).min(start + len));
-            ranges.push((badge_start..badge_end, theme.git_status_color(status)));
+        ranges.push((byte_at(mark_end)..byte_at(meta_from), name_color));
+        ranges.push((byte_at(meta_from)..byte_at(badge_from), theme.gutter_fg));
+        if let Some((_, _, status)) = meta.badge {
+            ranges.push((byte_at(badge_from)..byte_at(badge_to), theme.git_status_color(status)));
+        }
+        if badge_to < len {
+            ranges.push((byte_at(badge_to)..byte_at(len), theme.gutter_fg));
         }
     }
     ranges
@@ -29207,6 +29226,36 @@ configure_board stm32
         // Both rows put their metadata at the same column, which is what
         // makes the listing scannable down a column rather than ragged.
         assert_eq!(lines[1].unwrap().meta_from, lines[2].unwrap().meta_from);
+    }
+
+    #[test]
+    fn highlight_ranges_never_overlap_because_overlapping_draws_text_twice() {
+        // The bug this pins produced a fragment of the size column
+        // repeated past the end of every row, clipped at the pane's
+        // edge: the span builder turns each range into its own piece of
+        // text, so a range nested inside another draws its characters a
+        // second time. The generated text was correct all along, which
+        // is why it survived a test that only checked the text.
+        let dir = TempDir::new("highlight_disjoint");
+        dir.write("a-file.txt", "0123456789");
+        std::fs::create_dir(dir.path().join("a-dir")).unwrap();
+        let mut app = App::with_file(None);
+        app.open_dired_at(dir.path());
+        let id = app.focused_buffer_id();
+        app.dired_handle_action(ExplorerAction::ToggleMark);
+        let mut statuses = HashMap::new();
+        for entry in &app.dired_states[&id].entries {
+            statuses.insert(entry.path.clone(), fenix_explorer::GitStatus::Modified);
+        }
+        app.apply_explorer_git_status(id, app.explorer_requests[&id].id, statuses);
+
+        let ranges = app.syntax_highlights_for_visible_range(id, 0, 10);
+
+        assert!(!ranges.is_empty(), "the listing should be colored at all");
+        for pair in ranges.windows(2) {
+            let (a, b) = (&pair[0].0, &pair[1].0);
+            assert!(a.end <= b.start, "ranges {a:?} and {b:?} overlap, so the text between them draws twice");
+        }
     }
 
     #[test]
