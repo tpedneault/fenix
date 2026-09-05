@@ -2186,6 +2186,14 @@ pub enum FenixUserEvent {
     /// difference between a directory appearing at once and appearing
     /// after a subprocess has walked the repo.
     ExplorerGitStatus { buffer: BufferId, request: u64, statuses: HashMap<PathBuf, fenix_explorer::GitStatus> },
+    /// What a server answered when asked what it shares -- from the
+    /// thread `explorer_browse_shares` spawned, because `net view`
+    /// against a host that is not there blocks for tens of seconds.
+    ExplorerShares { host: String, result: Result<Vec<String>, String> },
+    /// The machine's drives, from the one-off background query
+    /// `ensure_volumes` starts -- see there for why it is not done on
+    /// demand.
+    ExplorerVolumes(Vec<fenix_fs::Volume>),
     /// The result of `fenix_terminal::Terminal::spawn`, from the one-
     /// shot background thread `toggle_terminal` spawns it on -- see
     /// that function's own doc comment for why spawning can't happen
@@ -2533,6 +2541,12 @@ enum ActivePicker {
     /// throws it away, which is the vocabulary the file-watching work
     /// already established for "these two versions disagree".
     Recovery(fenix_picker::PickerState<fenix_recovery::Snapshot>),
+    /// `SPC e b`/`SPC e r`, and the share list a server answers with:
+    /// somewhere to go. One variant for all three because the payload
+    /// and the confirm action are identical -- a path, opened -- and
+    /// three variants that did the same thing would be three places for
+    /// them to drift apart.
+    Places(fenix_picker::PickerState<PathBuf>),
     /// `SPC p d`: same candidate list as `SwitchProject`, but confirming
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
@@ -2690,6 +2704,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchProject(s) => s.push_char(c),
         ActivePicker::SwitchBuffer(s) => s.push_char(c),
         ActivePicker::Recovery(s) => s.push_char(c),
+        ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::DeleteMibRoot(s) => s.push_char(c),
         ActivePicker::DeleteJiraProject(s) => s.push_char(c),
@@ -2729,6 +2744,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchProject(s) => s.backspace(),
         ActivePicker::SwitchBuffer(s) => s.backspace(),
         ActivePicker::Recovery(s) => s.backspace(),
+        ActivePicker::Places(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::DeleteMibRoot(s) => s.backspace(),
         ActivePicker::DeleteJiraProject(s) => s.backspace(),
@@ -2768,6 +2784,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchProject(s) => s.move_selection(delta),
         ActivePicker::SwitchBuffer(s) => s.move_selection(delta),
         ActivePicker::Recovery(s) => s.move_selection(delta),
+        ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::DeleteMibRoot(s) => s.move_selection(delta),
         ActivePicker::DeleteJiraProject(s) => s.move_selection(delta),
@@ -2810,6 +2827,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::SwitchProject(s) => s.toggle_mark(),
         ActivePicker::SwitchBuffer(s) => s.toggle_mark(),
         ActivePicker::Recovery(s) => s.toggle_mark(),
+        ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
         ActivePicker::DeleteMibRoot(s) => s.toggle_mark(),
         ActivePicker::DeleteJiraProject(s) => s.toggle_mark(),
@@ -2849,6 +2867,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchProject(s) => s.query(),
         ActivePicker::SwitchBuffer(s) => s.query(),
         ActivePicker::Recovery(s) => s.query(),
+        ActivePicker::Places(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::DeleteMibRoot(s) => s.query(),
         ActivePicker::DeleteJiraProject(s) => s.query(),
@@ -2888,6 +2907,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.len(),
         ActivePicker::SwitchBuffer(s) => s.len(),
         ActivePicker::Recovery(s) => s.len(),
+        ActivePicker::Places(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::DeleteMibRoot(s) => s.len(),
         ActivePicker::DeleteJiraProject(s) => s.len(),
@@ -2927,6 +2947,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchProject(s) => s.selected_row(),
         ActivePicker::SwitchBuffer(s) => s.selected_row(),
         ActivePicker::Recovery(s) => s.selected_row(),
+        ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::DeleteMibRoot(s) => s.selected_row(),
         ActivePicker::DeleteJiraProject(s) => s.selected_row(),
@@ -2970,6 +2991,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBuffer(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Recovery(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteMibRoot(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteJiraProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -3020,6 +3042,10 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
 /// text input instead of Vim's own command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromptKind {
+    /// Type where you want to be. The one thing the explorer had no way
+    /// to do at all: reaching `\\nas\media\projects\2026` meant walking
+    /// there one `Enter` at a time from wherever you happened to start.
+    GoToPath,
     ConfirmDelete,
     Rename,
     CreateFile,
@@ -3032,6 +3058,7 @@ impl PromptKind {
     /// How to describe what just happened, for the status line.
     fn past_tense(self) -> &'static str {
         match self {
+            PromptKind::GoToPath => "opened",
             PromptKind::ConfirmDelete => "deleted",
             PromptKind::Rename => "renamed",
             PromptKind::CreateFile => "created",
@@ -3121,6 +3148,48 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
         fenix_keymap::Step::Matched(action) if !action.is_navigation() => Some(*action),
         _ => None,
     }
+}
+
+/// Where the explorer's own "places I have been" list lives.
+///
+/// Somewhere throwaway under test. The tests here open real directories
+/// through the real code path, which records every one of them -- and
+/// without this they land in the user's actual list, which is how the
+/// crash-recovery work found the same mistake in itself. A test suite
+/// must not leave its temp directories in the user's history.
+fn default_recent_dirs_path() -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join(format!("fenix-test-recent-dirs-{}.txt", std::process::id()))
+    } else {
+        fenix_project::RecentFiles::default_dirs_path().unwrap_or_else(|| PathBuf::from("recent_dirs.txt"))
+    }
+}
+
+/// A path as a person would read it, without Windows' extended-length
+/// `\\?\` prefix.
+///
+/// Canonicalising a path on Windows adds that prefix, so anything that
+/// has been through `canonicalize` -- every registered project root --
+/// shows up wearing it. It means nothing to a reader and makes an
+/// otherwise familiar path unrecognisable at a glance.
+fn readable_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    // The UNC form is `\\?\UNC\server\share`, which unwraps back to
+    // `\\server\share` rather than to `UNC\server\share`.
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    }
+}
+
+/// Whether `path` is a server with no share named -- `\\\\nas`, which is
+/// not a directory anybody can list, but is a question a server can
+/// answer.
+fn is_bare_server(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy().replace('/', "\\");
+    let Some(rest) = text.strip_prefix("\\\\") else { return false };
+    let rest = rest.trim_end_matches('\\');
+    !rest.is_empty() && !rest.contains('\\')
 }
 
 /// Whether `path` names a network location by its own spelling --
@@ -5383,6 +5452,28 @@ pub struct App {
     /// A copy/move waiting on an answer about what to overwrite -- see
     /// `ExplorerConflict`. Capturing, like `explorer_prompt`.
     explorer_conflict: Option<ExplorerConflict>,
+    /// Completions offered for what is currently typed in the path bar,
+    /// and how far through them Tab has cycled. Recomputed on every
+    /// keystroke rather than tracked incrementally -- listing one
+    /// directory is cheap, and a cache would be one more thing that can
+    /// disagree with the text.
+    explorer_completions: Vec<String>,
+    /// The machine's drives, read once on the first Places listing.
+    ///
+    /// Cached because the query costs a subprocess, and re-run only when
+    /// asked (`SPC e b` on an empty cache) rather than on a timer:
+    /// drives do not come and go often, and paying half a second every
+    /// time the picker opens would be worse than occasionally missing a
+    /// USB stick that was plugged in mid-session.
+    volumes: Vec<fenix_fs::Volume>,
+    /// Whether the drive query is already in flight, so asking twice
+    /// before it lands does not run two subprocesses.
+    volumes_loading: bool,
+    /// Directories the explorer has actually been, most recent first --
+    /// the same machinery as `recent_files`, kept in its own file
+    /// because "reopen a file" and "go back to a folder" are different
+    /// questions (see `RecentFiles::default_dirs_path`).
+    recent_dirs: fenix_project::RecentFiles,
     /// Whether the delete being confirmed right now is the permanent
     /// one (`D!`) rather than the Recycle Bin one (`D`). Read when the
     /// confirmation is answered, so the prompt and the action can never
@@ -6367,6 +6458,10 @@ impl App {
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_conflict: None,
+            explorer_completions: Vec::new(),
+            volumes: Vec::new(),
+            volumes_loading: false,
+            recent_dirs: fenix_project::RecentFiles::load_or_default(default_recent_dirs_path()),
             explorer_delete_permanently: false,
             explorer_scroll: 0,
             sidebar_scroll: 0,
@@ -8602,6 +8697,8 @@ impl App {
         self.dired_lines.insert(id, lines);
         self.open_buffer_in_focused_pane(id);
         self.explorer_navigate(id, dir);
+        // Warmed now so `SPC e b` is instant whenever it comes.
+        self.ensure_volumes();
         self.wake_caret();
     }
 
@@ -8815,11 +8912,17 @@ impl App {
         }
     }
 
-    /// Hook for the recent-directories list the Places work will read.
-    /// Deliberately a no-op for now rather than a `TODO` comment: the
-    /// one call site that should record a visit is here, and finding it
-    /// later is the part that goes wrong.
-    fn remember_visited_directory(&mut self, _path: &Path) {}
+    /// Records that a directory was actually opened, for `SPC e r`.
+    ///
+    /// Called where the listing *lands*, not where it is asked for, so
+    /// a path that turned out not to exist -- or a share that never
+    /// answered -- never joins the list of places you have been.
+    fn remember_visited_directory(&mut self, path: &Path) {
+        self.recent_dirs.add(path.to_path_buf());
+        if let Err(err) = self.recent_dirs.save() {
+            eprintln!("fenix: couldn't save recent directories ({err})");
+        }
+    }
 
     /// `Enter` on a dired buffer: opens the file at the cursor's line
     /// into the focused pane, or navigates into the directory at that
@@ -17673,6 +17776,12 @@ impl App {
                 self.active_picker = None;
                 self.recover_snapshot(&snapshot);
             }
+            Some(ActivePicker::Places(state)) => {
+                let Some(path) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.explorer_open_path(&path);
+            }
             Some(ActivePicker::DeleteProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -18653,19 +18762,266 @@ impl App {
             return;
         }
 
+        // Tab completes a path, and only a path -- everywhere else it
+        // has no meaning and is better left doing nothing than doing
+        // something surprising.
+        if key.code == KeyCode::Named(FenixNamedKey::Tab) && prompt.kind == PromptKind::GoToPath {
+            self.complete_path_prompt();
+            self.wake_caret();
+            return;
+        }
+
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.explorer_prompt = None,
             KeyCode::Named(FenixNamedKey::Enter) => {
                 let ExplorerPrompt { kind, input } = self.explorer_prompt.take().unwrap();
+                self.explorer_completions.clear();
                 self.explorer_prompt_submit(kind, &input);
             }
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 prompt.input.pop();
+                self.refresh_path_completions();
             }
-            KeyCode::Char(c) => prompt.input.push(c),
+            KeyCode::Char(c) => {
+                prompt.input.push(c);
+                self.refresh_path_completions();
+            }
             _ => {}
         }
         self.wake_caret();
+    }
+
+    /// `SPC e p`: opens the path bar, seeded with where you already are
+    /// so a nearby directory is an edit rather than a retype.
+    pub(crate) fn start_path_prompt(&mut self) {
+        let seed = self
+            .active_explorer()
+            .map(|e| e.cwd.display().to_string())
+            .unwrap_or_else(|| self.explorer_start_dir().display().to_string());
+        // With a trailing separator, so the first Tab offers what is
+        // inside rather than the siblings of where you are.
+        let seed = if seed.ends_with('\\') || seed.ends_with('/') { seed } else { format!("{seed}\\") };
+        self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::GoToPath, input: seed });
+        self.refresh_path_completions();
+        self.wake_caret();
+    }
+
+    /// Recomputes what the current text could become. Cheap enough to
+    /// redo on every keystroke -- it lists one directory -- and a cache
+    /// would be one more thing that can disagree with what is typed.
+    fn refresh_path_completions(&mut self) {
+        let Some(prompt) = self.explorer_prompt.as_ref().filter(|p| p.kind == PromptKind::GoToPath) else {
+            self.explorer_completions.clear();
+            return;
+        };
+        self.explorer_completions = fenix_fs::complete(&prompt.input);
+    }
+
+    /// Tab: fills in as much as every candidate agrees on.
+    ///
+    /// Not "cycle through the matches": with one match this finishes the
+    /// name, and with several it advances to the point where they
+    /// diverge and leaves you to type the next character -- which is
+    /// what makes repeated Tabs feel like progress rather than a
+    /// carousel.
+    fn complete_path_prompt(&mut self) {
+        let candidates = self.explorer_completions.clone();
+        let Some(prefix) = fenix_fs::common_prefix(&candidates) else {
+            self.set_message("no directory here starts with that");
+            return;
+        };
+        let Some(prompt) = self.explorer_prompt.as_mut() else { return };
+        if prefix.len() > prompt.input.trim().len() {
+            prompt.input = prefix;
+            // A single match is a directory you can go into, so leave the
+            // separator on and let the next Tab list its contents.
+            if candidates.len() == 1 {
+                prompt.input.push('\\');
+            }
+            self.refresh_path_completions();
+        } else if candidates.len() > 1 {
+            let shown: Vec<&str> =
+                candidates.iter().filter_map(|c| c.rsplit(['\\', '/']).next()).take(6).collect();
+            let more = candidates.len().saturating_sub(shown.len());
+            let suffix = if more > 0 { format!("  (+{more} more)") } else { String::new() };
+            self.set_message(format!("{}{suffix}", shown.join("  ")));
+        }
+    }
+
+    /// Opens `target` in the explorer, whatever kind of thing it turns
+    /// out to be.
+    ///
+    /// A file opens in the editor rather than being refused: typing a
+    /// full filename into a path bar and being told it is not a
+    /// directory is pedantry, not help. A bare `\\server` with no share
+    /// asks the server what it has (see `explorer_browse_shares`).
+    /// Anything else is a directory, and the explorer's own error path
+    /// handles it not existing.
+    pub(crate) fn explorer_open_path(&mut self, target: &Path) {
+        if target.is_file() {
+            self.open_file_from_picker(target);
+            return;
+        }
+        if is_bare_server(target) {
+            self.explorer_browse_shares(target);
+            return;
+        }
+        self.explorer_go_to(target);
+    }
+
+    /// `\\server` with no share named: ask it what it is offering.
+    ///
+    /// Off the main thread, and for the same reason listings are --
+    /// `net view` against a host that is not there blocks for tens of
+    /// seconds on name resolution alone. The answer arrives as a picker;
+    /// a failure arrives as a message, and either way the editor was
+    /// usable the whole time.
+    fn explorer_browse_shares(&mut self, server: &Path) {
+        let host = server.to_string_lossy().trim_start_matches(['\\', '/']).to_string();
+        self.set_message(format!("asking {host} what it shares..."));
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = fenix_fs::shares(&host).map_err(|err| err.to_string());
+                    let _ = proxy.send_event(FenixUserEvent::ExplorerShares { host, result });
+                });
+            }
+            None => {
+                let result = fenix_fs::shares(&host).map_err(|err| err.to_string());
+                self.apply_explorer_shares(host, result);
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `FenixUserEvent::ExplorerShares`: what the server said.
+    fn apply_explorer_shares(&mut self, host: String, result: Result<Vec<String>, String>) {
+        match result {
+            Ok(shares) if shares.is_empty() => self.set_error(format!("{host} is not sharing anything you can see")),
+            Ok(shares) => {
+                let candidates = shares
+                    .into_iter()
+                    .map(|share| {
+                        let path = PathBuf::from(format!("\\\\{host}\\{share}"));
+                        fenix_picker::Candidate::new(format!("\\\\{host}\\{share}"), path)
+                    })
+                    .collect();
+                self.enter_picker(ActivePicker::Places(fenix_picker::PickerState::new(candidates)));
+            }
+            Err(err) => self.set_error(err),
+        }
+        self.wake_caret();
+    }
+
+    // -- Places ----------------------------------------------------------
+
+    /// Starts the one-off drive query, if it has not run already.
+    ///
+    /// In the background, and started early -- the first time an
+    /// explorer opens rather than the first time Places is asked for.
+    /// Asking Windows costs about half a second, which is nothing spread
+    /// across a session and far too much to spend between a keypress and
+    /// a list appearing. By the time anyone presses `SPC e b` the answer
+    /// has been sitting there for minutes.
+    fn ensure_volumes(&mut self) {
+        if !self.volumes.is_empty() || self.volumes_loading {
+            return;
+        }
+        self.volumes_loading = true;
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(FenixUserEvent::ExplorerVolumes(fenix_fs::volumes()));
+                });
+            }
+            None => {
+                // No event loop to report back through (every test).
+                self.volumes = fenix_fs::volumes();
+                self.volumes_loading = false;
+            }
+        }
+    }
+
+    /// `SPC e b`: everywhere worth going, in one list.
+    ///
+    /// Bookmarks first because they were chosen deliberately, then the
+    /// machine's drives, then where you have actually been, then the
+    /// projects you have registered. Ordered by how likely each is to be
+    /// what you meant rather than alphabetically, since the whole point
+    /// is that the answer is near the top before you type anything.
+    pub(crate) fn picker_places(&mut self) {
+        self.ensure_volumes();
+        let mut candidates: Vec<fenix_picker::Candidate<PathBuf>> = Vec::new();
+        for (name, path) in &self.config.explorer_bookmarks {
+            candidates.push(fenix_picker::Candidate::new(format!("* {name}  --  {}", readable_path(path)), path.clone()));
+        }
+        for volume in &self.volumes {
+            let mut label = format!("{} {}", readable_path(&volume.root), volume.kind.label());
+            if !volume.name.is_empty() {
+                label = format!("{} ({})", label, volume.name);
+            }
+            // A mapped drive shows what it really is: `Z:` on its own
+            // tells you nothing about where you are about to go.
+            if let Some(remote) = &volume.remote {
+                label.push_str(&format!("  ->  {remote}"));
+            }
+            if let (Some(free), Some(total)) = (volume.free, volume.total) {
+                label.push_str(&format!("  --  {} free of {}", format_size(free), format_size(total)));
+            }
+            candidates.push(fenix_picker::Candidate::new(label, volume.root.clone()));
+        }
+        for path in self.recent_dirs.paths() {
+            candidates.push(fenix_picker::Candidate::new(readable_path(path), path.clone()));
+        }
+        for root in self.known_projects.roots() {
+            candidates.push(fenix_picker::Candidate::new(format!("project: {}", readable_path(root)), root.clone()));
+        }
+        if candidates.is_empty() {
+            self.set_message("nowhere bookmarked yet -- SPC e m remembers where you are");
+            return;
+        }
+        self.enter_picker(ActivePicker::Places(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC e r`: just the directories you have been, without the drives
+    /// and bookmarks around them -- for when you know you were there a
+    /// moment ago.
+    pub(crate) fn picker_recent_dirs(&mut self) {
+        if self.recent_dirs.paths().is_empty() {
+            self.set_message("no directories visited yet");
+            return;
+        }
+        let candidates = self.recent_dirs.paths().iter().map(|p| fenix_picker::Candidate::new(readable_path(p), p.clone())).collect();
+        self.enter_picker(ActivePicker::Places(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC e m`: bookmarks wherever the explorer currently is, named
+    /// after the folder itself.
+    ///
+    /// No prompt for a name. The folder's own name is right almost
+    /// every time, and a bookmark you can add without stopping to think
+    /// is a bookmark you will actually add.
+    pub(crate) fn bookmark_current_directory(&mut self) {
+        let Some(cwd) = self.active_explorer().map(|e| e.cwd.clone()) else {
+            self.set_error("no directory open to bookmark");
+            return;
+        };
+        if self.config.explorer_bookmarks.iter().any(|(_, path)| path == &cwd) {
+            self.set_message(format!("{} is already bookmarked", cwd.display()));
+            return;
+        }
+        let name = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            // A drive or share root has no file name of its own, so it
+            // is named by the whole path -- which is short anyway.
+            .unwrap_or_else(|| cwd.display().to_string());
+        self.config.explorer_bookmarks.push((name.clone(), cwd));
+        if let Err(err) = self.config.save() {
+            self.set_error(format!("couldn't save the bookmark: {err}"));
+            return;
+        }
+        self.set_message(format!("bookmarked as {name}"));
     }
 
     /// One keystroke's answer to "something is already there".
@@ -18729,6 +19085,7 @@ impl App {
                     format!("Move {items} to the Recycle Bin? (y/n)")
                 }
             }
+            PromptKind::GoToPath => format!("Go to: {}", prompt.input),
             PromptKind::Rename => format!("Rename to: {}", prompt.input),
             PromptKind::CreateFile => format!("Create file: {}", prompt.input),
             PromptKind::CreateDir => format!("Create directory: {}", prompt.input),
@@ -18740,6 +19097,11 @@ impl App {
     fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
         let Some(explorer) = self.active_explorer() else { return };
         let outcomes = match kind {
+            PromptKind::GoToPath => {
+                let target = fenix_fs::expand(input);
+                self.explorer_open_path(&target);
+                return;
+            }
             PromptKind::Rename => vec![explorer.rename_selected(input).map(|_| ()).map_err(|e| e.to_string())],
             PromptKind::CreateFile => vec![explorer.create_file(input).map(|_| ()).map_err(|e| e.to_string())],
             PromptKind::CreateDir => vec![explorer.create_dir(input).map(|_| ()).map_err(|e| e.to_string())],
@@ -19410,6 +19772,12 @@ impl App {
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
             FenixUserEvent::ExplorerListed { buffer, request, result } => self.apply_explorer_listed(buffer, request, result),
             FenixUserEvent::ExplorerGitStatus { buffer, request, statuses } => self.apply_explorer_git_status(buffer, request, statuses),
+            FenixUserEvent::ExplorerShares { host, result } => self.apply_explorer_shares(host, result),
+            FenixUserEvent::ExplorerVolumes(volumes) => {
+                self.volumes_loading = false;
+                self.volumes = volumes;
+                self.wake_caret();
+            }
             FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::JiraIssuesReady { request_id, issues } => self.apply_jira_issues(request_id, issues),
@@ -21167,6 +21535,7 @@ impl App {
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
+                Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteJiraProject(_)) => ("DELJIRAPROJ", picker_len(picker)),
@@ -26366,6 +26735,11 @@ configure_board stm32
             std::fs::write(&path, contents).unwrap();
             path
         }
+        fn mkdir(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
     }
     impl Drop for TempDir {
         fn drop(&mut self) {
@@ -27965,6 +28339,280 @@ configure_board stm32
         app.mib_refresh_index();
 
         assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
+    }
+
+    // -- Getting somewhere without walking there -------------------------
+
+    /// An explorer open on `dir`, with bookmarks and recents pointed at
+    /// throwaway files rather than the real config directory.
+    fn app_with_places(name: &str, dir: &Path) -> App {
+        let mut app = App::with_file(None);
+        app.recent_dirs = fenix_project::RecentFiles::load_or_default(
+            std::env::temp_dir().join(format!("fenix-places-test-{name}-{}.txt", std::process::id())),
+        );
+        app.open_dired_at(dir);
+        app
+    }
+
+    #[test]
+    fn the_path_bar_opens_seeded_with_where_you_already_are() {
+        // So a sibling directory is an edit, not a retype.
+        let dir = TempDir::new("path_bar_seed");
+        let mut app = app_with_places("seed", dir.path());
+
+        app.start_path_prompt();
+
+        let text = app.active_prompt_text().unwrap();
+        assert!(text.starts_with("Go to: "), "got: {text}");
+        assert!(text.contains(&dir.path().display().to_string()), "got: {text}");
+        // With a separator, so the first Tab offers what is *inside*
+        // rather than the siblings of where you are.
+        assert!(text.ends_with('\\'), "got: {text}");
+    }
+
+    #[test]
+    fn typing_a_path_and_pressing_enter_goes_there() {
+        let dir = TempDir::new("path_bar_go");
+        let sub = dir.mkdir("somewhere");
+        std::fs::write(sub.join("inside.txt"), "x").unwrap();
+        let mut app = app_with_places("go", dir.path());
+
+        app.explorer_prompt_submit(PromptKind::GoToPath, &sub.to_string_lossy());
+
+        assert_eq!(app.active_explorer().unwrap().cwd, sub);
+        assert!(app.open().buffer.text().contains("inside.txt"));
+    }
+
+    #[test]
+    fn typing_a_file_opens_it_rather_than_refusing() {
+        // Being told "that is not a directory" after typing a full
+        // filename is pedantry, not help.
+        let dir = TempDir::new("path_bar_file");
+        let file = dir.write("notes.txt", "hello");
+        let mut app = app_with_places("file", dir.path());
+
+        app.explorer_prompt_submit(PromptKind::GoToPath, &file.to_string_lossy());
+
+        assert_eq!(app.open().kind, BufferKind::Text);
+        assert_eq!(app.open().buffer.path(), Some(file.as_path()));
+    }
+
+    #[test]
+    fn a_path_with_a_home_shortcut_and_quotes_still_resolves() {
+        // The two things a pasted path arrives wrapped in.
+        let dir = TempDir::new("path_bar_expand");
+        let mut app = app_with_places("expand", dir.path());
+        let quoted = format!("\"{}\"", dir.path().display());
+
+        app.explorer_prompt_submit(PromptKind::GoToPath, &quoted);
+
+        assert_eq!(app.active_explorer().unwrap().cwd, dir.path());
+    }
+
+    #[test]
+    fn tab_fills_in_as_much_as_every_candidate_agrees_on() {
+        let dir = TempDir::new("path_bar_tab");
+        dir.mkdir("alpha");
+        dir.mkdir("alpine");
+        let mut app = app_with_places("tab", dir.path());
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::GoToPath, input: format!("{}\\al", dir.path().display()) });
+        app.refresh_path_completions();
+
+        app.complete_path_prompt();
+
+        // Up to where they diverge, and no further -- the next character
+        // is the user's to choose.
+        assert!(app.explorer_prompt.as_ref().unwrap().input.ends_with("alp"), "got: {}", app.explorer_prompt.as_ref().unwrap().input);
+    }
+
+    #[test]
+    fn tab_on_a_single_match_finishes_it_and_steps_inside() {
+        let dir = TempDir::new("path_bar_tab_one");
+        dir.mkdir("only-one");
+        let mut app = app_with_places("tab_one", dir.path());
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::GoToPath, input: format!("{}\\on", dir.path().display()) });
+        app.refresh_path_completions();
+
+        app.complete_path_prompt();
+
+        let input = &app.explorer_prompt.as_ref().unwrap().input;
+        assert!(input.ends_with("only-one\\"), "got: {input}");
+    }
+
+    #[test]
+    fn tab_with_nothing_matching_says_so_rather_than_doing_nothing() {
+        let dir = TempDir::new("path_bar_tab_none");
+        let mut app = app_with_places("tab_none", dir.path());
+        app.explorer_prompt =
+            Some(ExplorerPrompt { kind: PromptKind::GoToPath, input: format!("{}\\zzz", dir.path().display()) });
+        app.refresh_path_completions();
+
+        app.complete_path_prompt();
+
+        assert!(app.modeline_pieces().1.contains("no directory here"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn tab_only_completes_a_path_and_leaves_other_prompts_alone() {
+        // In a rename prompt, Tab is a character somebody might want.
+        let dir = TempDir::new("path_bar_tab_scope");
+        let mut app = app_with_places("tab_scope", dir.path());
+        app.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::Rename, input: "a".to_string() });
+
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Tab));
+
+        assert_eq!(app.explorer_prompt.as_ref().unwrap().input, "a", "unchanged, not completed");
+    }
+
+    #[test]
+    fn a_canonicalised_path_is_shown_the_way_a_person_would_write_it() {
+        // Every registered project root has been through `canonicalize`,
+        // which on Windows returns `\\?\C:\...` -- unrecognisable at a
+        // glance and meaningless to a reader.
+        assert_eq!(readable_path(Path::new(r"\\?\C:\Users\thoma")), r"C:\Users\thoma");
+        assert_eq!(readable_path(Path::new(r"\\?\UNC\nas\media")), r"\\nas\media");
+        assert_eq!(readable_path(Path::new(r"C:\Users\thoma")), r"C:\Users\thoma");
+        assert_eq!(readable_path(Path::new(r"\\nas\media")), r"\\nas\media");
+    }
+
+    #[test]
+    fn the_recent_directories_list_stays_out_of_the_real_config_directory_under_test() {
+        // The tests here open real directories through the real code
+        // path, which records every one -- and the crash-recovery work
+        // already found what happens when that lands in the user's own
+        // history.
+        let path = default_recent_dirs_path();
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "a test run must not touch the real history: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn a_server_with_no_share_named_is_a_question_not_a_directory() {
+        assert!(is_bare_server(Path::new(r"\\nas")));
+        assert!(is_bare_server(Path::new(r"\\nas\")));
+        assert!(!is_bare_server(Path::new(r"\\nas\media")));
+        assert!(!is_bare_server(Path::new(r"C:\Users")));
+        assert!(!is_bare_server(Path::new(r"\\")));
+    }
+
+    // -- Places ----------------------------------------------------------
+
+    #[test]
+    fn visiting_a_directory_remembers_it() {
+        // Recorded where the listing lands, not where it is asked for --
+        // a path that never answered is not somewhere you have been.
+        let dir = TempDir::new("places_remember");
+        let app = app_with_places("remember", dir.path());
+        assert_eq!(app.recent_dirs.paths().first(), Some(&dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn a_directory_that_failed_to_open_is_not_remembered() {
+        let dir = TempDir::new("places_remember_fail");
+        let mut app = app_with_places("remember_fail", dir.path());
+        let before = app.recent_dirs.paths().len();
+
+        let id = app.focused_buffer_id();
+        app.explorer_navigate(id, &dir.path().join("nope"));
+
+        assert_eq!(app.recent_dirs.paths().len(), before);
+    }
+
+    #[test]
+    fn places_lists_bookmarks_drives_and_where_you_have_been() {
+        let dir = TempDir::new("places_list");
+        let mut app = app_with_places("list", dir.path());
+        app.config.explorer_bookmarks = vec![("nas".to_string(), PathBuf::from(r"\\nas\media"))];
+
+        app.picker_places();
+
+        let rows = picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, 50);
+        let labels: Vec<String> = rows.into_iter().map(|(_, label)| label).collect();
+        assert!(labels.iter().any(|l| l.contains("nas")), "bookmarks: {labels:?}");
+        assert!(labels.iter().any(|l| l.contains(&dir.path().display().to_string())), "recents: {labels:?}");
+        // The machine's own drives, from the real query.
+        assert!(labels.iter().any(|l| l.contains("local disk") || l.contains("volume")), "drives: {labels:?}");
+    }
+
+    #[test]
+    fn a_mapped_drive_shows_where_it_really_points() {
+        // `Z:` on its own tells you nothing about where you are going.
+        let volume = fenix_fs::Volume {
+            root: PathBuf::from("Z:\\"),
+            name: String::new(),
+            kind: fenix_fs::VolumeKind::Network,
+            remote: Some(r"\\nas\media".to_string()),
+            free: None,
+            total: None,
+        };
+        let dir = TempDir::new("places_mapped");
+        let mut app = app_with_places("mapped", dir.path());
+        app.volumes = vec![volume];
+
+        app.picker_places();
+
+        let labels: Vec<String> =
+            picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, 50).into_iter().map(|(_, l)| l).collect();
+        assert!(labels.iter().any(|l| l.contains(r"->  \\nas\media")), "got: {labels:?}");
+    }
+
+    #[test]
+    fn confirming_a_place_goes_there() {
+        let dir = TempDir::new("places_confirm");
+        let sub = dir.mkdir("target-dir");
+        let mut app = app_with_places("confirm", dir.path());
+        app.active_picker =
+            Some(ActivePicker::Places(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new("t".to_string(), sub.clone())])));
+
+        app.picker_confirm();
+
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.active_explorer().unwrap().cwd, sub);
+    }
+
+    #[test]
+    fn bookmarking_names_the_folder_after_itself() {
+        // No prompt: the folder's own name is right almost every time,
+        // and a bookmark you can add without stopping to think is one
+        // you will actually add.
+        let dir = TempDir::new("places_bookmark");
+        let sub = dir.mkdir("interesting");
+        let mut app = app_with_places("bookmark", &sub);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+
+        app.bookmark_current_directory();
+
+        assert_eq!(app.config.explorer_bookmarks, vec![("interesting".to_string(), sub)]);
+        assert!(app.modeline_pieces().1.contains("bookmarked as interesting"));
+    }
+
+    #[test]
+    fn bookmarking_the_same_place_twice_says_so_instead_of_duplicating_it() {
+        let dir = TempDir::new("places_bookmark_twice");
+        let sub = dir.mkdir("interesting");
+        let mut app = app_with_places("bookmark_twice", &sub);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+
+        app.bookmark_current_directory();
+        app.bookmark_current_directory();
+
+        assert_eq!(app.config.explorer_bookmarks.len(), 1);
+        assert!(app.modeline_pieces().1.contains("already bookmarked"));
+    }
+
+    #[test]
+    fn recent_directories_are_offered_on_their_own_too() {
+        let dir = TempDir::new("places_recent_only");
+        let mut app = app_with_places("recent_only", dir.path());
+
+        app.picker_recent_dirs();
+
+        let labels: Vec<String> =
+            picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, 50).into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, vec![dir.path().display().to_string()]);
     }
 
     // -- The buffer-backed listing can now do things ---------------------

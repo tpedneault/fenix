@@ -92,6 +92,10 @@ impl CommandRegistry {
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
+        registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);
+        registry.register("explorer.places", "Bookmarks, drives, recent directories", cmd_explorer_places);
+        registry.register("explorer.recent_dirs", "Directories you have been to", cmd_explorer_recent_dirs);
+        registry.register("explorer.bookmark", "Bookmark the directory you are in", cmd_explorer_bookmark);
         registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
@@ -407,6 +411,22 @@ fn cmd_toggle_terminal(ctx: &mut CommandCtx) {
 
 fn cmd_open_terminal_buffer(ctx: &mut CommandCtx) {
     ctx.app.open_terminal_buffer();
+}
+
+fn cmd_explorer_go_to_path(ctx: &mut CommandCtx) {
+    ctx.app.start_path_prompt();
+}
+
+fn cmd_explorer_places(ctx: &mut CommandCtx) {
+    ctx.app.picker_places();
+}
+
+fn cmd_explorer_recent_dirs(ctx: &mut CommandCtx) {
+    ctx.app.picker_recent_dirs();
+}
+
+fn cmd_explorer_bookmark(ctx: &mut CommandCtx) {
+    ctx.app.bookmark_current_directory();
 }
 
 fn cmd_docker_open(ctx: &mut CommandCtx) {

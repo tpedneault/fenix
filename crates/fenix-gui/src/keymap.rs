@@ -123,6 +123,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "explorer.toggle_sidebar",
         );
 
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('e')], "open explorer here", "explorer.jump");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('p')], "go to path", "explorer.go_to_path");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('b')], "places", "explorer.places");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('r')], "recent directories", "explorer.recent_dirs");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('m')], "bookmark this directory", "explorer.bookmark");
         t.label_group(&[spc, KeyPress::char('p')], "project");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('f')], "find file", "project.find_file");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('s')], "search", "project.grep");

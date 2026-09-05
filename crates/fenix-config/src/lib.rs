@@ -120,6 +120,16 @@ pub struct Config {
     /// How many commits the History view's graph loads (`SPC g l`) --
     /// unset means 200, enough to cover recent work without making
     /// `git log --all` on a large repo feel slow.
+    /// Directories worth a key rather than a walk -- `[explorer]`'s
+    /// `bookmarkN = NAME|PATH`, the same numbered-pair convention
+    /// `mib_roots`/`documents` already use.
+    ///
+    /// Driven by `self` on save (not re-read fresh like `vnc_hosts`),
+    /// because unlike those this one genuinely has an in-app add flow:
+    /// `SPC e m` bookmarks wherever you are. Hand-editing the file is
+    /// still fine; it just has to happen between sessions, the same
+    /// deal `mib_roots` has.
+    pub explorer_bookmarks: Vec<(String, PathBuf)>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -236,6 +246,10 @@ impl Config {
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
             lsp_servers: lsp.map(|s| parse_pair_list(s, "server")).unwrap_or_default(),
             mib_roots: mib.map(parse_mib_roots).unwrap_or_default(),
+            explorer_bookmarks: sections
+                .get("explorer")
+                .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
+                .unwrap_or_default(),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
@@ -273,6 +287,7 @@ impl Config {
             completion_symbols_file: None,
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
+            explorer_bookmarks: Vec::new(),
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -364,6 +379,11 @@ impl Config {
         out.push_str("[lsp]\n");
         for (i, (language, command_line)) in lsp_servers.iter().enumerate() {
             out.push_str(&format!("server{} = {language}|{command_line}\n", i + 1));
+        }
+        out.push('\n');
+        out.push_str("[explorer]\n");
+        for (i, (name, path)) in self.explorer_bookmarks.iter().enumerate() {
+            out.push_str(&format!("bookmark{} = {name}|{}\n", i + 1, path.display()));
         }
         out.push('\n');
         out.push_str("[mib]\n");
@@ -1037,6 +1057,21 @@ mod tests {
         let config = Config::load(temp_path("git_absent")).unwrap();
         assert_eq!(config.git_graph_limit, None);
         assert_eq!(config.git_base_branch, None);
+    }
+
+    #[test]
+    fn explorer_bookmarks_round_trip_through_save_and_load() {
+        // Unlike `vnc_hosts`, these are written by the app -- `SPC e m`
+        // bookmarks wherever you are -- so a save has to carry them.
+        let path = temp_path("explorer_bookmarks_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.explorer_bookmarks =
+            vec![("nas".to_string(), PathBuf::from(r"\\nas\media")), ("work".to_string(), PathBuf::from(r"C:\work"))];
+
+        config.save().unwrap();
+
+        let reloaded = Config::load(path).unwrap();
+        assert_eq!(reloaded.explorer_bookmarks, config.explorer_bookmarks);
     }
 
     #[test]

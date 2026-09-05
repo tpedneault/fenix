@@ -123,6 +123,22 @@ for anyone curious to poke around or build on it.
   the listing, and are skipped for `\\server\share` paths where running
   `git status` across the wire would cost more than it is worth.
 
+  **Getting somewhere** does not mean walking there. `SPC e p` is a path
+  bar: type it, with `Tab` completing a directory at a time, `~` and
+  `%APPDATA%` expanded, quotes stripped off anything pasted out of
+  Explorer, and forward slashes accepted. Typing a *file* opens it
+  rather than refusing. Typing `\server` with no share asks the server
+  what it has and offers the answer as a list -- off the main thread,
+  because a host that is not there takes tens of seconds to say so.
+  `SPC e b` is everywhere else worth going in one list: bookmarks first,
+  then the machine's drives with free space (a mapped drive shows the
+  share it really points at, since `Z:` on its own tells you nothing),
+  then the directories you have actually been to, then registered
+  projects. `SPC e m` bookmarks where you are, named after the folder,
+  with no prompt -- a bookmark you can add without stopping to think is
+  one you will actually add. Bookmarks live in `config.ini`'s
+  `[explorer]` section and can be hand-edited between sessions.
+
   Deleting means the **Recycle Bin**, so a mistake is recoverable
   through Windows' own restore. Copying or moving onto something that
   already exists asks first -- overwrite, skip, or keep both -- rather
@@ -823,6 +839,11 @@ popup shows what keys continue it.
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
+| `SPC e e` | Open the file explorer here |
+| `SPC e p` | Go to a path you type (Tab completes; `~`, `%VAR%` and `\server\share` all work) |
+| `SPC e b` | Places: bookmarks, drives, recent directories, project roots |
+| `SPC e r` | Recent directories |
+| `SPC e m` | Bookmark the directory you are in |
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |
