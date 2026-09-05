@@ -92,6 +92,7 @@ impl CommandRegistry {
         registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
+        registry.register("explorer.dual_pane", "Two listings side by side", cmd_explorer_dual_pane);
         registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);
         registry.register("explorer.places", "Bookmarks, drives, recent directories", cmd_explorer_places);
         registry.register("explorer.recent_dirs", "Directories you have been to", cmd_explorer_recent_dirs);
@@ -411,6 +412,10 @@ fn cmd_toggle_terminal(ctx: &mut CommandCtx) {
 
 fn cmd_open_terminal_buffer(ctx: &mut CommandCtx) {
     ctx.app.open_terminal_buffer();
+}
+
+fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {
+    ctx.app.explorer_dual_pane();
 }
 
 fn cmd_explorer_go_to_path(ctx: &mut CommandCtx) {

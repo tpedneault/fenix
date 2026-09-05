@@ -111,7 +111,15 @@ for anyone curious to poke around or build on it.
   listing in a strip, reading the same key table, so a binding can never
   mean two different things in the two forms.
 
-  Reading a directory happens **off the main thread**. A slow path --
+  `SPC e d` arranges the classic two-listings-side-by-side layout out of
+  the window system rather than as a panel of its own, so both halves
+  are ordinary buffers that split, close and switch like any other --
+  and `C`/`M` seed their destination with the directory the other half
+  is showing, which is the whole reason to arrange two listings.
+
+  Reading a directory happens **off the main thread**, for all three
+  forms of the listing -- the pane, the sidebar and the directory
+  picker. A slow path --
   a network share, a disk waking up -- leaves the editor completely
   usable, and the pane keeps showing where you are until the new listing
   arrives; after a moment the header names what it is waiting on and
@@ -840,6 +848,7 @@ popup shows what keys continue it.
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
 | `SPC e e` | Open the file explorer here |
+| `SPC e d` | Two listings side by side (copy/move default to the other one) |
 | `SPC e p` | Go to a path you type (Tab completes; `~`, `%VAR%` and `\server\share` all work) |
 | `SPC e b` | Places: bookmarks, drives, recent directories, project roots |
 | `SPC e r` | Recent directories |
