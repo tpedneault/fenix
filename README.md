@@ -1257,8 +1257,19 @@ rather than rendering.
 |---|---|
 | `Ctrl-Space` | Force-open the popup (even with no prefix typed) |
 | `Up`/`Down` or `Ctrl-P`/`Ctrl-N` | Move selection |
-| `Tab` / `Enter` | Accept the selected candidate |
-| `Esc` | Dismiss the popup (stays in Insert mode) |
+| `Tab` / `Enter` / `Ctrl-Y` | Accept the selected candidate (stays in Insert mode) |
+| `Ctrl-E` | Dismiss the popup, keep typing |
+| `Esc` | Leave Insert mode, as it always does -- the popup closes with it |
+
+`Esc` is deliberately not spent on the popup. It used to be, which meant
+returning to Normal mode took two presses, and which one you needed
+depended on whether a popup you may not have been looking at happened to
+be open. That is the modeless-editor reflex: where `Esc` has nothing to
+do *but* dismiss things, spending it on a popup costs nothing. Here it
+costs the one key the whole grammar rests on. Vim itself agrees -- `:h
+popupmenu-keys` lists every key with a special meaning while the menu is
+up, and `Esc` is not among them; `Ctrl-E` is the dismiss key and
+`Ctrl-Y` the accept key.
 
 ## Configuration
 

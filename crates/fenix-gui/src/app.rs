@@ -7672,6 +7672,66 @@ impl App {
         self.completion_scroll = 0;
     }
 
+    /// The completion popup's own keys, claimed before Vim ever sees
+    /// them. Returns whether `keypress` was claimed.
+    ///
+    /// The popup only ever exists in Insert mode. `Ctrl-Space`
+    /// force-opens it whether or not it is already open (unclaimed
+    /// otherwise -- not a global Ctrl chord, not handled by
+    /// `handle_insert_key`). While it is open, its navigation/accept/
+    /// dismiss keys are claimed here; every other key (plain typing,
+    /// Backspace, arrows, Escape) falls through to the ordinary Vim
+    /// dispatch, after which `sync_completion` re-derives the popup's
+    /// state fresh -- there is no `VimEvent` for "a character was
+    /// typed", so this recomputes rather than tracking incrementally.
+    fn completion_key(&mut self, keypress: KeyPress) -> bool {
+        if self.vim.mode() != Mode::Insert {
+            return false;
+        }
+        if keypress == KeyPress::char(' ').with_ctrl() {
+            self.force_open_completion();
+            return true;
+        }
+        if self.completion.is_none() {
+            return false;
+        }
+        match keypress.code {
+            KeyCode::Named(FenixNamedKey::Down) => self.completion.as_mut().unwrap().picker.move_selection(1),
+            KeyCode::Named(FenixNamedKey::Up) => self.completion.as_mut().unwrap().picker.move_selection(-1),
+            KeyCode::Char('n') if keypress.mods.ctrl => self.completion.as_mut().unwrap().picker.move_selection(1),
+            KeyCode::Char('p') if keypress.mods.ctrl => self.completion.as_mut().unwrap().picker.move_selection(-1),
+            KeyCode::Named(FenixNamedKey::Tab) | KeyCode::Named(FenixNamedKey::Enter) => self.accept_completion(),
+            // Vim's own accept key, beside the Tab/Enter every other
+            // editor uses.
+            KeyCode::Char('y') if keypress.mods.ctrl => self.accept_completion(),
+            // Vim's own dismiss key: closes the popup and leaves you
+            // typing. This is the behaviour Escape used to have, and
+            // moving it here is the whole point -- see below.
+            KeyCode::Char('e') if keypress.mods.ctrl => self.completion = None,
+            // Escape is deliberately not claimed. It used to be, closing
+            // the popup and leaving you in Insert -- so getting back to
+            // Normal took two presses, and which one you needed depended
+            // on whether a popup you may not even have been looking at
+            // happened to be open. That is the VS Code reflex, and it
+            // does not transfer: there, Escape has nothing to do *but*
+            // dismiss things, so spending it on the popup costs nothing.
+            // In a modal editor it costs the one key the whole grammar
+            // rests on.
+            //
+            // Real Vim agrees, and `:h popupmenu-keys` is explicit: it
+            // lists every key with a special meaning while the menu is
+            // up -- CTRL-Y, CTRL-E, the arrows, Tab, Space -- and Escape
+            // is not among them. It keeps its ordinary Insert-mode
+            // meaning, and the popup closing is a consequence of leaving
+            // Insert rather than something Escape was spent on. Falling
+            // through is all that takes here too: `sync_completion` runs
+            // after every key that reaches Vim and drops the popup the
+            // moment the mode stops being Insert.
+            _ => return false, // plain typing/Backspace/arrows/Escape
+        }
+        true
+    }
+
     /// Force-opens the completion popup at the current (possibly empty)
     /// prefix, bypassing the normal ">=1 char" auto-trigger threshold --
     /// `Ctrl-Space`'s effect, the near-universal manual-trigger
@@ -19100,57 +19160,9 @@ impl App {
             return;
         }
 
-        // The completion popup only ever exists in Insert mode. `Ctrl-
-        // Space` force-opens it regardless of whether it's already open
-        // (unclaimed today -- not in the global Ctrl-chord list above,
-        // not handled by `handle_insert_key`). While it's open, its
-        // navigation/accept/dismiss keys are fully claimed here and never
-        // reach Vim; every other key (plain typing, Backspace, arrows)
-        // falls through to the ordinary Vim dispatch below, after which
-        // `sync_completion` re-derives the popup's state fresh -- there's
-        // no `VimEvent` for "a character was typed," so this recomputes
-        // instead of tracking it incrementally.
-        if self.vim.mode() == Mode::Insert {
-            if keypress == KeyPress::char(' ').with_ctrl() {
-                self.force_open_completion();
-                self.wake_caret();
-                return;
-            }
-            if self.completion.is_some() {
-                match keypress.code {
-                    KeyCode::Named(FenixNamedKey::Down) => {
-                        self.completion.as_mut().unwrap().picker.move_selection(1);
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Named(FenixNamedKey::Up) => {
-                        self.completion.as_mut().unwrap().picker.move_selection(-1);
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Char('n') if keypress.mods.ctrl => {
-                        self.completion.as_mut().unwrap().picker.move_selection(1);
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Char('p') if keypress.mods.ctrl => {
-                        self.completion.as_mut().unwrap().picker.move_selection(-1);
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Named(FenixNamedKey::Tab) | KeyCode::Named(FenixNamedKey::Enter) => {
-                        self.accept_completion();
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Named(FenixNamedKey::Escape) => {
-                        self.completion = None;
-                        self.wake_caret();
-                        return;
-                    }
-                    _ => {} // plain typing/Backspace/arrows -- fall through to Vim
-                }
-            }
+        if self.completion_key(keypress) {
+            self.wake_caret();
+            return;
         }
 
         // The dashboard is a real Vim-navigable buffer (see `BufferKind`'s
@@ -24083,6 +24095,20 @@ impl App {
         }
     }
 
+    /// Test-only mirror of the completion tier of `route_keypress`:
+    /// offer the key to the popup first, and only otherwise let it reach
+    /// Vim and re-derive the popup from the result. Both halves are the
+    /// production functions -- only the tier ordering is restated here,
+    /// since `route_keypress` itself needs a live `&ActiveEventLoop`
+    /// (see `test_dispatch_key`).
+    fn test_completion_key(&mut self, kp: KeyPress) {
+        if self.completion_key(kp) {
+            return;
+        }
+        self.test_route_key(kp);
+        self.sync_completion();
+    }
+
     /// Test-only mirror of `repeat_last_change` -- identical logic,
     /// replaying through `test_route_key` instead of the real `route_
     /// keypress`.
@@ -25733,6 +25759,107 @@ configure_board stm32
         assert!(labels.contains(&"set".to_string()));
         assert!(labels.contains(&"seek".to_string()));
         assert!(!labels.contains(&"proc".to_string())); // doesn't match "se"
+    }
+
+    // -- What the completion popup does with Escape ---------------------
+    //
+    // Verified against a real `vim -s` replay under a PTY, and against
+    // `:h popupmenu-keys`, which lists every key that means something
+    // special while the menu is up and does not list Escape.
+
+    /// A Tcl buffer in Insert mode with the popup open on "se".
+    fn app_with_an_open_completion_popup(name: &str) -> (TempDir, App) {
+        let dir = TempDir::new(name);
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("se");
+        app.sync_completion();
+        assert!(app.completion.is_some(), "the popup should be open before the key under test");
+        assert_eq!(app.vim.mode(), Mode::Insert);
+        (dir, app)
+    }
+
+    #[test]
+    fn escape_leaves_insert_mode_in_one_press_even_with_the_popup_open() {
+        // The whole point. Escape used to be spent closing the popup,
+        // so returning to Normal took two presses -- and whether you
+        // needed one or two depended on whether a popup you may not
+        // have been looking at happened to be open.
+        let (_dir, mut app) = app_with_an_open_completion_popup("esc_one_press");
+
+        app.test_completion_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert_eq!(app.vim.mode(), Mode::Normal, "one Escape, and you are back in Normal");
+        assert!(app.completion.is_none(), "and the popup went with it");
+    }
+
+    #[test]
+    fn escape_with_the_popup_open_leaves_the_typed_text_alone() {
+        // Leaving Insert is not the same as undoing what you typed:
+        // "se" was really typed and stays typed. Only an explicit accept
+        // (Tab/Enter/Ctrl-y) may complete it to something longer.
+        let (_dir, mut app) = app_with_an_open_completion_popup("esc_keeps_text");
+
+        app.test_completion_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert_eq!(app.open().buffer.text(), "se");
+    }
+
+    #[test]
+    fn ctrl_e_dismisses_the_popup_and_leaves_you_typing() {
+        // Vim's own dismiss key, and the behaviour Escape used to have
+        // -- kept, just moved to the key Vim puts it on.
+        let (_dir, mut app) = app_with_an_open_completion_popup("ctrl_e_dismiss");
+
+        app.test_completion_key(KeyPress::char('e').with_ctrl());
+
+        assert!(app.completion.is_none(), "the popup is gone");
+        assert_eq!(app.vim.mode(), Mode::Insert, "but you are still typing");
+        assert_eq!(app.open().buffer.text(), "se", "and nothing was inserted");
+    }
+
+    #[test]
+    fn ctrl_y_accepts_the_selected_match_like_tab_and_enter() {
+        // Vim's own accept key, beside the Tab/Enter every other editor
+        // uses -- all three do the same thing rather than one of them
+        // meaning something subtly different.
+        let (_dir, mut app) = app_with_an_open_completion_popup("ctrl_y_accept");
+        let selected = app.completion.as_ref().unwrap().picker.selected().unwrap().label.clone();
+
+        app.test_completion_key(KeyPress::char('y').with_ctrl());
+
+        assert_eq!(app.open().buffer.text(), selected);
+        assert_eq!(app.vim.mode(), Mode::Insert, "accepting a completion keeps you typing");
+    }
+
+    #[test]
+    fn escape_still_leaves_insert_mode_with_no_popup_open() {
+        // The ordinary case, unchanged -- worth pinning because Escape
+        // now reaches Vim by falling through the same branch the popup
+        // keys are claimed in.
+        let dir = TempDir::new("esc_no_popup");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        assert!(app.completion.is_none());
+
+        app.test_completion_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert_eq!(app.vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_e_and_ctrl_y_are_only_claimed_while_the_popup_is_open() {
+        // Outside the popup they are unclaimed keys; swallowing them
+        // there would invent a binding that only exists by accident.
+        let dir = TempDir::new("ctrl_ey_unclaimed");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+
+        assert!(!app.completion_key(KeyPress::char('e').with_ctrl()));
+        assert!(!app.completion_key(KeyPress::char('y').with_ctrl()));
     }
 
     #[test]
