@@ -5165,6 +5165,11 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             // not where its text lives. Vim edits here would change a
             // rope nobody renders while leaving the shell untouched.
             | BufferKind::Terminal
+            // A listing's text stands for rows; editing it would desync
+            // the two. The exception is rename mode, where the text *is*
+            // the edit -- which is why callers go through `App::buffer_
+            // edits_are_reverted` rather than asking this directly.
+            | BufferKind::Explorer
     )
 }
 
@@ -5505,12 +5510,23 @@ pub struct App {
     /// A copy/move waiting on an answer about what to overwrite -- see
     /// `ExplorerConflict`. Capturing, like `explorer_prompt`.
     explorer_conflict: Option<ExplorerConflict>,
+    /// A bulk rename worked out and waiting to be confirmed -- nothing
+    /// has been renamed while this is `Some`.
+    rename_confirm: Option<Vec<fenix_explorer::Rename>>,
     /// Completions offered for what is currently typed in the path bar,
     /// and how far through them Tab has cycled. Recomputed on every
     /// keystroke rather than tracked incrementally -- listing one
     /// directory is cheap, and a cache would be one more thing that can
     /// disagree with the text.
     explorer_completions: Vec<String>,
+    /// Explorer buffers currently open for editing (`SPC e w`), and the
+    /// entries their lines stood for when editing began.
+    ///
+    /// The snapshot is the whole mechanism: line N means entry N of
+    /// *this list*, not of whatever the directory happens to contain
+    /// when the edit is applied. Without it a listing that refreshed
+    /// mid-edit would silently re-point every line.
+    rename_mode: HashMap<BufferId, Vec<fenix_explorer::Entry>>,
     /// The machine's drives, read once on the first Places listing.
     ///
     /// Cached because the query costs a subprocess, and re-run only when
@@ -6511,7 +6527,9 @@ impl App {
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_conflict: None,
+            rename_confirm: None,
             explorer_completions: Vec::new(),
+            rename_mode: HashMap::new(),
             volumes: Vec::new(),
             volumes_loading: false,
             recent_dirs: fenix_project::RecentFiles::load_or_default(default_recent_dirs_path()),
@@ -8811,6 +8829,123 @@ impl App {
         (candidates.len() == 1).then(|| candidates.remove(0))
     }
 
+    // -- Renaming by editing the listing ---------------------------------
+
+    /// `SPC e w`: make the listing editable.
+    ///
+    /// The listing is already text, so this is mostly a matter of
+    /// getting out of the way: the buffer is re-rendered as one bare
+    /// name per line and stops being read-only, and every Vim tool --
+    /// `:%s/`, visual block, macros, counts -- becomes a bulk-rename
+    /// tool without anyone building one. Emacs calls it wdired.
+    ///
+    /// The columns go while editing. They are decoration around the one
+    /// thing being edited, and leaving them in would mean parsing them
+    /// back out of whatever the user did to the line.
+    pub(crate) fn start_rename_mode(&mut self) {
+        let Some(buffer) = self.focused_dired_buffer() else {
+            self.set_error("rename mode needs a file listing (SPC e e)");
+            return;
+        };
+        if self.rename_mode.contains_key(&buffer) {
+            self.set_message("already editing -- SPC e W applies, Esc cancels");
+            return;
+        }
+        let Some(entries) = self.dired_states.get(&buffer).map(|s| s.entries.clone()) else { return };
+        if entries.is_empty() {
+            self.set_error("nothing here to rename");
+            return;
+        }
+        // A read landing mid-edit would replace the text under the
+        // user's cursor, so stop waiting for one first.
+        self.explorer_abandon_listing(ExplorerTarget::Buffer(buffer));
+        self.rename_mode.insert(buffer, entries);
+        self.render_dired(buffer, true);
+        self.set_message("editing names -- SPC e W applies, Esc cancels");
+        self.wake_caret();
+    }
+
+    /// `Esc` in rename mode: throw the edits away and put the listing
+    /// back.
+    fn cancel_rename_mode(&mut self, buffer: BufferId) {
+        if self.rename_mode.remove(&buffer).is_none() {
+            return;
+        }
+        self.render_dired(buffer, true);
+        self.set_message("edits discarded");
+        self.wake_caret();
+    }
+
+    /// `SPC e W`: read the edited names, work out what they ask for, and
+    /// ask before doing it.
+    ///
+    /// A rejected edit changes nothing and leaves the text on screen to
+    /// fix, which is the whole reason the checking happens up front (see
+    /// `fenix_explorer::plan_renames`).
+    pub(crate) fn apply_rename_mode(&mut self) {
+        let Some(buffer) = self.focused_dired_buffer() else { return };
+        let Some(entries) = self.rename_mode.get(&buffer).cloned() else {
+            self.set_error("not editing names -- SPC e w starts");
+            return;
+        };
+        let text = self.buffers.get(buffer).map(|ob| ob.buffer.text()).unwrap_or_default();
+        let edited: Vec<&str> = text.lines().collect();
+        let plan = match fenix_explorer::plan_renames(&entries, &edited) {
+            Ok(plan) => plan,
+            Err(err) => {
+                self.set_error(err.to_string());
+                return;
+            }
+        };
+        if plan.is_empty() {
+            self.rename_mode.remove(&buffer);
+            self.render_dired(buffer, true);
+            self.set_message("no names changed");
+            return;
+        }
+        self.rename_confirm = Some(plan);
+        self.wake_caret();
+    }
+
+    /// Answers the "rename N files?" confirmation.
+    ///
+    /// Arm-then-confirm, like every other destructive action here. A
+    /// bulk rename is easy to get wrong in a way that is tedious to
+    /// undo, and the preview is the last chance to notice that `:%s/`
+    /// matched more than intended.
+    fn rename_confirm_key(&mut self, key: KeyPress) {
+        let Some(plan) = self.rename_confirm.take() else { return };
+        if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.set_message("cancelled");
+            self.wake_caret();
+            return;
+        }
+        let two_phase = fenix_explorer::needs_two_phases(&plan);
+        let pairs: Vec<(PathBuf, PathBuf)> = plan.iter().map(|r| (r.from.clone(), r.to.clone())).collect();
+        let outcomes: Vec<Result<(), String>> =
+            fenix_fs::rename_all(&pairs, two_phase).into_iter().map(|o| o.error.map_or(Ok(()), Err)).collect();
+        self.report_explorer_outcomes("renamed", outcomes);
+        if let Some(buffer) = self.focused_dired_buffer() {
+            self.rename_mode.remove(&buffer);
+        }
+        self.explorer_relist();
+        self.wake_caret();
+    }
+
+    /// What the confirmation says: how many, and a real example, because
+    /// "rename 40 files?" is not something anyone can answer.
+    fn rename_confirm_text(&self) -> Option<String> {
+        let plan = self.rename_confirm.as_ref()?;
+        let first = plan.first()?;
+        let from = first.from.file_name().unwrap_or(first.from.as_os_str()).to_string_lossy();
+        let to = first.to.strip_prefix(first.from.parent().unwrap_or(Path::new(""))).unwrap_or(&first.to).to_string_lossy();
+        Some(if plan.len() == 1 {
+            format!("Rename {from} -> {to}? (y/n)")
+        } else {
+            format!("Rename {} files? e.g. {from} -> {to} (y/n)", plan.len())
+        })
+    }
+
     // -- Reading a directory without freezing the editor -----------------
 
     /// Points a listing at `path`, reading it off the main thread.
@@ -9006,6 +9141,27 @@ impl App {
     /// content. A re-render of the same listing (a git badge landing, a
     /// pending note appearing) leaves the cursor where the user put it.
     fn render_dired(&mut self, buffer: BufferId, reset_cursor: bool) {
+        // While the names are being edited the buffer *is* the edit --
+        // regenerating it would throw away whatever has been typed.
+        if let Some(entries) = self.rename_mode.get(&buffer) {
+            if !reset_cursor {
+                return;
+            }
+            let text: String = entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join("\n");
+            self.dired_lines.remove(&buffer);
+            if let Some(ob) = self.buffers.get_mut(buffer) {
+                let end = ob.buffer.len_chars();
+                let mut scratch = Cursor::at_start();
+                ob.buffer.replace_range(&mut scratch, 0, end, &text);
+            }
+            for pane in self.windows().windows() {
+                if self.windows().content(pane) == Some(&buffer) {
+                    let ps = self.pane_state_mut(pane);
+                    *ps = PaneState::seeded_at(Cursor::at_start());
+                }
+            }
+            return;
+        }
         let waiting = self.explorer_waiting_on(ExplorerTarget::Buffer(buffer)).map(Path::to_path_buf);
         // Laid out against whichever pane is showing this listing, so
         // the columns line up with the space they actually have.
@@ -19254,6 +19410,18 @@ impl App {
     /// correctly, there was just no on-screen feedback that a prompt was
     /// even open). Mirrors `:`/`/`'s own "the modeline becomes the
     /// prompt" convention.
+    /// Whether an edit to `buffer` should be reverted.
+    ///
+    /// A listing is read-only -- typing into it would desync the text
+    /// from the rows it stands for -- *except* while its names are being
+    /// edited, which is the one time the text is the point.
+    fn buffer_edits_are_reverted(&self, buffer: BufferId, kind: BufferKind) -> bool {
+        if kind == BufferKind::Explorer {
+            return !self.rename_mode.contains_key(&buffer);
+        }
+        is_readonly_buffer_kind(kind)
+    }
+
     fn explorer_prompt_text(&self) -> Option<String> {
         if let Some(conflict) = &self.explorer_conflict {
             // Names the first collision and counts the rest: "some files
@@ -20176,6 +20344,13 @@ impl App {
             return;
         }
 
+        // An armed bulk rename captures the very next key -- same
+        // arm-then-confirm shape as every other destructive action here.
+        if self.rename_confirm.is_some() {
+            self.rename_confirm_key(keypress);
+            return;
+        }
+
         // An armed Docker remove confirmation (`x` on a container/image
         // row) captures the very next key the same way -- `y` confirms,
         // anything else cancels (see `docker_confirm_key`).
@@ -20424,7 +20599,18 @@ impl App {
         // This is what closes the gap the buffer form shipped with --
         // marks, delete, rename, create, copy and move all existed and
         // were reachable only from the sidebar, which cannot be split.
-        if self.open().kind == BufferKind::Explorer {
+        // While a listing's names are being edited it is an ordinary
+        // text buffer: every character is a character somebody might be
+        // typing into a filename, so none of the action keys are
+        // claimed. Only Escape means anything, and it means "throw the
+        // edits away".
+        if self.open().kind == BufferKind::Explorer && self.rename_mode.contains_key(&self.focused_buffer_id()) {
+            if keypress.code == KeyCode::Named(FenixNamedKey::Escape) && self.vim.mode() == Mode::Normal {
+                let id = self.focused_buffer_id();
+                self.cancel_rename_mode(id);
+                return;
+            }
+        } else if self.open().kind == BufferKind::Explorer {
             // Escape stops waiting for a directory that is not
             // answering, and does nothing at all otherwise -- claiming
             // it unconditionally would take a key away from Vim for a
@@ -21189,6 +21375,7 @@ impl App {
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
+            let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let Some(ob) = self.buffers.get_mut(id) else { return };
             let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) else { return };
             let mode_before = self.vim.mode();
@@ -21216,7 +21403,7 @@ impl App {
                 // regenerated on every refresh anyway -- a locally-
                 // corrupted undo stack has no real consequence. See `is_
                 // readonly_buffer_kind`'s own doc comment.
-                if is_readonly_buffer_kind(ob.kind) {
+                if reverts_edits {
                     ob.buffer.undo(&mut pane_state.cursor);
                 }
             }
@@ -21864,7 +22051,7 @@ impl App {
         if self.vim.mode() == Mode::Command {
             return Some(format!(":{}", self.vim.command_line()));
         }
-        self.explorer_prompt_text()
+        self.rename_confirm_text().or_else(|| self.explorer_prompt_text())
             .or_else(|| self.docker_confirm_text())
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
@@ -25302,6 +25489,7 @@ impl App {
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
+            let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
             let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
             let mode_before = self.vim.mode();
@@ -25316,7 +25504,7 @@ impl App {
                 self.marks.insert('.', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
                 // Mirrors `route_keypress`'s own read-only enforcement --
                 // see `is_readonly_buffer_kind`'s doc comment.
-                if is_readonly_buffer_kind(ob.kind) {
+                if reverts_edits {
                     ob.buffer.undo(&mut pane_state.cursor);
                 }
             }
@@ -28527,6 +28715,212 @@ configure_board stm32
         app.mib_refresh_index();
 
         assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
+    }
+
+    // -- Renaming by editing the listing ---------------------------------
+
+    /// A listing open on three files, with rename mode already started.
+    fn app_editing_names(name: &str) -> (TempDir, App) {
+        let dir = TempDir::new(name);
+        dir.write("a.txt", "A");
+        dir.write("b.txt", "B");
+        dir.write("c.txt", "C");
+        let mut app = app_with_places(name, dir.path());
+        app.start_rename_mode();
+        (dir, app)
+    }
+
+    /// Replaces the whole buffer with `text`, as an edit would.
+    fn set_buffer_text(app: &mut App, text: &str) {
+        let id = app.focused_buffer_id();
+        let ob = app.buffers.get_mut(id).unwrap();
+        let end = ob.buffer.len_chars();
+        let mut scratch = Cursor::at_start();
+        ob.buffer.replace_range(&mut scratch, 0, end, text);
+    }
+
+    #[test]
+    fn rename_mode_shows_bare_names_one_per_line() {
+        // The columns are decoration around the thing being edited;
+        // leaving them in would mean parsing them back out of whatever
+        // the user did to the line.
+        let (_dir, app) = app_editing_names("wdired_bare");
+        assert_eq!(app.open().buffer.text(), "a.txt\nb.txt\nc.txt");
+    }
+
+    #[test]
+    fn a_listing_is_read_only_until_its_names_are_being_edited() {
+        // Typing into a listing desyncs the text from the rows it stands
+        // for -- except in rename mode, where the text is the point.
+        let dir = TempDir::new("wdired_readonly");
+        dir.touch("a.txt");
+        let mut app = app_with_places("wdired_readonly", dir.path());
+        let id = app.focused_buffer_id();
+        assert!(app.buffer_edits_are_reverted(id, BufferKind::Explorer));
+
+        app.start_rename_mode();
+
+        assert!(!app.buffer_edits_are_reverted(id, BufferKind::Explorer));
+    }
+
+    #[test]
+    fn an_edit_to_a_listing_is_reverted_when_not_editing_names() {
+        let dir = TempDir::new("wdired_revert");
+        dir.touch("a.txt");
+        let mut app = app_with_places("wdired_revert", dir.path());
+        let before = app.open().buffer.text();
+
+        app.test_dispatch_key(KeyPress::char('x')); // delete-char
+
+        assert_eq!(app.open().buffer.text(), before);
+    }
+
+    #[test]
+    fn applying_an_edited_name_renames_the_file() {
+        let (dir, mut app) = app_editing_names("wdired_apply");
+        set_buffer_text(&mut app, "renamed.txt\nb.txt\nc.txt");
+
+        app.apply_rename_mode();
+        assert!(app.active_prompt_text().unwrap().contains("Rename"), "it asks first");
+        app.rename_confirm_key(KeyPress::char('y'));
+
+        assert!(dir.path().join("renamed.txt").exists());
+        assert!(!dir.path().join("a.txt").exists());
+        assert!(dir.path().join("b.txt").exists(), "and left the others alone");
+        assert!(app.rename_mode.is_empty(), "editing is over");
+    }
+
+    #[test]
+    fn the_confirmation_shows_a_real_example_rather_than_only_a_count() {
+        // "Rename 40 files?" is not a question anyone can answer.
+        let (_dir, mut app) = app_editing_names("wdired_preview");
+        set_buffer_text(&mut app, "x.txt\ny.txt\nc.txt");
+
+        app.apply_rename_mode();
+
+        let text = app.active_prompt_text().unwrap();
+        assert!(text.contains("2 files"), "got: {text}");
+        assert!(text.contains("a.txt -> x.txt"), "got: {text}");
+    }
+
+    #[test]
+    fn declining_the_confirmation_renames_nothing() {
+        let (dir, mut app) = app_editing_names("wdired_decline");
+        set_buffer_text(&mut app, "renamed.txt\nb.txt\nc.txt");
+        app.apply_rename_mode();
+
+        app.rename_confirm_key(KeyPress::named(FenixNamedKey::Escape));
+
+        assert!(dir.path().join("a.txt").exists());
+        assert!(!dir.path().join("renamed.txt").exists());
+    }
+
+    #[test]
+    fn two_names_can_be_swapped_in_one_edit() {
+        // The case that needs renaming through temporaries, driven the
+        // way a user would actually reach it.
+        let (dir, mut app) = app_editing_names("wdired_swap");
+        set_buffer_text(&mut app, "b.txt\na.txt\nc.txt");
+
+        app.apply_rename_mode();
+        app.rename_confirm_key(KeyPress::char('y'));
+
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "B");
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "A");
+    }
+
+    #[test]
+    fn deleting_a_line_is_refused_and_leaves_the_edit_on_screen_to_fix() {
+        // Position is identity: a deleted line is not a deleted file,
+        // and guessing which it meant would eventually guess wrong.
+        let (dir, mut app) = app_editing_names("wdired_line_count");
+        set_buffer_text(&mut app, "a.txt\nb.txt");
+
+        app.apply_rename_mode();
+
+        assert!(app.rename_confirm.is_none(), "nothing armed");
+        assert!(app.modeline_pieces().1.contains("not a deleted file"), "got: {}", app.modeline_pieces().1);
+        assert!(dir.path().join("c.txt").exists(), "and nothing was deleted");
+        assert!(!app.rename_mode.is_empty(), "still editing, so the mistake can be fixed");
+    }
+
+    #[test]
+    fn two_lines_given_the_same_name_are_refused() {
+        // One would silently destroy the other.
+        let (dir, mut app) = app_editing_names("wdired_duplicate");
+        set_buffer_text(&mut app, "same.txt\nsame.txt\nc.txt");
+
+        app.apply_rename_mode();
+
+        assert!(app.rename_confirm.is_none());
+        assert!(app.modeline_pieces().1.contains("both be named"), "got: {}", app.modeline_pieces().1);
+        assert!(dir.path().join("a.txt").exists() && dir.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn renaming_onto_an_untouched_file_is_refused() {
+        let (dir, mut app) = app_editing_names("wdired_collision");
+        set_buffer_text(&mut app, "c.txt\nb.txt\nc.txt");
+
+        app.apply_rename_mode();
+
+        assert!(app.rename_confirm.is_none());
+        assert_eq!(std::fs::read_to_string(dir.path().join("c.txt")).unwrap(), "C", "untouched");
+    }
+
+    #[test]
+    fn a_name_with_a_separator_moves_the_file() {
+        // Bulk *reorganising*, not just bulk renaming.
+        let (dir, mut app) = app_editing_names("wdired_move");
+        set_buffer_text(&mut app, "2026/a.txt\nb.txt\nc.txt");
+
+        app.apply_rename_mode();
+        app.rename_confirm_key(KeyPress::char('y'));
+
+        assert_eq!(std::fs::read_to_string(dir.path().join("2026").join("a.txt")).unwrap(), "A");
+    }
+
+    #[test]
+    fn cancelling_puts_the_listing_back() {
+        let (_dir, mut app) = app_editing_names("wdired_cancel");
+        set_buffer_text(&mut app, "nonsense\nnonsense2\nnonsense3");
+        let id = app.focused_buffer_id();
+
+        app.cancel_rename_mode(id);
+
+        assert!(app.rename_mode.is_empty());
+        assert!(app.open().buffer.text().contains("a.txt"), "the real listing is back");
+        assert!(app.open().buffer.text().lines().next().unwrap().contains("3 items"), "header and all");
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_just_ends_the_edit() {
+        let (_dir, mut app) = app_editing_names("wdired_noop");
+
+        app.apply_rename_mode();
+
+        assert!(app.rename_confirm.is_none());
+        assert!(app.rename_mode.is_empty());
+        assert!(app.modeline_pieces().1.contains("no names changed"));
+    }
+
+    #[test]
+    fn rename_mode_needs_a_listing() {
+        let mut app = App::with_file(None);
+        app.start_rename_mode();
+        assert!(app.rename_mode.is_empty());
+        assert!(app.modeline_pieces().1.contains("needs a file listing"));
+    }
+
+    #[test]
+    fn an_empty_directory_has_nothing_to_rename() {
+        let dir = TempDir::new("wdired_empty");
+        let mut app = app_with_places("wdired_empty", dir.path());
+
+        app.start_rename_mode();
+
+        assert!(app.rename_mode.is_empty());
+        assert!(app.modeline_pieces().1.contains("nothing here to rename"));
     }
 
     // -- Two listings side by side ---------------------------------------
@@ -38776,7 +39170,10 @@ configure_board stm32
         assert!(is_readonly_buffer_kind(BufferKind::PdfOutline));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
-        assert!(!is_readonly_buffer_kind(BufferKind::Explorer));
+        // A listing is read-only *by kind*; rename mode is the
+        // exception, and it lives in `App::buffer_edits_are_reverted`
+        // because it depends on which buffer, not on which kind.
+        assert!(is_readonly_buffer_kind(BufferKind::Explorer));
         assert!(!is_readonly_buffer_kind(BufferKind::Table));
         assert!(!is_readonly_buffer_kind(BufferKind::SearchReplace));
     }

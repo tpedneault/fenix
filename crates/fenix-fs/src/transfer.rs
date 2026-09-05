@@ -188,10 +188,208 @@ fn copy_link(src: &Path, dest: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(fs::read_link(src)?, dest)
 }
 
+/// Applies a whole set of renames, in an order that cannot lose a file.
+///
+/// `via_temporaries` renames everything aside to a unique name first and
+/// then into place. That makes the order irrelevant, which is what lets
+/// `a -> b` and `b -> a` both happen: done one at a time, whichever went
+/// second would land on a file that had not moved yet. The caller
+/// decides whether it is needed (`fenix_explorer::needs_two_phases`),
+/// because the safe path costs two renames per file and over a share
+/// that is two round trips where one would do.
+///
+/// Missing parent directories are created, so a rename can also move a
+/// file somewhere new.
+///
+/// **The two-phase path is all-or-nothing.** If anything fails, every
+/// file already moved is put back and nothing is applied. That is
+/// stricter than the rest of this module, which is deliberately
+/// best-effort -- but a bulk rename is one edit the user made, and
+/// applying half of it would leave a directory in a state they never
+/// asked for and cannot easily reconstruct. The one-at-a-time path
+/// stays best-effort, because there each rename really is independent.
+pub fn rename_all(renames: &[(PathBuf, PathBuf)], via_temporaries: bool) -> Vec<Outcome> {
+    if !via_temporaries {
+        return renames
+            .iter()
+            .map(|(from, to)| match rename_one(from, to) {
+                Ok(()) => Outcome { path: from.clone(), error: None },
+                Err(err) => Outcome { path: from.clone(), error: Some(err.to_string()) },
+            })
+            .collect();
+    }
+
+    // Phase one: everything out of the way, so the order of phase two
+    // cannot matter.
+    let mut staged: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::with_capacity(renames.len());
+    for (from, to) in renames {
+        let temp = temporary_beside(from);
+        match fs::rename(from, &temp) {
+            Ok(()) => staged.push((from.clone(), temp, to.clone())),
+            Err(err) => {
+                put_back(&staged, &[]);
+                return abandoned(renames, from, &err.to_string());
+            }
+        }
+    }
+
+    // Phase two: into place.
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(staged.len());
+    for (index, (original, temp, target)) in staged.iter().enumerate() {
+        if let Err(err) = rename_one(temp, target) {
+            put_back(&staged[index..], &done);
+            return abandoned(renames, original, &err.to_string());
+        }
+        done.push((original.clone(), target.clone()));
+    }
+
+    renames.iter().map(|(from, _)| Outcome { path: from.clone(), error: None }).collect()
+}
+
+/// Undoes a partly-applied batch: whatever is still wearing a temporary
+/// name goes back to its original, and whatever already reached its
+/// target is moved back from there.
+fn put_back(staged: &[(PathBuf, PathBuf, PathBuf)], done: &[(PathBuf, PathBuf)]) {
+    for (original, temp, _) in staged {
+        let _ = fs::rename(temp, original);
+    }
+    for (original, target) in done {
+        let _ = fs::rename(target, original);
+    }
+}
+
+/// Every path reported as not applied, with the real reason on the one
+/// that caused it -- so the message names the file that actually went
+/// wrong rather than blaming the first in the list.
+fn abandoned(renames: &[(PathBuf, PathBuf)], culprit: &Path, reason: &str) -> Vec<Outcome> {
+    renames
+        .iter()
+        .map(|(from, _)| {
+            let error =
+                if from == culprit { reason.to_string() } else { format!("not applied -- {} could not be renamed", culprit.display()) };
+            Outcome { path: from.clone(), error: Some(error) }
+        })
+        .collect()
+}
+
+fn rename_one(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(from, to)
+}
+
+/// A name nothing else can be using, in the same directory -- so the
+/// staging rename stays on the same filesystem and cannot fail for
+/// being a cross-volume move.
+fn temporary_beside(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or(Path::new(""));
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".fenix-rename-{}-{n}", std::process::id()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::TempDir;
+
+    #[test]
+    fn renames_apply_one_at_a_time_when_nothing_collides() {
+        let dir = TempDir::new("rename_all_simple");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+
+        let outcomes = rename_all(&[(a, dir.path().join("x.txt")), (b, dir.path().join("y.txt"))], false);
+
+        assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("x.txt")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(dir.path().join("y.txt")).unwrap(), "B");
+    }
+
+    #[test]
+    fn two_names_can_be_swapped() {
+        // The case the safe path exists for: done one at a time, the
+        // second rename would land on a file that had not moved yet.
+        let dir = TempDir::new("rename_all_swap");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+
+        let outcomes = rename_all(&[(a.clone(), b.clone()), (b.clone(), a.clone())], true);
+
+        assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "B");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "A");
+    }
+
+    #[test]
+    fn three_names_can_be_rotated() {
+        let dir = TempDir::new("rename_all_rotate");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+        let c = dir.write("c.txt", "C");
+
+        let outcomes = rename_all(&[(a.clone(), b.clone()), (b.clone(), c.clone()), (c.clone(), a.clone())], true);
+
+        assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "C");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(&c).unwrap(), "B");
+    }
+
+    #[test]
+    fn a_rename_can_move_a_file_into_a_directory_that_does_not_exist_yet() {
+        let dir = TempDir::new("rename_all_mkdir");
+        let a = dir.write("a.txt", "A");
+
+        let outcomes = rename_all(&[(a, dir.path().join("2026").join("a.txt"))], false);
+
+        assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
+        assert_eq!(std::fs::read_to_string(dir.path().join("2026").join("a.txt")).unwrap(), "A");
+    }
+
+    #[test]
+    fn a_failure_part_way_through_puts_everything_back() {
+        // A half-applied rename that left files under temporary names
+        // nobody chose would be worse than either outcome.
+        let dir = TempDir::new("rename_all_rollback");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+        // The second rename cannot succeed: a directory is in the way
+        // and is not empty, so it cannot be replaced.
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("inside.txt"), "x").unwrap();
+
+        let outcomes = rename_all(&[(a.clone(), dir.path().join("x.txt")), (b.clone(), blocked.clone())], true);
+
+        assert!(outcomes.iter().all(|o| !o.succeeded()), "a bulk rename is one edit: none of it applied");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "A", "put back, even though its own rename worked");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B", "and so is this one");
+        assert!(!dir.path().join("x.txt").exists(), "and nothing was left half-renamed");
+        // The message blames the file that actually went wrong, rather
+        // than the first one in the list.
+        assert!(outcomes[0].error.as_ref().unwrap().contains("b.txt"), "{outcomes:?}");
+    }
+
+    #[test]
+    fn no_temporary_names_are_left_behind() {
+        let dir = TempDir::new("rename_all_no_litter");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+
+        rename_all(&[(a.clone(), b.clone()), (b, a)], true);
+
+        let names: Vec<String> =
+            std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(!names.iter().any(|n| n.contains("fenix-rename")), "got: {names:?}");
+    }
 
     #[test]
     fn a_conflict_is_reported_before_anything_is_written() {

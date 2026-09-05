@@ -147,6 +147,22 @@ for anyone curious to poke around or build on it.
   one you will actually add. Bookmarks live in `config.ini`'s
   `[explorer]` section and can be hand-edited between sessions.
 
+  **Renaming in bulk** is the thing an editor can do that a file manager
+  cannot. `SPC e w` re-renders the listing as one bare name per line and
+  makes it editable, so `:%s/`, visual block, macros and counts become
+  bulk-rename tools nobody had to build; `SPC e W` works out what the
+  edit asks for and shows a real example before doing any of it. A name
+  may contain `/`, so it reorganises as well as renames. Line position
+  is identity -- line N is entry N -- which is why adding or removing a
+  line is refused rather than guessed at: a deleted line is not a
+  deleted file. Two names given the same value, or a name landing on an
+  untouched file, are refused up front, so a rejected edit changes
+  nothing and stays on screen to fix. Swapping two names works, because
+  when a rename set has a cycle in it everything is moved aside first
+  and then into place -- and if any part of that fails, all of it is put
+  back, since a bulk rename is one edit and half of one is a directory
+  nobody asked for.
+
   Deleting means the **Recycle Bin**, so a mistake is recoverable
   through Windows' own restore. Copying or moving onto something that
   already exists asks first -- overwrite, skip, or keep both -- rather
@@ -849,6 +865,8 @@ popup shows what keys continue it.
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e d` | Two listings side by side (copy/move default to the other one) |
+| `SPC e w` | Edit the listing's names as text |
+| `SPC e W` | Apply the edited names |
 | `SPC e p` | Go to a path you type (Tab completes; `~`, `%VAR%` and `\server\share` all work) |
 | `SPC e b` | Places: bookmarks, drives, recent directories, project roots |
 | `SPC e r` | Recent directories |
