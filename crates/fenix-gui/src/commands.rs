@@ -93,6 +93,7 @@ impl CommandRegistry {
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
         registry.register("explorer.dual_pane", "Two listings side by side", cmd_explorer_dual_pane);
+        registry.register("explorer.cancel", "Stop the running file operation", cmd_explorer_cancel);
         registry.register("explorer.rename_mode", "Edit the listing's names as text", cmd_explorer_rename_mode);
         registry.register("explorer.rename_apply", "Apply the edited names", cmd_explorer_rename_apply);
         registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);
@@ -418,6 +419,10 @@ fn cmd_open_terminal_buffer(ctx: &mut CommandCtx) {
 
 fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {
     ctx.app.explorer_dual_pane();
+}
+
+fn cmd_explorer_cancel(ctx: &mut CommandCtx) {
+    ctx.app.cancel_explorer_job();
 }
 
 fn cmd_explorer_rename_mode(ctx: &mut CommandCtx) {

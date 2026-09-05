@@ -163,6 +163,22 @@ for anyone curious to poke around or build on it.
   back, since a bulk rename is one edit and half of one is a directory
   nobody asked for.
 
+  **Copying and moving run in the background**, with a live count of
+  files and bytes in the modeline and `SPC e k` to stop. Cancelling
+  stops between files -- a file already being written has to finish,
+  since there is no way to abandon a copy part way through without
+  leaving a truncated one behind -- and what has already been copied
+  stays, because that is what actually happened. `z` packs the marked
+  set into a `.zip` (or `.tar.gz`, by extension) and `x` unpacks the
+  archive at point into a folder of its own; both go through the
+  `bsdtar` Windows ships, named by absolute path, because the `tar` on
+  `PATH` is often GNU tar and GNU tar answers a request for a `.zip`
+  with an uncompressed tar under that name. `i` shows what a column
+  cannot hold -- every timestamp, the attributes, where a link points --
+  and on a folder counts what is inside it, which is the one number a
+  listing cannot show without walking the whole tree. `w` flips
+  read-only, the attribute that stops an ordinary save.
+
   Deleting means the **Recycle Bin**, so a mistake is recoverable
   through Windows' own restore. Copying or moving onto something that
   already exists asks first -- overwrite, skip, or keep both -- rather
@@ -865,6 +881,7 @@ popup shows what keys continue it.
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e d` | Two listings side by side (copy/move default to the other one) |
+| `SPC e k` | Stop the running file operation |
 | `SPC e w` | Edit the listing's names as text |
 | `SPC e W` | Apply the edited names |
 | `SPC e p` | Go to a path you type (Tab completes; `~`, `%VAR%` and `\server\share` all work) |
@@ -1030,6 +1047,9 @@ sidebar reads -- only `j`/`k` differ, because here they are the cursor.
 | `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
 | `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `z` / `x` | Pack the marked set into an archive / unpack the one at point |
+| `i` | Properties (and, on a folder, count what is inside) |
+| `w` | Toggle read-only |
 | `f` | Filter the listing as you type (`Esc` widens it back out) |
 | `F` | Find by name through everything under here |
 | `r` | Refresh |

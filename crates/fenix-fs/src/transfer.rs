@@ -47,9 +47,157 @@ pub fn conflicts_in(sources: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// How far along a long transfer is.
+///
+/// Counted in both files and bytes because neither alone is honest:
+/// "3 of 4000 files" says nothing about a copy dominated by one huge
+/// file, and a byte count says nothing about a copy of forty thousand
+/// tiny ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// What is being copied at this moment.
+    pub current: PathBuf,
+}
+
+/// What a transfer counts before it starts, so progress has a
+/// denominator.
+///
+/// Walking first costs a pass over the tree, which on a share is not
+/// free -- but a progress indicator with no total is barely better than
+/// none, and the walk is metadata where the copy is data. Cancellable,
+/// because on a big enough tree the *measuring* is long enough to want
+/// out of.
+pub fn measure(sources: &[PathBuf], cancel: &impl Fn() -> bool) -> (usize, u64) {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for source in sources {
+        measure_one(source, cancel, &mut files, &mut bytes);
+    }
+    (files, bytes)
+}
+
+fn measure_one(path: &Path, cancel: &impl Fn() -> bool, files: &mut usize, bytes: &mut u64) {
+    if cancel() {
+        return;
+    }
+    let Ok(metadata) = fs::symlink_metadata(path) else { return };
+    if metadata.file_type().is_symlink() {
+        // A link is one entry to recreate, not the tree behind it.
+        *files += 1;
+        return;
+    }
+    if metadata.is_dir() {
+        let Ok(entries) = fs::read_dir(path) else { return };
+        for entry in entries.flatten() {
+            measure_one(&entry.path(), cancel, files, bytes);
+        }
+        return;
+    }
+    *files += 1;
+    *bytes += metadata.len();
+}
+
 /// Copies every source into `dest`, keeping each one's own filename.
 pub fn copy_into(sources: &[PathBuf], dest: &Path, on_conflict: OnConflict) -> Vec<Outcome> {
-    run(sources, dest, on_conflict, copy_recursive)
+    copy_into_reporting(sources, dest, on_conflict, &|| false, &mut |_| {})
+}
+
+/// `copy_into` that says how it is going and can be told to stop.
+///
+/// `cancel` is checked before each file. A file already in flight has to
+/// finish: there is no way to abandon a `fs::copy` part way through
+/// without leaving a truncated file behind, so a single very large file
+/// is the one thing cancelling cannot interrupt. Worth stating rather
+/// than implying otherwise with a button that appears to do nothing.
+///
+/// What has already been copied stays. That is what actually happened,
+/// and deleting it to make the operation look atomic would destroy work
+/// the user may well want.
+pub fn copy_into_reporting(
+    sources: &[PathBuf],
+    dest: &Path,
+    on_conflict: OnConflict,
+    cancel: &impl Fn() -> bool,
+    report: &mut impl FnMut(&Progress),
+) -> Vec<Outcome> {
+    let (files_total, bytes_total) = measure(sources, cancel);
+    let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
+    run_reporting(sources, dest, on_conflict, cancel, |src, target| {
+        copy_recursive_reporting(src, target, cancel, &mut progress, report)
+    })
+}
+
+/// `move_into` that says how it is going and can be told to stop.
+///
+/// Cancelling leaves the files already moved at the destination and the
+/// rest where they were -- again, what actually happened. A move is not
+/// a transaction and pretending it is would mean copying everything
+/// back.
+pub fn move_into_reporting(
+    sources: &[PathBuf],
+    dest: &Path,
+    on_conflict: OnConflict,
+    cancel: &impl Fn() -> bool,
+    report: &mut impl FnMut(&Progress),
+) -> Vec<Outcome> {
+    let (files_total, bytes_total) = measure(sources, cancel);
+    let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
+    run_reporting(sources, dest, on_conflict, cancel, |src, target| {
+        if fs::rename(src, target).is_ok() {
+            // A rename moves the whole tree in one step, so there is
+            // nothing to report per file -- count it as arrived.
+            progress.files_done = progress.files_total;
+            progress.bytes_done = progress.bytes_total;
+            src.clone_into(&mut progress.current);
+            report(&progress);
+            return Ok(());
+        }
+        copy_recursive_reporting(src, target, cancel, &mut progress, report)?;
+        let is_dir = fs::symlink_metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+        if is_dir {
+            fs::remove_dir_all(src)
+        } else {
+            fs::remove_file(src)
+        }
+    })
+}
+
+fn copy_recursive_reporting(
+    src: &Path,
+    dest: &Path,
+    cancel: &impl Fn() -> bool,
+    progress: &mut Progress,
+    report: &mut impl FnMut(&Progress),
+) -> io::Result<()> {
+    if cancel() {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+    let metadata = fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() {
+        copy_link(src, dest)?;
+        progress.files_done += 1;
+        src.clone_into(&mut progress.current);
+        report(progress);
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursive_reporting(&entry.path(), &dest.join(entry.file_name()), cancel, progress, report)?;
+        }
+        return Ok(());
+    }
+    fs::copy(src, dest)?;
+    progress.files_done += 1;
+    progress.bytes_done += metadata.len();
+    src.clone_into(&mut progress.current);
+    report(progress);
+    Ok(())
 }
 
 /// Moves every source into `dest`.
@@ -60,31 +208,22 @@ pub fn copy_into(sources: &[PathBuf], dest: &Path, on_conflict: OnConflict) -> V
 /// filesystems (`EXDEV`), and which is the normal case for anything
 /// going to or from a network share.
 pub fn move_into(sources: &[PathBuf], dest: &Path, on_conflict: OnConflict) -> Vec<Outcome> {
-    run(sources, dest, on_conflict, |src, target| {
-        if fs::rename(src, target).is_ok() {
-            return Ok(());
-        }
-        copy_recursive(src, target)?;
-        // Only after the copy is known to have worked: losing the
-        // source because the destination write failed is the one
-        // outcome a move must never produce.
-        let is_dir = fs::symlink_metadata(src).map(|m| m.is_dir()).unwrap_or(false);
-        if is_dir {
-            fs::remove_dir_all(src)
-        } else {
-            fs::remove_file(src)
-        }
-    })
+    move_into_reporting(sources, dest, on_conflict, &|| false, &mut |_| {})
 }
 
-fn run(
+fn run_reporting(
     sources: &[PathBuf],
     dest: &Path,
     on_conflict: OnConflict,
-    each: impl Fn(&Path, &Path) -> io::Result<()>,
+    cancel: &impl Fn() -> bool,
+    mut each: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(sources.len());
     for src in sources {
+        if cancel() {
+            outcomes.push(Outcome { path: src.clone(), error: Some("cancelled".to_string()) });
+            continue;
+        }
         let Some(name) = src.file_name() else {
             outcomes.push(Outcome { path: src.clone(), error: Some("no filename to copy under".to_string()) });
             continue;
@@ -148,29 +287,6 @@ fn free_name(taken: &Path) -> PathBuf {
         }
     }
     taken.to_path_buf()
-}
-
-/// Copies a file, or a directory and everything under it.
-///
-/// Never follows a link: a link is recreated as a link where the
-/// platform allows it, and otherwise reported rather than silently
-/// turned into a full copy of whatever it pointed at -- which for a
-/// junction into a large tree is the difference between copying a
-/// shortcut and copying a disk.
-fn copy_recursive(src: &Path, dest: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(src)?;
-    if metadata.file_type().is_symlink() {
-        return copy_link(src, dest);
-    }
-    if metadata.is_dir() {
-        fs::create_dir_all(dest)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursive(&entry.path(), &dest.join(entry.file_name()))?;
-        }
-        return Ok(());
-    }
-    fs::copy(src, dest).map(|_| ())
 }
 
 #[cfg(windows)]
@@ -410,6 +526,74 @@ mod tests {
         let src = TempDir::new("conflict_none_src");
         let dest = TempDir::new("conflict_none_dest");
         assert!(conflicts_in(&[src.write("a.txt", "x")], dest.path()).is_empty());
+    }
+
+    #[test]
+    fn a_transfer_reports_where_it_has_got_to() {
+        let src = TempDir::new("progress_src");
+        let dest = TempDir::new("progress_dest");
+        let tree = src.mkdir("tree");
+        std::fs::write(tree.join("a.txt"), "12345").unwrap();
+        std::fs::write(tree.join("b.txt"), "123").unwrap();
+
+        let mut seen: Vec<(usize, u64)> = Vec::new();
+        let outcomes = copy_into_reporting(&[tree], dest.path(), OnConflict::Overwrite, &|| false, &mut |p| {
+            seen.push((p.files_done, p.bytes_done));
+            // Both counts, because neither alone is honest.
+            assert_eq!(p.files_total, 2);
+            assert_eq!(p.bytes_total, 8);
+        });
+
+        assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
+        assert_eq!(seen.last(), Some(&(2, 8)), "it finishes on the total: {seen:?}");
+    }
+
+    #[test]
+    fn measuring_counts_a_link_as_one_entry_not_as_the_tree_behind_it() {
+        let dir = TempDir::new("progress_measure_link");
+        let real = dir.mkdir("real");
+        std::fs::write(real.join("big.txt"), vec![b'x'; 4096]).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        if !made {
+            return;
+        }
+        assert_eq!(measure(&[link], &|| false), (1, 0));
+    }
+
+    #[test]
+    fn cancelling_stops_the_batch_and_says_which_ones_did_not_happen() {
+        let src = TempDir::new("cancel_src");
+        let dest = TempDir::new("cancel_dest");
+        let a = src.write("a.txt", "A");
+        let b = src.write("b.txt", "B");
+
+        let outcomes = copy_into_reporting(&[a, b], dest.path(), OnConflict::Overwrite, &|| true, &mut |_| {});
+
+        assert!(outcomes.iter().all(|o| o.error.as_deref() == Some("cancelled")), "{outcomes:?}");
+        assert!(!dest.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn what_was_already_copied_stays_after_a_cancel() {
+        // That is what actually happened; deleting it to make the
+        // operation look atomic would destroy work the user may want.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let src = TempDir::new("cancel_partial_src");
+        let dest = TempDir::new("cancel_partial_dest");
+        let a = src.write("a.txt", "A");
+        let b = src.write("b.txt", "B");
+        let seen = AtomicUsize::new(0);
+        // Allow the measuring pass and the first file, then stop.
+        let cancel = || seen.fetch_add(1, Ordering::Relaxed) > 4;
+
+        copy_into_reporting(&[a, b], dest.path(), OnConflict::Overwrite, &cancel, &mut |_| {});
+
+        assert!(dest.path().join("a.txt").exists(), "the one that finished is still there");
+        assert!(!dest.path().join("b.txt").exists());
     }
 
     #[test]

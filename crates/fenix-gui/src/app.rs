@@ -2194,6 +2194,17 @@ pub enum FenixUserEvent {
     /// `ensure_volumes` starts -- see there for why it is not done on
     /// demand.
     ExplorerVolumes(Vec<fenix_fs::Volume>),
+    /// How far a long file operation has got. Sent per file, which for
+    /// a directory of thousands is a lot of events -- cheap ones, and
+    /// the alternative is a progress line that only moves per top-level
+    /// item and so does not move at all for a single big tree.
+    ExplorerJobProgress(fenix_fs::Progress),
+    /// A long file operation finished, was cancelled, or failed.
+    ExplorerJobDone(Vec<fenix_fs::Outcome>),
+    /// A recursive directory measurement finished (`SPC e i` on a
+    /// folder), reported separately because it answers a question
+    /// rather than changing anything.
+    ExplorerMeasured { path: PathBuf, total: fenix_fs::Total },
     /// The result of `fenix_terminal::Terminal::spawn`, from the one-
     /// shot background thread `toggle_terminal` spawns it on -- see
     /// that function's own doc comment for why spawning can't happen
@@ -3046,6 +3057,8 @@ enum PromptKind {
     /// to do at all: reaching `\\nas\media\projects\2026` meant walking
     /// there one `Enter` at a time from wherever you happened to start.
     GoToPath,
+    /// Where to write an archive of the marked set.
+    ArchiveTo,
     /// Narrows the listing as you type. Unlike every other prompt here
     /// it acts on each keystroke rather than on Enter -- a filter you
     /// cannot see the effect of while typing is just a slower search.
@@ -3063,6 +3076,7 @@ impl PromptKind {
     fn past_tense(self) -> &'static str {
         match self {
             PromptKind::GoToPath => "opened",
+            PromptKind::ArchiveTo => "archived",
             PromptKind::Filter => "filtered",
             PromptKind::ConfirmDelete => "deleted",
             PromptKind::Rename => "renamed",
@@ -3132,6 +3146,28 @@ struct ExplorerRequest {
     /// so the git-status second pass, which arrives later, can still
     /// check it is talking about the same read.
     done: bool,
+}
+
+/// A file operation big enough to be worth watching.
+///
+/// Copying a few files is instant and needs none of this. Copying a
+/// directory to a share is minutes, and doing it on the main thread
+/// would freeze the editor for all of them -- the same reason listings
+/// moved off it, applied to the operation that actually moves the
+/// bytes.
+struct ExplorerJob {
+    /// What to call it while it runs ("copying") and once it is over
+    /// ("copied"). Two words rather than one chopped about: deriving
+    /// the participle from the past tense gave "copi", which is what
+    /// the progress line actually said until someone read it.
+    running: &'static str,
+    done: &'static str,
+    /// Set to stop. The worker checks it before each file; a file
+    /// already being written has to finish (see `fenix_fs::
+    /// copy_into_reporting`), so this is "stop soon", not "stop now".
+    cancel: Arc<AtomicBool>,
+    /// The most recent progress the worker reported.
+    progress: fenix_fs::Progress,
 }
 
 /// A copy or move that has been asked for, found to collide with
@@ -3209,6 +3245,41 @@ fn readable_path(path: &Path) -> String {
         Some(rest) => format!(r"\\{rest}"),
         None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
     }
+}
+
+/// One line of everything a listing column cannot hold.
+fn describe_properties(props: &fenix_fs::Properties) -> String {
+    let name = props.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&props.path));
+    let mut out = name;
+    if !props.kind.is_dir_like() {
+        out.push_str(&format!("  --  {}", format_size(props.size)));
+    }
+    if let Some(modified) = props.modified {
+        out.push_str(&format!("  --  modified {} ago", format_age(Some(modified))));
+    }
+    if let Some(created) = props.created {
+        out.push_str(&format!(", created {} ago", format_age(Some(created))));
+    }
+    let mut flags = Vec::new();
+    if props.attributes.readonly {
+        flags.push("read-only");
+    }
+    if props.attributes.hidden {
+        flags.push("hidden");
+    }
+    if props.attributes.system {
+        flags.push("system");
+    }
+    if !flags.is_empty() {
+        out.push_str(&format!("  --  {}", flags.join(", ")));
+    }
+    if let Some(target) = &props.link_target {
+        out.push_str(&format!("  --  links to {}", readable_path(target)));
+    }
+    if props.kind.is_dir_like() {
+        out.push_str("  --  counting...");
+    }
+    out
 }
 
 /// Whether `path` is a server with no share named -- `\\\\nas`, which is
@@ -5513,6 +5584,11 @@ pub struct App {
     /// A bulk rename worked out and waiting to be confirmed -- nothing
     /// has been renamed while this is `Some`.
     rename_confirm: Option<Vec<fenix_explorer::Rename>>,
+    /// The long file operation currently running, if any -- see
+    /// `ExplorerJob`. At most one: two copies competing for the same
+    /// disk finish no sooner than one after the other, and a single
+    /// progress line is something a person can actually read.
+    explorer_job: Option<ExplorerJob>,
     /// Completions offered for what is currently typed in the path bar,
     /// and how far through them Tab has cycled. Recomputed on every
     /// keystroke rather than tracked incrementally -- listing one
@@ -6528,6 +6604,7 @@ impl App {
             explorer_prompt: None,
             explorer_conflict: None,
             rename_confirm: None,
+            explorer_job: None,
             explorer_completions: Vec::new(),
             rename_mode: HashMap::new(),
             volumes: Vec::new(),
@@ -18891,6 +18968,10 @@ impl App {
                 self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::Filter, input: seed });
             }
             ExplorerAction::BeginFind => self.explorer_find_under_here(),
+            ExplorerAction::BeginArchive => self.begin_archive(),
+            ExplorerAction::ExtractArchive => self.extract_selected_archive(),
+            ExplorerAction::ShowProperties => self.show_properties(),
+            ExplorerAction::ToggleReadOnly => self.toggle_read_only(),
             ExplorerAction::ToggleHidden => {
                 self.active_explorer_mut().unwrap().toggle_hidden();
                 self.explorer_relist();
@@ -19398,9 +19479,7 @@ impl App {
             }
         };
         let Some(ExplorerConflict { kind, targets, dest, .. }) = self.explorer_conflict.take() else { return };
-        let outcomes = self.explorer_transfer(kind, &targets, &dest, on_conflict);
-        self.report_explorer_outcomes(kind.past_tense(), outcomes);
-        self.explorer_relist();
+        self.explorer_transfer(kind, &targets, &dest, on_conflict);
         self.wake_caret();
     }
 
@@ -19449,6 +19528,7 @@ impl App {
                 }
             }
             PromptKind::GoToPath => format!("Go to: {}", prompt.input),
+            PromptKind::ArchiveTo => format!("Archive as: {}", prompt.input),
             PromptKind::Filter => format!("Filter: {}", prompt.input),
             PromptKind::Rename => format!("Rename to: {}", prompt.input),
             PromptKind::CreateFile => format!("Create file: {}", prompt.input),
@@ -19466,6 +19546,14 @@ impl App {
                 self.explorer_open_path(&target);
                 return;
             }
+            PromptKind::ArchiveTo => {
+                let sources = explorer.target_paths();
+                let cwd = explorer.cwd.clone();
+                // A bare name means "here"; a path means where it says.
+                let typed = fenix_fs::expand(input);
+                let archive = if typed.is_absolute() { typed } else { cwd.join(input.trim()) };
+                vec![fenix_fs::create_archive(&sources, &archive).map_err(|e| e.to_string())]
+            }
             PromptKind::Rename => vec![explorer.rename_selected(input).map(|_| ()).map_err(|e| e.to_string())],
             PromptKind::CreateFile => vec![explorer.create_file(input).map(|_| ()).map_err(|e| e.to_string())],
             PromptKind::CreateDir => vec![explorer.create_dir(input).map(|_| ()).map_err(|e| e.to_string())],
@@ -19480,7 +19568,8 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                self.explorer_transfer(kind, &targets, &dest, fenix_fs::OnConflict::KeepBoth)
+                self.explorer_transfer(kind, &targets, &dest, fenix_fs::OnConflict::KeepBoth);
+                return;
             }
             // Already applied on every keystroke -- Enter just closes
             // the prompt and leaves the listing narrowed.
@@ -19494,12 +19583,219 @@ impl App {
     /// Runs a copy or a move now that its collisions have been settled,
     /// reporting each path's fate rather than only the first failure --
     /// a batch where two of ten files failed should say so.
-    fn explorer_transfer(&mut self, kind: PromptKind, targets: &[PathBuf], dest: &Path, on_conflict: fenix_fs::OnConflict) -> Vec<Result<(), String>> {
-        let outcomes = match kind {
-            PromptKind::MoveTo => fenix_fs::move_into(targets, dest, on_conflict),
-            _ => fenix_fs::copy_into(targets, dest, on_conflict),
+    fn explorer_transfer(&mut self, kind: PromptKind, targets: &[PathBuf], dest: &Path, on_conflict: fenix_fs::OnConflict) {
+        if self.explorer_job.is_some() {
+            self.set_error("something is already being copied -- SPC e k stops it");
+            return;
+        }
+        let (running, done) = if kind == PromptKind::MoveTo { ("moving", "moved") } else { ("copying", "copied") };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.explorer_job = Some(ExplorerJob { running, done, cancel: cancel.clone(), progress: fenix_fs::Progress::default() });
+
+        let sources = targets.to_vec();
+        let dest = dest.to_path_buf();
+        let is_move = kind == PromptKind::MoveTo;
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let stop = || cancel.load(Ordering::Relaxed);
+                    let reporter = proxy.clone();
+                    // One event per file. A lot of them for a big tree,
+                    // but they are cheap, and per-*item* progress does
+                    // not move at all while a single large directory
+                    // copies -- which is exactly when someone is
+                    // watching it.
+                    let mut report = |p: &fenix_fs::Progress| {
+                        let _ = reporter.send_event(FenixUserEvent::ExplorerJobProgress(p.clone()));
+                    };
+                    let outcomes = if is_move {
+                        fenix_fs::move_into_reporting(&sources, &dest, on_conflict, &stop, &mut report)
+                    } else {
+                        fenix_fs::copy_into_reporting(&sources, &dest, on_conflict, &stop, &mut report)
+                    };
+                    let _ = proxy.send_event(FenixUserEvent::ExplorerJobDone(outcomes));
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // run it inline and finish immediately.
+                let stop = || cancel.load(Ordering::Relaxed);
+                let outcomes = if is_move {
+                    fenix_fs::move_into_reporting(&sources, &dest, on_conflict, &stop, &mut |_| {})
+                } else {
+                    fenix_fs::copy_into_reporting(&sources, &dest, on_conflict, &stop, &mut |_| {})
+                };
+                self.finish_explorer_job(outcomes);
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// A long operation is over: say how it went and catch the listing
+    /// up with what changed.
+    fn finish_explorer_job(&mut self, outcomes: Vec<fenix_fs::Outcome>) {
+        let verb = self.explorer_job.take().map(|job| job.done).unwrap_or("done");
+        let cancelled = outcomes.iter().any(|o| o.error.as_deref() == Some("cancelled"));
+        let results: Vec<Result<(), String>> = outcomes.into_iter().map(|o| o.error.map_or(Ok(()), Err)).collect();
+        if cancelled {
+            let done = results.iter().filter(|r| r.is_ok()).count();
+            // Names what did happen rather than only that it stopped:
+            // after a cancel the useful question is what is already at
+            // the other end.
+            self.set_message(format!("stopped -- {done} {verb} before that"));
+        } else {
+            self.report_explorer_outcomes(verb, results);
+        }
+        self.explorer_relist();
+        self.wake_caret();
+    }
+
+    /// `z`: pack the marked set (or the entry at point) into an archive.
+    ///
+    /// The name is offered rather than demanded -- one item is named
+    /// after itself, several after the folder they are in -- so the
+    /// common case is one keystroke and Enter.
+    fn begin_archive(&mut self) {
+        if fenix_fs::archiver().is_none() {
+            self.set_error("no archiver on this machine (Windows 10+ ships one as System32\\tar.exe)");
+            return;
+        }
+        let Some(explorer) = self.active_explorer() else { return };
+        let sources = explorer.target_paths();
+        if sources.is_empty() {
+            return;
+        }
+        let suggested = fenix_fs::suggested_name(&sources);
+        self.explorer_prompt = Some(ExplorerPrompt { kind: PromptKind::ArchiveTo, input: suggested });
+        self.wake_caret();
+    }
+
+    /// `x`: unpack the archive at point, into a directory named after
+    /// it.
+    ///
+    /// Into its own directory rather than over whatever is around it:
+    /// an archive with forty files at its root, emptied into a folder
+    /// that already had things in it, is a mess nobody can undo.
+    fn extract_selected_archive(&mut self) {
+        if fenix_fs::archiver().is_none() {
+            self.set_error("no archiver on this machine (Windows 10+ ships one as System32\\tar.exe)");
+            return;
+        }
+        let Some(entry) = self.active_explorer().and_then(|e| e.selected_entry()) else { return };
+        let path = entry.path.clone();
+        if !fenix_fs::looks_like_archive(&path) {
+            self.set_error(format!("{} does not look like an archive", entry.name));
+            return;
+        }
+        let dest = fenix_fs::suggested_destination(&path);
+        match fenix_fs::extract_archive(&path, &dest) {
+            Ok(()) => self.set_message(format!("extracted into {}", dest.file_name().unwrap_or(dest.as_os_str()).to_string_lossy())),
+            Err(err) => self.set_error(err.to_string()),
+        }
+        self.explorer_relist();
+        self.wake_caret();
+    }
+
+    /// `i`: everything about the entry at point that does not fit in a
+    /// column.
+    ///
+    /// For a directory it also starts counting what is inside, in the
+    /// background -- that answer needs a walk of the whole tree, which
+    /// is why it is asked for rather than shown in a column.
+    fn show_properties(&mut self) {
+        let Some(entry) = self.active_explorer().and_then(|e| e.selected_entry()) else { return };
+        let path = entry.path.clone();
+        let props = match fenix_fs::properties(&path) {
+            Ok(props) => props,
+            Err(err) => {
+                self.set_error(err.to_string());
+                return;
+            }
         };
-        outcomes.into_iter().map(|o| o.error.map_or(Ok(()), Err)).collect()
+        self.set_message(describe_properties(&props));
+        if props.kind.is_dir_like() {
+            match self.event_proxy.clone() {
+                Some(proxy) => {
+                    std::thread::spawn(move || {
+                        let total = fenix_fs::measure_tree(&path, &|| false);
+                        let _ = proxy.send_event(FenixUserEvent::ExplorerMeasured { path, total });
+                    });
+                }
+                None => {
+                    let total = fenix_fs::measure_tree(&path, &|| false);
+                    self.apply_explorer_measured(path, total);
+                }
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// `w`: flip the read-only attribute on the marked set, or on the
+    /// entry at point.
+    ///
+    /// Flipped rather than set, and decided by the *first* target, so a
+    /// mixed selection ends up consistent instead of each item swapping
+    /// to the opposite of whatever it happened to be.
+    fn toggle_read_only(&mut self) {
+        let Some(explorer) = self.active_explorer() else { return };
+        let targets = explorer.target_paths();
+        let Some(first) = targets.first() else { return };
+        let make_readonly = !fenix_fs::properties(first).map(|p| p.attributes.readonly).unwrap_or(false);
+        let outcomes: Vec<Result<(), String>> =
+            targets.iter().map(|path| fenix_fs::set_readonly(path, make_readonly).map_err(|e| e.to_string())).collect();
+        self.report_explorer_outcomes(if make_readonly { "made read-only" } else { "made writable" }, outcomes);
+        self.explorer_relist();
+        self.wake_caret();
+    }
+
+    /// A recursive directory count came back.
+    fn apply_explorer_measured(&mut self, path: PathBuf, total: fenix_fs::Total) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&path));
+        // "at least" when the walk did not finish -- passing off a
+        // partial count as the answer would be worse than saying so.
+        let at_least = if total.partial { "at least " } else { "" };
+        self.set_message(format!(
+            "{name}: {at_least}{} in {} file{} across {} folder{}",
+            format_size(total.bytes),
+            total.files,
+            if total.files == 1 { "" } else { "s" },
+            total.directories,
+            if total.directories == 1 { "" } else { "s" },
+        ));
+        self.wake_caret();
+    }
+
+    /// `SPC e k`: stop the running operation.
+    ///
+    /// Stops between files. A file already being written has to finish
+    /// -- there is no way to abandon a copy part way through without
+    /// leaving a truncated file behind -- so a single very large file is
+    /// the one thing this cannot interrupt, and saying so beats a key
+    /// that appears to do nothing.
+    pub(crate) fn cancel_explorer_job(&mut self) {
+        let Some(job) = &self.explorer_job else {
+            self.set_message("nothing running");
+            return;
+        };
+        job.cancel.store(true, Ordering::Relaxed);
+        self.set_message("stopping after the file in flight...");
+        self.wake_caret();
+    }
+
+    /// The progress line, for the modeline.
+    fn explorer_job_text(&self) -> Option<String> {
+        let job = self.explorer_job.as_ref()?;
+        let p = &job.progress;
+        let name = p.current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let percent = (p.bytes_done * 100).checked_div(p.bytes_total).unwrap_or(0);
+        Some(format!(
+            "{} {}/{} files, {} of {} ({percent}%)  {name}  --  SPC e k stops",
+            job.running,
+            p.files_done,
+            p.files_total,
+            format_size(p.bytes_done),
+            format_size(p.bytes_total),
+        ))
     }
 
     /// Moves the marked set (or the entry at point) to the Recycle Bin,
@@ -20129,6 +20425,14 @@ impl App {
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::ExplorerGitStatus { target, request, statuses } => self.apply_explorer_git_status(target, request, statuses),
             FenixUserEvent::ExplorerShares { host, result } => self.apply_explorer_shares(host, result),
+            FenixUserEvent::ExplorerJobProgress(progress) => {
+                if let Some(job) = &mut self.explorer_job {
+                    job.progress = progress;
+                }
+                self.wake_caret();
+            }
+            FenixUserEvent::ExplorerJobDone(outcomes) => self.finish_explorer_job(outcomes),
+            FenixUserEvent::ExplorerMeasured { path, total } => self.apply_explorer_measured(path, total),
             FenixUserEvent::ExplorerVolumes(volumes) => {
                 self.volumes_loading = false;
                 self.volumes = volumes;
@@ -22051,7 +22355,7 @@ impl App {
         if self.vim.mode() == Mode::Command {
             return Some(format!(":{}", self.vim.command_line()));
         }
-        self.rename_confirm_text().or_else(|| self.explorer_prompt_text())
+        self.explorer_job_text().or_else(|| self.rename_confirm_text()).or_else(|| self.explorer_prompt_text())
             .or_else(|| self.docker_confirm_text())
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
@@ -28719,6 +29023,244 @@ configure_board stm32
 
     // -- Renaming by editing the listing ---------------------------------
 
+    // -- Big operations, archives, properties ----------------------------
+
+    #[test]
+    fn a_copy_runs_as_a_job_and_reports_when_it_is_done() {
+        let src = TempDir::new("job_copy_src");
+        let dest = TempDir::new("job_copy_dest");
+        src.write("a.txt", "A");
+        let mut app = app_with_places("job_copy", src.path());
+
+        app.explorer_prompt_submit(PromptKind::CopyTo, &dest.path().to_string_lossy());
+
+        // With no event loop the job runs inline, so it is already over.
+        assert!(app.explorer_job.is_none());
+        assert!(dest.path().join("a.txt").exists());
+        assert!(app.modeline_pieces().1.contains("copied"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn only_one_long_operation_runs_at_a_time() {
+        // Two copies competing for one disk finish no sooner than one
+        // after the other, and one progress line is something a person
+        // can read.
+        let src = TempDir::new("job_one_src");
+        let dest = TempDir::new("job_one_dest");
+        src.write("a.txt", "A");
+        let mut app = app_with_places("job_one", src.path());
+        app.explorer_job = Some(ExplorerJob {
+            running: "copying",
+            done: "copied",
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: fenix_fs::Progress::default(),
+        });
+
+        app.explorer_prompt_submit(PromptKind::CopyTo, &dest.path().to_string_lossy());
+
+        assert!(!dest.path().join("a.txt").exists(), "nothing started");
+        assert!(app.modeline_pieces().1.contains("already being copied"));
+    }
+
+    #[test]
+    fn a_running_job_owns_the_status_line_and_says_how_to_stop_it() {
+        let dir = TempDir::new("job_progress_text");
+        let mut app = app_with_places("job_progress", dir.path());
+        app.explorer_job = Some(ExplorerJob {
+            running: "copying",
+            done: "copied",
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: fenix_fs::Progress {
+                files_done: 3,
+                files_total: 10,
+                bytes_done: 512,
+                bytes_total: 2048,
+                current: PathBuf::from(r"C:\work\photo.jpg"),
+            },
+        });
+
+        let text = app.active_prompt_text().unwrap();
+
+        // "copying", not a past tense with its ending chopped off --
+        // that is what this said until it was read out loud.
+        assert!(text.starts_with("copying "), "got: {text}");
+        assert!(text.contains("3/10 files"), "got: {text}");
+        assert!(text.contains("25%"), "both counts, because neither alone is honest: {text}");
+        assert!(text.contains("photo.jpg"), "got: {text}");
+        assert!(text.contains("SPC e k"), "got: {text}");
+    }
+
+    #[test]
+    fn cancelling_asks_the_worker_to_stop_and_says_what_that_means() {
+        // A file already being written has to finish -- saying so beats
+        // a key that appears to do nothing.
+        let dir = TempDir::new("job_cancel");
+        let mut app = app_with_places("job_cancel", dir.path());
+        let flag = Arc::new(AtomicBool::new(false));
+        app.explorer_job =
+            Some(ExplorerJob { running: "copying", done: "copied", cancel: flag.clone(), progress: fenix_fs::Progress::default() });
+
+        app.cancel_explorer_job();
+
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(app.modeline_pieces().1.contains("in flight"), "got: {}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn cancelling_with_nothing_running_says_so() {
+        let dir = TempDir::new("job_cancel_idle");
+        let mut app = app_with_places("job_cancel_idle", dir.path());
+        app.cancel_explorer_job();
+        assert!(app.modeline_pieces().1.contains("nothing running"));
+    }
+
+    #[test]
+    fn a_cancelled_job_reports_what_did_happen_rather_than_only_that_it_stopped() {
+        // After a cancel the useful question is what is already at the
+        // other end.
+        let dir = TempDir::new("job_cancel_report");
+        let mut app = app_with_places("job_cancel_report", dir.path());
+        app.explorer_job = Some(ExplorerJob {
+            running: "copying",
+            done: "copied",
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: fenix_fs::Progress::default(),
+        });
+
+        app.finish_explorer_job(vec![
+            fenix_fs::Outcome { path: PathBuf::from("a.txt"), error: None },
+            fenix_fs::Outcome { path: PathBuf::from("b.txt"), error: Some("cancelled".to_string()) },
+        ]);
+
+        assert!(app.modeline_pieces().1.contains("1 copied before that"), "got: {}", app.modeline_pieces().1);
+    }
+
+    // -- Archives --------------------------------------------------------
+
+    #[test]
+    fn archiving_offers_a_name_rather_than_demanding_one() {
+        if fenix_fs::archiver().is_none() {
+            return;
+        }
+        let dir = TempDir::new("archive_prompt");
+        dir.write("report.docx", "x");
+        let mut app = app_with_places("archive_prompt", dir.path());
+
+        app.dired_handle_action(ExplorerAction::BeginArchive);
+
+        assert_eq!(app.active_prompt_text().unwrap(), "Archive as: report.docx.zip");
+    }
+
+    #[test]
+    fn a_marked_set_zips_and_unzips_back_to_what_it_was() {
+        if fenix_fs::archiver().is_none() {
+            return;
+        }
+        let dir = TempDir::new("archive_round_trip");
+        dir.write("a.txt", "A");
+        dir.write("b.txt", "B");
+        let mut app = app_with_places("archive_round_trip", dir.path());
+        app.dired_handle_action(ExplorerAction::MarkAll);
+
+        app.explorer_prompt_submit(PromptKind::ArchiveTo, "bundle.zip");
+        assert!(dir.path().join("bundle.zip").exists(), "{}", app.modeline_pieces().1);
+
+        // And back: put the cursor on the archive and extract it. The
+        // cursor, not the state's own selection -- an action reconciles
+        // the two from the cursor, which is the point of doing it that
+        // way round.
+        app.active_explorer_mut().unwrap().unmark_all();
+        put_cursor_on(&mut app, "bundle.zip");
+        app.dired_handle_action(ExplorerAction::ExtractArchive);
+
+        assert_eq!(std::fs::read_to_string(dir.path().join("bundle").join("a.txt")).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(dir.path().join("bundle").join("b.txt")).unwrap(), "B");
+    }
+
+    #[test]
+    fn extracting_something_that_is_not_an_archive_says_so() {
+        if fenix_fs::archiver().is_none() {
+            return;
+        }
+        let dir = TempDir::new("archive_not_one");
+        dir.write("notes.txt", "hello");
+        let mut app = app_with_places("archive_not_one", dir.path());
+
+        app.dired_handle_action(ExplorerAction::ExtractArchive);
+
+        assert!(app.modeline_pieces().1.contains("does not look like an archive"), "got: {}", app.modeline_pieces().1);
+    }
+
+    // -- Properties ------------------------------------------------------
+
+    #[test]
+    fn properties_say_what_a_column_cannot_hold() {
+        let dir = TempDir::new("props_show");
+        dir.write("a.txt", "hello");
+        let mut app = app_with_places("props_show", dir.path());
+
+        app.dired_handle_action(ExplorerAction::ShowProperties);
+
+        let text = app.modeline_pieces().1;
+        assert!(text.contains("a.txt"), "got: {text}");
+        assert!(text.contains("5B"), "got: {text}");
+        assert!(text.contains("modified"), "got: {text}");
+    }
+
+    #[test]
+    fn a_directory_gets_counted_rather_than_reported_as_zero() {
+        // The one number a listing structurally cannot show, which is
+        // why it is asked for.
+        let dir = TempDir::new("props_measure_dir");
+        let sub = dir.mkdir("tree");
+        std::fs::write(sub.join("a.txt"), "12345").unwrap();
+        let mut app = app_with_places("props_measure_dir", dir.path());
+        put_cursor_on(&mut app, "tree");
+
+        app.dired_handle_action(ExplorerAction::ShowProperties);
+
+        // No event loop, so the walk ran inline and its answer replaced
+        // the first line.
+        let text = app.modeline_pieces().1;
+        assert!(text.contains("5B in 1 file"), "got: {text}");
+    }
+
+    #[test]
+    fn read_only_can_be_flipped_from_the_listing() {
+        let dir = TempDir::new("props_toggle_ro");
+        let file = dir.write("a.txt", "hello");
+        let mut app = app_with_places("props_toggle_ro", dir.path());
+
+        app.dired_handle_action(ExplorerAction::ToggleReadOnly);
+        assert!(fenix_fs::properties(&file).unwrap().attributes.readonly);
+        assert!(app.modeline_pieces().1.contains("read-only"), "got: {}", app.modeline_pieces().1);
+
+        app.dired_handle_action(ExplorerAction::ToggleReadOnly);
+        assert!(!fenix_fs::properties(&file).unwrap().attributes.readonly);
+    }
+
+    #[test]
+    fn a_mixed_selection_ends_up_consistent_rather_than_each_swapping() {
+        // Decided by the first target, so "make these writable" means
+        // that for all of them.
+        let dir = TempDir::new("props_toggle_mixed");
+        let a = dir.write("a.txt", "A");
+        let b = dir.write("b.txt", "B");
+        fenix_fs::set_readonly(&b, true).unwrap();
+        let mut app = app_with_places("props_toggle_mixed", dir.path());
+        app.dired_handle_action(ExplorerAction::MarkAll);
+
+        app.dired_handle_action(ExplorerAction::ToggleReadOnly);
+
+        assert!(fenix_fs::properties(&a).unwrap().attributes.readonly);
+        assert!(fenix_fs::properties(&b).unwrap().attributes.readonly);
+        // Left writable so the temp directory can clean itself up.
+        fenix_fs::set_readonly(&a, false).unwrap();
+        fenix_fs::set_readonly(&b, false).unwrap();
+    }
+
+    // -- Renaming by editing the listing ---------------------------------
+
     /// A listing open on three files, with rename mode already started.
     fn app_editing_names(name: &str) -> (TempDir, App) {
         let dir = TempDir::new(name);
@@ -29509,6 +30051,21 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.open_dired_at(dir.path());
         (dir, app)
+    }
+
+    /// Puts the Vim cursor on the row showing `name`, the way moving
+    /// there with `j` would -- which is what an action then acts on.
+    fn put_cursor_on(app: &mut App, name: &str) {
+        let buffer = app.focused_dired_buffer().expect("a listing");
+        let index = app.dired_states[&buffer]
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no entry named {name:?}"));
+        let line = index + 1; // row 0 is the header
+        let char_idx = app.buffers.get(buffer).unwrap().buffer.line_start_char(line);
+        let pane = app.focused_pane_id();
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
     }
 
     /// Just the names out of a rendered listing, without the mark

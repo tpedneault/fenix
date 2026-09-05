@@ -144,13 +144,13 @@ fn describe(dirent: &fs::DirEntry) -> DirEntryInfo {
     let readable = metadata.is_some();
     let size = metadata.as_ref().filter(|_| !kind.is_dir_like()).map(|m| m.len()).unwrap_or(0);
     let modified = metadata.as_ref().and_then(|m| m.modified().ok());
-    let attributes = metadata.as_ref().map(|m| attributes_of(m, &name)).unwrap_or_default();
+    let attributes = metadata.as_ref().map(|m| attributes_for(m, &name)).unwrap_or_default();
 
     DirEntryInfo { name, path, kind, size, modified, attributes, readable }
 }
 
 #[cfg(windows)]
-fn attributes_of(metadata: &fs::Metadata, _name: &str) -> Attributes {
+pub(crate) fn attributes_for(metadata: &fs::Metadata, _name: &str) -> Attributes {
     use std::os::windows::fs::MetadataExt;
     // The three flags a file manager acts on, straight from the
     // platform. `MetadataExt::file_attributes` is in std -- no binding
@@ -167,7 +167,7 @@ fn attributes_of(metadata: &fs::Metadata, _name: &str) -> Attributes {
 }
 
 #[cfg(not(windows))]
-fn attributes_of(metadata: &fs::Metadata, name: &str) -> Attributes {
+pub(crate) fn attributes_for(metadata: &fs::Metadata, name: &str) -> Attributes {
     // No attribute bits here: the leading dot genuinely is the
     // convention, and read-only is a permission rather than a flag.
     Attributes { hidden: name.starts_with('.'), readonly: metadata.permissions().readonly(), system: false }

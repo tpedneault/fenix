@@ -36,6 +36,17 @@ pub enum ExplorerAction {
     BeginFilter,
     /// Search this directory and everything under it, by name.
     BeginFind,
+    /// Pack the marked set (or the entry at point) into an archive.
+    BeginArchive,
+    /// Unpack the archive at point.
+    ExtractArchive,
+    /// Everything about the entry at point that does not fit in a
+    /// column -- and, for a directory, what it actually contains.
+    ShowProperties,
+    /// Flip the read-only attribute: the one that stops an ordinary
+    /// save, and the usual reason for opening Windows' own properties
+    /// dialog.
+    ToggleReadOnly,
     ToggleHidden,
     /// Cycle what the listing is ordered by; `ReverseSort` flips the
     /// direction of whatever that currently is. Two keys rather than
@@ -96,6 +107,10 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         t.insert(&[KeyPress::char('C')], "copy to...", ExplorerAction::BeginCopy);
         t.insert(&[KeyPress::char('M')], "move to...", ExplorerAction::BeginMove);
 
+        t.insert(&[KeyPress::char('z')], "archive...", ExplorerAction::BeginArchive);
+        t.insert(&[KeyPress::char('x')], "extract", ExplorerAction::ExtractArchive);
+        t.insert(&[KeyPress::char('i')], "properties", ExplorerAction::ShowProperties);
+        t.insert(&[KeyPress::char('w')], "toggle read-only", ExplorerAction::ToggleReadOnly);
         t.insert(&[KeyPress::char('f')], "filter", ExplorerAction::BeginFilter);
         t.insert(&[KeyPress::char('F')], "find under here", ExplorerAction::BeginFind);
         t.insert(&[KeyPress::char('.')], "toggle hidden", ExplorerAction::ToggleHidden);
