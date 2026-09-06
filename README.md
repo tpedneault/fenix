@@ -252,7 +252,12 @@ for anyone curious to poke around or build on it.
   moment where being approximately right costs somebody their work.
   `[editor] watch_files = false` turns the whole thing off, for a
   working copy on a network share.
-- **Crash recovery**: every buffer with unsaved changes is written to a
+- **Safe saves**: documents, settings, and recovery snapshots are staged beside
+  their destination, explicitly flushed and synced, then replaced. Windows
+  replacement preserves destination ACLs and refuses sharing violations; failed
+  saves leave buffers dirty. `:w <path>` names and saves an unnamed buffer
+  without overwriting an existing file (spaces in the path are preserved).
+- **Crash recovery**: every editable buffer with unsaved changes, including unnamed scratch work, is written to a
   snapshot a couple of times a second, so a crash, a power cut or a
   killed process costs at most a moment's typing instead of everything
   since the last `:w`. The snapshot is deleted the instant the buffer is
@@ -262,6 +267,9 @@ for anyone curious to poke around or build on it.
   `SPC f v` recovers them; recovering loads the text back as an
   *unsaved* edit, so `:w` accepts it and `:e!` throws it away -- the
   same pair of answers as any other two versions that disagree.
+  Recovery continues when file watching is disabled. A failed snapshot displays
+  `[recovery failed]` until recovery succeeds or the affected work is saved or
+  discarded. Unnamed snapshots recover into unnamed, unsaved buffers.
   Snapshots older than two weeks are cleaned up on startup.
 
   Deliberately **not** Vim's swap files. Those live next to the file
@@ -671,6 +679,15 @@ for anyone curious to poke around or build on it.
   JSON -- every other tool's plain `file:line:col: message` convention
   (gcc/clang/`pytest`/`ctest`) is recovered the same way without
   needing `--message-format=json` at all.
+  Task cancellation terminates the process tree on Windows, including children
+  holding output pipes. Closing or rerunning a task never waits for reader
+  threads. Windows also cleans up tasks when the editor exits abruptly. Output
+  from both streams is drained before the result appears; stale events from a
+  previous run are ignored. Cleanup has a two-second deadline and reports errors
+  rather than leaving the interface waiting indefinitely. A task's descendants
+  are terminated when its main process exits, so use a separate terminal for
+  background services intended to outlive a build.
+
 - **Debugger (DAP)**: `SPC u u` starts a real Debug Adapter Protocol
   session for the focused buffer (Python via
   [`debugpy`](https://github.com/microsoft/debugpy)'s
@@ -1000,7 +1017,7 @@ popup shows what keys continue it.
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
-| `SPC c a` | Request and apply the first available code action (LSP) |
+| `SPC c a` | Choose a code action and preview its edits (LSP) |
 | `SPC c T` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |
 | `SPC c F` | Indent region -- reindent the whole focused buffer structurally, or (with an attached language server) reformat it (LSP) |
@@ -1556,3 +1573,43 @@ crates, each independently unit-tested (`cargo test --workspace`):
 
 No license has been chosen yet — treat this as source-available for
 reference until one is added.
+
+### Refactor previews
+
+LSP rename and edit-based code actions open a read-only multi-file preview.
+For a list of code actions, move to an action and press Enter to preview it.
+Press `a` or Enter to apply every proposed text edit in memory, or `q` / Escape
+to cancel. Files remain unsaved; use the usual save commands after review.
+`:undo-refactor` reverses the latest refactor across all affected buffers, provided
+none has since been edited, renamed, or closed. Normal `u` undoes only one file.
+
+Edits validate document versions, exact UTF-16 ranges, overlapping ranges, and
+buffer/disk changes before applying. Unopened targets are loaded only on apply.
+File create/rename/delete operations, annotated edits, command-based actions, and
+lazy action resolution are not supported; unsupported edits are rejected whole.
+
+### CI and regression checks
+
+Run `pwsh -NoProfile -File ./scripts/ci.ps1 -Suite Workspace` for the Windows
+workspace test, scoped lint, and editor build gates. `-Suite Reliability` runs
+the smaller filesystem/process/protocol suite used by the Linux CI job.
+Both use the lockfile and save diagnostic logs under `target/ci/`.
+See [CI documentation](docs/CI.md) for setup, coverage, and required-check names.
+
+### Project tool environments
+
+Language servers are scoped by language and project root. Configure literal
+executables, argument arrays, working directories, and child environment values
+in `.fenix/tools.json` for LSP, DAP, and tasks. `:lsp-restart` reloads language
+services for the current project. Task rerun history is per project; debugger
+and task controls guard against operating on another project's active process.
+See [project tool settings](docs/PROJECT_TOOLS.md) for examples and precedence.
+
+### Session restoration
+
+Fenix restores documents, unsaved buffers, workspaces, splits, focus, cursors, and
+scroll positions at startup. Use `:session-save` to checkpoint immediately or
+`:session-quit` to exit and resume unsaved work next time. Force quit still discards
+unsaved work. Missing files and disk conflicts are reported without overwriting
+files. See [session restoration](docs/SESSION_RESTORATION.md) for configuration,
+recovery behavior, and current limits.

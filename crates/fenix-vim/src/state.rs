@@ -21,7 +21,13 @@ use crate::textobject;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VimEvent {
     None,
+    RequestUndoRefactor,
+    RequestRestartLsp,
+    RequestSessionSave,
+    RequestSessionQuit,
     RequestSave,
+    /// Name and save an unnamed document; path may contain spaces.
+    RequestSaveAs(String),
     /// `:w!` -- write even though the host has a reason not to. Today
     /// that reason is "the file changed on disk since it was read", and
     /// this is the way to say "yes, mine wins". Real Vim's own `!`

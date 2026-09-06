@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: '1'
+
+jobs:
+  windows:
+    name: Windows workspace
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: fenix editor
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          path: fenix editor
+      - name: Install Rust stable with Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup override set stable
+      - name: Configure Windows Git paths
+        run: |
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git config --global core.autocrlf false
+      - name: Test, lint, and build
+        run: ./scripts/ci.ps1 -Suite Workspace
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-ci-logs
+          path: fenix editor/target/ci/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload tested debug executable
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: fenix-windows-debug
+          path: fenix editor/target/debug/fenix.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-reliability:
+    name: Linux reliability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust stable with Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup override set stable
+      - name: Filesystem, process, and protocol regressions
+        run: ./scripts/ci.ps1 -Suite Reliability
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: linux-reliability-logs
+          path: target/ci/
+          if-no-files-found: warn
+          retention-days: 14

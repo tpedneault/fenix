@@ -25,6 +25,10 @@ pub fn run_ex_command(
 ) -> VimEvent {
     let cmd = cmd.trim();
     match cmd {
+        "session-save" => return VimEvent::RequestSessionSave,
+        "session-quit" => return VimEvent::RequestSessionQuit,
+        "lsp-restart" => return VimEvent::RequestRestartLsp,
+        "undo-refactor" => return VimEvent::RequestUndoRefactor,
         "w" => return VimEvent::RequestSave,
         "w!" => return VimEvent::RequestForceSave,
         "e!" | "edit!" => return VimEvent::RequestReloadFile,
@@ -35,6 +39,10 @@ pub fn run_ex_command(
         "qa!" | "quitall!" => return VimEvent::RequestForceQuitAll,
         "wqa" | "xa" => return VimEvent::RequestSaveAllAndQuit,
         _ => {}
+    }
+
+    if let Some(path) = cmd.strip_prefix("w ").map(str::trim).filter(|p| !p.is_empty()) {
+        return VimEvent::RequestSaveAs(path.to_string());
     }
 
     if cmd == "set" || cmd.starts_with("set ") {
@@ -359,6 +367,14 @@ mod tests {
     }
 
     #[test]
+    fn write_path_keeps_windows_spaces() {
+        let mut buffer = Buffer::empty();
+        let mut cursor = Cursor::at_start();
+        assert_eq!(run_ex_command(r"w C:\My Work\notes.txt", &mut buffer, &mut cursor, &mut 4, None),
+            VimEvent::RequestSaveAs(r"C:\My Work\notes.txt".to_string()));
+    }
+
+    #[test]
     fn w_q_wq_x_close_the_buffer_not_the_app() {
         let (mut b, mut c) = cmd("hi");
         assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4, None), VimEvent::RequestSave);
@@ -650,4 +666,21 @@ mod tests {
         assert_eq!(run_ex_command("set", &mut b, &mut c, &mut width, None), VimEvent::None);
         assert_eq!(width, 4);
     }
+    #[test]
+    fn undo_refactor_dispatches_to_the_host() {
+        let (mut b, mut c) = cmd("hi");
+        let mut width = 4;
+        assert_eq!(run_ex_command("undo-refactor", &mut b, &mut c, &mut width, None), VimEvent::RequestUndoRefactor);
+        assert_eq!(b.text(), "hi");
+    }
+
+    #[test]
+    fn lsp_restart_dispatches_to_the_project_host() {
+        let (mut b, mut c) = cmd("hi");
+        let mut width = 4;
+        assert_eq!(run_ex_command("lsp-restart", &mut b, &mut c, &mut width, None), VimEvent::RequestRestartLsp);
+        assert_eq!(run_ex_command("session-save", &mut b, &mut c, &mut width, None), VimEvent::RequestSessionSave);
+        assert_eq!(run_ex_command("session-quit", &mut b, &mut c, &mut width, None), VimEvent::RequestSessionQuit);
+    }
+
 }

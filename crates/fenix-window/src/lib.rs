@@ -31,7 +31,7 @@ fn alloc_id() -> WindowId {
 /// (Vim's `:split`); `Vertical` places them side by side with a vertical
 /// divider (Vim's `:vsplit`) -- Vim's own naming, not "which axis the
 /// windows are arranged along" (which would read backwards to a Vim user).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitKind {
     Horizontal,
     Vertical,
@@ -73,6 +73,45 @@ mod rect_tests {
 enum Node<T> {
     Leaf { id: WindowId, content: T },
     Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },
+}
+
+/// Portable layout without process-local window identities.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Layout<T> {
+    Leaf(T),
+    Split { kind: SplitKind, ratio: f32, first: Box<Layout<T>>, second: Box<Layout<T>> },
+}
+
+impl<T> WindowTree<T> {
+    pub fn snapshot<U>(&self, mut map: impl FnMut(WindowId, &T) -> U) -> Layout<U> {
+        fn visit<T, U>(node: &Node<T>, map: &mut impl FnMut(WindowId, &T) -> U) -> Layout<U> {
+            match node {
+                Node::Leaf { id, content } => Layout::Leaf(map(*id, content)),
+                Node::Split { kind, ratio, first, second } => Layout::Split {
+                    kind: *kind, ratio: *ratio, first: Box::new(visit(first, map)), second: Box::new(visit(second, map)),
+                },
+            }
+        }
+        visit(self.root(), &mut map)
+    }
+
+    /// Restores fresh identities, rejecting invalid or excessively deep trees.
+    pub fn from_layout(layout: Layout<T>, focused_leaf: usize) -> Result<Self, &'static str> {
+        fn visit<T>(layout: Layout<T>, depth: usize, leaves: &mut Vec<WindowId>) -> Result<Node<T>, &'static str> {
+            if depth > 32 || leaves.len() >= 256 { return Err("layout exceeds pane/depth limit"); }
+            Ok(match layout {
+                Layout::Leaf(content) => { let id = alloc_id(); leaves.push(id); Node::Leaf { id, content } }
+                Layout::Split { kind, ratio, first, second } => {
+                    if !ratio.is_finite() || !(0.1..=0.9).contains(&ratio) { return Err("invalid split ratio"); }
+                    Node::Split { kind, ratio, first: Box::new(visit(*first, depth + 1, leaves)?), second: Box::new(visit(*second, depth + 1, leaves)?) }
+                }
+            })
+        }
+        let mut leaves = Vec::new();
+        let root = visit(layout, 0, &mut leaves)?;
+        let focused = *leaves.get(focused_leaf).ok_or("invalid focused pane")?;
+        Ok(Self { root: Some(root), focused })
+    }
 }
 
 impl<T> Node<T> {
@@ -592,5 +631,38 @@ mod tests {
         assert_eq!(rects.len(), 3);
         let total_area: f32 = rects.iter().map(|(_, r)| r.w * r.h).sum();
         assert!((total_area - bounds.w * bounds.h).abs() < 0.01);
+    }
+}
+
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn portable_layout_preserves_structure_and_focus_with_fresh_ids() {
+        let layout = Layout::Split { kind: SplitKind::Vertical, ratio: 0.3,
+            first: Box::new(Layout::Leaf("a")),
+            second: Box::new(Layout::Split { kind: SplitKind::Horizontal, ratio: 0.7,
+                first: Box::new(Layout::Leaf("b")), second: Box::new(Layout::Leaf("c")) }) };
+        let tree = WindowTree::from_layout(layout.clone(), 2).unwrap();
+        assert_eq!(tree.snapshot(|_, text| *text), layout);
+        assert_eq!(tree.content(tree.focused_id()), Some(&"c"));
+        let restored = WindowTree::from_layout(tree.snapshot(|_, text| *text), 2).unwrap();
+        assert!(restored.windows().iter().all(|id| !tree.windows().contains(id)));
+    }
+
+    #[test]
+    fn portable_layout_rejects_invalid_ratio_focus_and_excessive_depth() {
+        for ratio in [f32::NAN, f32::INFINITY, 0.0, 1.0] {
+            let layout = Layout::Split { kind: SplitKind::Vertical, ratio,
+                first: Box::new(Layout::Leaf(0)), second: Box::new(Layout::Leaf(1)) };
+            assert!(WindowTree::from_layout(layout, 0).is_err());
+        }
+        assert!(WindowTree::from_layout(Layout::Leaf(0), 1).is_err());
+        let mut deep = Layout::Leaf(0);
+        for _ in 0..34 { deep = Layout::Split { kind: SplitKind::Vertical, ratio: 0.5,
+            first: Box::new(deep), second: Box::new(Layout::Leaf(1)) }; }
+        assert!(WindowTree::from_layout(deep, 0).is_err());
     }
 }

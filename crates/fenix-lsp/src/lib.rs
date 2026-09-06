@@ -21,6 +21,8 @@
 //! opinionated stdio main-loop would compete with this crate's own
 //! thread ownership.
 
+pub mod workspace_edit;
+
 mod client;
 mod envelope;
 pub mod per_language;

@@ -284,7 +284,7 @@ fn cmd_quit(ctx: &mut CommandCtx) {
 }
 
 fn cmd_quit_force(ctx: &mut CommandCtx) {
-    ctx.event_loop.exit();
+    if ctx.app.discard_session_edits() { ctx.event_loop.exit(); }
 }
 
 fn cmd_save_all_and_quit(ctx: &mut CommandCtx) {

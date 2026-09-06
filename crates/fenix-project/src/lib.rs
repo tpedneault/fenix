@@ -13,3 +13,5 @@ pub use grep::{grep_project, GrepMatch};
 pub use known::KnownProjects;
 pub use recent::RecentFiles;
 pub use root::find_project_root;
+
+pub mod tools;

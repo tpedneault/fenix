@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 
 use ropey::{Rope, RopeSlice};
@@ -134,7 +134,16 @@ impl Buffer {
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
         self.flush_pending();
         let path = path.as_ref();
-        self.rope.write_to(BufWriter::new(File::create(path)?))?;
+        fenix_storage::atomic_write(path, |writer| self.rope.write_to(writer))?;
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Name an unnamed document without overwriting a concurrently created file.
+    pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
+        self.flush_pending();
+        fenix_storage::atomic_write_new(path, |writer| self.rope.write_to(writer))?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
         Ok(())
@@ -618,6 +627,24 @@ mod tests {
 
     fn buffer_with(text: &str) -> Buffer {
         Buffer::from_text(text)
+    }
+
+    #[test]
+    fn failed_save_retains_unsaved_text_and_original_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, "original").unwrap();
+        let mut buffer = Buffer::from_path(&source).unwrap();
+        buffer.insert_str(&mut Cursor::at_start(), "unsaved ");
+        let destination = dir.path().join("missing").join("file.txt");
+        assert!(buffer.save_as(&destination).is_err());
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.path(), Some(source.as_path()));
+        assert_eq!(buffer.text(), "unsaved original");
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "original");
+        buffer.save().unwrap();
+        assert!(!buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "unsaved original");
     }
 
     #[test]

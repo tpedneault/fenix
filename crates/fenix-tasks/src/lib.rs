@@ -1,12 +1,12 @@
-//! The build/task runner: per-project task discovery (`defs`/
-//! `project_ini`), one-shot process execution, and output parsing
-//! (`output`) that feeds `fenix-gui`'s generalized quickfix list the
-//! same way a project grep or an LSP references response already does.
-//! This crate stays GUI/event-loop-agnostic (see `spawn`'s own doc
-//! comment) -- the actual streaming/quickfix/panel wiring lives in
-//! `fenix-gui`, mirroring the split `fenix-docker`'s own `spawn_log_
-//! follower` already established between "here's a piped child" and
-//! "here's what reads it on a background thread and feeds the UI."
+//! Project task discovery, output parsing, and process-tree supervision.
+//!
+//! `TaskRunner` owns process execution and pipe polling behind an event callback.
+//! The GUI consumes output batches and terminal outcomes without managing child
+//! locks or reader threads. The low-level `spawn` API remains for simple callers
+//! that explicitly own their child's cleanup; the editor uses `TaskRunner`.
+
+mod supervisor;
+pub use supervisor::{OutputLine, OutputStream, RunId, TaskEvent, TaskOutcome, TaskRunner};
 
 mod defs;
 mod output;
