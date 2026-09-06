@@ -16,6 +16,8 @@ pub struct BufferId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferKind {
     Text,
+    /// Read-only preview of a validated LSP refactor.
+    WorkspaceEdit,
     /// The startup dashboard (`fenix-gui`'s `SPC d d`) -- a real buffer
     /// like any other, just tagged so the host can special-case what
     /// `Enter` does on it and how it's colored.
@@ -381,6 +383,14 @@ impl BufferList {
     /// an empty buffer (still usable, just starts blank) rather than
     /// failing outright -- same posture as every other "can't read this,
     /// don't crash" fallback already established in this project.
+    /// Register a preloaded document after a transaction has validated every
+    /// target. No disk reads or fallible loading occur during commit.
+    pub fn insert_loaded_document(&mut self, buffer: Buffer) -> BufferId {
+        let syntax = buffer.path().and_then(fenix_syntax::detect_language_from_path)
+            .map(|language| fenix_syntax::SyntaxState::new(language, &buffer.text()));
+        self.insert(buffer, syntax, BufferKind::Text)
+    }
+
     pub fn open_path(&mut self, path: &Path) -> BufferId {
         if let Some(&id) = self.path_index.get(path) {
             self.touch(id);

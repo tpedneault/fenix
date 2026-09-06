@@ -71,14 +71,14 @@ impl DapClient {
     /// `fenix_rpc::resolve_command` first -- see its own doc comment for
     /// why a bare command name needs that on Windows.
     pub fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
-        let resolved = fenix_rpc::resolve_command(command);
-        let mut child = Command::new(&resolved)
-            .args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut process = Command::new(fenix_rpc::resolve_command(command));
+        process.args(args).current_dir(cwd);
+        Self::spawn_command(process)
+    }
+
+    /// Spawn a configured process, preserving its explicit arguments, cwd and environment.
+    pub fn spawn_command(mut process: Command) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
+        let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
         let stdin = child.stdin.take().expect("stdin was requested as piped");
         let stdout = child.stdout.take().expect("stdout was requested as piped");

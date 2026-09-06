@@ -86,13 +86,21 @@ mod tests {
 
     #[test]
     fn run_ndjson_skips_unparsable_lines_and_keeps_the_rest() {
-        // Exercises the parser against hand-built NDJSON via a real
-        // subprocess (`echo`, always on PATH) rather than mocking
-        // `Command` -- consistent with this project's existing posture
-        // of testing subprocess-shelling code against real processes.
-        let ndjson = "{\"n\":1}\nnot json\n{\"n\":2}\n";
-        let result = run_ndjson("echo", &["-n", ndjson], |v| v.get("n").and_then(|n| n.as_i64()));
+        // Run this test executable as a child; no shell or external utility is required.
+        let executable = std::env::current_exe().unwrap();
+        let result = run_ndjson(executable.to_str().unwrap(),
+            &["--ignored", "--exact", "process::tests::ndjson_fixture", "--nocapture"],
+            |v| v.get("n").and_then(|n| n.as_i64()));
         assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture, invoked by run_ndjson_skips_unparsable_lines_and_keeps_the_rest"]
+    fn ndjson_fixture() {
+        use std::io::Write;
+        std::io::stdout().write_all(b"{\"n\":1}\nnot json\n{\"n\":2}\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::process::exit(0);
     }
 
     #[test]

@@ -14,7 +14,7 @@ const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", 
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_dir() { start } else { start.parent()? };
     loop {
-        if MARKERS.iter().any(|marker| dir.join(marker).exists()) {
+        if dir.join(".fenix/tools.json").is_file() || dir.join(".fenix/project.ini").is_file() || MARKERS.iter().any(|marker| dir.join(marker).exists()) {
             return Some(dir.to_path_buf());
         }
         dir = dir.parent()?;

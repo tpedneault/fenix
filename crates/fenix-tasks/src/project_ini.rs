@@ -45,7 +45,7 @@ pub fn project_tasks(root: &Path) -> Vec<TaskDef> {
         let key = key.trim();
         let Some(n) = key.strip_prefix("task").and_then(|s| s.parse::<usize>().ok()) else { continue };
         let Some((name, command_line)) = value.trim().split_once('|') else { continue };
-        let mut parts = command_line.trim().split_whitespace();
+        let mut parts = command_line.split_whitespace();
         let Some(command) = parts.next() else { continue };
         let args: Vec<String> = parts.map(str::to_string).collect();
         entries.push((n, TaskDef { name: name.trim().to_string(), command: command.to_string(), args }));

@@ -153,6 +153,8 @@ pub struct Config {
     /// worth defaulting to; `restore_windows = false` opts out and
     /// always starts with a single window.
     pub restore_windows: Option<bool>,
+    /// Restore documents and layouts; enabled unless explicitly disabled.
+    pub restore_session: Option<bool>,
     /// Named workspace launchers, `(display name, action)`, in the
     /// order they appear in `config.ini`'s `[workspaces]` section --
     /// what `SPC TAB f` picks from. `action` is one of `git`, `jira`,
@@ -252,6 +254,7 @@ impl Config {
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
+            restore_session: windows.and_then(|s| s.get("restore_session")).and_then(|v| v.parse().ok()),
             restore_windows: windows.and_then(|s| s.get("restore_windows")).and_then(|v| v.parse().ok()),
             workspaces: workspaces.map(|s| parse_pair_list(s, "ws")).unwrap_or_default(),
         })
@@ -290,6 +293,7 @@ impl Config {
             documents: Vec::new(),
             windows: Vec::new(),
             restore_windows: None,
+            restore_session: None,
             workspaces: Vec::new(),
         })
     }
@@ -426,6 +430,9 @@ impl Config {
         }
         out.push('\n');
         out.push_str("[windows]\n");
+        if let Some(restore) = self.restore_session {
+            out.push_str(&format!("restore_session = {restore}\n"));
+        }
         if let Some(restore) = self.restore_windows {
             out.push_str(&format!("restore_windows = {restore}\n"));
         }
@@ -440,7 +447,7 @@ impl Config {
                 window.maximized
             ));
         }
-        std::fs::write(&self.path, out)
+        fenix_storage::write(&self.path, out.as_bytes())
     }
 
     #[cfg(test)]
@@ -614,12 +621,14 @@ mod tests {
             WindowLayout { x: -1920, y: -120, width: 1920, height: 1080, maximized: false },
         ];
         config.restore_windows = Some(false);
+        config.restore_session = Some(false);
 
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
 
         assert_eq!(reloaded.windows, config.windows);
         assert_eq!(reloaded.restore_windows, Some(false));
+        assert_eq!(reloaded.restore_session, Some(false));
         let _ = std::fs::remove_file(path);
     }
 

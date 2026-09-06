@@ -64,14 +64,14 @@ impl LspClient {
     /// started in, on top of whatever `rootUri`/`workspaceFolders` the
     /// `initialize` request itself carries).
     pub fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
-        let resolved = fenix_rpc::resolve_command(command);
-        let mut child = Command::new(&resolved)
-            .args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        let mut process = Command::new(fenix_rpc::resolve_command(command));
+        process.args(args).current_dir(cwd);
+        Self::spawn_command(process)
+    }
+
+    /// Spawn a configured process, preserving its explicit arguments, cwd and environment.
+    pub fn spawn_command(mut process: Command) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
+        let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
         let stdin = child.stdin.take().expect("stdin was requested as piped");
         let stdout = child.stdout.take().expect("stdout was requested as piped");
@@ -266,19 +266,19 @@ mod tests {
     #[test]
     fn a_message_with_both_id_and_method_is_a_server_request() {
         let event = classify(request_msg(1, "workspace/configuration"));
-        assert!(matches!(event, LspEvent::ServerRequest { id, method, .. } if id == Value::from(1) && method == "workspace/configuration"));
+        assert!(matches!(event, LspEvent::ServerRequest { id, method, .. } if id == 1 && method == "workspace/configuration"));
     }
 
     #[test]
     fn a_message_with_method_but_no_id_is_a_notification() {
         let event = classify(RawMessage::notification("textDocument/publishDiagnostics", Value::from("params")));
-        assert!(matches!(event, LspEvent::Notification { method, params } if method == "textDocument/publishDiagnostics" && params == Value::from("params")));
+        assert!(matches!(event, LspEvent::Notification { method, params } if method == "textDocument/publishDiagnostics" && params == "params"));
     }
 
     #[test]
     fn a_successful_response_carries_ok_result() {
         let event = classify(RawMessage::response(Value::from(5), Ok(Value::from(42))));
-        assert!(matches!(event, LspEvent::Response { id: 5, result: Ok(v) } if v == Value::from(42)));
+        assert!(matches!(event, LspEvent::Response { id: 5, result: Ok(v) } if v == 42));
     }
 
     #[test]

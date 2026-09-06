@@ -16,12 +16,33 @@ use fenix_syntax::LanguageId;
 /// mid-session.
 pub fn client_capabilities() -> lsp_types::ClientCapabilities {
     lsp_types::ClientCapabilities {
+        workspace: Some(lsp_types::WorkspaceClientCapabilities {
+            apply_edit: Some(false),
+            workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                document_changes: Some(true),
+                resource_operations: Some(vec![]),
+                failure_handling: Some(lsp_types::FailureHandlingKind::Transactional),
+                normalizes_line_endings: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         text_document: Some(lsp_types::TextDocumentClientCapabilities {
             synchronization: Some(lsp_types::TextDocumentSyncClientCapabilities {
                 dynamic_registration: Some(false),
                 will_save: Some(false),
                 will_save_wait_until: Some(false),
                 did_save: Some(true),
+            }),
+            code_action: Some(lsp_types::CodeActionClientCapabilities {
+                dynamic_registration: Some(false),
+                disabled_support: Some(true),
+                code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
+                    code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                        value_set: vec!["quickfix".into(), "refactor".into(), "source".into()],
+                    },
+                }),
+                ..Default::default()
             }),
             publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities { ..Default::default() }),
             ..Default::default()

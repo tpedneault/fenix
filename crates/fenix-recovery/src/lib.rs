@@ -30,14 +30,14 @@ use std::time::SystemTime;
 /// in a way older Fenix can't read -- a snapshot with an unknown
 /// version is skipped rather than guessed at, since the whole point is
 /// to hand back exactly what was typed.
-const MAGIC: &str = "fenix-recovery 1";
+const MAGIC: &str = "fenix-recovery 2";
 
 /// One recovered file: where it came from, when it was written, and
 /// what was in the buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// The file the buffer was editing.
-    pub original: PathBuf,
+    /// The file the buffer was editing, or None for unnamed work.
+    pub original: Option<PathBuf>,
     pub saved_at: SystemTime,
     pub contents: String,
     /// The snapshot's own file, so a caller can delete exactly this one.
@@ -48,6 +48,10 @@ impl Snapshot {
     /// How long ago this was written, for a human-readable listing.
     /// `None` if the clock has moved backwards since (a reboot with a
     /// bad RTC, a VM restored from a saved state).
+    pub fn label(&self) -> String {
+        self.original.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unnamed buffer".to_string())
+    }
+
     pub fn age(&self) -> Option<std::time::Duration> {
         SystemTime::now().duration_since(self.saved_at).ok()
     }
@@ -100,9 +104,26 @@ fn path_key(original: &Path) -> String {
 pub fn write(dir: &Path, original: &Path, contents: &str) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let target = snapshot_path(dir, original);
-    let temp = target.with_extension("fenixsave.part");
+    write_snapshot(&target, Some(original), contents)?;
+    Ok(target)
+}
+
+/// Allocate a session-independent identity for an unnamed document.
+pub fn unnamed_path(dir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    dir.join(format!("unnamed-{}-{now}-{}.fenixsave", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
+pub fn write_unnamed(target: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+    write_snapshot(target, None, contents)
+}
+
+fn write_snapshot(target: &Path, original: Option<&Path>, contents: &str) -> io::Result<()> {
     let seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path_text = original.to_string_lossy();
+    let path_text = original.map(|p| p.to_string_lossy()).unwrap_or_default();
 
     let mut body = String::with_capacity(contents.len() + 128);
     body.push_str(MAGIC);
@@ -116,9 +137,7 @@ pub fn write(dir: &Path, original: &Path, contents: &str) -> io::Result<PathBuf>
     body.push('\n');
     body.push_str(contents);
 
-    std::fs::write(&temp, body)?;
-    std::fs::rename(&temp, &target)?;
-    Ok(target)
+    fenix_storage::write(target, body.as_bytes())
 }
 
 /// Removes the snapshot for `original`, if there is one.
@@ -168,7 +187,7 @@ pub fn prune(dir: &Path, max_age: std::time::Duration) -> usize {
 }
 
 fn parse(raw: &str, snapshot: PathBuf) -> Option<Snapshot> {
-    let rest = raw.strip_prefix(MAGIC)?.strip_prefix('\n')?;
+    let rest = raw.strip_prefix(MAGIC).or_else(|| raw.strip_prefix("fenix-recovery 1"))?.strip_prefix('\n')?;
     let (saved_line, rest) = rest.split_once('\n')?;
     let seconds: u64 = saved_line.strip_prefix("saved ")?.parse().ok()?;
     let (path_line, rest) = rest.split_once('\n')?;
@@ -182,7 +201,7 @@ fn parse(raw: &str, snapshot: PathBuf) -> Option<Snapshot> {
     let (original, rest) = rest.split_at(path_len);
     let contents = rest.strip_prefix('\n')?;
     Some(Snapshot {
-        original: PathBuf::from(original),
+        original: if original.is_empty() { None } else { Some(PathBuf::from(original)) },
         saved_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
         contents: contents.to_string(),
         snapshot,
@@ -215,6 +234,27 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_snapshot_round_trips_and_keeps_its_identity_on_update() {
+        let dir = TempDir::new("unnamed");
+        let path = unnamed_path(dir.path());
+        write_unnamed(&path, "first").unwrap();
+        write_unnamed(&path, "latest\r\n").unwrap();
+        let found = list(dir.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].original, None);
+        assert_eq!(found[0].snapshot, path);
+        assert_eq!(found[0].contents, "latest\r\n");
+    }
+
+    #[test]
+    fn reads_legacy_named_snapshot() {
+        let raw = "fenix-recovery 1\nsaved 1\npath 5\na.txt\nold work";
+        let snapshot = parse(raw, PathBuf::from("legacy.fenixsave")).unwrap();
+        assert_eq!(snapshot.original, Some(PathBuf::from("a.txt")));
+        assert_eq!(snapshot.contents, "old work");
+    }
+
+    #[test]
     fn a_snapshot_round_trips_exactly_what_was_in_the_buffer() {
         let dir = TempDir::new("round_trip");
         let original = Path::new("/home/thomas/project/src/main.rs");
@@ -223,7 +263,7 @@ mod tests {
         let found = list(dir.path());
 
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].original, original);
+        assert_eq!(found[0].original, Some(original.to_path_buf()));
         assert_eq!(found[0].contents, "fn main() {}\n");
     }
 
@@ -249,7 +289,7 @@ mod tests {
         write(dir.path(), &original, "body\n").unwrap();
 
         let found = list(dir.path());
-        assert_eq!(found[0].original, original);
+        assert_eq!(found[0].original, Some(original.to_path_buf()));
         assert_eq!(found[0].contents, "body\n");
     }
 
@@ -295,7 +335,7 @@ mod tests {
 
         let found = list(dir.path());
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].original, PathBuf::from("/a/two.txt"));
+        assert_eq!(found[0].original, Some(PathBuf::from("/a/two.txt")));
     }
 
     #[test]

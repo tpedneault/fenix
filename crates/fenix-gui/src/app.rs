@@ -1,3 +1,8 @@
+mod refactor;
+mod tool_sessions;
+mod session;
+use tool_sessions::LspKey;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -442,6 +447,7 @@ impl Drop for DockerLogFollower {
 /// to re-derive it from whatever buffer happens to be focused by the
 /// time either fires.
 struct TaskSession {
+    cwd: PathBuf,
     workspace_index: usize,
     pane: fenix_window::WindowId,
     buffer: BufferId,
@@ -449,9 +455,10 @@ struct TaskSession {
     /// The live child, if a task is still running -- `None` once it
     /// finishes (`App::finish_task_run` drops it) or before the very
     /// first task in this session has been run. Held only for its
-    /// `Drop` side effect (see `TaskRunner`'s own doc comment) beyond
-    /// what `App::kill_running_task` explicitly calls `kill` on.
-    runner: Option<TaskRunner>,
+    /// cancellation-on-drop contract; all process and pipe ownership is in
+    /// fenix-tasks, so closing a pane never joins a worker.
+    runner: Option<fenix_tasks::TaskRunner>,
+    run_id: Option<fenix_tasks::RunId>,
 }
 
 /// The History view's session (`SPC g l`) -- the commit graph, the refs
@@ -507,7 +514,7 @@ struct CompareSession {
 /// to `len`. Together they catch essentially everything, and whatever
 /// they miss costs nothing, because the save guard reads the file
 /// outright before writing over it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DiskFingerprint {
     mtime: Option<std::time::SystemTime>,
     len: u64,
@@ -780,118 +787,6 @@ struct ToolStatusSession {
     buffer: BufferId,
 }
 
-/// One running task's child process plus the threads streaming its
-/// output -- shaped like `DockerLogFollower`, with two differences a
-/// task actually needs that a `docker logs -f` follow never did: stdout
-/// *and* stderr both matter (a compiler's diagnostics are conventionally
-/// on stderr, unlike Docker's own combined-stream logs), and a task
-/// genuinely *finishes* with an exit status worth reporting, rather than
-/// streaming until deliberately killed. `child` is `Arc<Mutex<_>>`
-/// (`DockerLogFollower`'s plain owned `Child` is enough for a follower,
-/// since nothing but its own `Drop` ever touches it) because both the
-/// dedicated wait thread below *and* `App::kill_running_task` need to
-/// reach the same process.
-struct TaskRunner {
-    child: Arc<Mutex<std::process::Child>>,
-    stop: Arc<AtomicBool>,
-    stdout_handle: Option<JoinHandle<()>>,
-    stderr_handle: Option<JoinHandle<()>>,
-    wait_handle: Option<JoinHandle<()>>,
-}
-
-impl TaskRunner {
-    /// `send` mirrors `DockerLogFollower::spawn`'s own callback shape,
-    /// for the same "testable without a real winit `EventLoop`" reason
-    /// -- wrapped in an `Arc` internally (rather than requiring the
-    /// caller's closure itself to be `Clone`) since three threads below
-    /// each need their own handle to it.
-    fn spawn(mut child: std::process::Child, buffer_id: BufferId, send: impl Fn(FenixUserEvent) -> bool + Send + Sync + 'static) -> Self {
-        let send = Arc::new(send);
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let stdout_handle = child.stdout.take().map(|stdout| {
-            let (send, thread_stop) = (send.clone(), stop.clone());
-            std::thread::spawn(move || {
-                use std::io::BufRead;
-                for line in std::io::BufReader::new(stdout).lines() {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let Ok(line) = line else { break };
-                    if !send(FenixUserEvent::TaskOutputLine(buffer_id, line)) {
-                        return;
-                    }
-                }
-            })
-        });
-        let stderr_handle = child.stderr.take().map(|stderr| {
-            let (send, thread_stop) = (send.clone(), stop.clone());
-            std::thread::spawn(move || {
-                use std::io::BufRead;
-                for line in std::io::BufReader::new(stderr).lines() {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let Ok(line) = line else { break };
-                    if !send(FenixUserEvent::TaskOutputLine(buffer_id, line)) {
-                        return;
-                    }
-                }
-            })
-        });
-
-        let child = Arc::new(Mutex::new(child));
-        let wait_handle = Some({
-            let (send, thread_stop, wait_child) = (send.clone(), stop.clone(), child.clone());
-            std::thread::spawn(move || {
-                let status = wait_child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).wait().ok();
-                // A deliberate `kill()` (`Drop`/`App::kill_running_task`)
-                // also makes `wait()` return -- the `stop` flag is what
-                // tells this apart from a genuine finish, same
-                // distinction `DockerLogFollower`'s own EOF handling
-                // already draws for the same reason.
-                if !thread_stop.load(Ordering::Relaxed) {
-                    let _ = send(FenixUserEvent::TaskFinished(buffer_id, status.map(|s| s.success())));
-                }
-            })
-        });
-
-        Self { child, stop, stdout_handle, stderr_handle, wait_handle }
-    }
-
-    /// `SPC t k` -- ends the task early. Just a kill, not a full
-    /// teardown (`Drop` still runs when the session's `runner` field is
-    /// eventually replaced/dropped) -- the wait thread's own `stop`-
-    /// guarded check above is what keeps this from also emitting a
-    /// spurious `TaskFinished` on top of whatever explicit "killed"
-    /// marker the caller appends itself.
-    fn kill(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-        }
-    }
-}
-
-impl Drop for TaskRunner {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-            let _ = child.wait(); // reap, avoid a zombie process
-        }
-        if let Some(handle) = self.stdout_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.stderr_handle.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.wait_handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 /// The active DAP debug session (`SPC u u`), if any -- four fixed panes
 /// (Call Stack / Variables / Watches / Breakpoints) in their own
 /// workspace, all sharing `BufferKind::Debug` the way `DockerSession`'s
@@ -902,6 +797,9 @@ impl Drop for TaskRunner {
 /// `continued`/`terminated` event or a request's own response landing,
 /// which happen exactly when there's something new to show.
 struct DebugSession {
+    language: fenix_syntax::LanguageId,
+    generation: u64,
+    launch_attributes: serde_json::Map<String, serde_json::Value>,
     workspace_index: usize,
     call_stack_pane: fenix_window::WindowId,
     variables_pane: fenix_window::WindowId,
@@ -921,15 +819,8 @@ struct DebugSession {
     /// *for*, keyed by the `seq` `DapClient::request` returned -- same
     /// role as `LspSession::pending`.
     pending: HashMap<i64, PendingDapRequest>,
-    /// The project root this session was launched from -- not read
-    /// anywhere yet (every path in play, `program` included, is
-    /// already absolute), kept for the same forward-looking reason as
-    /// `LspSession::root`: real future work here (multi-file breakpoint
-    /// resolution against relative adapter-reported paths, a restart
-    /// that re-reads `.fenix/project.ini`) will need it.
-    #[allow(dead_code)]
+    /// Project ownership for controls, breakpoints, and source-path resolution.
     root: PathBuf,
-    program: PathBuf,
     /// Set once the adapter's `initialized` event has arrived -- gates
     /// sending `setBreakpoints`/`configurationDone`, which per spec
     /// can't go out before that (the adapter isn't necessarily ready to
@@ -1605,13 +1496,14 @@ struct PdfSession {
     last_search_query: String,
 }
 
-/// One running language server for one `fenix_syntax::LanguageId`.
+/// One running language server for one language and canonical project root.
 /// Unlike `VncSession`/`PdfSession`/etc., this has no pane/buffer/
 /// workspace of its own -- a language server has no UI surface by
 /// itself; it's attached to whichever ordinary text buffers share its
 /// language, feeding diagnostics/completion/hover/etc. into panes that
 /// already exist for other reasons.
 struct LspSession {
+    generation: u64,
     client: fenix_lsp::LspClient,
     /// The project root this session was spawned for (`ensure_lsp_
     /// session`'s own `cwd`) -- kept around so the `initialize`
@@ -1664,9 +1556,9 @@ enum PendingLspRequest {
     Hover { buffer: BufferId },
     Definition { buffer: BufferId },
     References { buffer: BufferId },
-    Rename { buffer: BufferId },
-    CodeAction { buffer: BufferId },
-    Format { buffer: BufferId },
+    Rename { buffer: BufferId, context: refactor::Context },
+    CodeAction { buffer: BufferId, context: refactor::Context },
+    Format { buffer: BufferId, revision: u64 },
     Completion { buffer: BufferId, prefix_start: usize },
 }
 
@@ -1683,7 +1575,7 @@ struct LspReader {
 }
 
 impl LspReader {
-    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, language: fenix_syntax::LanguageId, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, language: LspKey, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = std::thread::spawn(move || loop {
@@ -1696,7 +1588,7 @@ impl LspReader {
                         return;
                     }
                     let disconnected = matches!(event, fenix_lsp::LspEvent::Disconnected(_));
-                    if !send(FenixUserEvent::Lsp { language, event }) || disconnected {
+                    if !send(FenixUserEvent::Lsp { language: language.clone(), generation, event }) || disconnected {
                         return;
                     }
                 }
@@ -1728,7 +1620,7 @@ struct DapReader {
 }
 
 impl DapReader {
-    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_dap::DapEvent>, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_dap::DapEvent>, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = std::thread::spawn(move || loop {
@@ -1741,7 +1633,7 @@ impl DapReader {
                         return;
                     }
                     let disconnected = matches!(event, fenix_dap::DapEvent::Disconnected(_));
-                    if !send(FenixUserEvent::Dap(event)) || disconnected {
+                    if !send(FenixUserEvent::Dap { generation, event }) || disconnected {
                         return;
                     }
                 }
@@ -2099,12 +1991,11 @@ pub enum FenixUserEvent {
     /// explicitly since more than one server can be live at once and
     /// events from a slow-to-answer one can arrive well after focus
     /// moved to a different language's buffer.
-    Lsp { language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent },
+    Lsp { language: LspKey, generation: u64, event: fenix_lsp::LspEvent },
     /// One decoded event from the active debug session's adapter
     /// connection, from `DapReader` -- only one debug session is ever
-    /// live at a time (unlike LSP's per-language map), so this carries
-    /// no extra key.
-    Dap(fenix_dap::DapEvent),
+    /// live at a time. The generation rejects queued events from a retired adapter.
+    Dap { generation: u64, event: fenix_dap::DapEvent },
     /// A fresh `docker stats --no-stream` snapshot, from the active
     /// Docker session's background poller.
     StatsReady(Vec<fenix_docker::ContainerStat>),
@@ -2119,19 +2010,9 @@ pub enum FenixUserEvent {
     /// the Details pane show a "log stream ended" marker instead of
     /// just silently going stale.
     LogEnded(BufferId),
-    /// One new line of a running task's stdout or stderr (both feed the
-    /// same event, see `TaskRunner`'s own doc comment for why) --
-    /// carries the target `BufferId` explicitly, same reasoning as
-    /// `LogLine`.
-    TaskOutputLine(BufferId, String),
-    /// A running task's child process exited -- `Some(true)`/`Some(false)`
-    /// for a clean success/failure exit, `None` if its status couldn't be
-    /// determined at all (killed by a signal on a platform that doesn't
-    /// report one, or the wait itself failed). Lets the Task Output panel
-    /// show a final "succeeded"/"failed" marker instead of just quietly
-    /// going stale the way `LogEnded` already does for Docker's own log
-    /// follower.
-    TaskFinished(BufferId, Option<bool>),
+    /// Ordered task output/completion tagged by run identity. The same buffer
+    /// can display a newer run before the previous run's events are delivered.
+    TaskEvent(BufferId, fenix_tasks::RunId, fenix_tasks::TaskEvent),
     /// A fresh `git status --porcelain=v2 --branch` snapshot (`None`
     /// outside a repo), from the active Git session's background
     /// poller.
@@ -4775,7 +4656,8 @@ struct JiraEditSession {
 fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
     matches!(
         kind,
-        BufferKind::Docker
+        BufferKind::WorkspaceEdit
+            | BufferKind::Docker
             | BufferKind::Git
             | BufferKind::Jira
             | BufferKind::Vnc
@@ -5218,6 +5100,8 @@ pub struct App {
     /// synchronously -- the edit only lands once the server answers,
     /// see `PendingLspRequest::Rename`).
     lsp_rename_prompt: Option<String>,
+    refactor_preview: Option<refactor::Preview>,
+    refactor_undo: Option<refactor::Undo>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
     /// shape as `rename_file_prompt`. Lives on `App` rather than per
@@ -5302,11 +5186,8 @@ pub struct App {
     /// The active build/task runner's single-pane session (`SPC t t`),
     /// if any -- see `TaskSession`'s own doc comment.
     task_session: Option<TaskSession>,
-    /// The most recently run task, plus the project root it was run
-    /// from -- what `SPC t r` reruns without going back through the
-    /// picker. `None` until a task has actually been run at least once
-    /// this session.
-    last_task: Option<(fenix_tasks::TaskDef, PathBuf)>,
+    /// Last task per canonical project root, used by `SPC t r`.
+    project_last_tasks: HashMap<PathBuf, fenix_tasks::TaskDef>,
     /// The active DAP debug session (`SPC u u`), if any -- see
     /// `DebugSession`'s own doc comment.
     debug_session: Option<DebugSession>,
@@ -5371,10 +5252,13 @@ pub struct App {
     /// when the config directory can't be found at all, in which case
     /// the whole feature quietly does nothing rather than failing on
     /// every keystroke.
+    session: session::State,
     recovery_dir: Option<PathBuf>,
     /// Each dirty buffer's `edit_count` as of its last snapshot, so an
     /// unchanged buffer isn't rewritten every tick.
     snapshot_state: HashMap<BufferId, u64>,
+    unnamed_snapshots: HashMap<BufferId, PathBuf>,
+    recovery_failures: HashMap<BufferId, String>,
     /// When the next sweep is due. Driven from `about_to_wait`'s own
     /// `WaitUntil` deadline rather than a poller thread: `stat` on a
     /// handful of open files is far cheaper than a thread and a channel,
@@ -5428,7 +5312,8 @@ pub struct App {
     /// proven with one server end-to-end first, widened when a second
     /// server actually gets wired in, same "prove it, then generalize"
     /// order the transport itself was already built in.
-    lsp_sessions: HashMap<fenix_syntax::LanguageId, LspSession>,
+    lsp_sessions: HashMap<LspKey, LspSession>,
+    lsp_unavailable: std::collections::HashSet<LspKey>,
     /// The most recent `textDocument/publishDiagnostics` for each file,
     /// keyed by its canonical path (LSP publishes per-URI regardless of
     /// whether a buffer for it is currently open, so this can't be keyed
@@ -5961,6 +5846,8 @@ impl App {
     pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>, file_arg: Option<String>) -> Self {
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
+        app.session.path = fenix_config::Config::default_path().map(|p| p.with_file_name("session.json"));
+        app.restore_session(file_arg.is_some());
         // Recording lives here, not inside `with_file` -- `with_file` is
         // what the test suite calls directly to simulate "opened with
         // this file," and recording there would mean every such test
@@ -5982,9 +5869,9 @@ impl App {
                 // entry in the buffer switcher nobody asked for.
                 let placeholder = app.focused_buffer_id();
                 app.open_pdf_path(path);
-                app.buffers.close(placeholder);
+                if app.session.pending.is_none() { app.buffers.close(placeholder); }
             } else {
-                app.record_recent_file(path);
+                app.open_startup_file(path);
             }
         }
         app.announce_recoverable_work();
@@ -6129,7 +6016,7 @@ impl App {
             pane_titles: HashMap::new(),
             docker_session: None,
             task_session: None,
-            last_task: None,
+            project_last_tasks: HashMap::new(),
             debug_session: None,
             breakpoints: HashMap::new(),
             tool_status_session: None,
@@ -6147,8 +6034,11 @@ impl App {
             // through it -- which it did, until this was noticed.
             // Tests that exercise recovery point this at a temp
             // directory of their own.
+            session: session::State::default(),
             recovery_dir: if cfg!(test) { None } else { fenix_recovery::default_dir() },
             snapshot_state: HashMap::new(),
+            unnamed_snapshots: HashMap::new(),
+            recovery_failures: HashMap::new(),
             next_disk_check: Instant::now() + DISK_CHECK_INTERVAL,
             diff_lines: HashMap::new(),
             diff_models: HashMap::new(),
@@ -6164,6 +6054,7 @@ impl App {
             jira_session: None,
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
+            lsp_unavailable: std::collections::HashSet::new(),
             diagnostics: HashMap::new(),
             lsp_hover: None,
             vnc_upload_scratch: Vec::new(),
@@ -6202,6 +6093,8 @@ impl App {
             pdf_search_prompt: None,
             rename_file_prompt: None,
             lsp_rename_prompt: None,
+            refactor_preview: None,
+            refactor_undo: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,
             vim,
@@ -6485,6 +6378,7 @@ impl App {
     /// which is the whole reason this records rectangles instead of
     /// monitor names (see `fenix_config::WindowLayout`).
     fn restore_saved_windows(&mut self, event_loop: &ActiveEventLoop) {
+        if self.restore_session_frames(event_loop) { return; }
         if self.config.restore_windows == Some(false) {
             return;
         }
@@ -6846,8 +6740,9 @@ impl App {
     fn sync_lsp_for_focused_buffer(&mut self) {
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
-        let cwd = self.project_root.clone().unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")));
+        let cwd = tool_sessions::root_for_path(&path);
         self.ensure_lsp_session(language, &cwd);
+        let language = LspKey { language, root: cwd };
 
         // `fenix_lsp::normalize` strips Windows' `\\?\` verbatim prefix
         // (which `canonicalize` always adds there) -- everywhere else
@@ -6872,7 +6767,7 @@ impl App {
         match session.open_documents.get(&canonical).copied() {
             None => {
                 let params = lsp_types::DidOpenTextDocumentParams {
-                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language), version: 0, text },
+                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language.language), version: 0, text },
                 };
                 if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
                     session.open_documents.insert(canonical, (edit_count, 1));
@@ -6904,19 +6799,25 @@ impl App {
     /// posture as completion quietly having nothing to offer for a
     /// language with no ctags support).
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
-        if self.lsp_sessions.contains_key(&language) {
-            return;
-        }
-        let Some((program, args)) = crate::lsp::resolve_server_command(language, &self.config.lsp_servers) else { return };
-        match fenix_lsp::LspClient::spawn(&program, &args, cwd) {
+        let key = LspKey { language, root: fenix_lsp::normalize(refactor::identity(cwd)) };
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
+            Ok(config) => config,
+            Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
+        };
+        let spec = configured.lsp.get(&crate::lsp::language_config_name(language)).cloned().or_else(|| {
+            crate::lsp::resolve_server_command(language, &self.config.lsp_servers).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
+        });
+        let Some(spec) = spec else { self.lsp_unavailable.insert(key); return };
+        let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+        match spawned {
             Ok((client, receiver)) => {
-                let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, language, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(language, LspSession { client, root: cwd.to_path_buf(), reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
-                self.send_lsp_initialize(language, cwd);
+                let generation = tool_sessions::generation();
+                let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
+                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
+                self.send_lsp_initialize(key, cwd);
             }
-            Err(err) => {
-                self.set_error(format!("couldn't start {program} for {language:?}: {err}"));
-            }
+            Err(err) => { self.lsp_unavailable.insert(key); self.set_error(format!("couldn't start {} for {}: {err}", spec.executable, cwd.display())); },
         }
     }
 
@@ -6929,7 +6830,7 @@ impl App {
     /// increments), so its response is always id 1 -- relied on by
     /// `apply_lsp_event` instead of a general pending-request map, which
     /// nothing else needs yet.
-    fn send_lsp_initialize(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
+    fn send_lsp_initialize(&mut self, language: LspKey, cwd: &Path) {
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
@@ -6946,7 +6847,8 @@ impl App {
     }
 
     /// Dispatches one decoded event from a language server's connection.
-    fn apply_lsp_event(&mut self, language: fenix_syntax::LanguageId, event: fenix_lsp::LspEvent) {
+    fn apply_lsp_event(&mut self, language: LspKey, generation: u64, event: fenix_lsp::LspEvent) {
+        if !self.lsp_sessions.get(&language).is_some_and(|s| s.generation == generation) { return; }
         match event {
             fenix_lsp::LspEvent::Response { id, result } => {
                 let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
@@ -6956,7 +6858,7 @@ impl App {
             fenix_lsp::LspEvent::Notification { method, params } => {
                 if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
                     if let Ok(diagnostics) = serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
-                        self.apply_lsp_diagnostics(diagnostics);
+                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
                     }
                 }
             }
@@ -6971,8 +6873,11 @@ impl App {
                 }
             }
             fenix_lsp::LspEvent::Disconnected(reason) => {
-                self.lsp_sessions.remove(&language);
+                if let Some(session) = self.lsp_sessions.remove(&language) {
+                    for path in session.open_documents.keys() { self.diagnostics.remove(path); }
+                }
                 self.set_error(format!("{language:?} language server disconnected: {reason}"));
+                self.lsp_unavailable.insert(language);
             }
         }
     }
@@ -6980,7 +6885,7 @@ impl App {
     /// Routes one arrived response to whatever `pending` says the
     /// original request was for -- the single dispatch point every
     /// request-sending method's eventual answer passes through.
-    fn apply_lsp_response(&mut self, language: fenix_syntax::LanguageId, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
+    fn apply_lsp_response(&mut self, language: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         match pending {
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
@@ -6999,7 +6904,7 @@ impl App {
                         // client never declared `workspace/configuration`
                         // pull support, so a push right after `initialized`
                         // is the one required step, not just an optimization.
-                        if language == fenix_syntax::LanguageId::Python {
+                        if language.language == fenix_syntax::LanguageId::Python {
                             let env = fenix_lsp::per_language::python::resolve(&session.root);
                             let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
                             let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
@@ -7037,27 +6942,30 @@ impl App {
                     }
                 }
             }
-            PendingLspRequest::Rename { buffer } => match result {
-                Ok(value) => {
-                    if let Some(edit) = serde_json::from_value::<Option<lsp_types::WorkspaceEdit>>(value).ok().flatten() {
-                        if buffer == self.focused_buffer_id() {
-                            self.apply_lsp_workspace_edit(edit);
-                        }
-                    }
-                }
+            PendingLspRequest::Rename { buffer, context } => match result {
+                Ok(value) => match serde_json::from_value::<Option<lsp_types::WorkspaceEdit>>(value) {
+                    Ok(Some(edit)) if buffer == self.focused_buffer_id() => self.preview_lsp_edit(edit, context),
+                    Ok(Some(_)) => self.set_error("rename cancelled: focus changed; request it again"),
+                    Ok(None) => self.set_message("no rename changes proposed"),
+                    Err(error) => self.set_error(format!("invalid rename response: {error}")),
+                },
                 Err(err) => self.set_error(format!("rename failed: {}", err.message)),
             },
-            PendingLspRequest::CodeAction { buffer } => {
-                if let Ok(Some(actions)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::CodeActionOrCommand>>>(v).ok().flatten()) {
-                    if buffer == self.focused_buffer_id() {
-                        self.apply_lsp_code_actions(language, actions);
-                    }
-                }
-            }
-            PendingLspRequest::Format { buffer } => {
+            PendingLspRequest::CodeAction { buffer, context } => match result {
+                Ok(value) => match serde_json::from_value::<Option<Vec<lsp_types::CodeActionOrCommand>>>(value) {
+                    Ok(Some(actions)) if buffer == self.focused_buffer_id() => self.preview_lsp_actions(actions, context),
+                    Ok(Some(_)) => self.set_error("code actions cancelled: focus changed; request them again"),
+                    Ok(None) => self.set_message("no code actions available"),
+                    Err(error) => self.set_error(format!("invalid code action response: {error}")),
+                },
+                Err(err) => self.set_error(format!("code actions failed: {}", err.message)),
+            },
+            PendingLspRequest::Format { buffer, revision } => {
                 if let Ok(Some(edits)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::TextEdit>>>(v).ok().flatten()) {
-                    if buffer == self.focused_buffer_id() {
+                    if self.buffers.get(buffer).is_some_and(|ob| ob.buffer.edit_count() == revision) {
                         self.apply_lsp_text_edits(buffer, edits);
+                    } else {
+                        self.set_error("formatting rejected: document changed while waiting for the server");
                     }
                 }
             }
@@ -7091,11 +6999,12 @@ impl App {
     /// for a *different* buffer's `didOpen` before this one's has landed).
     /// The shared precondition every LSP request this app sends starts
     /// from (`gd`/`gr`/`K`/rename/code actions/format all begin here).
-    fn focused_lsp_context(&self) -> Option<(fenix_syntax::LanguageId, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+    fn focused_lsp_context(&self) -> Option<(LspKey, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
         let language = fenix_syntax::detect_language_from_path(path)?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        let language = LspKey { language, root: tool_sessions::root_for_path(path) };
         let session = self.lsp_sessions.get(&language)?;
         session.capabilities.as_ref()?;
         if !session.open_documents.contains_key(&canonical) {
@@ -7106,26 +7015,13 @@ impl App {
         Some((language, lsp_types::TextDocumentIdentifier { uri }, position))
     }
 
-    /// Finds the already-open buffer (if any) for a path that came from
-    /// an LSP URI -- tries an exact `BufferList::id_for_path` match
-    /// first (works whenever the buffer's own stored path is already
-    /// exactly this), then falls back to comparing the *focused*
-    /// buffer's own canonicalized path (the common case this exists
-    /// for: a rename/code action/format response for whatever's
-    /// currently being edited, where the stored path may be a
-    /// differently-spelled-but-equivalent representation of the same
-    /// file -- see `fenix_lsp::normalize`'s own doc comment). Doesn't
-    /// open anything -- see `apply_lsp_workspace_edit`'s own doc comment
-    /// for why a path with no open buffer is simply skipped rather than
-    /// opened invisibly.
+    /// Match all open documents by filesystem identity, including nonfocused
+    /// buffers reached through an alternate path or symlink.
     fn buffer_id_for_lsp_path(&self, path: &Path) -> Option<BufferId> {
-        if let Some(id) = self.buffers.id_for_path(path) {
-            return Some(id);
-        }
-        let focused = self.focused_buffer_id();
-        let focused_path = self.buffers.get(focused)?.buffer.path()?;
-        let focused_canonical = fenix_lsp::normalize(std::fs::canonicalize(focused_path).unwrap_or_else(|_| focused_path.to_path_buf()));
-        (focused_canonical == path).then_some(focused)
+        let canonical = refactor::identity(path);
+        self.buffers.ids_sorted_by_path().into_iter().find(|id| {
+            self.buffers.get(*id).and_then(|ob| ob.buffer.path()).is_some_and(|p| refactor::identity(p) == canonical)
+        })
     }
 
     /// Moves the focused pane's cursor to an LSP `Position` within
@@ -7205,81 +7101,17 @@ impl App {
     /// position: an edit earlier in the document never shifts the
     /// position of one later in it as long as the later one is applied
     /// first.
-    fn apply_lsp_text_edits(&mut self, buffer_id: BufferId, mut edits: Vec<lsp_types::TextEdit>) {
-        edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+    fn apply_lsp_text_edits(&mut self, buffer_id: BufferId, edits: Vec<lsp_types::TextEdit>) {
         let Some(ob) = self.buffers.get_mut(buffer_id) else { return };
-        for edit in edits {
-            let start = fenix_lsp::position_to_char_offset(ob.buffer.rope(), edit.range.start);
-            let end = fenix_lsp::position_to_char_offset(ob.buffer.rope(), edit.range.end);
-            ob.buffer.replace_range(&mut ob.cursor, start, end, &edit.new_text);
-        }
-    }
-
-    /// Applies a server's `WorkspaceEdit` (rename's result, or a code
-    /// action's) -- limited to buffers *already open*
-    /// (`buffer_id_for_lsp_path`): opening every file a multi-file edit
-    /// touches, applying it, and saving automatically is real scope
-    /// beyond what this needs yet (most renames pyright/rust-analyzer
-    /// produce for a local symbol stay within one file anyway). A path
-    /// with no open buffer is silently skipped rather than edited
-    /// invisibly on disk behind a file the user never asked to have
-    /// touched without seeing it happen.
-    ///
-    /// Reads both shapes a `WorkspaceEdit` can arrive in: the plain
-    /// `changes` map this client's own capabilities ask for (`lsp::
-    /// client_capabilities` declares no `workspace.workspaceEdit`
-    /// block at all, which per spec should keep a server on this
-    /// simpler shape), and `document_changes`' `TextDocumentEdit` list,
-    /// which pyright sends regardless in practice -- confirmed live
-    /// against a real pyright rename, which came back empty-handed
-    /// (`changes: None`) until this fallback was added. A resource
-    /// operation entry (`document_changes`' `Operations` variant --
-    /// create/rename/delete a whole file) is skipped for the same
-    /// reason cross-file edits already are: nothing here opens or
-    /// creates files on a server's say-so.
-    fn apply_lsp_workspace_edit(&mut self, edit: lsp_types::WorkspaceEdit) {
-        let per_file: Vec<(lsp_types::Uri, Vec<lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
-            changes.into_iter().collect()
-        } else {
-            match edit.document_changes {
-                Some(lsp_types::DocumentChanges::Edits(edits)) => edits
-                    .into_iter()
-                    .map(|e| {
-                        let edits = e.edits.into_iter().map(|oe| match oe {
-                            lsp_types::OneOf::Left(edit) => edit,
-                            lsp_types::OneOf::Right(annotated) => annotated.text_edit,
-                        });
-                        (e.text_document.uri, edits.collect())
-                    })
-                    .collect(),
-                _ => Vec::new(),
+        if !ob.kind.tracks_unsaved_changes() { self.set_error("cannot edit a read-only panel"); return; }
+        match fenix_lsp::workspace_edit::apply_text_edits(&ob.buffer.text(), &edits) {
+            Ok(text) => {
+                if text != ob.buffer.text() {
+                    let end = ob.buffer.len_chars();
+                    ob.buffer.replace_range(&mut ob.cursor, 0, end, &text);
+                }
             }
-        };
-        for (uri, edits) in per_file {
-            let Some(path) = fenix_lsp::uri_to_path(&uri) else { continue };
-            let Some(buffer_id) = self.buffer_id_for_lsp_path(&path) else { continue };
-            self.apply_lsp_text_edits(buffer_id, edits);
-        }
-    }
-
-    /// `textDocument/codeAction`'s response: a `Command` entry (a
-    /// server-side action with no client-applicable edit of its own,
-    /// e.g. "organize imports" some servers implement as a command
-    /// rather than a `WorkspaceEdit`) is skipped -- executing an
-    /// arbitrary server-defined command is real scope beyond applying
-    /// an edit this app already knows how to interpret. Only one action
-    /// exists today: whichever's `WorkspaceEdit` is present is applied
-    /// immediately, no picker -- `SPC c a` becomes a real chooser once
-    /// more than one meaningfully-different action is common enough to
-    /// justify it.
-    fn apply_lsp_code_actions(&mut self, _language: fenix_syntax::LanguageId, actions: Vec<lsp_types::CodeActionOrCommand>) {
-        let edit = actions.into_iter().find_map(|action| match action {
-            lsp_types::CodeActionOrCommand::CodeAction(action) => action.edit,
-            lsp_types::CodeActionOrCommand::Command(_) => None,
-        });
-        match edit {
-            Some(edit) => self.apply_lsp_workspace_edit(edit),
-            None => self.set_error("no applicable code action".to_string()),
+            Err(error) => self.set_error(format!("LSP edits rejected: {error}")),
         }
     }
 
@@ -7383,8 +7215,10 @@ impl App {
     /// editors send when the caller isn't a Visual selection -- Fenix
     /// has no separate "code action for this selection" entry point yet).
     pub(crate) fn request_code_action(&mut self) {
+        self.sync_lsp_for_focused_buffer();
         let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
+        let context = self.refactor_context(language.language);
         let diagnostics = self.open().buffer.path().and_then(|p| std::fs::canonicalize(p).ok()).and_then(|p| self.diagnostics.get(&fenix_lsp::normalize(p)).cloned()).unwrap_or_default();
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
         let line_range = lsp_types::Range { start: lsp_types::Position { line: position.line, character: 0 }, end: lsp_types::Position { line: position.line, character: u32::MAX } };
@@ -7396,7 +7230,7 @@ impl App {
             partial_result_params: Default::default(),
         };
         if let Ok(id) = session.client.request::<lsp_types::request::CodeActionRequest>(params) {
-            session.pending.insert(id, PendingLspRequest::CodeAction { buffer });
+            session.pending.insert(id, PendingLspRequest::CodeAction { buffer, context });
         }
     }
 
@@ -7411,8 +7245,10 @@ impl App {
     /// doesn't use yet, so a selection-scoped format still asks for and
     /// gets the whole file reformatted.
     pub(crate) fn request_lsp_format(&mut self) -> bool {
+        self.sync_lsp_for_focused_buffer();
         let Some((language, text_document, _)) = self.focused_lsp_context() else { return false };
         let buffer = self.focused_buffer_id();
+        let revision = self.open().buffer.edit_count();
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return false };
         if !session.capabilities.as_ref().is_some_and(|c| matches!(c.document_formatting_provider, Some(lsp_types::OneOf::Left(true)) | Some(lsp_types::OneOf::Right(_)))) {
             return false;
@@ -7424,7 +7260,7 @@ impl App {
         };
         match session.client.request::<lsp_types::request::Formatting>(params) {
             Ok(id) => {
-                session.pending.insert(id, PendingLspRequest::Format { buffer });
+                session.pending.insert(id, PendingLspRequest::Format { buffer, revision });
                 true
             }
             Err(_) => false,
@@ -7502,16 +7338,18 @@ impl App {
     }
 
     fn send_lsp_rename(&mut self, new_name: &str) {
+        self.sync_lsp_for_focused_buffer();
         let new_name = new_name.trim();
         if new_name.is_empty() {
             return;
         }
         let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
+        let context = self.refactor_context(language.language);
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
         let params = lsp_types::RenameParams { text_document_position: lsp_types::TextDocumentPositionParams { text_document, position }, new_name: new_name.to_string(), work_done_progress_params: Default::default() };
         if let Ok(id) = session.client.request::<lsp_types::request::Rename>(params) {
-            session.pending.insert(id, PendingLspRequest::Rename { buffer });
+            session.pending.insert(id, PendingLspRequest::Rename { buffer, context });
         }
     }
 
@@ -8089,10 +7927,41 @@ impl App {
     /// did between the buffer being read and this keystroke is gone,
     /// with nothing to recover it from. Both ways out are offered by
     /// name, because "your file changed" is useless without them.
+    fn save_unnamed_as(&mut self, input: &str) {
+        if self.open().buffer.path().is_some() {
+            self.set_error("this buffer already has a path; use :w to save or the file rename command");
+            return;
+        }
+        if !self.open().kind.tracks_unsaved_changes() {
+            self.set_error("this panel cannot be saved as a document");
+            return;
+        }
+        let path = PathBuf::from(input);
+        let path = if path.is_absolute() { path } else {
+            self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join(path)
+        };
+        // Naming a scratch document must never overwrite another document.
+        if path.exists() || self.buffers.id_for_path(&path).is_some() {
+            self.set_error("destination already exists or is open; choose a new file name");
+            return;
+        }
+        let id = self.focused_buffer_id();
+        match self.open_mut().buffer.save_new(&path) {
+            Ok(()) => {
+                self.buffers.path_changed(id, None);
+                self.note_disk_state(id);
+                self.discard_recovery_for(id);
+                self.refresh_project_root();
+                self.set_message(format!("saved {}", path.display()));
+            }
+            Err(err) => self.set_error(format!("save failed: {err}")),
+        }
+    }
+
     fn save_inner(&mut self, force: bool) {
         let id = self.focused_buffer_id();
         if self.open().buffer.path().is_none() {
-            self.set_error("no file path to save to yet; pass a file path as the first argument");
+            self.set_error("no file path to save to yet; use :w <path>");
             return;
         }
         if !force {
@@ -8276,7 +8145,7 @@ impl App {
     /// next key" shape as `docker_confirm_key`/`git_confirm_key`.
     fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
         match self.resolve_quit_confirm_action(keypress) {
-            QuitConfirmAction::Quit => event_loop.exit(),
+            QuitConfirmAction::Quit => { if self.discard_session_edits() { event_loop.exit(); } },
             QuitConfirmAction::ShowDirtyBuffers => self.picker_switch_dirty_buffers(),
             QuitConfirmAction::Cancel => {}
         }
@@ -11745,6 +11614,7 @@ impl App {
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
+        if self.refactor_preview.as_ref().is_some_and(|p| p.buffer == id) { self.refactor_preview = None; }
         if self.project_replace.as_ref().is_some_and(|s| s.buffer_id == id) {
             self.project_replace = None;
         }
@@ -12292,7 +12162,12 @@ impl App {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
-        let tasks = fenix_tasks::discover_tasks(&root);
+        let mut tasks = fenix_tasks::discover_tasks(&root);
+        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
+        for (name, spec) in tools.tasks {
+            tasks.retain(|task| task.name != name);
+            tasks.push(fenix_tasks::TaskDef { name, command: spec.executable, args: spec.args });
+        }
         if tasks.is_empty() {
             self.set_error(format!("no known tasks for {}", root.display()));
             return;
@@ -12305,8 +12180,9 @@ impl App {
     /// picker. A no-op (with a message) if nothing has been run yet this
     /// session.
     pub(crate) fn rerun_last_task(&mut self) {
-        let Some((task, root)) = self.last_task.clone() else {
-            self.set_error("no task has been run yet".to_string());
+        let root = self.integration_root();
+        let Some(task) = self.project_last_tasks.get(&root).cloned() else {
+            self.set_error("no task has been run yet for this project".to_string());
             return;
         };
         self.run_task(task, root);
@@ -12321,16 +12197,14 @@ impl App {
             self.set_error("no task is running".to_string());
             return;
         };
+        if session.root != self.integration_root() { self.set_error("task belongs to another project; switch to its task panel to cancel it"); return; }
         let Some(runner) = &session.runner else {
             self.set_error("no task is running".to_string());
             return;
         };
-        runner.kill();
+        runner.cancel();
         let buffer = session.buffer;
-        self.append_task_output_text(buffer, "-- task killed --");
-        if let Some(session) = self.task_session.as_mut() {
-            session.runner = None;
-        }
+        self.append_task_output_text(buffer, "-- cancellation requested --");
     }
 
     /// Runs `task` from `root`, opening the single-pane Task Output
@@ -12343,8 +12217,16 @@ impl App {
     /// the quickfix list before anything about this run's own output has
     /// arrived -- a stale previous run's diagnostics have no business
     /// surviving into a fresh one.
-    fn run_task(&mut self, task: fenix_tasks::TaskDef, root: PathBuf) {
-        self.last_task = Some((task.clone(), root.clone()));
+    fn run_task(&mut self, mut task: fenix_tasks::TaskDef, root: PathBuf) {
+        let root = fenix_lsp::normalize(refactor::identity(&root));
+        if self.task_session.as_ref().is_some_and(|s| s.runner.is_some() && s.root != root) {
+            self.set_error("a task is running in another project; cancel it from its task panel first"); return;
+        }
+        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
+        let spec = tools.tasks.get(&task.name).cloned().unwrap_or_else(|| fenix_project::tools::CommandSpec::new(task.command.clone(), task.args.clone()));
+        task.command = spec.executable.clone();
+        task.args = spec.args.clone();
+        self.project_last_tasks.insert(root.clone(), task.clone());
         self.quickfix.clear();
         self.quickfix_index = None;
         let header = format!("$ {} {}\n", task.command, task.args.join(" "));
@@ -12363,11 +12245,12 @@ impl App {
             let workspace_index = self.workspaces.active_index();
             let pane = self.focused_pane_id();
             self.pane_titles.insert(pane, "Task Output".to_string());
-            self.task_session = Some(TaskSession { workspace_index, pane, buffer, root: root.clone(), runner: None });
+            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None });
             buffer
         };
 
-        self.start_task_process(task, root, buffer);
+        if let Some(session) = self.task_session.as_mut() { session.root = root.clone(); }
+        self.start_task_process(task, spec, root, buffer);
         self.wake_caret();
     }
 
@@ -12392,40 +12275,77 @@ impl App {
         }
     }
 
-    /// Actually spawns `task`'s process and starts streaming its output
-    /// into `buffer`. Without a real `event_proxy` (every test; see
-    /// `App::new`'s own doc comment) there's nothing that could ever
-    /// deliver a `TaskOutputLine`/`TaskFinished` event, so this falls
-    /// back to running the task to completion synchronously and
-    /// appending its whole combined output at once -- same posture
-    /// `docker_view_logs_selected` already established for the same gap.
-    fn start_task_process(&mut self, task: fenix_tasks::TaskDef, root: PathBuf, buffer: BufferId) {
-        let Some(proxy) = self.event_proxy.clone() else {
-            match std::process::Command::new(&task.command).args(&task.args).current_dir(&root).output() {
-                Ok(out) => {
-                    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-                    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-                    for line in combined.lines() {
-                        self.append_task_output_line(buffer, line.to_string());
-                    }
-                    self.finish_task_run(buffer, Some(out.status.success()));
-                }
-                Err(err) => self.append_task_output_text(buffer, &format!("fenix: couldn't start `{}`: {err}", task.command)),
+    /// Uses the same supervisor for GUI and headless tests. Every event is tagged
+    /// with a run identity because the output buffer is reused on rerun.
+    fn start_task_process(&mut self, task: fenix_tasks::TaskDef, spec: fenix_project::tools::CommandSpec, root: PathBuf, buffer: BufferId) {
+        let run_id = fenix_tasks::RunId::next();
+        if let Some(session) = self.task_session.as_mut() { session.run_id = Some(run_id); }
+        let command = spec.command(&root).map_err(|e| format!("couldn't start `{}`: {e}", task.command));
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => { self.apply_task_event(buffer, run_id, fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Failed(error))); return; }
+        };
+        if let Some(session) = self.task_session.as_mut() { session.cwd = command.get_current_dir().unwrap_or(&root).to_path_buf(); }
+        if let Some(proxy) = self.event_proxy.clone() {
+            match fenix_tasks::TaskRunner::spawn_command(command, move |event| {
+                proxy.send_event(FenixUserEvent::TaskEvent(buffer, run_id, event)).is_ok()
+            }) {
+                Ok(runner) => if let Some(session) = self.task_session.as_mut() { session.runner = Some(runner); },
+                Err(err) => self.apply_task_event(buffer, run_id, fenix_tasks::TaskEvent::Finished(
+                    fenix_tasks::TaskOutcome::Failed(format!("couldn't start `{}`: {err}", task.command)))),
             }
             return;
-        };
-
-        let Some(child) = fenix_tasks::spawn(&task, &root) else {
-            self.append_task_output_text(buffer, &format!("fenix: couldn't start `{}`", task.command));
-            return;
-        };
-        let runner = TaskRunner::spawn(child, buffer, move |event| proxy.send_event(event).is_ok());
-        if let Some(session) = self.task_session.as_mut() {
-            session.runner = Some(runner);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let runner = fenix_tasks::TaskRunner::spawn_command(command, move |event| tx.send(event).is_ok());
+        match runner {
+            Ok(runner) => {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                        Ok(event) => {
+                            let finished = matches!(event, fenix_tasks::TaskEvent::Finished(_));
+                            self.apply_task_event(buffer, run_id, event);
+                            if finished { break; }
+                        }
+                        Err(err) => {
+                            runner.cancel();
+                            self.apply_task_event(buffer, run_id, fenix_tasks::TaskEvent::Finished(
+                                fenix_tasks::TaskOutcome::Failed(format!("headless task deadline: {err}"))));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(err) => self.apply_task_event(buffer, run_id, fenix_tasks::TaskEvent::Finished(
+                fenix_tasks::TaskOutcome::Failed(format!("couldn't start `{}`: {err}", task.command)))),
         }
     }
 
-    /// `FenixUserEvent::TaskOutputLine` handling: parses the line
+    fn apply_task_event(&mut self, buffer: BufferId, run_id: fenix_tasks::RunId, event: fenix_tasks::TaskEvent) {
+        if !self.task_session.as_ref().is_some_and(|s| s.buffer == buffer && s.run_id == Some(run_id)) { return; }
+        match event {
+            fenix_tasks::TaskEvent::Output(lines) => {
+                for line in lines { self.append_task_output_line(buffer, line.text); }
+            }
+            fenix_tasks::TaskEvent::Finished(outcome) => {
+                match outcome {
+                    fenix_tasks::TaskOutcome::Exited { success, .. } => self.finish_task_run(buffer, Some(success)),
+                    fenix_tasks::TaskOutcome::Cancelled => self.append_task_output_text(buffer, "-- task cancelled --"),
+                    fenix_tasks::TaskOutcome::Failed(error) => {
+                        self.append_task_output_text(buffer, &format!("-- task error: {error} --"));
+                        self.set_error(format!("Task failed: {error}"));
+                    }
+                }
+                if let Some(session) = self.task_session.as_mut() {
+                    session.runner = None;
+                    session.run_id = None;
+                }
+            }
+        }
+    }
+
+    /// Task output handling: parses the line
     /// (`fenix_tasks::parse_line` -- see its own doc comment for why a
     /// cargo `--message-format=json` line decodes into a human-readable
     /// multi-line block plus a recovered location, a recognized-but-
@@ -12450,7 +12370,7 @@ impl App {
             self.append_task_output_text(buffer_id, &parsed.display);
         }
         if let Some(loc) = parsed.location {
-            let root = self.task_session.as_ref().map(|s| s.root.clone()).unwrap_or_default();
+            let root = self.task_session.as_ref().map(|s| s.cwd.clone()).unwrap_or_default();
             let path = root.join(loc.path);
             self.quickfix.push(QuickfixEntry::Task(fenix_project::GrepMatch { path, line: loc.line, col: loc.col, text: loc.message }));
         }
@@ -12490,12 +12410,8 @@ impl App {
         }
     }
 
-    /// `FenixUserEvent::TaskFinished` handling: appends a final
-    /// succeeded/failed/unknown-status marker and drops the session's
-    /// live `runner` -- same "the child already exited on its own here;
-    /// `Drop` still runs for consistency, but its `kill()`/`wait()` on an
-    /// already-gone process are harmless no-ops" shape `finish_docker_
-    /// log_stream` already established.
+    /// Append the exit marker and release the cancellation handle. The worker
+    /// has already drained output; releasing its handle never joins it.
     fn finish_task_run(&mut self, buffer_id: BufferId, success: Option<bool>) {
         if self.task_session.as_ref().map(|s| s.buffer) != Some(buffer_id) {
             return;
@@ -12517,6 +12433,7 @@ impl App {
     /// if one is running but not currently stopped (nothing useful to
     /// do -- it's already going).
     pub(crate) fn debug_start_or_continue(&mut self) {
+        if !self.debug_scope_matches() { return; }
         if let Some(session) = &self.debug_session {
             let Some(thread_id) = session.stopped_thread else {
                 // Already running -- nothing to continue, but still
@@ -12538,31 +12455,31 @@ impl App {
             self.set_error("no recognized language for the focused buffer".to_string());
             return;
         };
-        let Some((command, adapter_args)) = crate::dap::default_adapter_command(language) else {
-            self.set_error(format!("no known debug adapter for {language:?}"));
-            return;
+        let root = self.integration_root();
+        let tools = match fenix_project::tools::ProjectTools::read(&root) {
+            Ok(tools) => tools,
+            Err(error) => { self.set_error(error); return; }
         };
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let launch = fenix_dap::read_launch_config(&root);
-        let program = match launch.program {
-            Some(p) => p,
-            None => match self.open().buffer.path() {
-                Some(p) => p.to_path_buf(),
-                None => {
-                    self.set_error("no file to debug -- open one, or set [launch] program in .fenix/project.ini".to_string());
-                    return;
-                }
-            },
-        };
-
-        let (client, rx) = match fenix_dap::DapClient::spawn(&command, &adapter_args, &root) {
+        let spec = tools.dap.get(&crate::lsp::language_config_name(language)).cloned().or_else(|| {
+            crate::dap::default_adapter_command(language).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
+        });
+        let Some(spec) = spec else { self.set_error(format!("no known debug adapter for {language:?}")); return; };
+        let legacy = fenix_dap::read_launch_config(&root);
+        let program = tools.launch.program.clone().map(|p| if p.is_absolute() { p } else { root.join(p) }).or(legacy.program)
+            .or_else(|| self.open().buffer.path().map(Path::to_path_buf));
+        let Some(program) = program else { self.set_error("no file to debug -- configure a launch program"); return; };
+        let mut launch_attributes = crate::dap::launch_arguments(language, &program);
+        launch_attributes.insert("args".into(), serde_json::json!(tools.launch.args.unwrap_or(legacy.args)));
+        let cwd = tools.launch.cwd.map(|p| if p.is_absolute() { p } else { root.join(p) }).unwrap_or_else(|| root.clone());
+        launch_attributes.insert("cwd".into(), serde_json::json!(cwd));
+        launch_attributes.insert("env".into(), serde_json::json!(tools.launch.env));
+        let (client, rx) = match spec.command(&root).and_then(fenix_dap::DapClient::spawn_command) {
             Ok(pair) => pair,
-            Err(err) => {
-                self.set_error(format!("couldn't start debug adapter `{command}`: {err}"));
-                return;
-            }
+            Err(err) => { self.set_error(format!("couldn't start debug adapter {}: {err}", spec.executable)); return; }
         };
-        let reader = self.event_proxy.clone().map(|proxy| DapReader::spawn(rx, move |event| proxy.send_event(event).is_ok()));
+        let generation = tool_sessions::generation();
+        let reader = self.event_proxy.clone().map(|proxy| DapReader::spawn(rx, generation, move |event| proxy.send_event(event).is_ok()));
+        let (command, adapter_args) = (&spec.executable, &spec.args);
 
         let header = format!("$ {command} {}\n(starting {language:?} debug session for {})\n", adapter_args.join(" "), program.display());
         let call_stack_buffer = self.buffers.open_debug(&header);
@@ -12593,6 +12510,9 @@ impl App {
         self.pane_titles.insert(breakpoints_pane, "4. Breakpoints".to_string());
 
         let mut session = DebugSession {
+            language,
+            generation,
+            launch_attributes,
             workspace_index,
             call_stack_pane,
             variables_pane,
@@ -12606,7 +12526,6 @@ impl App {
             reader,
             pending: HashMap::new(),
             root,
-            program,
             initialized: false,
             stopped_thread: None,
             current_frame_id: None,
@@ -12630,6 +12549,7 @@ impl App {
     /// `continued` event instead), so this is a thin, un-tracked send
     /// shared by every one of them.
     fn send_debug_step(&mut self, req: fenix_dap::requests::Request) {
+        if !self.debug_scope_matches() { return; }
         let Some(session) = self.debug_session.as_ref() else { return };
         let _ = session.client.request(req);
     }
@@ -12667,6 +12587,7 @@ impl App {
     /// behind it" posture `finish_task_run`/`finish_docker_log_stream`
     /// already have; the four panes just stop updating.
     pub(crate) fn debug_stop(&mut self) {
+        if !self.debug_scope_matches() { return; }
         if self.debug_session.is_none() {
             self.set_error("no debug session running".to_string());
             return;
@@ -12718,6 +12639,7 @@ impl App {
     /// if currently stopped; otherwise the watch just shows `<not
     /// evaluated>` until the next stop.
     pub(crate) fn debug_add_watch(&mut self) {
+        if !self.debug_scope_matches() { return; }
         let cursor = self.cursor();
         let ob = self.open();
         let Some((_, word)) = completion::prefix_at_cursor(&ob.buffer, &cursor).filter(|(_, w)| !w.is_empty()) else {
@@ -12748,6 +12670,7 @@ impl App {
     /// request).
     fn send_set_breakpoints_for(&mut self, path: &Path) {
         let Some(session) = self.debug_session.as_mut() else { return };
+        if tool_sessions::root_for_path(path) != session.root { return; }
         let lines = self.breakpoints.get(path).cloned().unwrap_or_default();
         let source = fenix_dap::types::Source::builder().path(Some(path.to_string_lossy().into_owned())).build();
         let breakpoints = lines.into_iter().map(|line| fenix_dap::types::SourceBreakpoint::builder().line(line as i32).build()).collect();
@@ -12803,8 +12726,7 @@ impl App {
             PendingDapRequest::Initialize => match result {
                 Ok(_) => {
                     let Some(session) = self.debug_session.as_ref() else { return };
-                    let language = fenix_syntax::detect_language_from_path(&session.program).unwrap_or(fenix_syntax::LanguageId::Python);
-                    let additional_attributes = crate::dap::launch_arguments(language, &session.program);
+                    let additional_attributes = session.launch_attributes.clone();
                     let args = fenix_dap::requests::LaunchRequestArguments::builder().additional_attributes(additional_attributes).build();
                     let Some(session) = self.debug_session.as_mut() else { return };
                     if let Ok(seq) = session.client.request(fenix_dap::requests::Request::Launch(args)) {
@@ -12829,14 +12751,16 @@ impl App {
             PendingDapRequest::StackTrace => {
                 if let Ok(SuccessResponse::StackTrace(body)) = result {
                     let Some(session) = self.debug_session.as_mut() else { return };
+                    let cwd = session.launch_attributes.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_else(|| session.root.clone());
+                    let resolve_source = |p: String| { let p = PathBuf::from(p); if p.is_absolute() { p } else { cwd.join(p) } };
                     session.call_stack = body
                         .stack_frames
                         .iter()
-                        .map(|f| (f.name.clone(), f.source.as_ref().and_then(|s| s.path.clone()).map(PathBuf::from).unwrap_or_default(), f.line.max(0) as usize))
+                        .map(|f| (f.name.clone(), f.source.as_ref().and_then(|s| s.path.clone()).map(resolve_source).unwrap_or_default(), f.line.max(0) as usize))
                         .collect();
                     let top = body.stack_frames.first();
                     session.current_frame_id = top.map(|f| f.id);
-                    let top_location = top.and_then(|f| f.source.as_ref().and_then(|s| s.path.clone())).map(|p| (PathBuf::from(p), top.unwrap().line.max(0) as usize));
+                    let top_location = top.and_then(|f| f.source.as_ref().and_then(|s| s.path.clone())).map(|p| (resolve_source(p), top.unwrap().line.max(0) as usize));
                     let frame_id = session.current_frame_id;
 
                     if let Some((path, line)) = top_location {
@@ -13032,13 +12956,18 @@ impl App {
     /// DAP adapter actually exists.
     pub(crate) fn open_tool_status_panel(&mut self) {
         let configured = self.config.lsp_servers.clone();
-        let lsp_sessions: std::collections::HashSet<fenix_syntax::LanguageId> = self.lsp_sessions.keys().copied().collect();
-        let dap_running = self.debug_session.is_some();
+        let lsp_sessions: std::collections::HashSet<fenix_syntax::LanguageId> = self.lsp_sessions.keys().filter(|key| key.root == self.integration_root()).map(|key| key.language).collect();
+        let root = self.integration_root();
+        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
+        let dap_language = self.debug_session.as_ref().filter(|s| s.root == root).map(|s| s.language);
+        let configured_command = |spec: &fenix_project::tools::CommandSpec| {
+            spec.command(&root).ok().map(|command| (command.get_program().to_string_lossy().into_owned(), spec.args.clone()))
+        };
         let entries = crate::tool_status::scan(
-            |language| crate::lsp::resolve_server_command(language, &configured),
-            crate::dap::default_adapter_command,
+            |language| tools.lsp.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::lsp::resolve_server_command(language, &configured)),
+            |language| tools.dap.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::dap::default_adapter_command(language)),
             |language| lsp_sessions.contains(&language),
-            |language| dap_running && language == fenix_syntax::LanguageId::Python,
+            |language| dap_language == Some(language),
         );
         let text = crate::tool_status::render(&entries);
 
@@ -14317,14 +14246,17 @@ impl App {
     /// another application, and the timer catches Fenix's own terminal
     /// panel, which never takes focus away from the window at all.
     pub(crate) fn poll_files_changed_on_disk(&mut self) {
-        if !self.config.watch_files.unwrap_or(true) {
-            return;
-        }
+        // Advance the maintenance deadline even when watching is disabled.
+        // Recovery protects edits independently of external-change detection.
         self.next_disk_check = Instant::now() + DISK_CHECK_INTERVAL;
         // Before the sweep, not after: a sweep that reloads a buffer
         // makes it clean, and snapshotting afterwards would then throw
         // away a snapshot that had never been written.
         self.snapshot_dirty_buffers();
+        self.checkpoint_session();
+        if !self.config.watch_files.unwrap_or(true) {
+            return;
+        }
         let sweep = self.reload_buffers_changed_on_disk();
         let Some(message) = sweep.message() else { return };
         if sweep.is_bad() {
@@ -14352,19 +14284,13 @@ impl App {
             if !ob.kind.tracks_unsaved_changes() {
                 continue;
             }
-            let Some(path) = ob.buffer.path().map(Path::to_path_buf) else {
-                // A buffer with no path has nowhere to be recovered
-                // *to*, so there is nothing useful to write: restoring
-                // it would produce text with no home. `:w` on it names
-                // a file, and from then on it snapshots like any other.
-                continue;
-            };
+            let path = ob.buffer.path().map(Path::to_path_buf);
             if !ob.buffer.is_dirty() {
                 // Saved or reverted since the last tick -- the snapshot
                 // is now describing work that isn't lost, and leaving it
                 // would offer to "recover" it on the next start.
-                if self.snapshot_state.remove(&id).is_some() {
-                    let _ = fenix_recovery::discard(&dir, &path);
+                if self.snapshot_state.contains_key(&id) || self.unnamed_snapshots.contains_key(&id) || self.recovery_failures.contains_key(&id) {
+                    self.discard_recovery_for(id);
                 }
                 continue;
             }
@@ -14373,15 +14299,21 @@ impl App {
                 continue;
             }
             let contents = ob.buffer.text();
-            match fenix_recovery::write(&dir, &path, &contents) {
+            let result = if let Some(path) = &path {
+                fenix_recovery::write(&dir, path, &contents).map(|_| ())
+            } else {
+                let target = self.unnamed_snapshots.entry(id).or_insert_with(|| fenix_recovery::unnamed_path(&dir));
+                fenix_recovery::write_unnamed(target, &contents)
+            };
+            match result {
                 Ok(_) => {
                     self.snapshot_state.insert(id, edits);
+                    self.recovery_failures.remove(&id);
                 }
-                // Deliberately silent. This runs every couple of
-                // seconds; a read-only config directory would otherwise
-                // produce an error message the user can neither act on
-                // nor dismiss, on top of whatever they were doing.
-                Err(err) => eprintln!("fenix: couldn't write a recovery snapshot for {}: {err}", path.display()),
+                Err(err) => {
+                    self.recovery_failures.insert(id, err.to_string());
+                    self.set_error(format!("Recovery failed: {err}. Save your work to a writable location."));
+                }
             }
         }
     }
@@ -14390,6 +14322,10 @@ impl App {
     /// at risk -- it was saved, or deliberately thrown away.
     fn discard_recovery_for(&mut self, id: BufferId) {
         self.snapshot_state.remove(&id);
+        self.recovery_failures.remove(&id);
+        if let Some(target) = self.unnamed_snapshots.remove(&id) {
+            let _ = std::fs::remove_file(target);
+        }
         let Some(dir) = self.recovery_dir.clone() else { return };
         let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
         let _ = fenix_recovery::discard(&dir, &path);
@@ -14406,12 +14342,16 @@ impl App {
         let Some(dir) = self.recovery_dir.clone() else { return };
         fenix_recovery::prune(&dir, RECOVERY_MAX_AGE);
         let snapshots = fenix_recovery::list(&dir);
-        if snapshots.is_empty() {
-            return;
-        }
-        let names: Vec<String> =
-            snapshots.iter().filter_map(|s| s.original.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
-        self.set_message(format!("unsaved work from a previous session: {} -- SPC f v recovers it", join_names(&names)));
+        let names: Vec<String> = snapshots.iter().filter(|snapshot| {
+            let owned = snapshot.original.as_ref().and_then(|path| self.buffer_id_for_lsp_path(path))
+                .or_else(|| self.unnamed_snapshots.iter().find_map(|(id, path)| (*path == snapshot.snapshot).then_some(*id)));
+            !owned.and_then(|id| self.buffers.get(id)).is_some_and(|ob| ob.buffer.is_dirty() && ob.buffer.text() == snapshot.contents)
+        }).map(|snapshot| snapshot.label()).collect();
+        if names.is_empty() { return; }
+        let message = format!("unsaved work from a previous session: {} -- SPC f v recovers it", join_names(&names));
+        if let Some(previous) = self.status_message.as_ref().filter(|message| message.is_error) {
+            self.set_error(format!("{}; {message}", previous.text));
+        } else { self.set_message(message); }
     }
 
     /// `SPC f v`: what a previous session left unsaved.
@@ -14428,7 +14368,7 @@ impl App {
         let candidates = snapshots
             .into_iter()
             .map(|snapshot| {
-                let label = format!("{}   ({})", snapshot.original.display(), describe_age(snapshot.age()));
+                let label = format!("{}   ({})", snapshot.label(), describe_age(snapshot.age()));
                 fenix_picker::Candidate::new(label, snapshot)
             })
             .collect();
@@ -14445,8 +14385,21 @@ impl App {
     /// established for two versions that disagree.
     fn recover_snapshot(&mut self, snapshot: &fenix_recovery::Snapshot) {
         self.main_view = MainView::Editor;
-        let existed = snapshot.original.exists();
-        self.open_file_from_picker(&snapshot.original);
+        let Some(original) = &snapshot.original else {
+            if let Some(id) = self.unnamed_snapshots.iter().find_map(|(id, path)| (path == &snapshot.snapshot).then_some(*id)) {
+                self.open_buffer_in_focused_pane(id);
+                return;
+            }
+            self.new_scratch_buffer();
+            let id = self.focused_buffer_id();
+            self.replace_buffer_from_disk(id, &snapshot.contents);
+            self.buffers.get_mut(id).unwrap().buffer.mark_unsaved();
+            self.unnamed_snapshots.insert(id, snapshot.snapshot.clone());
+            self.set_message("recovered unnamed buffer -- use :w <path> to save it");
+            return;
+        };
+        let existed = original.exists();
+        self.open_file_from_picker(original);
         let id = self.focused_buffer_id();
         // Compared against what's on disk *now*: a snapshot identical to
         // the file is work that was saved after all (recovered by hand,
@@ -14455,7 +14408,7 @@ impl App {
         let unchanged = self.buffers.get(id).is_some_and(|ob| ob.buffer.text() == snapshot.contents);
         if unchanged {
             self.discard_recovery_for(id);
-            self.set_message(format!("{} already matches what was recovered", snapshot.original.display()));
+            self.set_message(format!("{} already matches what was recovered", snapshot.label()));
             self.wake_caret();
             return;
         }
@@ -14468,7 +14421,7 @@ impl App {
             ob.buffer.mark_unsaved();
         }
         let note = if existed { "" } else { " (the file itself is gone)" };
-        self.set_message(format!("recovered {}{note} -- :w keeps it, :e! discards it", snapshot.original.display()));
+        self.set_message(format!("recovered {}{note} -- :w keeps it, :e! discards it", snapshot.label()));
         self.wake_caret();
     }
 
@@ -17505,7 +17458,12 @@ impl App {
     /// behavior; called once per extra path, right after startup, from
     /// `main.rs`.
     pub(crate) fn open_startup_file(&mut self, path: &Path) {
-        self.open_file_from_picker(path);
+        // Session paths are absolute; CLI paths may be relative or aliases.
+        // Reuse the restored document rather than opening a clean duplicate.
+        let existing = self.buffer_id_for_lsp_path(path)
+            .and_then(|id| self.buffers.get(id))
+            .and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
+        self.open_file_from_picker(existing.as_deref().unwrap_or(path));
     }
 
     /// `FenixUserEvent::OpenFiles`: a *later* `fenix` launch handed its
@@ -18879,13 +18837,14 @@ impl App {
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
-            FenixUserEvent::Lsp { language, event } => self.apply_lsp_event(language, event),
+            FenixUserEvent::Lsp { language, generation, event } => self.apply_lsp_event(language, generation, event),
             FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
-            FenixUserEvent::TaskOutputLine(buffer_id, line) => self.append_task_output_line(buffer_id, line),
-            FenixUserEvent::TaskFinished(buffer_id, success) => self.finish_task_run(buffer_id, success),
-            FenixUserEvent::Dap(event) => self.apply_dap_event(event),
+            FenixUserEvent::TaskEvent(buffer_id, run_id, event) => self.apply_task_event(buffer_id, run_id, event),
+            FenixUserEvent::Dap { generation, event } => {
+                if self.debug_session.as_ref().is_some_and(|s| s.generation == generation) { self.apply_dap_event(event); }
+            },
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::ForgeListReady { request_id, result } => self.apply_forge_list(request_id, result),
@@ -19522,6 +19481,8 @@ impl App {
         // here, not whatever they'd mean in ordinary editing (macro-
         // record `q`, in particular) -- same precedent the Explorer/
         // Docker/Git panels already established for their own `q`.
+        if self.refactor_key(keypress) { return; }
+
         if self.open().kind == BufferKind::SearchReplace {
             let confirming = self.project_replace.as_ref().is_some_and(|s| s.confirming);
             match keypress.code {
@@ -20199,8 +20160,15 @@ impl App {
             _ => {}
         }
         match vim_event {
+            VimEvent::RequestSessionSave => { self.save_session_explicit(); }
+            VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
+            VimEvent::RequestRestartLsp => { self.restart_project_lsp(); }
+            VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
+            }
+            VimEvent::RequestSaveAs(path) => {
+                self.save_unnamed_as(&path);
             }
             VimEvent::RequestForceSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save_force");
@@ -20521,7 +20489,9 @@ impl App {
     fn buffer_display_name(&self, buffer_id: BufferId) -> String {
         let Some(ob) = self.buffers.get(buffer_id) else { return "[No Name]".to_string() };
         ob.buffer.path().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| {
-            if ob.kind == BufferKind::Dashboard {
+            if ob.kind == BufferKind::WorkspaceEdit {
+                "*refactor*".to_string()
+            } else if ob.kind == BufferKind::Dashboard {
                 "*dashboard*".to_string()
             } else if ob.kind == BufferKind::Explorer {
                 self.dired_states.get(&buffer_id).map(|s| s.cwd.display().to_string()).unwrap_or_else(|| "*dired*".to_string())
@@ -20712,7 +20682,9 @@ impl App {
         // worse way to find out.
         let diverged = if self.externally_changed.contains(&self.focused_buffer_id()) { " [disk]" } else { "" };
         let (line, col) = ob.buffer.line_col(&self.cursor());
-        let modified = format!("{modified}{diverged}");
+        let recovery = if self.recovery_failures.is_empty() { "" } else { " [recovery failed]" };
+        let session = if self.session.error.is_some() { " [session failed]" } else { "" };
+        let modified = format!("{modified}{diverged}{recovery}{session}");
         let mode_label = self.mode_badge_label();
         // Only shown once there's more than one workspace to distinguish --
         // stays out of the way for the common single-workspace case.
@@ -23955,6 +23927,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
     /// `SPC q q`, `:q`, `SPC q Q`, and the last window's X button all
     /// end in `event_loop.exit()`, which lands here.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.checkpoint_session();
         self.save_window_layout();
     }
 
@@ -30533,11 +30506,12 @@ configure_board stm32
         app.handle_user_event(FenixUserEvent::LogLine(app.focused_buffer_id(), "a line".to_string()));
         app.handle_user_event(FenixUserEvent::LogEnded(app.focused_buffer_id()));
         app.handle_user_event(FenixUserEvent::Lsp {
-            language: fenix_syntax::LanguageId::Python,
+            language: app.lsp_key(fenix_syntax::LanguageId::Python),
+            generation: 0,
             event: fenix_lsp::LspEvent::Disconnected("test".to_string()),
         });
-        app.handle_user_event(FenixUserEvent::TaskOutputLine(app.focused_buffer_id(), "a line".to_string()));
-        app.handle_user_event(FenixUserEvent::TaskFinished(app.focused_buffer_id(), Some(true)));
+        app.handle_user_event(FenixUserEvent::TaskEvent(app.focused_buffer_id(), fenix_tasks::RunId::next(), fenix_tasks::TaskEvent::Output(vec![])));
+        app.handle_user_event(FenixUserEvent::TaskEvent(app.focused_buffer_id(), fenix_tasks::RunId::next(), fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled)));
     }
 
     #[test]
@@ -30588,11 +30562,7 @@ configure_board stm32
 
     #[test]
     fn run_task_without_a_real_event_proxy_captures_output_synchronously() {
-        // `App::with_file` never sets a real `event_proxy` (see its own
-        // doc comment) -- `start_task_process`'s fallback path runs the
-        // command to completion and appends its whole output at once,
-        // same posture `docker_view_logs_selected` already established
-        // for the same gap.
+        // Headless tests consume the same supervisor events as the GUI.
         let dir = TempDir::new("run_task_sync");
         let mut app = App::with_file(None);
         let (program, args) = echo_command("hello-from-task");
@@ -30620,6 +30590,42 @@ configure_board stm32
         let text = app.open().buffer.text();
         assert!(!text.contains("first-run"), "the previous run's output should have been cleared, got:\n{text}");
         assert!(text.contains("second-run"));
+    }
+
+    #[test]
+    fn stale_task_events_cannot_modify_or_finish_a_newer_run() {
+        let dir = TempDir::new("task_stale_events");
+        let mut app = App::with_file(None);
+        let (command, args) = echo_command("current-run");
+        app.run_task(fenix_tasks::TaskDef { name: "t".into(), command, args }, dir.path().to_path_buf());
+        let buffer = app.focused_buffer_id();
+        let current = fenix_tasks::RunId::next();
+        let stale = fenix_tasks::RunId::next();
+        app.task_session.as_mut().unwrap().run_id = Some(current);
+        let before = app.open().buffer.text();
+        app.apply_task_event(buffer, stale, fenix_tasks::TaskEvent::Output(vec![fenix_tasks::OutputLine {
+            stream: fenix_tasks::OutputStream::Stdout, text: "stale.rs:1:1: old error".into(),
+        }]));
+        app.apply_task_event(buffer, stale, fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled));
+        assert_eq!(app.open().buffer.text(), before);
+        assert!(app.quickfix.is_empty());
+        assert_eq!(app.task_session.as_ref().unwrap().run_id, Some(current));
+        app.apply_task_event(buffer, current, fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled));
+        assert!(app.open().buffer.text().contains("task cancelled"));
+        assert_eq!(app.task_session.as_ref().unwrap().run_id, None);
+        let finished = app.open().buffer.text();
+        app.apply_task_event(buffer, current, fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled));
+        assert_eq!(app.open().buffer.text(), finished, "completion is applied once");
+    }
+
+    #[test]
+    fn task_spawn_failure_displays_the_underlying_error() {
+        let dir = TempDir::new("task_spawn_failure");
+        let mut app = App::with_file(None);
+        app.run_task(fenix_tasks::TaskDef { name: "missing".into(), command: "fenix-missing-tool-xyz".into(), args: vec![] }, dir.path().to_path_buf());
+        let text = app.open().buffer.text();
+        assert!(text.contains("couldn't start `fenix-missing-tool-xyz`:"));
+        assert!(app.task_session.as_ref().unwrap().run_id.is_none());
     }
 
     #[test]
@@ -30743,6 +30749,9 @@ configure_board stm32
         let workspace_index = app.workspaces.active_index();
         let call_stack_pane = app.focused_pane_id();
         app.debug_session = Some(DebugSession {
+            language: fenix_syntax::LanguageId::Python,
+            generation: tool_sessions::generation(),
+            launch_attributes: serde_json::Map::new(),
             workspace_index,
             call_stack_pane,
             variables_pane: call_stack_pane,
@@ -30756,7 +30765,6 @@ configure_board stm32
             reader: None,
             pending: HashMap::new(),
             root: dir.path().to_path_buf(),
-            program: dir.path().join("main.py"),
             initialized: false,
             stopped_thread: None,
             current_frame_id: None,
@@ -30854,7 +30862,7 @@ configure_board stm32
     #[test]
     fn handle_user_event_never_panics_for_the_dap_variant() {
         let mut app = App::with_file(None);
-        app.handle_user_event(FenixUserEvent::Dap(fenix_dap::DapEvent::Disconnected("test".to_string())));
+        app.handle_user_event(FenixUserEvent::Dap { generation: 0, event: fenix_dap::DapEvent::Disconnected("test".to_string()) });
     }
 
     #[test]
@@ -30926,7 +30934,7 @@ configure_board stm32
     fn ensure_lsp_session_is_a_no_op_for_a_language_with_no_configured_or_default_command() {
         let mut app = App::with_file(None);
         app.ensure_lsp_session(fenix_syntax::LanguageId::Batch, &std::env::temp_dir());
-        assert!(!app.lsp_sessions.contains_key(&fenix_syntax::LanguageId::Batch));
+        assert!(!app.lsp_sessions.keys().any(|key| key.language == fenix_syntax::LanguageId::Batch));
     }
 
     #[test]
@@ -30950,29 +30958,46 @@ configure_board stm32
     }
 
     #[test]
+    #[ignore = "subprocess fixture, invoked by the Docker log follower test"]
+    fn docker_log_fixture() {
+        if std::env::var("FENIX_DOCKER_LOG_FIXTURE").as_deref() != Ok("1") { return; }
+        use std::io::Write;
+        std::io::stdout().write_all(b"line1\nline2\n").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(100));
+    }
+
+    #[test]
     fn docker_log_follower_delivers_lines_and_stops_promptly_on_drop() {
         // A real subprocess standing in for `docker logs -f` (a harmless
         // long-running command, per the plan's own "never assert on
         // real docker output" posture) -- prints two lines immediately,
         // then sleeps long enough that `drop`'s `kill()` is what has to
         // end it, not the process exiting on its own.
-        let child = std::process::Command::new("sh")
-            .args(["-c", "echo line1; echo line2; sleep 100"])
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "app::tests::docker_log_fixture", "--nocapture"])
+            .env("FENIX_DOCKER_LOG_FIXTURE", "1")
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("sh should be available to spawn in this environment");
+            .expect("the Rust log fixture should spawn");
 
         let buffer_id = App::with_file(None).focused_buffer_id();
         let (tx, rx) = std::sync::mpsc::channel::<FenixUserEvent>();
         let follower = DockerLogFollower::spawn(child, buffer_id, move |event| tx.send(event).is_ok());
 
-        match rx.recv_timeout(Duration::from_secs(3)).expect("should receive at least one log line") {
-            FenixUserEvent::LogLine(id, line) => {
-                assert_eq!(id, buffer_id);
-                assert_eq!(line, "line1");
+        // The test harness can emit its own preamble before the fixture's output.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut lines = Vec::new();
+        while lines.len() < 2 {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).expect("fixture should deliver both lines") {
+                FenixUserEvent::LogLine(id, line) => {
+                    assert_eq!(id, buffer_id);
+                    if line == "line1" || line == "line2" { lines.push(line); }
+                }
+                other => panic!("expected a LogLine event, got {other:?}"),
             }
-            other => panic!("expected a LogLine event, got {other:?}"),
         }
+        assert_eq!(lines, ["line1", "line2"]);
 
         let before_drop = Instant::now();
         drop(follower);
@@ -32418,7 +32443,7 @@ configure_board stm32
 
         let found = fenix_recovery::list(store.path());
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].original, work.path().join("notes.txt"));
+        assert_eq!(found[0].original, Some(work.path().join("notes.txt")));
         assert!(found[0].contents.starts_with("unsaved work "), "got: {:?}", found[0].contents);
         // And the file itself is untouched -- a snapshot is not a save.
         assert_eq!(std::fs::read_to_string(work.path().join("notes.txt")).unwrap(), "one\n");
@@ -32492,17 +32517,79 @@ configure_board stm32
     }
 
     #[test]
-    fn a_buffer_with_no_file_is_not_snapshotted() {
-        // There would be nowhere to recover it *to*: restoring it would
-        // produce text with no home.
+    fn unnamed_work_recovers_without_inventing_a_file_path() {
         let store = TempDir::new("recover_no_path");
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.recovery_dir = Some(store.path().to_path_buf());
         app.test_insert_str("scratch work");
-
         app.poll_files_changed_on_disk();
-
+        let snapshots = fenix_recovery::list(store.path());
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].original, None);
+        let mut fresh = App::with_file(None);
+        fresh.recovery_dir = Some(store.path().to_path_buf());
+        fresh.recover_snapshot(&snapshots[0]);
+        assert_eq!(fresh.open().buffer.text(), "scratch work");
+        assert!(fresh.open().buffer.path().is_none());
+        assert!(fresh.open().buffer.is_dirty());
+        fresh.force_kill_buffer();
         assert!(fenix_recovery::list(store.path()).is_empty());
+    }
+
+    #[test]
+    fn naming_recovered_scratch_saves_text_and_removes_snapshot() {
+        let store = TempDir::new("recovered_scratch_save");
+        let target = store.path().join("my recovered notes.txt");
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.test_insert_str("important notes");
+        app.poll_files_changed_on_disk();
+        app.save_unnamed_as(target.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "important notes");
+        assert!(!app.open().buffer.is_dirty());
+        assert!(fenix_recovery::list(store.path()).is_empty());
+    }
+
+    #[test]
+    fn failed_scratch_save_keeps_recovery_and_existing_destination() {
+        let store = TempDir::new("scratch_save_existing");
+        let target = store.write("existing.txt", "original");
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.test_insert_str("important notes");
+        app.poll_files_changed_on_disk();
+        app.save_unnamed_as(target.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "original");
+        assert!(app.open().buffer.is_dirty());
+        assert_eq!(fenix_recovery::list(store.path()).len(), 1);
+    }
+
+    #[test]
+    fn recovery_continues_with_watching_disabled_and_advances_deadline() {
+        let (_work, store, mut app) = app_with_recovery("recover_without_watch", "original");
+        app.config.watch_files = Some(false);
+        app.test_insert_str("unsaved ");
+        app.next_disk_check = Instant::now() - Duration::from_secs(1);
+        app.poll_files_changed_on_disk();
+        assert!(app.next_disk_check > Instant::now());
+        assert_eq!(fenix_recovery::list(store.path()).len(), 1);
+    }
+
+    #[test]
+    fn recovery_failure_is_visible_and_retries_successfully() {
+        let (_work, store, mut app) = app_with_recovery("recover_failure", "original");
+        let blocked = store.write("not-a-directory", "blocked");
+        app.recovery_dir = Some(blocked);
+        app.test_insert_str("unsaved ");
+        app.poll_files_changed_on_disk();
+        assert!(!app.recovery_failures.is_empty());
+        app.recovery_dir = Some(store.path().to_path_buf());
+        app.poll_files_changed_on_disk();
+        assert!(app.recovery_failures.is_empty());
+        assert_eq!(fenix_recovery::list(store.path()).len(), 1);
     }
 
     #[test]
@@ -32791,7 +32878,14 @@ configure_board stm32
         // neither is enough alone; this is the case length can't see.
         let (dir, mut app) = open_file("watch_same_len", "aaaa\n");
         app.poll_files_changed_on_disk();
-        write_externally(&dir.path().join("a.txt"), "bbbb\n");
+        let path = dir.path().join("a.txt");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write_externally(&path, "bbbb\n");
+        // Exercise an mtime change deterministically: rapid writes can share
+        // a timestamp on Windows, which this fingerprint cannot distinguish.
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(before + Duration::from_secs(2))).unwrap();
+        drop(file);
 
         app.poll_files_changed_on_disk();
 
@@ -37663,4 +37757,183 @@ configure_board stm32
         assert!(app.pdf_search_result_lines.is_empty());
         assert!(app.pdf_search_source.is_empty());
     }
+
+    fn project_scope_fixture(name: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "old\n");
+        (dir, path)
+    }
+
+    fn install_test_lsp(app: &mut App, path: &Path) -> LspKey {
+        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::root_for_path(path) };
+        let (program, args) = echo_command("fixture");
+        let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
+        let canonical = fenix_lsp::normalize(refactor::identity(path));
+        app.lsp_sessions.insert(key.clone(), LspSession {
+            generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
+            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), pending: HashMap::new(),
+        });
+        key
+    }
+
+    #[test]
+    fn project_scoped_lsp_routes_same_language_and_same_request_id_independently() {
+        let (_a, a) = project_scope_fixture("lsp_scope_a");
+        let (_b, b) = project_scope_fixture("lsp_scope_b");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let a_id = app.focused_buffer_id();
+        let b_id = app.buffers.open_path(&b);
+        let a_key = install_test_lsp(&mut app, &a);
+        let b_key = install_test_lsp(&mut app, &b);
+        assert_ne!(a_key, b_key);
+        assert_eq!(app.focused_lsp_context().unwrap().0, a_key);
+        for (key, buffer) in [(&a_key,a_id),(&b_key,b_id)] {
+            app.lsp_sessions.get_mut(key).unwrap().pending.insert(9, PendingLspRequest::Format { buffer, revision:0 });
+        }
+        let generation = app.lsp_sessions[&b_key].generation;
+        app.apply_lsp_event(b_key.clone(), generation, fenix_lsp::LspEvent::Response { id:9, result:Ok(serde_json::json!([
+            {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"new"}
+        ])) });
+        assert_eq!(app.buffers.get(a_id).unwrap().buffer.text(), "old\n");
+        assert_eq!(app.buffers.get(b_id).unwrap().buffer.text(), "new\n");
+        assert!(app.lsp_sessions[&a_key].pending.contains_key(&9));
+        assert!(!app.lsp_sessions[&b_key].pending.contains_key(&9));
+    }
+
+    #[test]
+    fn project_scoped_lsp_ignores_retired_generations_and_foreign_diagnostics() {
+        let (_a, a) = project_scope_fixture("lsp_generation_a");
+        let (_b, b) = project_scope_fixture("lsp_generation_b");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let key = install_test_lsp(&mut app, &a);
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation+1, fenix_lsp::LspEvent::Disconnected("late".into()));
+        assert!(app.lsp_sessions.contains_key(&key));
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Notification {
+            method:"textDocument/publishDiagnostics".into(), params:serde_json::json!({"uri":fenix_lsp::path_to_uri(&b).unwrap(),"diagnostics":[
+                {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"message":"foreign"}
+            ]})
+        });
+        assert!(app.diagnostics.is_empty());
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Disconnected("current".into()));
+        assert!(!app.lsp_sessions.contains_key(&key));
+    }
+
+    #[test]
+    fn project_scoped_refactor_rejects_another_projects_document() {
+        let (_a, a) = project_scope_fixture("refactor_scope_a");
+        let (_b, b) = project_scope_fixture("refactor_scope_b");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let context = app.refactor_context(fenix_syntax::LanguageId::Rust);
+        let edit = serde_json::from_value(serde_json::json!({"changes":{fenix_lsp::path_to_uri(&b).unwrap().as_str():[
+            {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"new"}
+        ]}})).unwrap();
+        app.preview_lsp_edit(edit, context);
+        assert!(app.refactor_preview.is_none());
+        assert!(app.status_message.as_ref().unwrap().text.contains("another project"));
+    }
+
+    #[test]
+    fn project_scoped_task_rerun_uses_the_focused_projects_history() {
+        let (a_dir,a) = project_scope_fixture("task_scope_a");
+        let (b_dir,_) = project_scope_fixture("task_scope_b");
+        let mut app = App::with_file(None);
+        for (root,label) in [(a_dir.path(),"project-A"),(b_dir.path(),"project-B")] {
+            let (command,args) = echo_command(label);
+            app.run_task(fenix_tasks::TaskDef { name:label.into(), command,args }, root.into());
+        }
+        let id = app.buffers.open_path(&a);
+        app.open_buffer_in_focused_pane(id);
+        app.rerun_last_task();
+        assert!(app.open().buffer.text().contains("project-A"));
+        assert!(!app.open().buffer.text().contains("project-B"));
+    }
+
+    #[test]
+    #[ignore = "isolated process for structured tool launch tests"]
+    fn project_tool_fixture() {
+        let Ok(value) = std::env::var("FENIX_TOOL_TEST") else { return };
+        println!("tool value: {value}");
+        println!("tool cwd: {}", std::env::current_dir().unwrap().display());
+    }
+
+    fn write_structured_tools(dir: &TempDir) {
+        let exe = std::env::current_exe().unwrap();
+        let spec = serde_json::json!({"executable":exe,"args":["--ignored","--exact","app::tests::project_tool_fixture","--nocapture"],
+            "cwd":"build dir", "env":{"FENIX_TOOL_TEST":"structured project value"}});
+        std::fs::create_dir_all(dir.path().join("build dir")).unwrap();
+        dir.write(".fenix/tools.json", &serde_json::json!({
+            "tasks":{"structured":spec}, "dap":{"python":spec},
+            "launch":{"program":"main.py", "args":["a b",""],"cwd":"build dir","env":{"DEBUG_TARGET":"project value"}}
+        }).to_string());
+    }
+
+    #[test]
+    fn project_scoped_task_uses_structured_cwd_and_environment() {
+        let (dir,_) = project_scope_fixture("structured_task");
+        write_structured_tools(&dir);
+        let before = std::env::var_os("FENIX_TOOL_TEST");
+        let mut app = App::with_file(None);
+        app.run_task(fenix_tasks::TaskDef { name:"structured".into(),command:"not-used".into(),args:vec![] },dir.path().into());
+        assert!(app.open().buffer.text().contains("tool value: structured project value"));
+        assert_eq!(app.task_session.as_ref().unwrap().cwd, fenix_lsp::normalize(refactor::identity(&dir.path().join("build dir"))));
+        assert_eq!(std::env::var_os("FENIX_TOOL_TEST"), before);
+    }
+
+    #[test]
+    fn project_scoped_debug_launch_freezes_args_cwd_env_and_ignores_stale_events() {
+        let (dir,_) = project_scope_fixture("structured_debug");
+        let (_other,b) = project_scope_fixture("structured_debug_other");
+        let script = dir.write("main.py", "print('hello')\n");
+        write_structured_tools(&dir);
+        let mut app = App::with_file(Some(script.to_string_lossy().into_owned()));
+        app.debug_start_or_continue();
+        let session = app.debug_session.as_ref().expect("configured adapter should spawn");
+        assert_eq!(session.launch_attributes["args"],serde_json::json!(["a b",""]));
+        assert_eq!(session.launch_attributes["env"]["DEBUG_TARGET"], "project value");
+        assert_eq!(session.launch_attributes["cwd"], serde_json::json!(session.root.join("build dir")));
+        let generation = session.generation;
+        app.handle_user_event(FenixUserEvent::Dap { generation:generation+1, event:fenix_dap::DapEvent::Disconnected("stale".into()) });
+        assert!(app.debug_session.is_some());
+        let id = app.buffers.open_path(&b);
+        app.open_buffer_in_focused_pane(id);
+        app.debug_start_or_continue();
+        assert!(app.status_message.as_ref().unwrap().text.contains("another project"));
+        app.debug_stop();
+        assert!(app.debug_session.is_some());
+    }
+
+    #[test]
+    fn project_scoped_servers_spawn_separately_and_canonical_aliases_reuse_them() {
+        let (a,_) = project_scope_fixture("server_spawn_a");
+        let (b,_) = project_scope_fixture("server_spawn_b");
+        let mut app = App::with_file(None);
+        for (dir,value) in [(&a,"A"),(&b,"B")] {
+            dir.write(".fenix/tools.json",&serde_json::json!({"lsp":{"rust":{
+                "executable":std::env::current_exe().unwrap(),"args":["--ignored","--exact","app::tests::project_tool_fixture","--nocapture"],
+                "env":{"FENIX_TOOL_TEST":value}
+            }}}).to_string());
+            app.ensure_lsp_session(fenix_syntax::LanguageId::Rust,dir.path());
+        }
+        assert_eq!(app.lsp_sessions.len(),2);
+        let generations: std::collections::HashSet<_> = app.lsp_sessions.values().map(|s| s.generation).collect();
+        assert_eq!(generations.len(),2);
+        app.ensure_lsp_session(fenix_syntax::LanguageId::Rust,&a.path().join("."));
+        assert_eq!(app.lsp_sessions.len(),2);
+    }
+    #[test]
+    fn project_scoped_restart_leaves_other_projects_servers_running() {
+        let (_a,a) = project_scope_fixture("restart_a");
+        let (_b,b) = project_scope_fixture("restart_b");
+        let mut app = App::with_file(None);
+        let a_key = install_test_lsp(&mut app,&a);
+        let b_key = install_test_lsp(&mut app,&b);
+        // A dashboard with an explicit project root avoids spawning a real language server.
+        app.project_root = Some(a_key.root.clone());
+        app.restart_project_lsp();
+        assert!(!app.lsp_sessions.contains_key(&a_key));
+        assert!(app.lsp_sessions.contains_key(&b_key));
+    }
+
 }

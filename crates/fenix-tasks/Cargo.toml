@@ -4,7 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+process-wrap = { version = "10", features = ["std"] }
+fenix-rpc = { path = "../fenix-rpc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Pipes", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
