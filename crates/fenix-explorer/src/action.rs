@@ -31,7 +31,28 @@ pub enum ExplorerAction {
     BeginCreateDir,
     BeginCopy,
     BeginMove,
+    /// Narrow the listing to names containing what you type -- the
+    /// answer to a folder with four hundred things in it.
+    BeginFilter,
+    /// Search this directory and everything under it, by name.
+    BeginFind,
+    /// Pack the marked set (or the entry at point) into an archive.
+    BeginArchive,
+    /// Unpack the archive at point.
+    ExtractArchive,
+    /// Everything about the entry at point that does not fit in a
+    /// column -- and, for a directory, what it actually contains.
+    ShowProperties,
+    /// Flip the read-only attribute: the one that stops an ordinary
+    /// save, and the usual reason for opening Windows' own properties
+    /// dialog.
+    ToggleReadOnly,
     ToggleHidden,
+    /// Cycle what the listing is ordered by; `ReverseSort` flips the
+    /// direction of whatever that currently is. Two keys rather than
+    /// one cycle through eight states, which nobody can navigate.
+    CycleSort,
+    ReverseSort,
     Refresh,
     Quit,
     /// Confirm the directory currently being browsed (`cwd`, not the
@@ -44,6 +65,20 @@ pub enum ExplorerAction {
     /// with one action and confirm the folder you're currently in with a
     /// separate one.
     SelectCwd,
+}
+
+impl ExplorerAction {
+    /// Whether this action is about *moving around* the listing.
+    ///
+    /// The sidebar has no cursor of its own, so it needs these. The
+    /// buffer-backed listing is real text with a real Vim cursor, and
+    /// claiming `j`/`k` there would take two of the most-used motions in
+    /// the editor away from the editor -- so it claims only the
+    /// operations, and lets Vim move. One table, two readings of it,
+    /// rather than two tables that drift.
+    pub fn is_navigation(self) -> bool {
+        matches!(self, ExplorerAction::Down | ExplorerAction::Up)
+    }
 }
 
 /// Bindings chosen to match evil-collection's real dired keymap (what
@@ -72,8 +107,22 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         t.insert(&[KeyPress::char('C')], "copy to...", ExplorerAction::BeginCopy);
         t.insert(&[KeyPress::char('M')], "move to...", ExplorerAction::BeginMove);
 
+        t.insert(&[KeyPress::char('z')], "archive...", ExplorerAction::BeginArchive);
+        t.insert(&[KeyPress::char('x')], "extract", ExplorerAction::ExtractArchive);
+        t.insert(&[KeyPress::char('i')], "properties", ExplorerAction::ShowProperties);
+        t.insert(&[KeyPress::char('w')], "toggle read-only", ExplorerAction::ToggleReadOnly);
+        t.insert(&[KeyPress::char('f')], "filter", ExplorerAction::BeginFilter);
+        t.insert(&[KeyPress::char('F')], "find under here", ExplorerAction::BeginFind);
         t.insert(&[KeyPress::char('.')], "toggle hidden", ExplorerAction::ToggleHidden);
+        t.insert(&[KeyPress::char('o')], "sort by...", ExplorerAction::CycleSort);
+        t.insert(&[KeyPress::char('O')], "reverse sort", ExplorerAction::ReverseSort);
         t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "refresh", ExplorerAction::Refresh);
+        // `r` as well as `gr`. The buffer-backed listing claims single
+        // keys only (a `g` prefix there would have to fight `gg`/`G`,
+        // which are genuinely useful in a long directory), and the two
+        // forms must not disagree about what a key does -- so the alias
+        // lives in the one table both of them read.
+        t.insert(&[KeyPress::char('r')], "refresh", ExplorerAction::Refresh);
         t.insert(&[KeyPress::char('q')], "quit", ExplorerAction::Quit);
         t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Escape)], "quit", ExplorerAction::Quit);
         t.insert(&[KeyPress::char('S')], "select this directory", ExplorerAction::SelectCwd);
@@ -131,6 +180,43 @@ mod tests {
             Step::Matched(ExplorerAction::SelectCwd) => {}
             _ => panic!("expected SelectCwd"),
         }
+    }
+
+    #[test]
+    fn refresh_is_reachable_as_both_r_and_gr() {
+        // The buffer-backed listing can only claim single keys, and the
+        // two forms must agree about what a key does.
+        let trie = explorer_trie();
+        let mut m = trie.matcher();
+        match m.feed(KeyPress::char('r')) {
+            Step::Matched(ExplorerAction::Refresh) => {}
+            _ => panic!("expected Refresh for 'r'"),
+        }
+    }
+
+    #[test]
+    fn sorting_is_two_keys_rather_than_one_long_cycle() {
+        let trie = explorer_trie();
+        let mut m = trie.matcher();
+        match m.feed(KeyPress::char('o')) {
+            Step::Matched(ExplorerAction::CycleSort) => {}
+            _ => panic!("expected CycleSort"),
+        }
+        let mut m = trie.matcher();
+        match m.feed(KeyPress::char('O')) {
+            Step::Matched(ExplorerAction::ReverseSort) => {}
+            _ => panic!("expected ReverseSort"),
+        }
+    }
+
+    #[test]
+    fn only_the_cursor_actions_count_as_navigation() {
+        // What the buffer-backed listing leaves to Vim.
+        assert!(ExplorerAction::Down.is_navigation());
+        assert!(ExplorerAction::Up.is_navigation());
+        assert!(!ExplorerAction::Open.is_navigation());
+        assert!(!ExplorerAction::BeginDelete.is_navigation());
+        assert!(!ExplorerAction::ToggleExpand.is_navigation());
     }
 
     #[test]

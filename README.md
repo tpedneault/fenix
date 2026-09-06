@@ -102,13 +102,107 @@ for anyone curious to poke around or build on it.
   list continuation/checkbox toggling: `#` means "comment," not
   "heading," in half the languages this editor highlights.
 - **File explorer** (dired-style): `SPC f j` opens a real, Vim-navigable
-  buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) --
-  `Enter` opens a file or navigates into a directory, `-` goes up, `R`
-  refreshes, `.` toggles hidden files; ordinary motions (`j k gg G /`)
-  work for free since it's real text. A persistent sidebar (`SPC e t`)
-  is also available, with the fuller dired feature set (git-status
-  badges, marking, batch create/rename/copy/move/delete, inline subtree
-  expansion) -- those aren't yet wired up for the buffer-backed form.
+  buffer (splittable, closable with `SPC b k`, listed in `SPC b b`) with
+  the whole feature set -- marks, batch create/rename/copy/move/delete,
+  git-status badges, subtree expansion, sorting by name/size/date/type;
+  ordinary motions (`j k gg G /`) work for free since it's real text,
+  and the cursor *is* the selection, so operations always act on the row
+  you are looking at. A persistent sidebar (`SPC e t`) shows the same
+  listing in a strip, reading the same key table, so a binding can never
+  mean two different things in the two forms.
+
+  `SPC e d` arranges the classic two-listings-side-by-side layout out of
+  the window system rather than as a panel of its own, so both halves
+  are ordinary buffers that split, close and switch like any other --
+  and `C`/`M` seed their destination with the directory the other half
+  is showing, which is the whole reason to arrange two listings.
+
+  Reading a directory happens **off the main thread**, for all three
+  forms of the listing -- the pane, the sidebar and the directory
+  picker. A slow path --
+  a network share, a disk waking up -- leaves the editor completely
+  usable, and the pane keeps showing where you are until the new listing
+  arrives; after a moment the header names what it is waiting on and
+  `Esc` stops waiting and leaves you where you were. (Nothing tries to
+  cancel the read itself: a blocked `read_dir` on a share that has gone
+  away sits in the kernel until SMB gives up, minutes later, and no
+  amount of asking shortens that. Its result simply arrives stale and is
+  dropped.) Git badges follow as a separate pass, so they never hold up
+  the listing, and are skipped for `\\server\share` paths where running
+  `git status` across the wire would cost more than it is worth.
+
+  **Getting somewhere** does not mean walking there. `SPC e p` is a path
+  bar: type it, with `Tab` completing a directory at a time, `~` and
+  `%APPDATA%` expanded, quotes stripped off anything pasted out of
+  Explorer, and forward slashes accepted. Typing a *file* opens it
+  rather than refusing. Typing `\server` with no share asks the server
+  what it has and offers the answer as a list -- off the main thread,
+  because a host that is not there takes tens of seconds to say so.
+  `SPC e b` is everywhere else worth going in one list: bookmarks first,
+  then the machine's drives with free space (a mapped drive shows the
+  share it really points at, since `Z:` on its own tells you nothing),
+  then the directories you have actually been to, then registered
+  projects. `SPC e m` bookmarks where you are, named after the folder,
+  with no prompt -- a bookmark you can add without stopping to think is
+  one you will actually add. Bookmarks live in `config.ini`'s
+  `[explorer]` section and can be hand-edited between sessions.
+
+  **Renaming in bulk** is the thing an editor can do that a file manager
+  cannot. `SPC e w` re-renders the listing as one bare name per line and
+  makes it editable, so `:%s/`, visual block, macros and counts become
+  bulk-rename tools nobody had to build; `SPC e W` works out what the
+  edit asks for and shows a real example before doing any of it. A name
+  may contain `/`, so it reorganises as well as renames. Line position
+  is identity -- line N is entry N -- which is why adding or removing a
+  line is refused rather than guessed at: a deleted line is not a
+  deleted file. Two names given the same value, or a name landing on an
+  untouched file, are refused up front, so a rejected edit changes
+  nothing and stays on screen to fix. Swapping two names works, because
+  when a rename set has a cycle in it everything is moved aside first
+  and then into place -- and if any part of that fails, all of it is put
+  back, since a bulk rename is one edit and half of one is a directory
+  nobody asked for.
+
+  **Copying and moving run in the background**, with a live count of
+  files and bytes in the modeline and `SPC e k` to stop. Cancelling
+  stops between files -- a file already being written has to finish,
+  since there is no way to abandon a copy part way through without
+  leaving a truncated one behind -- and what has already been copied
+  stays, because that is what actually happened. `z` packs the marked
+  set into a `.zip` (or `.tar.gz`, by extension) and `x` unpacks the
+  archive at point into a folder of its own; both go through the
+  `bsdtar` Windows ships, named by absolute path, because the `tar` on
+  `PATH` is often GNU tar and GNU tar answers a request for a `.zip`
+  with an uncompressed tar under that name. `i` shows what a column
+  cannot hold -- every timestamp, the attributes, where a link points --
+  and on a folder counts what is inside it, which is the one number a
+  listing cannot show without walking the whole tree. `w` flips
+  read-only, the attribute that stops an ordinary save.
+
+  **The last mile** is the set of things that make trusting all of this
+  easy. `SPC e o` opens the entry with whatever the system associates
+  with it, because the answer to a `.xlsx` is Excel and not a hex dump.
+  `SPC e O` shows it in Explorer, selected -- being unable to leave is
+  not the same as not needing to. `SPC e y` copies the full path (the
+  path, not the name: a path is what you paste into a terminal or
+  another program's open dialog). `SPC e T` opens a shell *here*, which
+  is what the pane-terminal work made possible -- without a working
+  directory the first thing anybody types is a `cd`. `SPC e g` searches
+  this directory once, leaving the next unqualified search meaning the
+  project again, and `SPC e G` makes this the project and opens the Git
+  panel on it, so `SPC p f` and `SPC s p` follow rather than one panel
+  pointing somewhere the rest of the editor is not.
+
+  Links and junctions are shown as links (`name/@`) and coloured
+  differently from real directories, because following one into a tree
+  you did not expect to be in is exactly the surprise worth preventing;
+  `i` says where one points.
+
+  Deleting means the **Recycle Bin**, so a mistake is recoverable
+  through Windows' own restore. Copying or moving onto something that
+  already exists asks first -- overwrite, skip, or keep both -- rather
+  than silently destroying it, and skipping a *move* leaves the source
+  where it was.
   `SPC f e` starts that same fuller explorer at your home directory
   instead of the current file's -- for a file that isn't in any project
   and isn't worth typing an absolute path for (something in
@@ -821,6 +915,20 @@ popup shows what keys continue it.
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
+| `SPC e e` | Open the file explorer here |
+| `SPC e d` | Two listings side by side (copy/move default to the other one) |
+| `SPC e o` / `SPC e O` | Open with the system's default app / show it in Explorer |
+| `SPC e y` | Copy the full path |
+| `SPC e T` | Open a shell in this directory |
+| `SPC e g` | Search this directory |
+| `SPC e G` | Make this the project and open the Git panel |
+| `SPC e k` | Stop the running file operation |
+| `SPC e w` | Edit the listing's names as text |
+| `SPC e W` | Apply the edited names |
+| `SPC e p` | Go to a path you type (Tab completes; `~`, `%VAR%` and `\server\share` all work) |
+| `SPC e b` | Places: bookmarks, drives, recent directories, project roots |
+| `SPC e r` | Recent directories |
+| `SPC e m` | Bookmark the directory you are in |
 | `SPC e t` | Toggle the file explorer sidebar |
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |
@@ -956,21 +1064,40 @@ popup shows what keys continue it.
 | `c` / `+` | Create file / directory |
 | `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
-| `g r` | Refresh |
+| `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `f` / `F` | Filter the listing / find by name under here |
+| `r` / `g r` | Refresh |
 | `S` | Select this directory (when picking a project root) |
 | `q` / `Esc` | Quit |
 
-### Dired buffer (`SPC f j`)
+### File explorer buffer (`SPC f j`)
 
-A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`).
-Only these are special:
+A real buffer, so every ordinary Vim motion works (`j k gg G / n N ...`)
+and the cursor is the selection. The keys below are the same table the
+sidebar reads -- only `j`/`k` differ, because here they are the cursor.
 
 | Keys | Action |
 |---|---|
-| `Enter` | Open the file, or navigate into the directory, at point |
+| `Enter` / `l` | Open the file, or navigate into the directory, at point |
 | `-` | Go to the parent directory |
-| `R` | Refresh |
+| `Tab` | Expand / collapse a directory in place |
+| `m` / `u` / `U` / `t` | Mark / unmark / unmark all / toggle all marks |
+| `D` | Delete to the Recycle Bin (marked, or entry under cursor) |
+| `R` | Rename |
+| `c` / `+` | Create file / directory (either may include `/`, and missing parents are created) |
+| `C` / `M` | Copy / move to... |
 | `.` | Toggle hidden files |
+| `o` / `O` | Cycle sort key (name/size/date/type) / reverse it |
+| `z` / `x` | Pack the marked set into an archive / unpack the one at point |
+| `i` | Properties (and, on a folder, count what is inside) |
+| `w` | Toggle read-only |
+| `f` | Filter the listing as you type (`Esc` widens it back out) |
+| `F` | Find by name through everything under here |
+| `r` | Refresh |
+| `Esc` | Stop waiting for a directory that isn't answering |
+
+Operations act on the marked set if there is one, and on the row under
+the cursor otherwise -- dired's own convention.
 
 ### Table view (`SPC f t`)
 

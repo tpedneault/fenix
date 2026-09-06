@@ -123,6 +123,21 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "explorer.toggle_sidebar",
         );
 
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('e')], "open explorer here", "explorer.jump");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('d')], "dual pane", "explorer.dual_pane");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('k')], "stop the running operation", "explorer.cancel");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('o')], "open with the system", "explorer.open_external");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('O')], "show in Explorer", "explorer.reveal");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('y')], "copy the full path", "explorer.yank_path");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('T')], "shell here", "explorer.terminal_here");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('g')], "search here", "explorer.grep_here");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('G')], "project + Git panel here", "explorer.git_here");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('w')], "edit names", "explorer.rename_mode");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('W')], "apply edited names", "explorer.rename_apply");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('p')], "go to path", "explorer.go_to_path");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('b')], "places", "explorer.places");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('r')], "recent directories", "explorer.recent_dirs");
+        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('m')], "bookmark this directory", "explorer.bookmark");
         t.label_group(&[spc, KeyPress::char('p')], "project");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('f')], "find file", "project.find_file");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('s')], "search", "project.grep");

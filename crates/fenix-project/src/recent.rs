@@ -22,6 +22,18 @@ impl RecentFiles {
         dirs::config_dir().map(|dir| dir.join("fenix").join("recent_files.txt"))
     }
 
+    /// Where the explorer remembers the directories it has been.
+    ///
+    /// The same machinery, a different file. Directories and files are
+    /// both "somewhere you were recently", and both want the same
+    /// most-recent-first, capped, plain-text-list treatment -- but they
+    /// are answers to different questions (`SPC f r` reopens a file,
+    /// `SPC e r` goes back to a folder), so mixing them into one list
+    /// would make both worse.
+    pub fn default_dirs_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("fenix").join("recent_dirs.txt"))
+    }
+
     /// Loads the recent-files list from `path`. A missing file means "no
     /// recent files yet," not an error -- the common case on first run.
     pub fn load(path: PathBuf) -> io::Result<Self> {
