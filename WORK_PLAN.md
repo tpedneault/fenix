@@ -253,3 +253,12 @@ clock-resolution assumption. The existing JiraBadgeColor dead-code warning remai
 Final logs: `target/ci/workspace-20260905-211209-78ec6968/`.
 `git diff --check` passes. Native multi-monitor and Linux-host smoke tests were not
 performed.
+
+## PR integration validation
+
+Merged `origin/master` at `b3447c4` into `reliability-foundation` without conflicts.
+The merged Windows workspace passed **2,558 tests, 0 failures, 24 ignored**, scoped
+all-target Clippy, and the debug editor build. `git diff --check` passed.
+Logs: `target/ci/workspace-20260905-213914-d1386176/`.
+The existing JiraBadgeColor warning remains; hosted Linux and native multi-monitor
+smoke tests are not claimed by this local validation.
