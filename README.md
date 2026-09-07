@@ -1613,3 +1613,10 @@ scroll positions at startup. Use `:session-save` to checkpoint immediately or
 unsaved work. Missing files and disk conflicts are reported without overwriting
 files. See [session restoration](docs/SESSION_RESTORATION.md) for configuration,
 recovery behavior, and current limits.
+
+## Native snippets
+
+Insert-mode **Tab** expands `header`, `section`, and Tcl's `proc`, with editable
+fields, live mirrors, transformations and date/user/file variables. Add your own
+files in the `snippets` directory beside the config. See [the snippet guide](docs/SNIPPETS.md) for
+syntax, navigation, examples and design details.

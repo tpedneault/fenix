@@ -470,8 +470,8 @@ impl Config {
         fenix_storage::write(&self.path, out.as_bytes())
     }
 
-    #[cfg(test)]
-    fn path(&self) -> &std::path::Path {
+    /// Location of this configuration, used to resolve companion user files.
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 }

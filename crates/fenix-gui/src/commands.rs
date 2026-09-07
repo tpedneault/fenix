@@ -11,6 +11,10 @@ pub struct CommandCtx<'a> {
 
 type CommandFn = fn(&mut CommandCtx);
 
+fn cmd_insert_snippet(ctx: &mut CommandCtx) {
+    ctx.app.start_snippet_picker();
+}
+
 /// A named, invokable editor action. Every user-facing action should
 /// eventually be one of these rather than a function wired directly to a
 /// key, so the same action can be bound in multiple keymaps (Phase 2) and,
@@ -29,6 +33,7 @@ pub struct CommandRegistry {
 impl CommandRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self { commands: Vec::new() };
+        registry.register("insert.snippet", "Choose a snippet for the current document", cmd_insert_snippet);
         registry.register("file.save", "Save the current file", cmd_save);
         registry.register("file.save_force", "Save, overwriting a file that changed on disk (:w!)", cmd_save_force);
         registry.register("file.reload", "Re-read the current file from disk, discarding unsaved edits (:e!)", cmd_file_reload);

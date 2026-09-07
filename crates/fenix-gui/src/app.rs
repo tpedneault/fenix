@@ -1,4 +1,5 @@
 mod refactor;
+mod snippets;
 mod tool_sessions;
 mod session;
 use tool_sessions::LspKey;
@@ -1559,7 +1560,7 @@ enum PendingLspRequest {
     Rename { buffer: BufferId, context: refactor::Context },
     CodeAction { buffer: BufferId, context: refactor::Context },
     Format { buffer: BufferId, revision: u64 },
-    Completion { buffer: BufferId, prefix_start: usize },
+    Completion { buffer: BufferId, prefix_start: usize, generation: u64 },
 }
 
 /// Background reader for one `LspSession` -- drains `fenix_lsp::
@@ -2193,7 +2194,7 @@ struct CompletionState {
     /// `accept_completion` replaces `[prefix_start, cursor.char_idx)`
     /// with the chosen candidate's full label.
     prefix_start: usize,
-    picker: fenix_picker::PickerState<fenix_completion::CompletionItem>,
+    picker: fenix_picker::PickerState<completion::Item>,
 }
 
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
@@ -2485,6 +2486,7 @@ enum ActivePicker {
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
     Theme(fenix_picker::PickerState<&'static Theme>),
+    Snippet(fenix_picker::PickerState<snippets::SnippetChoice>),
     /// `SPC c s`: fuzzy-find any known Tcl definition by its fully-
     /// qualified name (same `ctags`-sourced list `tcl_candidates`'s own
     /// `Tag`-kind completion entries come from, see `tcl_tags`) --
@@ -2607,6 +2609,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::JiraAssignee(s) => s.push_char(c),
         ActivePicker::JiraPriority(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
+        ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
         ActivePicker::MibTelecommandInsert(s) => s.push_char(c),
@@ -2647,6 +2650,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::JiraAssignee(s) => s.backspace(),
         ActivePicker::JiraPriority(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
+        ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibTelecommandLookup(s) => s.backspace(),
         ActivePicker::MibTelecommandInsert(s) => s.backspace(),
@@ -2687,6 +2691,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::JiraAssignee(s) => s.move_selection(delta),
         ActivePicker::JiraPriority(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
+        ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
         ActivePicker::MibTelecommandInsert(s) => s.move_selection(delta),
@@ -2730,6 +2735,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::JiraAssignee(s) => s.toggle_mark(),
         ActivePicker::JiraPriority(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
+        ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::MibTelecommandLookup(s) => s.toggle_mark(),
         ActivePicker::MibTelecommandInsert(s) => s.toggle_mark(),
@@ -2770,6 +2776,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::JiraAssignee(s) => s.query(),
         ActivePicker::JiraPriority(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
+        ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibTelecommandLookup(s) => s.query(),
         ActivePicker::MibTelecommandInsert(s) => s.query(),
@@ -2810,6 +2817,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::JiraAssignee(s) => s.len(),
         ActivePicker::JiraPriority(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
+        ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibTelecommandLookup(s) => s.len(),
         ActivePicker::MibTelecommandInsert(s) => s.len(),
@@ -2850,6 +2858,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::JiraAssignee(s) => s.selected_row(),
         ActivePicker::JiraPriority(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
+        ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
         ActivePicker::MibTelecommandInsert(s) => s.selected_row(),
@@ -2906,6 +2915,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::JiraAssignee(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::JiraPriority(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibTelecommandInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -6005,6 +6015,10 @@ pub struct App {
     /// so even a buffer with no recognized language at all still gets a
     /// popup once it has something to complete from.
     completion: Option<CompletionState>,
+    completion_selected: bool,
+    completion_generation: u64,
+    completion_context: Option<(BufferId, fenix_window::WindowId, usize, u64)>,
+    snippet: Option<snippets::ActiveSnippet>,
     /// One cached `(project_root, candidates)` pair for Tcl completion,
     /// rebuilt only when the current buffer's project root differs from
     /// what's cached -- not a map of every project root ever visited
@@ -6603,6 +6617,10 @@ impl App {
             replaying_change: false,
             event_proxy: None,
             completion: None,
+            completion_selected: false,
+            completion_generation: 0,
+            completion_context: None,
+            snippet: None,
             tcl_candidates_cache: None,
             tcl_tags_cache: None,
             completion_scroll: 0,
@@ -7148,6 +7166,7 @@ impl App {
     /// from whatever it was showing before (which could easily be out of
     /// bounds for the new buffer's own length).
     fn set_pane_content(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId) {
+        if self.snippet.as_ref().is_some_and(|s| s.pane == pane) { self.snippet = None; }
         self.windows_mut().set_content(pane, buffer_id);
         let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
@@ -7488,7 +7507,7 @@ impl App {
                     }
                 }
             }
-            PendingLspRequest::Completion { buffer, prefix_start } => {
+            PendingLspRequest::Completion { buffer, prefix_start, generation } => { if generation != self.completion_generation || !self.completion_context_valid() { return; }
                 if let Ok(value) = result {
                     self.apply_lsp_completion(buffer, prefix_start, value);
                 }
@@ -7641,7 +7660,7 @@ impl App {
     /// popup closed (moved on to something else) before this arrived,
     /// or if `buffer` isn't focused any more.
     fn apply_lsp_completion(&mut self, buffer: BufferId, prefix_start: usize, value: serde_json::Value) {
-        if buffer != self.focused_buffer_id() {
+        if buffer != self.focused_buffer_id() || self.vim.mode() != Mode::Insert || !self.completion_context_valid() {
             return;
         }
         // `PickerState` has no "add candidates to what's already there"
@@ -7670,18 +7689,17 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let mut candidates = self.completion_candidates();
-        candidates.extend(items.into_iter().map(|item| {
-            let label = item.label;
-            fenix_picker::Candidate::new(label.clone(), fenix_completion::CompletionItem { label, kind: fenix_completion::CompletionKind::Lsp })
-        }));
+        let selected = self.completion.as_ref().and_then(|s| s.picker.selected())
+            .map(|c| (c.payload.label.clone(), c.payload.source));
+        let candidates = completion::merge(self.completion_candidates(), items.into_iter().filter_map(completion::Item::lsp).collect());
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&query);
-        if let Some(state) = &mut self.completion {
-            state.picker = picker;
+        if self.completion_selected {
+            let row = picker.visible_rows(0, picker.len()).position(|(_, c)| Some((c.payload.label.clone(), c.payload.source)) == selected);
+            if let Some(row) = row { picker.move_selection(row as isize); }
         }
+        if let Some(state) = &mut self.completion { state.picker = picker; }
     }
-
     /// `K` -- requests `textDocument/hover` for the cursor's current
     /// position. A no-op (no error message; this fires on every `K`
     /// press, including ones with genuinely nothing to say) if no
@@ -7794,7 +7812,7 @@ impl App {
     /// A no-op if no server is attached -- the popup still works from
     /// local candidates alone, same as it always has for a language
     /// with none configured.
-    fn request_lsp_completion(&mut self, prefix_start: usize) {
+    fn request_lsp_completion(&mut self, prefix_start: usize) { self.completion_generation = self.completion_generation.wrapping_add(1);
         let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
@@ -7805,7 +7823,7 @@ impl App {
             context: None,
         };
         if let Ok(id) = session.client.request::<lsp_types::request::Completion>(params) {
-            session.pending.insert(id, PendingLspRequest::Completion { buffer, prefix_start });
+            session.pending.insert(id, PendingLspRequest::Completion { buffer, prefix_start, generation: self.completion_generation });
         }
     }
 
@@ -8038,6 +8056,10 @@ impl App {
     /// identifier prefix at the cursor, or the prefix no longer matches
     /// anything.
     fn sync_completion(&mut self) {
+        if self.snippet_is_valid() {
+            self.completion = None;
+            return;
+        }
         if self.vim.mode() != Mode::Insert {
             self.completion = None;
             return;
@@ -8053,18 +8075,11 @@ impl App {
             return;
         };
 
-        match &mut self.completion {
-            Some(state) => {
-                state.prefix_start = start;
-                state.picker.set_query(&prefix);
-            }
-            None => {
-                let candidates = self.completion_candidates();
-                let mut picker = fenix_picker::PickerState::new(candidates);
-                picker.set_query(&prefix);
-                self.completion = Some(CompletionState { prefix_start: start, picker });
-            }
-        }
+        self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), cursor.char_idx, self.open().buffer.edit_count()));
+        self.completion_selected = false;
+        let mut picker = fenix_picker::PickerState::new(self.completion_candidates());
+        picker.set_query(&prefix);
+        self.completion = Some(CompletionState { prefix_start: start, picker });
         // A server attached to this buffer may still fill the popup
         // once its (async) response lands (`apply_lsp_completion`),
         // even if the locally-known candidates are empty right now --
@@ -8103,7 +8118,10 @@ impl App {
         if self.completion.is_none() {
             return false;
         }
+        if self.completion.as_ref().is_some_and(|s| s.picker.is_empty()) { return false; } self.completion_selected = true;
         match keypress.code {
+            KeyCode::Named(FenixNamedKey::PageDown) => self.completion.as_mut().unwrap().picker.move_selection(COMPLETION_MAX_ROWS as isize),
+            KeyCode::Named(FenixNamedKey::PageUp) => self.completion.as_mut().unwrap().picker.move_selection(-(COMPLETION_MAX_ROWS as isize)),
             KeyCode::Named(FenixNamedKey::Down) => self.completion.as_mut().unwrap().picker.move_selection(1),
             KeyCode::Named(FenixNamedKey::Up) => self.completion.as_mut().unwrap().picker.move_selection(-1),
             KeyCode::Char('n') if keypress.mods.ctrl => self.completion.as_mut().unwrap().picker.move_selection(1),
@@ -8144,7 +8162,14 @@ impl App {
     /// prefix, bypassing the normal ">=1 char" auto-trigger threshold --
     /// `Ctrl-Space`'s effect, the near-universal manual-trigger
     /// convention.
+    fn completion_context_valid(&self) -> bool {
+        self.completion_context.is_none_or(|context| context ==
+            (self.focused_buffer_id(), self.focused_pane_id(), self.cursor().char_idx, self.open().buffer.edit_count()))
+    }
+
     fn force_open_completion(&mut self) {
+        self.completion_selected = false;
+        self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), self.cursor().char_idx, self.open().buffer.edit_count()));
         let cursor = self.cursor();
         let ob = self.open();
         let (prefix_start, prefix) =
@@ -8174,19 +8199,25 @@ impl App {
     /// "not a built-in keyword" bucket ctags/symbols-file entries
     /// already share -- see that variant's own doc comment for why a
     /// third kind isn't worth a new calibrated popup color.
-    fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>> {
+    fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<completion::Item>> {
         let mut candidates = if self.focused_language() == Some(fenix_syntax::LanguageId::Tcl) {
             let root = self.project_root.clone();
-            self.tcl_candidates(root.as_deref())
+            self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>()
         } else {
             Vec::new()
         };
         let mut seen: std::collections::HashSet<String> = candidates.iter().map(|c| c.label.clone()).collect();
-        for word in completion::buffer_words(&self.open().buffer) {
+        let mut words: Vec<_> = completion::buffer_words(&self.open().buffer).into_iter().collect();
+        words.sort();
+        for word in words {
             if seen.insert(word.clone()) {
-                let item = fenix_completion::CompletionItem { label: word.clone(), kind: fenix_completion::CompletionKind::Tag };
+                let item = completion::Item::text(word.clone(), completion::Source::Buffer);
                 candidates.push(fenix_picker::Candidate::new(word, item));
             }
+        }
+        let catalog = self.snippet_catalog();
+        for snippet in catalog.available(&self.snippet_scope()) {
+            candidates.push(fenix_picker::Candidate::new(snippet.trigger.clone(), completion::Item::snippet(snippet)));
         }
         candidates
     }
@@ -8422,13 +8453,21 @@ impl App {
     /// Replaces the typed prefix with the selected candidate's full
     /// label -- one atomic undo step via `Buffer::replace_range`.
     fn accept_completion(&mut self) {
+        if !self.completion_context_valid() { self.completion = None; return; }
         let Some(state) = self.completion.take() else { return };
-        let Some(label) = state.picker.selected().map(|c| c.payload.label.clone()) else { return };
-        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = cursor.char_idx;
-        buffer.replace_range(cursor, state.prefix_start, end, &label);
+        let Some(item) = state.picker.selected().map(|c| c.payload.clone()) else { return };
+        match item.insertion {
+            completion::Insertion::Snippet(template) => self.expand_snippet_template(state.prefix_start, template),
+            completion::Insertion::Text(text) => {
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                buffer.replace_range(cursor, state.prefix_start, cursor.char_idx, &text);
+            }
+            completion::Insertion::Lsp(item) => {
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                if let Err(error) = completion::apply_lsp(buffer, cursor, state.prefix_start..cursor.char_idx, &item) { self.set_error(error); }
+            }
+        }
     }
-
     pub(crate) fn save(&mut self) {
         self.save_inner(false);
     }
@@ -18268,6 +18307,12 @@ impl App {
                     Ok(format!("Set priority of {key} to {}", priority.name))
                 });
             }
+            Some(ActivePicker::Snippet(state)) => {
+                let Some(choice) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.insert_picked_snippet(choice);
+            }
             Some(ActivePicker::Theme(state)) => {
                 let Some(theme) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -19291,7 +19336,11 @@ impl App {
             self.explorer_browse_shares(target);
             return;
         }
-        self.explorer_go_to(target);
+        if self.active_explorer_target().is_some() {
+            self.explorer_go_to(target);
+        } else {
+            self.open_dired_at(target);
+        }
     }
 
     /// `\\server` with no share named: ask it what it is offering.
@@ -19532,13 +19581,15 @@ impl App {
     }
 
     fn explorer_prompt_submit(&mut self, kind: PromptKind, input: &str) {
+        // The path bar is also available from documents and the dashboard,
+        // where there is no listing yet to supply an active explorer.
+        if kind == PromptKind::GoToPath {
+            self.explorer_open_path(&fenix_fs::expand(input));
+            return;
+        }
         let Some(explorer) = self.active_explorer() else { return };
         let outcomes = match kind {
-            PromptKind::GoToPath => {
-                let target = fenix_fs::expand(input);
-                self.explorer_open_path(&target);
-                return;
-            }
+            PromptKind::GoToPath => unreachable!("handled before requiring a listing"),
             PromptKind::ArchiveTo => {
                 let sources = explorer.target_paths();
                 let cwd = explorer.cwd.clone();
@@ -20976,7 +21027,7 @@ impl App {
             return;
         }
 
-        if self.completion_key(keypress) {
+        if self.snippet_key(keypress) || self.completion_key(keypress) {
             self.wake_caret();
             return;
         }
@@ -22336,6 +22387,7 @@ impl App {
                 Some(picker @ ActivePicker::JiraAssignee(_)) => ("JIRAASSIGNEE", picker_len(picker)),
                 Some(picker @ ActivePicker::JiraPriority(_)) => ("JIRAPRIORITY", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandInsert(_)) => ("MIB-TC", picker_len(picker)),
@@ -22922,7 +22974,7 @@ impl App {
         let known_tcl_commands: Option<std::collections::HashSet<String>> = if is_tcl {
             let root = self.project_root.clone();
             let mut known: std::collections::HashSet<String> =
-                self.tcl_candidates(root.as_deref()).into_iter().map(|c| c.payload.label).collect();
+                self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>().into_iter().map(|c| c.payload.label).collect();
             // Plus whatever this file itself defines. Without it, a call
             // to a proc defined twenty lines up renders as plain body
             // text whenever `ctags` has nothing to say -- which is every
@@ -23022,6 +23074,11 @@ impl App {
     /// column-range rectangle across lines (clamped per ragged line, like
     /// the Block operators themselves).
     fn visual_selection_segments(&self, visible_lines: usize) -> Segments {
+        if self.snippet_is_valid() {
+            if let Some(range) = self.snippet.as_ref().and_then(|s| s.session.selection()) {
+                return self.range_to_segments(range, visible_lines);
+            }
+        }
         if self.vim.mode() != Mode::Visual {
             return Vec::new();
         }
@@ -23630,49 +23687,46 @@ impl App {
         };
         let (caret_x, caret_y) = caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height);
 
-        let shown_rows = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING).min(COMPLETION_MAX_ROWS);
-        let rows: Vec<(bool, &fenix_picker::Candidate<fenix_completion::CompletionItem>)> =
-            state.picker.visible_rows(self.completion_scroll, shown_rows).collect();
-        if rows.is_empty() {
-            return None;
-        }
-
+        let available = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING);
+        if available == 0 || state.picker.is_empty() { return None; }
+        let selected = state.picker.selected()?;
+        let mut extra = Vec::new();
+        if !selected.payload.detail.is_empty() { extra.push(selected.payload.detail.clone()); }
+        if !selected.payload.documentation.is_empty() { extra.push(selected.payload.documentation.clone()); }
+        extra.push(format!("{}/{}  ↑↓ choose · Tab/Enter accept · C-e close", state.picker.selected_row() + 1, state.picker.len()));
+        extra.truncate(available.saturating_sub(1).min(3));
+        let shown_rows = (available - extra.len()).min(COMPLETION_MAX_ROWS);
+        let offset = completion::scroll_offset(state.picker.selected_row(), self.completion_scroll, shown_rows);
+        let rows: Vec<_> = state.picker.visible_rows(offset, shown_rows).collect();
+        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(1.0).min(text::WHICH_KEY_MAX_WIDTH);
+        let longest = rows.iter().map(|(_, c)| c.label.chars().count() + 10)
+            .chain(extra.iter().map(|s| s.chars().count().min(72))).max().unwrap_or(20);
+        let width = (longest as f32 * char_width + COMPLETION_PADDING).max(text::WHICH_KEY_MIN_WIDTH).min(max_width);
+        let columns = ((width - COMPLETION_PADDING).max(0.0) / char_width) as usize;
+        let label_columns = columns.saturating_sub(10);
         let theme = self.theme;
         let mut spans = Vec::new();
         let mut selected_row = None;
         for (i, (is_selected, candidate)) in rows.iter().enumerate() {
-            if i > 0 {
-                spans.push(("\n".to_string(), theme.fg_modeline, false));
-            }
-            if *is_selected {
-                selected_row = Some(i);
-            }
-            // `caret_text`/`fg_modeline`, not `syntax_keyword`/
-            // `syntax_function` -- this popup shares the modeline's
-            // background (`bg_modeline`, pushed below alongside every
-            // other popup kind), and the `syntax_*` family is calibrated
-            // for contrast against `bg` (the content background)
-            // instead. Same bug class already fixed for which-key's own
-            // key column and the dashboard banner earlier this project:
-            // `caret_text`/`fg_modeline` are the two colors actually
-            // guaranteed legible against `bg_modeline` in every theme.
-            let color = match candidate.payload.kind {
-                fenix_completion::CompletionKind::Keyword => theme.caret_text,
-                fenix_completion::CompletionKind::Tag | fenix_completion::CompletionKind::Lsp => theme.fg_modeline,
+            if i > 0 { spans.push(("\n".into(), theme.fg_modeline, false)); }
+            if *is_selected { selected_row = Some(i); }
+            let color = match candidate.payload.source {
+                completion::Source::Keyword | completion::Source::Snippet => theme.caret_text,
+                _ => theme.fg_modeline,
             };
-            spans.push((candidate.label.clone(), color, false));
+            let label = completion::clipped_line(&candidate.payload.label, label_columns);
+            let padding = label_columns.saturating_sub(label.chars().count()) + 2;
+            spans.push((label, color, false));
+            spans.push((format!("{}{}", " ".repeat(padding), completion::clipped_line(candidate.payload.source.label(), columns.saturating_sub(label_columns + 2))), theme.fg_modeline, false));
         }
-
-        let longest = rows.iter().map(|(_, c)| c.label.chars().count()).max().unwrap_or(0);
-        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
-        let width = (longest as f32 * char_width + COMPLETION_PADDING)
-            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
-        let height = rows.len() as f32 * line_height + COMPLETION_PADDING;
-        let rect =
-            popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
+        for line in &extra {
+            spans.push(("\n".into(), theme.fg_modeline, false));
+            spans.push((completion::clipped_line(line, columns), theme.fg_modeline, false));
+        }
+        let height = (rows.len() + extra.len()) as f32 * line_height + COMPLETION_PADDING;
+        let rect = popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
         Some((rect, spans, selected_row))
     }
-
     /// Builds the `K` hover popup -- same `BelowPoint`-anchored-under-
     /// the-caret shape as `completion_popup`, just rendering `self.lsp_
     /// hover`'s plain-text lines instead of a candidate list (no
@@ -25721,6 +25775,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 self.handle_vnc_pointer_move(pos);
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed { self.snippet = None; }
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(pos) = self.cursor_pos {
                         self.handle_click(pos);
@@ -28121,11 +28176,11 @@ configure_board stm32
         app.force_open_completion();
 
         let state = app.completion.as_ref().expect("Ctrl-Space should force-open the popup");
-        assert_eq!(state.picker.len(), fenix_completion::tcl::KEYWORDS.len());
+        assert_eq!(state.picker.len(), fenix_completion::tcl::KEYWORDS.len() + 3);
     }
 
     #[test]
-    fn force_open_completion_is_a_noop_with_nothing_to_complete_from() {
+    fn force_open_completion_offers_snippets_in_an_empty_document() {
         let dir = TempDir::new("completion_force_open_empty");
         let file = dir.write("foo.rs", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
@@ -28133,9 +28188,7 @@ configure_board stm32
 
         app.force_open_completion();
 
-        // Empty buffer, non-Tcl language -- neither source has anything
-        // to offer.
-        assert!(app.completion.is_none());
+        assert!(app.completion.as_ref().unwrap().picker.visible_rows(0, 10).all(|(_, c)| c.payload.source == completion::Source::Snippet));
     }
 
     #[test]
@@ -30078,6 +30131,39 @@ configure_board stm32
 
         assert_eq!(app.active_explorer().unwrap().cwd, sub);
         assert!(app.open().buffer.text().contains("inside.txt"));
+    }
+
+    #[test]
+    fn path_prompt_opens_an_explorer_from_dashboard_or_document() {
+        let dir = TempDir::new("path_prompt_without_explorer");
+        let file = dir.write("document.txt", "keep this document");
+        for file_arg in [None, Some(file.to_string_lossy().into_owned())] {
+            let mut app = App::with_file(file_arg);
+            let original = app.focused_buffer_id();
+            assert!(app.active_explorer_target().is_none());
+            app.start_path_prompt();
+            app.explorer_prompt.as_mut().unwrap().input = dir.path().to_string_lossy().into_owned();
+            app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+            assert!(app.explorer_prompt.is_none());
+            assert_eq!(app.main_view, MainView::Editor);
+            assert_eq!(app.open().kind, BufferKind::Explorer);
+            assert_eq!(app.active_explorer().unwrap().cwd, dir.path());
+            assert!(app.open().buffer.text().contains("document.txt"));
+            assert!(app.buffers.get(original).is_some());
+        }
+    }
+
+    #[test]
+    fn path_prompt_opens_a_file_without_an_existing_explorer() {
+        let dir = TempDir::new("path_prompt_file_without_explorer");
+        let file = dir.write("document.txt", "opened from the path bar");
+        let mut app = App::with_file(None);
+        app.start_path_prompt();
+        app.explorer_prompt.as_mut().unwrap().input = file.to_string_lossy().into_owned();
+        app.explorer_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        assert!(app.explorer_prompt.is_none());
+        assert_eq!(app.open().kind, BufferKind::Text);
+        assert_eq!(app.open().buffer.text(), "opened from the path bar");
     }
 
     #[test]
@@ -32246,8 +32332,8 @@ configure_board stm32
         assert!(joined.contains("a very long command line"));
     }
 
-    fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<fenix_completion::CompletionItem> {
-        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind })
+    fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<completion::Item> {
+        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind }.into())
     }
 
     #[test]

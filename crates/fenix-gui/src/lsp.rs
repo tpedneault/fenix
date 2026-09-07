@@ -28,6 +28,15 @@ pub fn client_capabilities() -> lsp_types::ClientCapabilities {
             ..Default::default()
         }),
         text_document: Some(lsp_types::TextDocumentClientCapabilities {
+            completion: Some(lsp_types::CompletionClientCapabilities {
+                dynamic_registration: Some(false),
+                completion_item: Some(lsp_types::CompletionItemCapability {
+                    snippet_support: Some(false),
+                    documentation_format: Some(vec![lsp_types::MarkupKind::PlainText]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             synchronization: Some(lsp_types::TextDocumentSyncClientCapabilities {
                 dynamic_registration: Some(false),
                 will_save: Some(false),
