@@ -11,6 +11,205 @@ use std::collections::HashSet;
 
 use fenix_core::{Buffer, Cursor};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Keyword,
+    Symbol,
+    Buffer,
+    Lsp,
+    Snippet,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::Symbol => "symbol",
+            Self::Buffer => "word",
+            Self::Lsp => "LSP",
+            Self::Snippet => "snippet",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum Insertion {
+    Text(String),
+    Snippet(fenix_snippets::Template),
+    Lsp(Box<lsp_types::CompletionItem>),
+}
+
+#[derive(Clone)]
+pub struct Item {
+    pub label: String,
+    pub source: Source,
+    pub detail: String,
+    pub documentation: String,
+    pub insertion: Insertion,
+}
+
+impl From<fenix_completion::CompletionItem> for Item {
+    fn from(item: fenix_completion::CompletionItem) -> Self {
+        let source = match item.kind {
+            fenix_completion::CompletionKind::Keyword => Source::Keyword,
+            fenix_completion::CompletionKind::Tag => Source::Symbol,
+            fenix_completion::CompletionKind::Lsp => Source::Lsp,
+        };
+        Self::text(item.label, source)
+    }
+}
+
+impl Item {
+    pub fn text(label: String, source: Source) -> Self {
+        Self {
+            insertion: Insertion::Text(label.clone()),
+            label,
+            source,
+            detail: String::new(),
+            documentation: String::new(),
+        }
+    }
+
+    pub fn snippet(snippet: &fenix_snippets::Snippet) -> Self {
+        Self {
+            label: snippet.trigger.clone(),
+            source: Source::Snippet,
+            detail: snippet.name.clone(),
+            documentation: snippet
+                .template
+                .render(&Default::default(), &fenix_snippets::Context::default(), "")
+                .text,
+            insertion: Insertion::Snippet(snippet.template.clone()),
+        }
+    }
+
+    pub fn lsp(item: lsp_types::CompletionItem) -> Option<Self> {
+        // Native snippets deliberately aren't a full LSP snippet grammar.
+        // We advertise plain text only, rather than insert unsupported syntax.
+        if item.insert_text_format == Some(lsp_types::InsertTextFormat::SNIPPET) {
+            return None;
+        }
+        let documentation = match &item.documentation {
+            Some(lsp_types::Documentation::String(s)) => s.clone(),
+            Some(lsp_types::Documentation::MarkupContent(s)) => s.value.clone(),
+            None => String::new(),
+        };
+        Some(Self {
+            label: item.label.clone(),
+            source: Source::Lsp,
+            detail: item.detail.clone().unwrap_or_default(),
+            documentation,
+            insertion: Insertion::Lsp(Box::new(item)),
+        })
+    }
+}
+
+/// Keep native snippets distinct from code completions with the same label;
+/// server results replace redundant local words/keywords. Stable tie order.
+pub fn merge(
+    local: Vec<fenix_picker::Candidate<Item>>,
+    server: Vec<Item>,
+) -> Vec<fenix_picker::Candidate<Item>> {
+    let mut seen = HashSet::new();
+    server
+        .into_iter()
+        .map(|item| fenix_picker::Candidate::new(item.label.clone(), item))
+        .chain(local)
+        .filter(|item| {
+            seen.insert((
+                item.payload.label.clone(),
+                item.payload.source == Source::Snippet,
+            ))
+        })
+        .collect()
+}
+
+pub fn clipped_line(text: &str, width: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= width {
+        return line;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    line.chars()
+        .take(width - 1)
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+pub fn scroll_offset(selected: usize, previous: usize, rows: usize) -> usize {
+    previous
+        .min(selected)
+        .max(selected.saturating_sub(rows.max(1) - 1))
+}
+
+/// Validate all completion edits before mutating anything, then apply them as
+/// one undoable replacement. Additional edits (e.g. imports) share this undo.
+pub fn apply_lsp(
+    buffer: &mut Buffer,
+    cursor: &mut Cursor,
+    fallback: std::ops::Range<usize>,
+    item: &lsp_types::CompletionItem,
+) -> Result<(), String> {
+    let convert = |range: lsp_types::Range| -> Result<std::ops::Range<usize>, String> {
+        let start = fenix_lsp::position_to_char_offset(buffer.rope(), range.start);
+        let end = fenix_lsp::position_to_char_offset(buffer.rope(), range.end);
+        if start > end
+            || fenix_lsp::char_offset_to_position(buffer.rope(), start) != range.start
+            || fenix_lsp::char_offset_to_position(buffer.rope(), end) != range.end
+        {
+            return Err("completion has an invalid edit range".into());
+        }
+        Ok(start..end)
+    };
+    let (main, text) = match &item.text_edit {
+        Some(lsp_types::CompletionTextEdit::Edit(edit)) => {
+            (convert(edit.range)?, edit.new_text.clone())
+        }
+        Some(lsp_types::CompletionTextEdit::InsertAndReplace(edit)) => {
+            (convert(edit.replace)?, edit.new_text.clone())
+        }
+        None => (
+            fallback,
+            item.insert_text
+                .clone()
+                .unwrap_or_else(|| item.label.clone()),
+        ),
+    };
+    if main.start > cursor.char_idx || main.end < cursor.char_idx {
+        return Err("completion edit does not contain the cursor".into());
+    }
+    let mut edits = vec![(main.clone(), text, true)];
+    for edit in item.additional_text_edits.iter().flatten() {
+        edits.push((convert(edit.range)?, edit.new_text.clone(), false));
+    }
+    edits.sort_by_key(|(range, _, _)| (range.start, range.end));
+    if edits
+        .windows(2)
+        .any(|pair| pair[0].0.end > pair[1].0.start || pair[0].0.start == pair[1].0.start)
+    {
+        return Err("completion contains overlapping edits".into());
+    }
+    let start = edits.first().unwrap().0.start;
+    let end = edits.last().unwrap().0.end;
+    let mut result = String::new();
+    let mut at = start;
+    let mut caret = start;
+    for (range, text, primary) in edits {
+        result.push_str(&buffer.text_range(at, range.start));
+        result.push_str(&text);
+        if primary {
+            caret = start + result.chars().count();
+        }
+        at = range.end;
+    }
+    buffer.replace_range(cursor, start, end, &result);
+    cursor.char_idx = caret;
+    cursor.sticky_col = buffer.line_col(cursor).1;
+    Ok(())
+}
+
 /// `:` is included specifically for Tcl's `::` namespace separator --
 /// ctags-sourced candidates are labeled with their fully-qualified name
 /// (`myns::greet`), so `ns::gr` needs to survive as one prefix, not get
@@ -114,7 +313,10 @@ mod tests {
     }
 
     fn cur(char_idx: usize) -> Cursor {
-        Cursor { char_idx, sticky_col: 0 }
+        Cursor {
+            char_idx,
+            sticky_col: 0,
+        }
     }
 
     #[test]
@@ -252,13 +454,70 @@ mod tests {
     fn buffer_words_ignores_punctuation_and_whitespace_boundaries() {
         let buffer = buf("baz.qux(quux)");
         let words = buffer_words(&buffer);
-        assert_eq!(words, HashSet::from(["baz", "qux", "quux"].map(str::to_string)));
+        assert_eq!(
+            words,
+            HashSet::from(["baz", "qux", "quux"].map(str::to_string))
+        );
     }
 
     #[test]
     fn buffer_words_keeps_a_namespace_qualified_name_as_one_token() {
         let buffer = buf("foo::bar, baz");
         let words = buffer_words(&buffer);
-        assert_eq!(words, HashSet::from(["foo::bar", "baz"].map(str::to_string)));
+        assert_eq!(
+            words,
+            HashSet::from(["foo::bar", "baz"].map(str::to_string))
+        );
+    }
+    #[test]
+    fn selection_scrolls_both_directions() {
+        assert_eq!(scroll_offset(17, 0, 10), 8);
+        assert_eq!(scroll_offset(3, 8, 10), 3);
+        assert_eq!(clipped_line("αβγδε", 3), "αβ…");
+    }
+
+    #[test]
+    fn lsp_edits_use_utf16_and_keep_import_and_replacement_in_one_undo() {
+        let mut buffer = buf("😀\npri");
+        let mut cursor = Cursor::default();
+        cursor.char_idx = 5;
+        let item: lsp_types::CompletionItem = serde_json::from_value(serde_json::json!({
+            "label": "print(value)", "textEdit": {
+                "range": {"start":{"line":1,"character":0},"end":{"line":1,"character":3}},
+                "newText":"print"
+            }, "additionalTextEdits": [{
+                "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},
+                "newText":"import\n"
+            }]
+        }))
+        .unwrap();
+        apply_lsp(&mut buffer, &mut cursor, 2..5, &item).unwrap();
+        assert_eq!(buffer.text(), "import\n😀\nprint");
+        assert_eq!(cursor.char_idx, 14);
+        buffer.undo(&mut cursor);
+        assert_eq!(buffer.text(), "😀\npri");
+    }
+
+    #[test]
+    fn lsp_insert_text_and_invalid_edits() {
+        let mut buffer = buf("pr");
+        let mut cursor = Cursor::default();
+        cursor.char_idx = 2;
+        let mut item = lsp_types::CompletionItem {
+            label: "print(value)".into(),
+            insert_text: Some("print".into()),
+            ..Default::default()
+        };
+        apply_lsp(&mut buffer, &mut cursor, 0..2, &item).unwrap();
+        assert_eq!(buffer.text(), "print");
+        item.additional_text_edits = Some(vec![lsp_types::TextEdit {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 2),
+            ),
+            new_text: "bad".into(),
+        }]);
+        assert!(apply_lsp(&mut buffer, &mut cursor, 0..5, &item).is_err());
+        assert_eq!(buffer.text(), "print");
     }
 }

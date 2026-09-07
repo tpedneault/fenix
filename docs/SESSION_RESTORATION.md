@@ -24,7 +24,8 @@ recovery snapshots contain document contents in plain text in your config direct
 
 Closing a document removes it from subsequent checkpoints. Undo history, selections,
 marks, transient prompts, refactor transactions, and running processes are not
-restored. Terminal, task, debugger, PDF, and integration panes become placeholders;
+restored. Dashboards are regenerated with their current projects and recent-file
+actions. Terminal, task, debugger, PDF, and integration panes return to a dashboard;
 open the desired integration again. Normal language-service startup still applies
 when editing restored files.
 

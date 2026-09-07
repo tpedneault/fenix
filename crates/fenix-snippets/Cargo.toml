@@ -1,0 +1,11 @@
+[package]
+name = "fenix-snippets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = "0.4"
+fenix-core = { path = "../fenix-core" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -213,7 +213,11 @@ impl App {
             }
             documents.push(Some(id));
         }
-        let placeholder = self.buffers.open_dashboard("Session view not restarted. Open the desired document or integration.\n");
+        // Version 1 records no document for dashboards and transient panels.
+        // Restore those leaves to a usable dashboard, including its actions.
+        let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
+        let placeholder = self.buffers.open_dashboard(&dashboard.text);
+        self.dashboard_lines.insert(placeholder, dashboard.lines);
         let mut frames = Vec::new();
         for frame in saved.frames {
             let mut workspaces = Vec::new();
@@ -229,6 +233,10 @@ impl App {
                 let tree = WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
                 let mut pane_states = HashMap::new();
                 for (id, pane) in tree.windows().into_iter().zip(states) {
+                    if tree.content(id) == Some(&placeholder) {
+                        pane_states.insert(id, PaneState::seeded_at(Cursor::at_start()));
+                        continue;
+                    }
                     let buffer = &self.buffers.get(*tree.content(id).unwrap()).unwrap().buffer;
                     let scroll_line = pane.scroll_line.min(buffer.visual_line_count().saturating_sub(1));
                     pane_states.insert(id, PaneState {
@@ -241,7 +249,10 @@ impl App {
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
         let placeholder_used = frames.iter().any(|frame| frame.workspaces.iter().any(|workspace| workspace.windows.windows().iter().any(|pane| workspace.windows.content(*pane) == Some(&placeholder))));
-        if !placeholder_used { self.buffers.close(placeholder); }
+        if !placeholder_used {
+            self.buffers.close(placeholder);
+            self.dashboard_lines.remove(&placeholder);
+        }
         self.workspaces = frames.remove(0);
         self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
         self.refresh_project_root();
@@ -334,6 +345,57 @@ mod tests {
         let ob = app.buffers.get_mut(id).unwrap();
         let len = ob.buffer.len_chars();
         ob.buffer.replace_range(&mut ob.cursor, 0, len, text);
+    }
+
+    #[test]
+    fn session_restores_dashboard_content_actions_and_resets_transient_scroll() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        let pane = app.focused_pane_id();
+        app.workspaces.active_pane_states_mut().get_mut(&pane).unwrap().scroll_col = 500;
+        assert!(app.checkpoint_session());
+
+        let restored = temp.restore();
+        let expected = dashboard::render(restored.known_projects.roots(), restored.recent_files.paths());
+        assert_eq!(restored.open().kind, BufferKind::Dashboard);
+        assert_eq!(restored.open().buffer.text(), expected.text);
+        assert!(restored.dashboard_lines.contains_key(&restored.focused_buffer_id()));
+        assert_eq!(restored.cursor().char_idx, 0);
+        assert_eq!(restored.pane_state(restored.focused_pane_id()).scroll_col, 0);
+    }
+
+    #[test]
+    fn session_restores_transient_panel_to_dashboard_without_restarting_it() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        let id = app.focused_buffer_id();
+        app.buffers.get_mut(id).unwrap().kind = BufferKind::TaskOutput;
+        assert!(app.checkpoint_session());
+        let restored = temp.restore();
+        assert_eq!(restored.open().kind, BufferKind::Dashboard);
+        assert_eq!(restored.open().buffer.text(), dashboard::render(restored.known_projects.roots(), restored.recent_files.paths()).text);
+        assert!(restored.dashboard_lines.contains_key(&restored.focused_buffer_id()));
+    }
+
+    #[test]
+    fn session_restored_dashboard_recent_file_action_opens_the_document() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        assert!(app.checkpoint_session());
+        let file = temp.0.join("recent.txt");
+        std::fs::write(&file, "recent document").unwrap();
+        let mut restored = temp.app();
+        restored.recent_files.add(file.clone());
+        restored.restore_session(false);
+        let id = restored.focused_buffer_id();
+        let line = restored.dashboard_lines[&id].iter().position(|line| {
+            matches!(line.as_ref().and_then(|line| line.entry.as_ref()),
+                Some(dashboard::DashboardEntry::RecentFile(path)) if path == &file)
+        }).expect("restored dashboard should expose recent-file actions");
+        let (buffer, cursor) = restored.focused_buffer_and_cursor_mut();
+        cursor.char_idx = buffer.line_start_char(line);
+        restored.dashboard_activate_selected();
+        assert_eq!(restored.open().buffer.text(), "recent document");
     }
 
     #[test]

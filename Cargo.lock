@@ -759,6 +759,7 @@ dependencies = [
  "fenix-picker",
  "fenix-project",
  "fenix-recovery",
+ "fenix-snippets",
  "fenix-storage",
  "fenix-syntax",
  "fenix-table",
@@ -840,6 +841,15 @@ dependencies = [
 [[package]]
 name = "fenix-rpc"
 version = "0.0.1"
+
+[[package]]
+name = "fenix-snippets"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "fenix-core",
+ "tempfile",
+]
 
 [[package]]
 name = "fenix-storage"

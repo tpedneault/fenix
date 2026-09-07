@@ -80,6 +80,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         let mut t = KeyTrie::new();
         let spc = KeyPress::char(' ');
         t.label_group(&[spc], "leader");
+        t.label_group(&[spc, KeyPress::char('i')], "insert");
+        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('s')], "snippet", "insert.snippet");
         // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
         // single most-used action" convention -- here, the same fuzzy
         // find-file-in-project picker as `SPC p f`.

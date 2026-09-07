@@ -39,7 +39,7 @@ try {
         $testArgs += '--workspace'
     } else {
         # No display, container engine, network service, or language server needed.
-        foreach ($package in @('fenix-storage', 'fenix-core', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-lsp', 'fenix-dap', 'fenix-vim')) {
+        foreach ($package in @('fenix-storage', 'fenix-core', 'fenix-snippets', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-lsp', 'fenix-dap', 'fenix-vim')) {
             $testArgs += @('-p', $package)
         }
     }
