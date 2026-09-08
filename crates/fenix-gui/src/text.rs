@@ -65,6 +65,38 @@ pub const TERMINAL_ROWS: usize = 12;
 /// font_family` on the `TEMPLEOS` theme.
 static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_font.ttf");
 
+/// cosmic-text's generic alias can name an uninstalled font (notably
+/// Noto Sans Mono on Windows). Using that name directly permits proportional
+/// fallback, so resolve an actual fixed-pitch face before measuring the grid.
+fn default_monospace_family(font_system: &FontSystem) -> String {
+    let db = font_system.db();
+    let installed =
+        |family: &str| db.faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family));
+    for family in [
+        db.family_name(&Family::Monospace),
+        "Cascadia Mono",
+        "Consolas",
+        "Menlo",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Courier New",
+    ] {
+        if installed(family) {
+            return family.to_owned();
+        }
+    }
+    // Deterministic fallback for other platforms; the embedded font is a
+    // last resort on machines with no system monospace fonts at all.
+    let mut families: Vec<_> = db
+        .faces()
+        .filter(|face| face.monospaced)
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.as_str()))
+        .filter(|name| *name != "TempleOS")
+        .collect();
+    families.sort_unstable();
+    families.first().copied().unwrap_or("TempleOS").to_owned()
+}
+
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
 ///
 /// Holds one independent glyph buffer per visible window pane
@@ -116,7 +148,7 @@ impl FontContext {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         let default_family: &'static str =
-            Box::leak(font_system.db().family_name(&Family::Monospace).to_string().into_boxed_str());
+            Box::leak(default_monospace_family(&font_system).into_boxed_str());
         let cache = Cache::new(&gpu.device);
         let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
         Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
@@ -193,25 +225,9 @@ pub struct TextPipeline {
     /// six call sites need touching just because this field's *source*
     /// changed from theme-only to theme-or-config.
     content_family: Option<&'static str>,
-    /// The system's real default monospace font, resolved *once* here
-    /// (via `fontdb::Database::family_name(&Family::Monospace)`, the
-    /// same generic-family-alias resolution `Family::Monospace` itself
-    /// would trigger) rather than re-resolved on every shape. This is
-    /// the fix for a real, measured performance bug: shaping text with
-    /// the generic `Family::Monospace` enum variant directly costs
-    /// `cosmic-text` extra per-shape fallback-substitution work it only
-    /// does for that variant (confirmed via a standalone headless
-    /// benchmark against this crate's own font database: ~37ms/shape
-    /// for `Family::Monospace` vs. ~6ms for a concrete `Family::Name`
-    /// on identical text) -- paid on every keystroke, since content is
-    /// reshaped once per `redraw()`. Resolving the *name* once and
-    /// always shaping via `Family::Name(_)` from then on keeps the
-    /// same visual font (it's the same name the generic variant would
-    /// have resolved to) without paying that tax continuously. Used as
-    /// the fallback whenever no theme/config font is set -- previously
-    /// every theme without an explicit `font_family` (i.e. every theme
-    /// except TempleOS) paid this cost on every frame, which is why
-    /// typing felt slower on any theme but TempleOS.
+    /// An installed monospace family, resolved once by FontContext. A concrete
+    /// name avoids generic fallback work on every shape; verifying installation
+    /// prevents an absent generic alias from selecting proportional text.
     default_family: &'static str,
     /// The active font's real, measured monospace advance width in
     /// pixels at the current `font_size` -- recomputed whenever
@@ -369,6 +385,12 @@ impl TextPipeline {
         self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.sidebar.set_metrics(metrics);
         self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.terminal.set_metrics(metrics);
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        for buf in self.titles.values_mut() {
+            buf.set_metrics(metrics);
+            buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        }
         for buf in self.content_buffers.values_mut() {
             buf.set_metrics(metrics);
             buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -920,22 +942,53 @@ mod tests {
     }
 
     #[test]
-    fn resolving_the_monospace_generic_family_yields_a_usable_concrete_name() {
-        // The precondition `default_family` (in `TextPipeline::new`)
-        // depends on: `content_family()`'s fallback must always be a
-        // resolved concrete `Family::Name`, never the generic `Family::
-        // Monospace` variant itself, because shaping via the generic
-        // variant is measurably slower (see `default_family`'s own doc
-        // comment -- ~37ms/shape vs. ~6ms for a concrete name on this
-        // crate's own font database in a standalone benchmark). This
-        // guards the one fact that fix relies on: `fontdb` actually
-        // resolves `Family::Monospace` to some real, non-empty family
-        // name on a real font database, so leaking it once at startup
-        // and shaping via `Family::Name(_)` from then on can't silently
-        // fall back to shaping against an empty/bogus family.
-        let font_system = FontSystem::new();
-        let resolved = font_system.db().family_name(&Family::Monospace);
-        assert!(!resolved.is_empty(), "expected fontdb to resolve Family::Monospace to a real family name");
+    fn missing_generic_alias_resolves_to_an_installed_fixed_width_font() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        fonts.db_mut().set_monospace_family("Fenix deliberately missing monospace");
+        let name = default_monospace_family(&fonts);
+        assert!(fonts
+            .db()
+            .faces()
+            .any(|face| face.monospaced && face.families.iter().any(|(family, _)| family == &name)));
+        assert_fixed_grid(&mut fonts, &name);
+    }
+
+    fn assert_fixed_grid(fonts: &mut FontSystem, family: &str) {
+        // Different-width letters, punctuation, spaces, and potential ligatures.
+        let sample = "MiWl 0123456789 []{}().,:; != == => -> ffi www iii";
+        for size in [8.0, 16.0, 24.0, 40.0] {
+            let mut buffer = GlyphBuffer::new(fonts, Metrics::new(size, size * 1.25));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(4000.0), Some(size * 1.25));
+            buffer.set_text(sample, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+            buffer.shape_until_scroll(fonts, false);
+            let run = buffer.layout_runs().next().expect("shaped ASCII");
+            let cell = run.glyphs[0].w;
+            for glyph in run.glyphs {
+                let columns = (glyph.end - glyph.start) as f32;
+                assert!(
+                    (glyph.x - glyph.start as f32 * cell).abs() < 0.05,
+                    "{family} at {size}px: glyph at {} drifts off grid: {}",
+                    glyph.start,
+                    glyph.x
+                );
+                assert!(
+                    (glyph.w - columns * cell).abs() < 0.05,
+                    "{family} at {size}px: inconsistent advance {}",
+                    glyph.w
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_font_and_templeos_keep_mixed_text_on_the_character_grid() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        let name = default_monospace_family(&fonts);
+        assert_fixed_grid(&mut fonts, &name);
+        assert_fixed_grid(&mut fonts, "TempleOS");
     }
 
     #[test]
