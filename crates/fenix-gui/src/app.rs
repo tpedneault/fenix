@@ -9987,7 +9987,17 @@ impl App {
                 Some(pane) => {
                     self.windows_mut().focus(pane);
                 }
-                None => self.open_buffer_in_focused_pane(buffer),
+                None => {
+                    self.open_buffer_in_focused_pane(buffer);
+                    // This is a *new* pane id for an already-running
+                    // session (the one that originally showed it got
+                    // repurposed) -- needs its own `pane_titles` override
+                    // too, same as the brand-new-connection path below,
+                    // or this pane would be missing both the descriptive
+                    // title and the tab-strip exemption every other VNC
+                    // pane gets.
+                    self.pane_titles.insert(self.focused_pane_id(), format!("VNC: {name}"));
+                }
             }
             self.sync_vnc_focus();
             self.wake_caret();
@@ -10159,6 +10169,17 @@ impl App {
                 // the focused pane is already some *other* tracked
                 // session's, so this can't hijack one.
                 self.open_buffer_in_focused_pane(buffer);
+                // Same reasoning as `PDF: {name}`'s own `pane_titles`
+                // override: gives the pane a real descriptive title
+                // instead of the VNC buffer's own generic display name,
+                // and -- just as importantly -- excludes it from a `show_
+                // tabs` theme's tab strip, matching every other long-
+                // lived session pane (PDF/Docker/Git/Jira/Task). Without
+                // this, a VNC pane was the one session type left showing
+                // a tab whose × silently hides the session (`set_pane_
+                // content`, not a real disconnect) rather than being
+                // exempt like its siblings.
+                self.pane_titles.insert(self.focused_pane_id(), format!("VNC: {name}"));
                 let workspace_index = self.workspaces.active_index();
                 let framebuffer = Arc::new(Mutex::new(fenix_vnc::framebuffer::VncFramebuffer::new()));
                 let reader = self.event_proxy.clone().map(|proxy| {
