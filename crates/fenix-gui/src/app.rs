@@ -3732,6 +3732,29 @@ fn gutter_marks_from_hunks(hunks: &[fenix_diff::Hunk]) -> Vec<GutterMark> {
     marks
 }
 
+/// One line's own indentation guide columns -- a thin vertical line per
+/// *complete* indent level already present in `leading_columns` (the
+/// line's own leading-whitespace width, already tab-expanded to display
+/// columns by the caller), positioned at that level's own start column.
+/// 8 leading columns at a 4-column indent width gives `[0, 4]`: one guide
+/// marking "inside the first block," one marking "inside the second" --
+/// not `[4, 8]`, which would mark each level's *end* instead of its
+/// start, and not include a guide for the outermost level at all.
+///
+/// Pure and buffer-free (the caller does the tab-expansion/line-reading),
+/// so this is directly unit-testable. A disclosed v1 simplification:
+/// guides are computed independently per line, not bridged across a
+/// blank line to the next non-blank line's own indent the way some
+/// editors do -- a blank line inside an indented block simply shows no
+/// guides of its own.
+fn indent_guide_columns(leading_columns: usize, indent_width: usize) -> Vec<usize> {
+    if indent_width == 0 {
+        return Vec::new();
+    }
+    let levels = leading_columns / indent_width;
+    (0..levels).map(|level| level * indent_width).collect()
+}
+
 /// Everything `git_refresh_session` re-lists in one shell-out round --
 /// owned/`Send`, so `git_refresh_session`'s spawned background thread
 /// never needs to touch `self`/`GitSession` at all (same reasoning as
@@ -24848,6 +24871,12 @@ impl App {
             /// lookups of its own. Empty for every pane but an ordinary
             /// text buffer's.
             gutter_marks: Vec<(usize, GutterMarkKind)>,
+            /// Indentation guide `(row, column)` pairs -- `row` relative
+            /// to `render_base_line` like `gutter_marks`, `column` a
+            /// display column within the row's own text (0 = the pane's
+            /// own content start). Empty for every pane but an ordinary
+            /// text buffer's.
+            indent_guides: Vec<(usize, usize)>,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -24978,6 +25007,7 @@ impl App {
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
                     gutter_marks: Vec::new(),
+                    indent_guides: Vec::new(),
                 });
                 continue;
             }
@@ -25059,6 +25089,7 @@ impl App {
                         tab_active: Vec::new(),
                         tab_spans: Vec::new(),
                         gutter_marks: Vec::new(),
+                        indent_guides: Vec::new(),
                     });
                     continue;
                 }
@@ -25128,6 +25159,7 @@ impl App {
                         tab_active: Vec::new(),
                         tab_spans: Vec::new(),
                         gutter_marks: Vec::new(),
+                        indent_guides: Vec::new(),
                     });
                     continue;
                 }
@@ -25162,6 +25194,7 @@ impl App {
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
                     gutter_marks: Vec::new(),
+                    indent_guides: Vec::new(),
                 });
                 continue;
             }
@@ -25194,6 +25227,7 @@ impl App {
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
                     gutter_marks: Vec::new(),
+                    indent_guides: Vec::new(),
                 });
                 continue;
             }
@@ -25271,6 +25305,14 @@ impl App {
             // test call sites -- didn't need to change shape just to
             // additionally hand back this map.
             let mut col_maps: HashMap<usize, Vec<usize>> = HashMap::new();
+            // Indentation guides (row, column) pairs -- computed in this
+            // same loop since it already fetches/tab-expands every
+            // visible row's raw text for `col_maps`, and this needs
+            // exactly that same (display-column) text to count each
+            // row's own leading whitespace correctly on a tab-indented
+            // file.
+            let mut indent_guides: Vec<(usize, usize)> = Vec::new();
+            let indent_width = self.vim.indent_width();
             if let Some(ob) = self.buffers.get(buffer_id) {
                 let visual_lines = ob.buffer.visual_line_count();
                 for r in 0..=pane_visible_lines {
@@ -25281,10 +25323,14 @@ impl App {
                     let start = ob.buffer.line_start_char(buffer_line);
                     let len = ob.buffer.line_len(buffer_line);
                     let line_text = ob.buffer.text_range(start, start + len);
-                    if line_text.contains('\t') {
-                        let (_, col_map) = tabstops::expand_line(&line_text, &tab_stops);
+                    let leading_columns = if line_text.contains('\t') {
+                        let (display, col_map) = tabstops::expand_line(&line_text, &tab_stops);
                         col_maps.insert(r, col_map);
-                    }
+                        display.chars().take_while(|&c| c == ' ').count()
+                    } else {
+                        line_text.chars().take_while(|&c| c == ' ').count()
+                    };
+                    indent_guides.extend(indent_guide_columns(leading_columns, indent_width).into_iter().map(|col| (r, col)));
                 }
             }
             let content_spans = match self.buffers.get(buffer_id) {
@@ -25431,6 +25477,7 @@ impl App {
                 tab_active,
                 tab_spans,
                 gutter_marks,
+                indent_guides,
             });
         }
 
@@ -25810,6 +25857,23 @@ impl App {
                 let x = pane.rect.x + GUTTER_MARK_MARGIN;
                 let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
                 bg_rect.push_rect(gpu, x, y, GUTTER_MARK_WIDTH, line_height, color);
+            }
+        }
+        // Indentation guides -- a thin vertical line per indent level
+        // within a line's own leading whitespace (`indent_guide_columns`).
+        // `theme.divider` at a low alpha rather than a new theme field:
+        // every theme already has a divider color tuned to be a subtle,
+        // structural line rather than an eye-catching one, exactly the
+        // weight a guide drawn on *every* indented line needs to stay
+        // polish rather than noise.
+        const INDENT_GUIDE_ALPHA: f32 = 0.35;
+        let indent_guide_color = [theme.divider[0], theme.divider[1], theme.divider[2], theme.divider[3] * INDENT_GUIDE_ALPHA];
+        for pane in &panes_render {
+            let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            for &(row, col) in &pane.indent_guides {
+                let x = content_x + col as f32 * char_width;
+                let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
+                bg_rect.push_rect(gpu, x, y, 1.0, line_height, indent_guide_color);
             }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
@@ -26896,6 +26960,31 @@ mod tests {
             tabs: Vec::new(),
         };
         assert_eq!(cursor_icon_for(&geometry, (999.0, 999.0), 20.0), winit::window::CursorIcon::Default);
+    }
+
+    #[test]
+    fn indent_guide_columns_is_empty_for_an_unindented_line() {
+        assert_eq!(indent_guide_columns(0, 4), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn indent_guide_columns_gives_one_guide_per_complete_level_at_its_own_start() {
+        assert_eq!(indent_guide_columns(4, 4), vec![0]);
+        assert_eq!(indent_guide_columns(8, 4), vec![0, 4]);
+        assert_eq!(indent_guide_columns(12, 4), vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn indent_guide_columns_ignores_a_partial_trailing_level() {
+        // 6 columns of leading whitespace at a 4-column indent width is
+        // one complete level (0..4) plus 2 stray columns -- no guide for
+        // an incomplete level.
+        assert_eq!(indent_guide_columns(6, 4), vec![0]);
+    }
+
+    #[test]
+    fn indent_guide_columns_is_empty_when_indent_width_is_zero() {
+        assert_eq!(indent_guide_columns(8, 0), Vec::<usize>::new());
     }
 
     #[test]
