@@ -25861,13 +25861,25 @@ impl App {
         }
         // Indentation guides -- a thin vertical line per indent level
         // within a line's own leading whitespace (`indent_guide_columns`).
-        // `theme.divider` at a low alpha rather than a new theme field:
-        // every theme already has a divider color tuned to be a subtle,
-        // structural line rather than an eye-catching one, exactly the
-        // weight a guide drawn on *every* indented line needs to stay
-        // polish rather than noise.
-        const INDENT_GUIDE_ALPHA: f32 = 0.35;
-        let indent_guide_color = [theme.divider[0], theme.divider[1], theme.divider[2], theme.divider[3] * INDENT_GUIDE_ALPHA];
+        // Blended from `theme.bg` towards `theme.fg` rather than off
+        // `theme.divider`: a theme's divider is tuned as its own subtle
+        // structural line and, for Visual Studio Dark specifically, sits
+        // only ~15/255 above `bg` (real VS's own splitter is nearly
+        // invisible) -- fine for a divider but too faint once dimmed
+        // further for a guide meant to actually read on screen. `fg`'s
+        // contrast against `bg` is large and guaranteed by this file's
+        // own contrast tests for every theme, so blending a small slice
+        // of it in gives every theme a guide that's actually visible
+        // without a new `Theme` field, still weighted light enough to
+        // stay polish rather than noise.
+        const INDENT_GUIDE_MIX: f32 = 0.16;
+        let guide_fg = glyphon_to_rgba(theme.fg);
+        let indent_guide_color = [
+            theme.bg[0] + (guide_fg[0] - theme.bg[0]) * INDENT_GUIDE_MIX,
+            theme.bg[1] + (guide_fg[1] - theme.bg[1]) * INDENT_GUIDE_MIX,
+            theme.bg[2] + (guide_fg[2] - theme.bg[2]) * INDENT_GUIDE_MIX,
+            1.0,
+        ];
         for pane in &panes_render {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
             for &(row, col) in &pane.indent_guides {
