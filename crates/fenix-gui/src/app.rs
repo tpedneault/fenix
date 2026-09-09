@@ -25674,16 +25674,19 @@ impl App {
         // Popup backgrounds are deliberately *not* pushed into this batch --
         // see the big comment at the two-pass render sequence below for why.
         if show_sidebar {
-            // `theme.bg`, not `theme.bg_modeline` -- the sidebar shows
-            // file/directory names with the same icon/syntax-adjacent
-            // colors the main content area uses (dark, saturated colors
-            // meant to read on `theme.bg`, per `TEMPLEOS`'s own doc
-            // comment), so it needs the *content* background, not the
+            // `theme.sidebar_bg`, not `theme.bg_modeline` -- the sidebar
+            // shows file/directory names with the same icon/syntax-
+            // adjacent colors the main content area uses (dark, saturated
+            // colors meant to read on `theme.bg`, per `TEMPLEOS`'s own doc
+            // comment), so it needs a *content*-shaped background, not the
             // modeline's. The previous `bg_modeline` choice produced an
             // unreadable blue-background/black-text combination on the
             // TempleOS theme specifically (ORBIT_DARK's own bg/bg_modeline
             // are close enough in value that this went unnoticed there).
-            bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.bg);
+            // `sidebar_bg` defaults to exactly `bg` on every theme but one
+            // (see its own doc comment), so this is only a real change for
+            // a theme that deliberately wants the two surfaces distinct.
+            bg_rect.push_rect(gpu, 0.0, 0.0, text::SIDEBAR_WIDTH, modeline_top, theme.sidebar_bg);
             if let Some((_, Some(selected_row), _)) = &sidebar_render {
                 // `theme.selection`, not `theme.hl_line`: the sidebar has no
                 // caret of its own, so this highlight is the *only* cue for

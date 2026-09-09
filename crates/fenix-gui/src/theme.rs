@@ -33,6 +33,16 @@ pub struct Theme {
     pub show_tabs: bool,
 
     pub bg: [f32; 4],
+    /// The persistent file-explorer sidebar's own background -- real VS
+    /// paints its Solution Explorer/tool windows a shade lighter than the
+    /// editor canvas (`#252526` vs `#1E1E1E`), not the identical color.
+    /// Every existing theme sets this equal to `bg`, matching their
+    /// current on-screen appearance exactly (the sidebar's own icon/git
+    /// colors were tuned assuming that equality, per the "unreadable
+    /// blue-background/black-text" fix `App::redraw`'s sidebar-background
+    /// push documents) -- only a theme that actually wants the two
+    /// surfaces to read as visually distinct sets this to something else.
+    pub sidebar_bg: [f32; 4],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
@@ -225,6 +235,7 @@ pub const ORBIT_DARK: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x1a1b26),
+    sidebar_bg: rgba(0x1a1b26),
     bg_modeline: rgba(0x24283b),
     fg: text_color(0xc0caf5),
     fg_modeline: text_color(0xc0caf5),
@@ -296,6 +307,7 @@ pub const TEMPLEOS: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0xffffff),
+    sidebar_bg: rgba(0xffffff),
     bg_modeline: rgba(0x0000aa),
     fg: text_color(0x000000),
     fg_modeline: text_color(0xffffff),
@@ -400,6 +412,7 @@ pub const GRUVBOX_DARK: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x1d2021),
+    sidebar_bg: rgba(0x1d2021),
     bg_modeline: rgba(0x282828),
     fg: text_color(0xebdbb2),
     fg_modeline: text_color(0xebdbb2),
@@ -453,6 +466,7 @@ pub const NORD: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x2e3440),
+    sidebar_bg: rgba(0x2e3440),
     bg_modeline: rgba(0x343b49),
     fg: text_color(0xd8dee9),
     fg_modeline: text_color(0xeceff4),
@@ -506,6 +520,7 @@ pub const DRACULA: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x282a36),
+    sidebar_bg: rgba(0x282a36),
     bg_modeline: rgba(0x303341),
     fg: text_color(0xf8f8f2),
     fg_modeline: text_color(0xf8f8f2),
@@ -559,6 +574,7 @@ pub const SOLARIZED_DARK: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x002b36),
+    sidebar_bg: rgba(0x002b36),
     bg_modeline: rgba(0x073642),
     fg: text_color(0xb5c3be),
     fg_modeline: text_color(0xc4cfca),
@@ -612,6 +628,7 @@ pub const ONE_DARK: Theme = Theme {
     show_tabs: false,
 
     bg: rgba(0x282c34),
+    sidebar_bg: rgba(0x282c34),
     bg_modeline: rgba(0x21252b),
     fg: text_color(0xc1c8d4),
     fg_modeline: text_color(0xc1c8d4),
@@ -678,13 +695,18 @@ pub const VISUAL_STUDIO_DARK: Theme = Theme {
     show_tabs: true,
 
     bg: rgba(0x1e1e1e),
+    // VS's own real "tool window" background -- one shade lighter than
+    // the editor canvas, confirmed against Microsoft's Color Value
+    // Reference for VS 2022 (the Dark theme's "Body background" for
+    // properties/tool-window content is `#FF252526`).
+    sidebar_bg: rgba(0x252526),
     bg_modeline: rgba(0x2d2d30),
     fg: text_color(0xd4d4d4),
     fg_modeline: text_color(0xffffff),
     caret: rgba(0x4fc1ff),
     caret_text: text_color(0x4fc1ff),
     hl_line: rgba(0x2a2d2e),
-    selection: rgba_alpha(0x264f78, 0.35),
+    selection: rgba_alpha(0x264f78, 0.55),
     bracket_match: rgba_alpha(0x4ec9b0, 0.12),
     search_match: rgba_alpha(0xd7ba7b, 0.12),
 
@@ -783,7 +805,7 @@ mod tests {
                 theme.caret_text,
             ];
             let line = composite(theme.hl_line, theme.bg);
-            for surface in [theme.bg, line, theme.bg_modeline] {
+            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg] {
                 for color in colors {
                     let ratio = contrast(color, surface);
                     assert!(ratio >= 4.5, "{}: {color:?} on {surface:?}: {ratio:.2}:1", theme.name);
