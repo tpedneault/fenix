@@ -101,18 +101,87 @@ impl App {
         }
         let frames = (0..self.frames.len()).map(|frame| {
             let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
-            let workspaces = list.workspaces.iter().map(|workspace| SavedWorkspace {
-                name: workspace.name.clone(),
-                focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
-                layout: workspace.windows.snapshot(|pane, buffer| {
-                    let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
-                    Pane { document: ids.get(buffer).copied(), cursor: state.cursor.char_idx, sticky_col: state.cursor.sticky_col,
-                        scroll_line: state.scroll_line, scroll_col: state.scroll_col }
-                }),
-            }).collect();
-            SavedFrame { workspaces, active: list.active }
+            // Docker/Git/Jira/VNC/PDF/Task/Debug/Terminal sessions each
+            // own a live, in-memory struct (`DockerSession`, `GitSession`,
+            // ...) that this whole `capture_session`/restore mechanism
+            // has no way to reconstruct -- none of it is captured here,
+            // and nothing on the restore side ever rebuilds one. Every
+            // one of those panels opens in its own dedicated workspace
+            // (`self.workspaces.new_workspace(...)`, never mixed into an
+            // ordinary file workspace), so restoring *that* workspace's
+            // layout unconditionally produced exactly the bug this skips:
+            // the right pane shapes, each one silently pointed at a blank
+            // placeholder buffer instead of the session it used to show,
+            // since `document: None` (nothing in `ids` for a buffer kind
+            // that isn't `tracks_unsaved_changes`) falls back to that
+            // placeholder on restore. Skipped here instead of only on
+            // restore so a broken layout is never written to disk in the
+            // first place. Kept (not skipped) in the one edge case where
+            // *every* workspace in this frame is one of these -- an empty
+            // `workspaces` list would fail `Session::validate`, and a
+            // frame that's nothing but ephemeral sessions restoring with
+            // its old (already-established-to-be-imperfect) behavior
+            // beats inventing a synthetic fallback workspace here.
+            let ephemeral: Vec<bool> = list.workspaces.iter().map(|w| self.workspace_is_ephemeral_session(w)).collect();
+            let keep_all = ephemeral.iter().all(|&e| e);
+            let workspaces = list
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| keep_all || !ephemeral[i])
+                .map(|(_, workspace)| SavedWorkspace {
+                    name: workspace.name.clone(),
+                    focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
+                    layout: workspace.windows.snapshot(|pane, buffer| {
+                        let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
+                        Pane { document: ids.get(buffer).copied(), cursor: state.cursor.char_idx, sticky_col: state.cursor.sticky_col,
+                            scroll_line: state.scroll_line, scroll_col: state.scroll_col }
+                    }),
+                })
+                .collect();
+            // Remapped to the filtered list's own indices -- falls back
+            // to 0 (not `list.active` unchanged) when the active
+            // workspace itself was the one skipped, same as an out-of-
+            // range index anywhere else in a freshly built list.
+            let active = if keep_all {
+                list.active
+            } else {
+                list.workspaces.iter().enumerate().filter(|&(i, _)| !ephemeral[i]).position(|(i, _)| i == list.active).unwrap_or(0)
+            };
+            SavedFrame { workspaces, active }
         }).collect();
         Session { version: VERSION, documents, frames, focused_frame: self.focused_frame.min(self.frames.len() - 1) }
+    }
+
+    /// Whether every pane in `workspace` shows a buffer kind backed by a
+    /// live, in-memory session object this module has no way to save or
+    /// rebuild (`Docker`/`Git`/`Jira`/`Vnc`/`Pdf`/`PdfOutline`/
+    /// `PdfSearchResults`/`TaskOutput`/`Debug`/`Terminal`) -- see
+    /// `capture_session`'s own doc comment for why `capture_session`
+    /// skips persisting such a workspace's layout at all. A pane whose
+    /// buffer has already been closed out from under it (`self.buffers.
+    /// get` returning `None`, which shouldn't normally happen but isn't
+    /// this function's job to assume away) counts as *not* ephemeral --
+    /// safer to keep an unrecognized pane's layout than to silently drop
+    /// it.
+    fn workspace_is_ephemeral_session(&self, workspace: &Workspace) -> bool {
+        workspace.windows.windows().into_iter().all(|pane| {
+            workspace.windows.content(pane).and_then(|id| self.buffers.get(*id)).is_some_and(|ob| {
+                matches!(
+                    ob.kind,
+                    BufferKind::Docker
+                        | BufferKind::Git
+                        | BufferKind::Jira
+                        | BufferKind::Vnc
+                        | BufferKind::Pdf
+                        | BufferKind::PdfOutline
+                        | BufferKind::PdfSearchResults
+                        | BufferKind::TaskOutput
+                        | BufferKind::Debug
+                        | BufferKind::Terminal
+                )
+            })
+        })
     }
 
     pub(super) fn checkpoint_session(&mut self) -> bool {
@@ -437,6 +506,43 @@ mod tests {
         assert_eq!(restored.pane_state(panes[1]).cursor.char_idx, 8);
         assert_eq!(restored.pane_state(panes[1]).scroll_line, 1);
         assert_eq!(restored.pane_state(panes[1]).scroll_col, 3);
+        assert!(restored.checkpoint_session());
+    }
+
+    #[test]
+    fn session_drops_an_ephemeral_sessions_own_workspace_but_keeps_a_real_one_beside_it() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        // A real, ordinary file workspace -- this is the one that should
+        // survive a restore untouched.
+        let real_id = app.buffers.open_scratch();
+        dirty(&mut app, real_id, "real content\n");
+        app.workspaces.workspaces[0].name = "Writing".into();
+        app.set_pane_content(app.focused_pane_id(), real_id);
+        // A second workspace standing in for a Docker/Git-style session:
+        // its own dedicated workspace, its one pane's buffer tagged with
+        // a kind `capture_session` now treats as ephemeral.
+        let docker_id = app.buffers.open_scratch();
+        app.buffers.get_mut(docker_id).unwrap().kind = BufferKind::Docker;
+        let tree = WindowTree::new(docker_id);
+        let workspace = Workspace::new("docker".into(), tree, Cursor::at_start());
+        app.workspaces.workspaces.push(workspace);
+        app.workspaces.active = 1;
+
+        assert!(app.checkpoint_session());
+        let mut restored = temp.restore();
+
+        // The ephemeral workspace is gone entirely -- not restored with
+        // a placeholder in its old shape, just not there.
+        assert_eq!(restored.workspaces.workspaces.len(), 1);
+        assert_eq!(restored.workspaces.active, 0);
+        assert_eq!(restored.workspaces.active_name(), "Writing");
+        assert_eq!(restored.open().buffer.text(), "real content\n");
+        assert!(restored.open().buffer.is_dirty());
+        // Restoring again still round-trips cleanly -- the fallback
+        // logic didn't leave `active`/`workspaces` in some state that
+        // can't itself be saved and restored a second time.
+        restored.focus_frame(0);
         assert!(restored.checkpoint_session());
     }
 
