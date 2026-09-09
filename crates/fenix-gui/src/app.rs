@@ -3231,6 +3231,17 @@ fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: 
     (x, y)
 }
 
+/// A themed glyph-text color (`glyphon::Color`, 0-255 `u8` channels) in
+/// `bg_rect`'s own rect-fill representation (`[f32; 4]`, 0.0-1.0 channels)
+/// -- the inline git gutter marks (Part 5) are the one place a `Theme`'s
+/// text-shaped git colors (`git_staged`/`git_modified`/`git_conflicted`)
+/// need to paint a flat rect rather than color glyphs, so this bridges
+/// the same two representations every `rgba`/`text_color` pair in
+/// `theme.rs` already keeps separate for every other field.
+fn glyphon_to_rgba(color: glyphon::Color) -> [f32; 4] {
+    [color.r() as f32 / 255.0, color.g() as f32 / 255.0, color.b() as f32 / 255.0, 1.0]
+}
+
 /// Skips the first `n` characters of `s` for horizontal scroll --
 /// returns the remaining substring plus how many *bytes* that was, so
 /// a caller matching byte-offset syntax-highlight ranges against the
@@ -3654,6 +3665,71 @@ fn fetch_main_diff(repo_root: &Path, fetch: &MainFetch) -> Option<String> {
         MainFetch::Stash(index) => fenix_git::stash_diff(repo_root, *index).ok(),
         MainFetch::Skip | MainFetch::Untracked => None,
     }
+}
+
+/// What kind of inline change a gutter mark (`App::gutter_hunks`) shows
+/// beside a line -- the same three-way distinction most editors' own git-
+/// gutter indicator makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GutterMarkKind {
+    Added,
+    Modified,
+    /// Anchored at the *following* line (or end of file) -- there is no
+    /// line of its own left in the new file to sit beside.
+    Deleted,
+}
+
+/// One inline git gutter mark -- `line` is 1-based, in the *new* (current)
+/// file's own line numbering, matching `fenix_diff::DiffLine::new_line`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GutterMark {
+    line: usize,
+    kind: GutterMarkKind,
+}
+
+/// Walks a parsed diff's hunks into gutter marks -- pure and GPU/git-free,
+/// so it's directly unit-testable against small synthetic diff text. Git's
+/// own diff output groups a change as a contiguous run of removed lines
+/// immediately followed by a contiguous run of added lines (never
+/// interleaved), so this walks each hunk in maximal non-context runs: a
+/// run with any added lines marks every one of them `Modified` if the run
+/// also removed something, else `Added`; a run of pure removals (nothing
+/// added at all) becomes one `Deleted` mark at the run's own end -- the
+/// next line's new-file position, or the hunk's own end if the removal
+/// runs off it.
+fn gutter_marks_from_hunks(hunks: &[fenix_diff::Hunk]) -> Vec<GutterMark> {
+    let mut marks = Vec::new();
+    for hunk in hunks {
+        let mut i = 0;
+        while i < hunk.lines.len() {
+            let is_change = |k: fenix_diff::LineKind| matches!(k, fenix_diff::LineKind::Removed | fenix_diff::LineKind::Added);
+            if !is_change(hunk.lines[i].kind) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < hunk.lines.len() && is_change(hunk.lines[i].kind) {
+                i += 1;
+            }
+            let run = &hunk.lines[start..i];
+            let has_removed = run.iter().any(|l| l.kind == fenix_diff::LineKind::Removed);
+            let has_added = run.iter().any(|l| l.kind == fenix_diff::LineKind::Added);
+            if has_added {
+                let kind = if has_removed { GutterMarkKind::Modified } else { GutterMarkKind::Added };
+                for line in run {
+                    if line.kind == fenix_diff::LineKind::Added {
+                        if let Some(new_line) = line.new_line {
+                            marks.push(GutterMark { line: new_line, kind });
+                        }
+                    }
+                }
+            } else if has_removed {
+                let anchor = hunk.lines[i..].iter().find_map(|l| l.new_line).unwrap_or(hunk.new_start + hunk.new_len);
+                marks.push(GutterMark { line: anchor, kind: GutterMarkKind::Deleted });
+            }
+        }
+    }
+    marks
 }
 
 /// Everything `git_refresh_session` re-lists in one shell-out round --
@@ -4849,13 +4925,23 @@ struct Workspace {
     /// comment for why this lives here, not on `App` directly.
     pane_states: HashMap<fenix_window::WindowId, PaneState>,
     scroll_anims: HashMap<fenix_window::WindowId, ScrollAnim>,
+    /// Every buffer a pane has ever shown, in first-opened order -- the
+    /// open-tabs strip a `show_tabs` theme renders (`App::pane_tab_layout`).
+    /// Keyed by `WindowId` for the same reason `pane_states` is: `WindowId`s
+    /// are only unique within one `WindowTree`. Maintained for every
+    /// theme, not just tabbed ones (see `App::set_pane_content`), so
+    /// switching *to* a tabbed theme mid-session already has real tab
+    /// history instead of a blank strip.
+    pane_tabs: HashMap<fenix_window::WindowId, Vec<BufferId>>,
 }
 
 impl Workspace {
     fn new(name: String, windows: WindowTree<BufferId>, initial_cursor: Cursor) -> Self {
         let mut pane_states = HashMap::new();
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
-        Self { name, windows, pane_states, scroll_anims: HashMap::new() }
+        let mut pane_tabs = HashMap::new();
+        pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs }
     }
 }
 
@@ -4896,6 +4982,14 @@ impl WorkspaceList {
 
     fn active_scroll_anims_mut(&mut self) -> &mut HashMap<fenix_window::WindowId, ScrollAnim> {
         &mut self.workspaces[self.active].scroll_anims
+    }
+
+    fn active_pane_tabs(&self) -> &HashMap<fenix_window::WindowId, Vec<BufferId>> {
+        &self.workspaces[self.active].pane_tabs
+    }
+
+    fn active_pane_tabs_mut(&mut self) -> &mut HashMap<fenix_window::WindowId, Vec<BufferId>> {
+        &mut self.workspaces[self.active].pane_tabs
     }
 
     fn active_name(&self) -> &str {
@@ -5473,6 +5567,14 @@ pub struct App {
     /// position of their own in `winit`, so this is what click-to-focus
     /// and wheel-scroll hit-test against.
     cursor_pos: Option<(f32, f32)>,
+    /// The OS cursor icon last actually set (`App::update_hover_cursor`),
+    /// so `window.set_cursor` is only called on a real change rather than
+    /// on every one of potentially hundreds of `CursorMoved` events per
+    /// second. Deliberately not preserved across `FrameState` park/
+    /// activate the way `cursor_pos` is -- it's cheap, self-correcting
+    /// UI state that recomputes correctly the moment the mouse next moves
+    /// in a reactivated frame, unlike `cursor_pos` itself.
+    current_cursor_icon: Option<winit::window::CursorIcon>,
     /// What `explorer` (the full-buffer listing) is currently for --
     /// meaningless while `main_view != Explorer`. See `ExplorerPurpose`'s
     /// own doc comment.
@@ -5698,6 +5800,15 @@ pub struct App {
     /// today; an ordinary `SPC w v`/`SPC w s` split never gets an entry
     /// here, so its rendering is completely unaffected.
     pane_titles: HashMap<fenix_window::WindowId, String>,
+    /// The inline git gutter marks (`App::refresh_gutter_hunks`) for every
+    /// buffer that currently has any -- a buffer with no backing path, or
+    /// outside a git repo, or with no changes against `HEAD`, simply has
+    /// no entry (not an empty `Vec`, so "never computed" and "computed,
+    /// nothing changed" both collapse to the same absent-key case).
+    /// Keyed by `BufferId`, not pane -- the marks describe the *file*,
+    /// not any particular view of it, same reasoning `BufferList`'s own
+    /// dirty-tracking is buffer-scoped rather than per-pane.
+    gutter_hunks: HashMap<BufferId, Vec<GutterMark>>,
     /// The active Docker multi-pane session (`SPC d d`), if any -- see
     /// `DockerSession`'s own doc comment.
     docker_session: Option<DockerSession>,
@@ -6141,6 +6252,12 @@ struct FrameGeometry {
     sidebar_rect: Option<fenix_window::Rect>,
     terminal_rect: Option<fenix_window::Rect>,
     panes: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
+    /// Every visible tab, across every pane, when the active theme has
+    /// `show_tabs` -- empty for every other theme (see `App::frame_
+    /// geometry`). Checked by `hit_test`/`cursor_icon_for` before the
+    /// coarser `panes` rects, so a tab or its close glyph wins over
+    /// "just focus whatever pane this is."
+    tabs: Vec<(fenix_window::WindowId, TabRect)>,
 }
 
 /// What a click or wheel notch landed on, per `hit_test`.
@@ -6149,6 +6266,11 @@ enum ScrollTarget {
     Sidebar,
     Terminal,
     Pane(fenix_window::WindowId),
+    /// A tab's own body was clicked -- switch that pane to this buffer.
+    SwitchTab(fenix_window::WindowId, BufferId),
+    /// A tab's close glyph was clicked -- drop it from that pane's tab
+    /// list (see `App::handle_click_at`).
+    CloseTab(fenix_window::WindowId, BufferId),
 }
 
 /// Point-in-region hit test shared by click-to-focus and wheel-scroll --
@@ -6168,7 +6290,106 @@ fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
             return Some(ScrollTarget::Sidebar);
         }
     }
+    for (pane, tab) in &geometry.tabs {
+        if tab.close.contains_point(x, y) {
+            return Some(ScrollTarget::CloseTab(*pane, tab.buffer));
+        }
+        if tab.body.contains_point(x, y) {
+            return Some(ScrollTarget::SwitchTab(*pane, tab.buffer));
+        }
+    }
     geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)).map(|(id, _)| ScrollTarget::Pane(*id))
+}
+
+/// Which OS cursor icon should show at `pos`, given the same `geometry`
+/// `hit_test` already checks clicks against -- pure and GPU-free like
+/// `hit_test` itself, so hovering and clicking can never disagree about
+/// what's under the pointer. A tab/close glyph or the sidebar reads as
+/// clickable chrome (`Pointer`); a pane's own *content* sub-rect (below
+/// its title/tab strip -- `line_height` is that strip's fixed height, the
+/// same value `pane_content_rect` shrinks by) is editable text (`Text`,
+/// an I-beam); everything else (a pane's own strip dead space, the
+/// terminal, dividers, the modeline) is the plain arrow.
+fn cursor_icon_for(geometry: &FrameGeometry, pos: (f32, f32), line_height: f32) -> winit::window::CursorIcon {
+    let (x, y) = pos;
+    if geometry.tabs.iter().any(|(_, tab)| tab.body.contains_point(x, y)) {
+        return winit::window::CursorIcon::Pointer;
+    }
+    if geometry.sidebar_rect.is_some_and(|rect| rect.contains_point(x, y)) {
+        return winit::window::CursorIcon::Pointer;
+    }
+    if let Some((_, rect)) = geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)) {
+        if y >= rect.y + line_height {
+            return winit::window::CursorIcon::Text;
+        }
+    }
+    winit::window::CursorIcon::Default
+}
+
+/// One tab's own on-screen layout -- `body` is the whole clickable tab
+/// (background + text), `close` its narrower close-glyph sub-rect at the
+/// right edge, both sharing `body`'s vertical span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TabRect {
+    buffer: BufferId,
+    body: fenix_window::Rect,
+    close: fenix_window::Rect,
+}
+
+/// Minimum/maximum width, in characters, a tab's body gets for its
+/// filename before clamping -- same "stay in a readable range regardless
+/// of content length" posture as `WHICH_KEY_MIN_WIDTH`/`_MAX_WIDTH`.
+const TAB_MIN_NAME_CHARS: usize = 6;
+const TAB_MAX_NAME_CHARS: usize = 20;
+/// Extra chars reserved for `" {icon} "` + a worst-case one-char dirty
+/// marker + `" × "`, on top of the (clamped) filename itself -- matches
+/// `App::redraw`'s own tab-span formatting exactly, so the background
+/// rect this produces never clips the text it lays under.
+const TAB_CHROME_CHARS: usize = 8;
+/// The close glyph's own `" × "` width, in chars, carved out of a tab's
+/// right edge.
+const TAB_CLOSE_CHARS: usize = 3;
+
+/// Lays out `tabs` left-to-right within `rect` (a pane's title-strip rect,
+/// exactly `line_height` tall) -- pure and GPU-free like `pane_content_
+/// rect`, so the same geometry backs both hit-testing (`frame_geometry`)
+/// and drawing (`redraw`) without the two ever disagreeing about where a
+/// tab is. `tabs` is `(buffer, filename char count)` pairs, left to right;
+/// tabs that would run past the strip's right edge are simply omitted
+/// (clipped, not scrolled) -- a disclosed v1 simplification.
+fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
+    let mut out = Vec::new();
+    let mut x = rect.x;
+    for &(buffer, name_chars) in tabs {
+        let chars = name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS;
+        let w = chars as f32 * char_width;
+        if x + w > rect.x + rect.w {
+            break;
+        }
+        let close_w = TAB_CLOSE_CHARS as f32 * char_width;
+        let body = fenix_window::Rect { x, y: rect.y, w, h: rect.h };
+        let close = fenix_window::Rect { x: x + w - close_w, y: rect.y, w: close_w, h: rect.h };
+        out.push(TabRect { buffer, body, close });
+        x += w;
+    }
+    out
+}
+
+/// Clamps `name` to at most `max_chars`, replacing the tail with `…` when
+/// it doesn't fit -- keeps a long filename from running past its tab's own
+/// clamped width (`pane_tab_layout`'s own `TAB_MAX_NAME_CHARS`).
+fn truncate_tab_name(name: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max_chars {
+        return name.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = chars[..keep].iter().collect();
+    out.push('\u{2026}');
+    out
 }
 
 /// Lines per physical wheel notch -- matches the common "3 lines"
@@ -6514,6 +6735,7 @@ impl App {
             terminal_buffer_cwds: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
+            current_cursor_icon: None,
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_conflict: None,
@@ -6547,6 +6769,7 @@ impl App {
             docker_confirm_remove: None,
             docker_menu_open: false,
             pane_titles: HashMap::new(),
+            gutter_hunks: HashMap::new(),
             docker_session: None,
             task_session: None,
             project_last_tasks: HashMap::new(),
@@ -7170,6 +7393,65 @@ impl App {
         self.windows_mut().set_content(pane, buffer_id);
         let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
+        let tabs = self.workspaces.active_pane_tabs_mut().entry(pane).or_default();
+        if !tabs.contains(&buffer_id) {
+            tabs.push(buffer_id);
+        }
+        self.refresh_gutter_hunks(buffer_id);
+    }
+
+    /// Recomputes `gutter_hunks` for `buffer_id` from a single synchronous,
+    /// one-file `git diff` (fast -- not `GitStatusPoller`'s repo-wide
+    /// background poll, a different subsystem this doesn't need), run at
+    /// the points a file's on-disk content can meaningfully change under
+    /// it: opening/switching to it (`set_pane_content`), right after a
+    /// save (`save_inner`), and regaining window focus (`WindowEvent::
+    /// Focused(true)`, the same moment `poll_files_changed_on_disk`
+    /// already re-syncs against external disk changes). Reflects the
+    /// file's last-saved-to-disk content against `HEAD`, not a live per-
+    /// keystroke diff against an in-memory git blob -- the explorer's own
+    /// git status badges are save-triggered the same way. Clears any
+    /// stale entry for a buffer with no backing path, outside a git repo,
+    /// or with no changes against `HEAD` -- mirrors how those badges
+    /// already no-op there.
+    fn refresh_gutter_hunks(&mut self, buffer_id: BufferId) {
+        match self.compute_gutter_hunks(buffer_id) {
+            Some(marks) if !marks.is_empty() => {
+                self.gutter_hunks.insert(buffer_id, marks);
+            }
+            _ => {
+                self.gutter_hunks.remove(&buffer_id);
+            }
+        }
+    }
+
+    fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<Vec<GutterMark>> {
+        let path = self.buffers.get(buffer_id)?.buffer.path()?.to_path_buf();
+        // Resolved from `path` itself, not `self.project_root` -- that
+        // field tracks a single global "current project" derived from
+        // whichever buffer happens to be *focused* (see `refresh_project_
+        // root`), which isn't necessarily this buffer, or any real
+        // project at all (a dashboard/scratch buffer has no path, so it's
+        // `None` while one of those is focused). Every open buffer's own
+        // gutter marks need its own file's real repo root, independent of
+        // what else happens to be focused when this runs.
+        let repo_root = fenix_project::find_project_root(&path)?;
+        let diff_text = fenix_git::file_diff(&repo_root, &path.to_string_lossy(), false).ok()?;
+        let file = fenix_diff::parse(&diff_text).into_iter().next()?;
+        Some(gutter_marks_from_hunks(&file.hunks))
+    }
+
+    /// `refresh_gutter_hunks` for every currently open buffer -- restoring
+    /// a session reconstructs `Workspace`/`WindowTree` state directly
+    /// (`app/session.rs`), bypassing `set_pane_content` entirely, so
+    /// nothing else would ever compute a restored pane's gutter marks:
+    /// merely focusing/clicking into it afterward doesn't either, since
+    /// that's a plain focus change, not a buffer switch. Called once
+    /// right after a session restore finishes.
+    pub(crate) fn refresh_all_gutter_hunks(&mut self) {
+        for id in self.buffers.mru().to_vec() {
+            self.refresh_gutter_hunks(id);
+        }
     }
 
     /// Whether the *focused* pane currently belongs to one of the app's
@@ -8556,6 +8838,7 @@ impl App {
                 // nothing that's lost -- and leaving it would offer to
                 // "recover" it on the next start.
                 self.discard_recovery_for(id);
+                self.refresh_gutter_hunks(id);
                 self.set_message(format!("saved {}", path.display()));
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
@@ -10835,6 +11118,7 @@ impl App {
         if self.windows_mut().close_focused() {
             self.workspaces.active_pane_states_mut().remove(&pane);
             self.workspaces.active_scroll_anims_mut().remove(&pane);
+            self.workspaces.active_pane_tabs_mut().remove(&pane);
         }
         if let Some(buffer) = buffer {
             self.buffers.close(buffer);
@@ -11004,6 +11288,7 @@ impl App {
         if self.windows_mut().close_focused() {
             self.workspaces.active_pane_states_mut().remove(&pane);
             self.workspaces.active_scroll_anims_mut().remove(&pane);
+            self.workspaces.active_pane_tabs_mut().remove(&pane);
         }
         if let Some(buffer) = buffer {
             self.buffers.close(buffer);
@@ -16069,6 +16354,7 @@ impl App {
         if self.windows_mut().close_focused() {
             self.workspaces.active_pane_states_mut().remove(&compose.pane);
             self.workspaces.active_scroll_anims_mut().remove(&compose.pane);
+            self.workspaces.active_pane_tabs_mut().remove(&compose.pane);
         }
         self.buffers.close(compose.buffer);
         if self.windows().windows().contains(&compose.returning_to) {
@@ -20029,6 +20315,12 @@ impl App {
         let source_state = *self.pane_state(self.focused_pane_id());
         let new_pane = self.windows_mut().split(kind, id);
         self.workspaces.active_pane_states_mut().insert(new_pane, source_state);
+        // Bypasses `set_pane_content` (there's no buffer *switch* here, the
+        // new pane starts already showing `id`), so it needs its own tab-
+        // list seed -- just the one buffer, not the source pane's whole tab
+        // list, matching real VS's own "a new split group starts with one
+        // tab" behavior.
+        self.workspaces.active_pane_tabs_mut().insert(new_pane, vec![id]);
         self.wake_caret();
     }
 
@@ -20157,6 +20449,7 @@ impl App {
         if self.windows_mut().close_focused() {
             self.workspaces.active_pane_states_mut().remove(&closed_pane);
             self.workspaces.active_scroll_anims_mut().remove(&closed_pane);
+            self.workspaces.active_pane_tabs_mut().remove(&closed_pane);
         }
         self.wake_caret();
     }
@@ -23955,12 +24248,33 @@ impl App {
             w: (window_width - sidebar_px).max(0.0),
             h: (modeline_top - terminal_h).max(0.0),
         };
+        let panes = self.windows().layout(pane_area);
+        let tabs = if self.theme.show_tabs {
+            let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+            let char_width = self.text.as_ref().map(|t| t.char_width()).unwrap_or(text::CHAR_WIDTH);
+            panes
+                .iter()
+                .flat_map(|&(pane, rect)| {
+                    let strip = fenix_window::Rect { h: line_height, ..rect };
+                    let names: Vec<(BufferId, usize)> = self
+                        .workspaces
+                        .active_pane_tabs()
+                        .get(&pane)
+                        .map(|ids| ids.iter().map(|&id| (id, self.buffer_display_name(id).chars().count())).collect())
+                        .unwrap_or_default();
+                    pane_tab_layout(strip, char_width, &names).into_iter().map(move |tab| (pane, tab))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         FrameGeometry {
-            panes: self.windows().layout(pane_area),
+            panes,
             pane_area,
             sidebar_rect: (sidebar_px > 0.0).then_some(fenix_window::Rect { x: 0.0, y: 0.0, w: sidebar_px, h: modeline_top }),
             terminal_rect: (terminal_h > 0.0)
                 .then_some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: window_width, h: terminal_h }),
+            tabs,
         }
     }
 
@@ -24031,6 +24345,33 @@ impl App {
         pane_state.rendered_scroll = scroll_line as f32;
     }
 
+    /// Updates the OS cursor icon for wherever the mouse is now, via
+    /// `cursor_icon_for` -- called on every `WindowEvent::CursorMoved`.
+    /// Skipped entirely while a VNC session has mouse capture (`self.
+    /// vnc_focused.is_some()`): `set_vnc_focused` already owns the cursor
+    /// image for the whole duration of that capture (swapping in a
+    /// transparent one so only the guest's own pointer shows), and this
+    /// would otherwise fight it on every move. Only actually calls `window
+    /// .set_cursor` when the icon changed since last time (`self.current_
+    /// cursor_icon`) -- `CursorMoved` can fire hundreds of times a second,
+    /// and the OS call isn't free.
+    fn update_hover_cursor(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        if self.vnc_focused.is_some() {
+            return;
+        }
+        let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
+        let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        let icon = cursor_icon_for(&geometry, pos, line_height);
+        if self.current_cursor_icon == Some(icon) {
+            return;
+        }
+        self.current_cursor_icon = Some(icon);
+        if let Some(window) = &self.window {
+            window.set_cursor(icon);
+        }
+    }
+
     /// Left-click: focuses whatever the click landed on -- a plain
     /// focus change, the same granularity `SPC w hjkl`/pane-cycling
     /// already work at (see this feature's own design notes on why
@@ -24082,9 +24423,36 @@ impl App {
                     None => self.unfocus_terminal_buffer(),
                 }
             }
+            Some(ScrollTarget::SwitchTab(pane, buffer)) => {
+                self.windows_mut().focus(pane);
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+                self.set_pane_content(pane, buffer);
+            }
+            Some(ScrollTarget::CloseTab(pane, buffer)) => self.close_pane_tab(pane, buffer),
             None => return,
         }
         self.wake_caret();
+    }
+
+    /// Drops `buffer` from `pane`'s own tab strip (a `show_tabs` theme's
+    /// tab × click) -- never calls `BufferList::close` (its own doc
+    /// comment makes retargeting/closing the caller's job, and the same
+    /// buffer may still be shown in another split or listed in another
+    /// pane's own tab strip), so this only ever hides it from *this*
+    /// pane's strip, same as navigating away from a buffer already works
+    /// today (`SPC b b` still reaches it). If `buffer` was the pane's
+    /// active tab, retargets to the tab list's new last entry, or a fresh
+    /// scratch buffer if the list is now empty.
+    fn close_pane_tab(&mut self, pane: fenix_window::WindowId, buffer: BufferId) {
+        let was_active = self.windows().content(pane) == Some(&buffer);
+        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
+        tabs.retain(|&id| id != buffer);
+        let next = tabs.last().copied();
+        if was_active {
+            let target = next.unwrap_or_else(|| self.buffers.open_scratch());
+            self.set_pane_content(pane, target);
+        }
     }
 
     /// Wheel-scrolls a pane that ISN'T focused: moves its own
@@ -24156,6 +24524,13 @@ impl App {
         }
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let Some(target) = hit_test(&geometry, pos) else { return };
+        // A wheel notch landing on a tab or its close glyph scrolls that
+        // tab's own pane, same as landing anywhere else in it -- neither
+        // "switch tab" nor "close tab" is a wheel gesture.
+        let target = match target {
+            ScrollTarget::SwitchTab(pane, _) | ScrollTarget::CloseTab(pane, _) => ScrollTarget::Pane(pane),
+            other => other,
+        };
         match target {
             ScrollTarget::Sidebar => {
                 if let Some(sidebar) = &mut self.sidebar {
@@ -24215,6 +24590,7 @@ impl App {
                     self.scroll_unfocused_pane(pane, lines, rect_h, line_height);
                 }
             }
+            ScrollTarget::SwitchTab(..) | ScrollTarget::CloseTab(..) => unreachable!("normalized to Pane above"),
         }
         self.wake_caret();
     }
@@ -24427,6 +24803,30 @@ impl App {
             caret: Option<(usize, usize)>,
             content_frac: f32,
             gutter_px: f32,
+            /// This pane's own tab strip, when it has one -- empty for
+            /// every pane but an ordinary file-editing one on a `show_
+            /// tabs` theme (terminal/VNC/PDF/overlay/table panes always
+            /// keep the plain single `title` above; tabs make no sense
+            /// for a fixed-purpose panel). Precomputed here, not in the
+            /// later GPU-borrow-split rendering block, since building it
+            /// needs `self.buffer_display_name`/`self.buffers`/`self.
+            /// workspaces`, all off-limits once `text`/`bg_rect` hold
+            /// exclusive borrows of other `self` fields down there.
+            tabs_layout: Vec<TabRect>,
+            /// Parallel to `tabs_layout` -- whether each tab is the
+            /// pane's currently-active buffer.
+            tab_active: Vec<bool>,
+            /// The whole strip's rich-text spans, in the exact left-to-
+            /// right order `tabs_layout` lays the tabs out in -- handed
+            /// straight to `set_pane_title_rich`.
+            tab_spans: Vec<(String, glyphon::Color, bool)>,
+            /// Inline git gutter marks (`App::gutter_hunks`) currently
+            /// visible in this pane -- `(row, kind)`, `row` already
+            /// relative to this frame's own `render_base_line` like
+            /// `hl_row`, so the later drawing loop needs no buffer/scroll
+            /// lookups of its own. Empty for every pane but an ordinary
+            /// text buffer's.
+            gutter_marks: Vec<(usize, GutterMarkKind)>,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -24553,6 +24953,10 @@ impl App {
                     caret,
                     content_frac: 0.0,
                     gutter_px: 0.0,
+                    tabs_layout: Vec::new(),
+                    tab_active: Vec::new(),
+                    tab_spans: Vec::new(),
+                    gutter_marks: Vec::new(),
                 });
                 continue;
             }
@@ -24630,6 +25034,10 @@ impl App {
                         caret: None,
                         content_frac: 0.0,
                         gutter_px: 0.0,
+                        tabs_layout: Vec::new(),
+                        tab_active: Vec::new(),
+                        tab_spans: Vec::new(),
+                        gutter_marks: Vec::new(),
                     });
                     continue;
                 }
@@ -24695,6 +25103,10 @@ impl App {
                         caret: None,
                         content_frac: 0.0,
                         gutter_px: 0.0,
+                        tabs_layout: Vec::new(),
+                        tab_active: Vec::new(),
+                        tab_spans: Vec::new(),
+                        gutter_marks: Vec::new(),
                     });
                     continue;
                 }
@@ -24725,6 +25137,10 @@ impl App {
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
+                    tabs_layout: Vec::new(),
+                    tab_active: Vec::new(),
+                    tab_spans: Vec::new(),
+                    gutter_marks: Vec::new(),
                 });
                 continue;
             }
@@ -24753,6 +25169,10 @@ impl App {
                     caret: None,
                     content_frac: 0.0,
                     gutter_px: 0.0,
+                    tabs_layout: Vec::new(),
+                    tab_active: Vec::new(),
+                    tab_spans: Vec::new(),
+                    gutter_marks: Vec::new(),
                 });
                 continue;
             }
@@ -24905,6 +25325,71 @@ impl App {
                 (Segments::new(), None, Segments::new(), Segments::new(), None)
             };
 
+            // A `show_tabs` theme's tab strip for this pane -- only for an
+            // ordinary file-editing pane (no `pane_titles` override; a
+            // fixed-purpose session panel always keeps its plain single
+            // title). Every other `PaneRender` push site above (terminal/
+            // VNC/PDF/overlay/table) leaves these three fields empty,
+            // since tabs make no sense for those. Computed here, not in
+            // the later GPU-borrow-split rendering block, since it needs
+            // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
+            // `self.windows()`, all off-limits once `text`/`bg_rect` hold
+            // exclusive borrows of other `self` fields down there.
+            let (tabs_layout, tab_active, tab_spans) = if theme.show_tabs && !self.pane_titles.contains_key(&pane) {
+                let tab_ids = self.workspaces.active_pane_tabs().get(&pane).cloned().unwrap_or_default();
+                let strip_rect = fenix_window::Rect { x: rect.x, y: rect.y - line_height, w: rect.w, h: line_height };
+                let names: Vec<(BufferId, usize)> =
+                    tab_ids.iter().map(|&id| (id, self.buffer_display_name(id).chars().count())).collect();
+                let layout = pane_tab_layout(strip_rect, char_width, &names);
+                let active_buffer = self.windows().content(pane).copied();
+                let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
+                let mut active_flags: Vec<bool> = Vec::new();
+                for tab in &layout {
+                    let is_active = Some(tab.buffer) == active_buffer;
+                    active_flags.push(is_active);
+                    let name_color =
+                        if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
+                    let name = self.buffer_display_name(tab.buffer);
+                    let icon_ch = icon::icon_for(&name, false, false);
+                    let dirty = self
+                        .buffers
+                        .get(tab.buffer)
+                        .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
+                    // `TAB_CLOSE_CHARS` (the `" × "` segment below) is
+                    // already reserved out of the tab's own width by
+                    // `pane_tab_layout` -- this budget is just for the
+                    // icon/gap/dirty-marker segment ahead of it.
+                    let name_budget = (((tab.body.w - tab.close.w) / char_width).floor() as usize).saturating_sub(3);
+                    let truncated = truncate_tab_name(&name, name_budget);
+                    spans.push((format!(" {icon_ch} "), theme.icon_file, true));
+                    spans.push((format!("{truncated}{}", if dirty { "*" } else { "" }), name_color, false));
+                    spans.push((" × ".to_string(), theme.gutter_fg, false));
+                }
+                (layout, active_flags, spans)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+
+            // Inline git gutter marks (Part 5) currently in view -- every
+            // mark's 1-based file line is remapped to a row relative to
+            // `render_base_line`, same convention `hl_row` already uses,
+            // so the later GPU-borrow-split drawing loop needs no buffer/
+            // scroll lookups of its own. Marks scrolled out of view are
+            // simply dropped here, not carried forward.
+            let gutter_marks: Vec<(usize, GutterMarkKind)> = self
+                .gutter_hunks
+                .get(&buffer_id)
+                .map(|marks| {
+                    marks
+                        .iter()
+                        .filter_map(|mark| {
+                            let row = (mark.line.saturating_sub(1)).checked_sub(render_base_line)?;
+                            (row <= pane_visible_lines).then_some((row, mark.kind))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -24921,6 +25406,10 @@ impl App {
                 caret,
                 content_frac: render_frac,
                 gutter_px,
+                tabs_layout,
+                tab_active,
+                tab_spans,
+                gutter_marks,
             });
         }
 
@@ -25007,8 +25496,14 @@ impl App {
             .map(|pane| {
                 let title_rect =
                     fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - line_height, w: pane.rect.w, h: line_height };
-                let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), color, false)]);
+                if pane.tabs_layout.is_empty() {
+                    let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
+                    text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), color, false)]);
+                } else {
+                    let refs: Vec<(&str, glyphon::Color, bool)> =
+                        pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+                    text.set_pane_title_rich(pane.pane, title_rect.w, &refs);
+                }
                 (pane.pane, title_rect)
             })
             .collect();
@@ -25241,8 +25736,57 @@ impl App {
         // Title-bar backgrounds -- same `bg_modeline` color the modeline
         // itself uses, so a titled pane reads as "a small modeline for
         // just this section" rather than an unrelated new chrome color.
+        // A pane with a tab strip (`pane.tabs_layout`) additionally gets
+        // one `theme.bg` rect per *active* tab, layered on top of that
+        // flat `bg_modeline` fill -- the same "active tab matches the
+        // editor canvas, inactive tabs blend into the chrome" convention
+        // real VS/VS-Code-style tab strips use -- plus a thin `theme.
+        // divider` line closing off the strip's own bottom edge (the
+        // divider loop above only draws *between* panes, not under a
+        // pane's own title/tab strip).
         for &(_, rect) in &title_rects {
             bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+        }
+        for pane in &panes_render {
+            if pane.tabs_layout.is_empty() {
+                continue;
+            }
+            let strip_y = pane.rect.y - line_height;
+            for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
+                if is_active {
+                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, line_height, theme.bg);
+                }
+                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, line_height, theme.divider);
+            }
+            bg_rect.push_rect(gpu, pane.rect.x, strip_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
+        }
+        // Inline git gutter marks (Part 5) -- a thin colored bar, one per
+        // changed line still in view. Sits within the pane's own left
+        // margin (`text::PAD_LEFT`), *before* the line-number digits
+        // (which start exactly at `PAD_LEFT`) rather than squeezed into
+        // the ~1-char gap between the digits and the code -- the same
+        // "indicator strip, then line numbers, then code" left-to-right
+        // order real VS/VS Code use, and the only placement that leaves
+        // real breathing room on both sides of the bar without changing
+        // `gutter_chars`' own width (which every caret/selection
+        // position calculation elsewhere already assumes). Reuses the
+        // theme's existing git-status colors (already `glyphon::Color`,
+        // converted via `glyphon_to_rgba`) rather than adding dedicated
+        // fields -- every theme gets this for free, not just `VISUAL_
+        // STUDIO_DARK`.
+        const GUTTER_MARK_WIDTH: f32 = 3.0;
+        const GUTTER_MARK_MARGIN: f32 = 2.0;
+        for pane in &panes_render {
+            for &(row, kind) in &pane.gutter_marks {
+                let color = glyphon_to_rgba(match kind {
+                    GutterMarkKind::Added => theme.git_staged,
+                    GutterMarkKind::Modified => theme.git_modified,
+                    GutterMarkKind::Deleted => theme.git_conflicted,
+                });
+                let x = pane.rect.x + GUTTER_MARK_MARGIN;
+                let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
+                bg_rect.push_rect(gpu, x, y, GUTTER_MARK_WIDTH, line_height, color);
+            }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
         // this frame (modeline bar, hl-line, selection, which-key/sidebar
@@ -25767,12 +26311,18 @@ impl ApplicationHandler<FenixUserEvent> for App {
             // of the answer: the timer catches Fenix's own terminal
             // panel (which never takes focus away), and this catches
             // everything else, without waiting out the interval.
-            WindowEvent::Focused(true) => self.poll_files_changed_on_disk(),
+            WindowEvent::Focused(true) => {
+                self.poll_files_changed_on_disk();
+                self.refresh_gutter_hunks(self.focused_buffer_id());
+            }
             WindowEvent::Focused(false) => self.set_vnc_focused(None),
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = (position.x as f32, position.y as f32);
                 self.cursor_pos = Some(pos);
                 self.handle_vnc_pointer_move(pos);
+                if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
+                    self.update_hover_cursor(pos, window_width, window_height);
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed { self.snippet = None; }
@@ -26166,6 +26716,241 @@ mod tests {
         let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 10.0 };
         let shrunk = pane_content_rect(rect, 20.0, true);
         assert_eq!(shrunk.h, 0.0);
+    }
+
+    #[test]
+    fn pane_tab_layout_with_no_tabs_is_empty() {
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 20.0 };
+        assert!(pane_tab_layout(rect, 8.0, &[]).is_empty());
+    }
+
+    #[test]
+    fn pane_tab_layout_places_tabs_left_to_right_with_no_gap() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        app.new_scratch_buffer();
+        let second = app.focused_buffer_id();
+        let rect = fenix_window::Rect { x: 10.0, y: 5.0, w: 400.0, h: 20.0 };
+        let tabs = [(first, 6), (second, 6)];
+        let layout = pane_tab_layout(rect, 8.0, &tabs);
+        assert_eq!(layout.len(), 2);
+        assert_eq!(layout[0].buffer, first);
+        assert_eq!(layout[0].body.x, rect.x);
+        assert_eq!(layout[0].body.y, rect.y);
+        assert_eq!(layout[0].body.h, rect.h);
+        // Second tab starts exactly where the first one's body ends.
+        assert_eq!(layout[1].body.x, layout[0].body.x + layout[0].body.w);
+        // The close glyph sits at each tab's own right edge.
+        assert_eq!(layout[0].close.x + layout[0].close.w, layout[0].body.x + layout[0].body.w);
+    }
+
+    #[test]
+    fn pane_tab_layout_clamps_a_short_name_up_to_the_minimum_width() {
+        let app = App::with_file(None);
+        let buffer = app.focused_buffer_id();
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 400.0, h: 20.0 };
+        let short = pane_tab_layout(rect, 8.0, &[(buffer, 1)])[0].body.w;
+        let at_min = pane_tab_layout(rect, 8.0, &[(buffer, TAB_MIN_NAME_CHARS)])[0].body.w;
+        assert_eq!(short, at_min, "a 1-char name should be padded up to the same width as a name already at the minimum");
+    }
+
+    #[test]
+    fn pane_tab_layout_clamps_a_long_name_down_to_the_maximum_width() {
+        let app = App::with_file(None);
+        let buffer = app.focused_buffer_id();
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: 20.0 };
+        let huge = pane_tab_layout(rect, 8.0, &[(buffer, 500)])[0].body.w;
+        let at_max = pane_tab_layout(rect, 8.0, &[(buffer, TAB_MAX_NAME_CHARS)])[0].body.w;
+        assert_eq!(huge, at_max);
+    }
+
+    #[test]
+    fn pane_tab_layout_omits_a_tab_that_would_run_past_the_strips_right_edge() {
+        let mut app = App::with_file(None);
+        let first = app.focused_buffer_id();
+        app.new_scratch_buffer();
+        let second = app.focused_buffer_id();
+        // (TAB_MIN_NAME_CHARS + TAB_CHROME_CHARS) * char_width is exactly
+        // one minimum-width tab -- room for one, not two.
+        let one_tab_width = (TAB_MIN_NAME_CHARS + TAB_CHROME_CHARS) as f32 * 8.0;
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: one_tab_width, h: 20.0 };
+        let tabs = [(first, TAB_MIN_NAME_CHARS), (second, TAB_MIN_NAME_CHARS)];
+        let layout = pane_tab_layout(rect, 8.0, &tabs);
+        assert_eq!(layout.len(), 1, "the second tab doesn't fit and should be dropped, not overflow the strip");
+    }
+
+    #[test]
+    fn truncate_tab_name_keeps_a_name_that_already_fits() {
+        assert_eq!(truncate_tab_name("main.rs", 20), "main.rs");
+    }
+
+    #[test]
+    fn truncate_tab_name_ellipsizes_a_name_that_does_not_fit() {
+        let out = truncate_tab_name("a_very_long_filename.rs", 8);
+        assert_eq!(out.chars().count(), 8);
+        assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn truncate_tab_name_with_zero_budget_is_empty() {
+        assert_eq!(truncate_tab_name("anything", 0), "");
+    }
+
+    #[test]
+    fn hit_test_prefers_a_tabs_close_glyph_over_its_body_and_the_coarse_pane_rect() {
+        let app = App::with_file(None);
+        let pane = app.focused_pane_id();
+        let buffer = app.focused_buffer_id();
+        let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let tab = TabRect {
+            buffer,
+            body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
+            close: fenix_window::Rect { x: 80.0, y: 0.0, w: 20.0, h: 20.0 },
+        };
+        let geometry = FrameGeometry {
+            pane_area: pane_rect,
+            sidebar_rect: None,
+            terminal_rect: None,
+            panes: vec![(pane, pane_rect)],
+            tabs: vec![(pane, tab)],
+        };
+        assert_eq!(hit_test(&geometry, (90.0, 10.0)), Some(ScrollTarget::CloseTab(pane, buffer)));
+        assert_eq!(hit_test(&geometry, (40.0, 10.0)), Some(ScrollTarget::SwitchTab(pane, buffer)));
+        // Below the tab strip, in the pane's own content area -- falls
+        // through to the coarse pane hit exactly as an untabbed theme's
+        // pane already does.
+        assert_eq!(hit_test(&geometry, (40.0, 50.0)), Some(ScrollTarget::Pane(pane)));
+    }
+
+    #[test]
+    fn cursor_icon_for_a_tab_or_the_sidebar_is_a_pointer() {
+        let app = App::with_file(None);
+        let pane = app.focused_pane_id();
+        let buffer = app.focused_buffer_id();
+        let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let tab = TabRect {
+            buffer,
+            body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
+            close: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+        };
+        let geometry = FrameGeometry {
+            pane_area: pane_rect,
+            sidebar_rect: Some(fenix_window::Rect { x: -200.0, y: 0.0, w: 200.0, h: 200.0 }),
+            terminal_rect: None,
+            panes: vec![(pane, pane_rect)],
+            tabs: vec![(pane, tab)],
+        };
+        assert_eq!(cursor_icon_for(&geometry, (40.0, 10.0), 20.0), winit::window::CursorIcon::Pointer);
+        assert_eq!(cursor_icon_for(&geometry, (-100.0, 10.0), 20.0), winit::window::CursorIcon::Pointer);
+    }
+
+    #[test]
+    fn cursor_icon_for_a_panes_content_below_its_title_strip_is_text() {
+        let app = App::with_file(None);
+        let pane = app.focused_pane_id();
+        let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let geometry = FrameGeometry { pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
+        assert_eq!(cursor_icon_for(&geometry, (40.0, 50.0), 20.0), winit::window::CursorIcon::Text);
+        // Within the title strip itself (not on a tab, since there are
+        // none here) -- the plain arrow, not an I-beam.
+        assert_eq!(cursor_icon_for(&geometry, (40.0, 5.0), 20.0), winit::window::CursorIcon::Default);
+    }
+
+    #[test]
+    fn cursor_icon_for_empty_space_outside_every_region_is_the_plain_arrow() {
+        let geometry = FrameGeometry {
+            pane_area: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            sidebar_rect: None,
+            terminal_rect: None,
+            panes: Vec::new(),
+            tabs: Vec::new(),
+        };
+        assert_eq!(cursor_icon_for(&geometry, (999.0, 999.0), 20.0), winit::window::CursorIcon::Default);
+    }
+
+    #[test]
+    fn gutter_marks_from_hunks_marks_a_pure_addition_as_added() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+index 0000000..1111111 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,3 @@
+ one
++two
+ three
+";
+        let file = fenix_diff::parse(diff).into_iter().next().unwrap();
+        let marks = gutter_marks_from_hunks(&file.hunks);
+        assert_eq!(marks, vec![GutterMark { line: 2, kind: GutterMarkKind::Added }]);
+    }
+
+    #[test]
+    fn gutter_marks_from_hunks_marks_a_replaced_line_as_modified() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+index 0000000..1111111 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,3 @@
+ one
+-two
++TWO
+ three
+";
+        let file = fenix_diff::parse(diff).into_iter().next().unwrap();
+        let marks = gutter_marks_from_hunks(&file.hunks);
+        assert_eq!(marks, vec![GutterMark { line: 2, kind: GutterMarkKind::Modified }]);
+    }
+
+    #[test]
+    fn refresh_all_gutter_hunks_populates_marks_for_every_open_buffer_with_a_real_diff() {
+        // A real `git` repo, not a mock -- `compute_gutter_hunks` shells
+        // a real `git diff`, same discipline `fenix-git`'s own tests use.
+        let dir = TempDir::new("refresh_all_gutter_hunks");
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git").current_dir(repo).args(args).status().expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        let file = dir.write("f.txt", "one\ntwo\nthree\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "initial"]);
+        std::fs::write(&file, "one\nTWO\nthree\n").unwrap();
+
+        let mut app = App::with_file(None);
+        app.project_root = Some(repo.to_path_buf());
+        app.test_open_path(&file);
+        // `set_pane_content` (via `test_open_path`) already refreshes the
+        // buffer it just opened -- clear that out so this test actually
+        // exercises `refresh_all_gutter_hunks` itself, not that call.
+        let id = app.focused_buffer_id();
+        app.gutter_hunks.remove(&id);
+        assert!(app.gutter_hunks.get(&id).is_none());
+
+        app.refresh_all_gutter_hunks();
+
+        assert_eq!(app.gutter_hunks.get(&id), Some(&vec![GutterMark { line: 2, kind: GutterMarkKind::Modified }]));
+    }
+
+    #[test]
+    fn gutter_marks_from_hunks_marks_a_pure_removal_as_deleted_at_the_following_line() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+index 0000000..1111111 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,3 +1,2 @@
+ one
+-two
+ three
+";
+        let file = fenix_diff::parse(diff).into_iter().next().unwrap();
+        let marks = gutter_marks_from_hunks(&file.hunks);
+        assert_eq!(marks, vec![GutterMark { line: 2, kind: GutterMarkKind::Deleted }]);
     }
 
     #[test]

@@ -232,7 +232,9 @@ impl App {
                 let layout = map(workspace.layout, &documents, placeholder, &mut states);
                 let tree = WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
                 let mut pane_states = HashMap::new();
+                let mut pane_tabs = HashMap::new();
                 for (id, pane) in tree.windows().into_iter().zip(states) {
+                    pane_tabs.insert(id, vec![*tree.content(id).unwrap_or(&placeholder)]);
                     if tree.content(id) == Some(&placeholder) {
                         pane_states.insert(id, PaneState::seeded_at(Cursor::at_start()));
                         continue;
@@ -244,7 +246,7 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new() });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
@@ -256,6 +258,7 @@ impl App {
         self.workspaces = frames.remove(0);
         self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
         self.refresh_project_root();
+        self.refresh_all_gutter_hunks();
         self.main_view = MainView::Editor;
         if warnings.is_empty() { self.set_message("restored editor session"); }
         else { self.set_error(format!("Session restored with warnings: {}", warnings.join("; "))); }
@@ -269,6 +272,7 @@ impl App {
                 self.workspaces.workspaces.extend(frame.workspaces);
             }
             self.refresh_project_root();
+            self.refresh_all_gutter_hunks();
             return true;
         }
         let layouts = self.config.windows.clone();
@@ -287,6 +291,7 @@ impl App {
         self.focus_frame(focused.min(self.frames.len() - 1));
         self.focus_active_frame_window();
         self.refresh_project_root();
+        self.refresh_all_gutter_hunks();
         true
     }
 
