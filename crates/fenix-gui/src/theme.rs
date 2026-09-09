@@ -691,7 +691,10 @@ pub const VISUAL_STUDIO_DARK: Theme = Theme {
     name: "Visual Studio Dark",
     font_family: Some("Consolas"),
     border: None,
-    divider: rgba(0x3f3f46),
+    // The real VS "Divider lines" value (`#FF2D2D30`, Microsoft's own
+    // Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
+    // actually that same doc's *button border* color, a different token.
+    divider: rgba(0x2d2d30),
     show_tabs: true,
 
     bg: rgba(0x1e1e1e),

@@ -26120,14 +26120,20 @@ impl App {
             for &(id, rect) in &popup_rects {
                 popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
                 // The completion popup's own selected-candidate row --
-                // same `theme.hl_line` mechanism a pane's current-line
-                // highlight and a picker/explorer's selected-row highlight
-                // already use, just applied to a floating popup's local
-                // coordinates instead of a pane's.
+                // `theme.selection`, not `theme.hl_line`: same reasoning
+                // the sidebar's own selected-row highlight already
+                // documents (see its own push_rect call, just above) --
+                // the popup has no caret of its own, so this has to
+                // actually stand out on its own, not just serve as a
+                // subtle secondary cue alongside a visible caret. Using
+                // `hl_line` here was the bug: on Visual Studio Dark it's
+                // barely distinguishable from this same popup's own
+                // `bg_modeline` background, making the selected row
+                // unreadable.
                 if id == popup::PopupId::Completion {
                     if let Some(row) = popup_selected_row {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
-                        popup_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.hl_line);
+                        popup_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.selection);
                     }
                 }
             }
