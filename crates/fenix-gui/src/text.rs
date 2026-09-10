@@ -65,6 +65,21 @@ pub const TERMINAL_ROWS: usize = 12;
 /// font_family` on the `TEMPLEOS` theme.
 static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_font.ttf");
 
+/// The official Nerd Fonts symbols-only release (`NerdFontsSymbolsOnly.zip`,
+/// `github.com/ryanoasis/nerd-fonts`), embedded for the same reason the
+/// TempleOS font is: every icon glyph the sidebar/tabs/file explorer draw
+/// (`icon::icon_for`) needs this font actually present, not just assumed
+/// installed. This is the `...Mono` variant specifically -- every icon
+/// occupies exactly one fixed-width cell, matching the monospace grid the
+/// rest of the app already assumes (`icon::ICON_FONT_FAMILY`'s own doc
+/// comment). Its family name (confirmed by grepping the font's own name
+/// table, not guessed) is `"Symbols Nerd Font Mono"`, matching `ICON_FONT_
+/// FAMILY` exactly. Nerd Fonts ships no ASCII glyphs at all in this build
+/// -- it's meant to sit as a fallback alongside a real body font, exactly
+/// how `ICON_FONT_FAMILY` is only ever selected for icon-flagged spans,
+/// never body text.
+static SYMBOLS_NERD_FONT_MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/symbols_nerd_font_mono.ttf");
+
 /// cosmic-text's generic alias can name an uninstalled font (notably
 /// Noto Sans Mono on Windows). Using that name directly permits proportional
 /// fallback, so resolve an actual fixed-pitch face before measuring the grid.
@@ -147,6 +162,7 @@ impl FontContext {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let default_family: &'static str =
             Box::leak(default_monospace_family(&font_system).into_boxed_str());
         let cache = Cache::new(&gpu.device);
@@ -910,6 +926,19 @@ mod tests {
             .faces()
             .any(|face| face.families.iter().any(|(name, _)| name == "TempleOS"));
         assert!(found, "expected the embedded font to register under the family name \"TempleOS\"");
+    }
+
+    #[test]
+    fn embedded_symbols_nerd_font_mono_loads_and_resolves_by_the_expected_family_name() {
+        // Same guard as the TempleOS test above, for the icon font every
+        // sidebar/tab/explorer icon glyph (`icon::icon_for`) depends on.
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        let found = font_system
+            .db_mut()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == ICON_FONT_FAMILY));
+        assert!(found, "expected the embedded font to register under the family name {ICON_FONT_FAMILY:?}");
     }
 
     #[test]

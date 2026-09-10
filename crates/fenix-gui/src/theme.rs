@@ -24,8 +24,25 @@ pub struct Theme {
     /// The line drawn along a window split's boundary, between two
     /// adjacent panes.
     pub divider: [f32; 4],
+    /// Whether each pane's title strip renders as a clickable row of open-
+    /// buffer tabs (`App::pane_tab_layout`) instead of today's plain
+    /// single-line title. A per-theme opt-in rather than a blanket
+    /// behavior change: every existing theme sets this `false`, so their
+    /// rendering is untouched byte-for-byte -- only a theme that actually
+    /// wants a VS/VS-Code-style tab strip sets it `true`.
+    pub show_tabs: bool,
 
     pub bg: [f32; 4],
+    /// The persistent file-explorer sidebar's own background -- real VS
+    /// paints its Solution Explorer/tool windows a shade lighter than the
+    /// editor canvas (`#252526` vs `#1E1E1E`), not the identical color.
+    /// Every existing theme sets this equal to `bg`, matching their
+    /// current on-screen appearance exactly (the sidebar's own icon/git
+    /// colors were tuned assuming that equality, per the "unreadable
+    /// blue-background/black-text" fix `App::redraw`'s sidebar-background
+    /// push documents) -- only a theme that actually wants the two
+    /// surfaces to read as visually distinct sets this to something else.
+    pub sidebar_bg: [f32; 4],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
@@ -215,8 +232,10 @@ pub const ORBIT_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x565f89),
+    show_tabs: false,
 
     bg: rgba(0x1a1b26),
+    sidebar_bg: rgba(0x1a1b26),
     bg_modeline: rgba(0x24283b),
     fg: text_color(0xc0caf5),
     fg_modeline: text_color(0xc0caf5),
@@ -285,8 +304,10 @@ pub const TEMPLEOS: Theme = Theme {
     font_family: Some("TempleOS"),
     border: Some(rgba(0x0000aa)),
     divider: rgba(0x0000aa),
+    show_tabs: false,
 
     bg: rgba(0xffffff),
+    sidebar_bg: rgba(0xffffff),
     bg_modeline: rgba(0x0000aa),
     fg: text_color(0x000000),
     fg_modeline: text_color(0xffffff),
@@ -388,8 +409,10 @@ pub const GRUVBOX_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x665c54),
+    show_tabs: false,
 
     bg: rgba(0x1d2021),
+    sidebar_bg: rgba(0x1d2021),
     bg_modeline: rgba(0x282828),
     fg: text_color(0xebdbb2),
     fg_modeline: text_color(0xebdbb2),
@@ -440,8 +463,10 @@ pub const NORD: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x4c566a),
+    show_tabs: false,
 
     bg: rgba(0x2e3440),
+    sidebar_bg: rgba(0x2e3440),
     bg_modeline: rgba(0x343b49),
     fg: text_color(0xd8dee9),
     fg_modeline: text_color(0xeceff4),
@@ -492,8 +517,10 @@ pub const DRACULA: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x6272a4),
+    show_tabs: false,
 
     bg: rgba(0x282a36),
+    sidebar_bg: rgba(0x282a36),
     bg_modeline: rgba(0x303341),
     fg: text_color(0xf8f8f2),
     fg_modeline: text_color(0xf8f8f2),
@@ -544,8 +571,10 @@ pub const SOLARIZED_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x586e75),
+    show_tabs: false,
 
     bg: rgba(0x002b36),
+    sidebar_bg: rgba(0x002b36),
     bg_modeline: rgba(0x073642),
     fg: text_color(0xb5c3be),
     fg_modeline: text_color(0xc4cfca),
@@ -596,8 +625,10 @@ pub const ONE_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x5c6370),
+    show_tabs: false,
 
     bg: rgba(0x282c34),
+    sidebar_bg: rgba(0x282c34),
     bg_modeline: rgba(0x21252b),
     fg: text_color(0xc1c8d4),
     fg_modeline: text_color(0xc1c8d4),
@@ -641,9 +672,83 @@ pub const ONE_DARK: Theme = Theme {
     git_conflicted: text_color(0xed929b),
 };
 
+/// The modern Visual Studio dark theme's own palette (VS 2022+/VS Code
+/// Dark+ converged on the same per-token defaults) -- near-black editor
+/// canvas, dark neutral chrome (not VS's eye-catching status-bar blue:
+/// every text color here also has to pass this file's own contrast tests
+/// against `bg_modeline`, which a bright saturated blue can't do for a
+/// muted color like `gutter_fg`, so the chrome stays a dark neutral gray
+/// the same way every other dark theme's own `bg_modeline` already is),
+/// and real VS syntax colors rather than an approximation. `show_tabs:
+/// true` -- the one theme so far that opts into the VS/VS-Code-style tab
+/// strip (`App::pane_tab_layout`) instead of the plain single-line title
+/// every other theme keeps. `font_family: Some("Consolas")` points at the
+/// system font Windows ships by default rather than an embedded one, per
+/// explicit direction -- `cosmic-text`'s existing fontdb substitution
+/// already covers a machine without it, the same fallback every other
+/// `Some(family)` theme already relies on.
+pub const VISUAL_STUDIO_DARK: Theme = Theme {
+    name: "Visual Studio Dark",
+    font_family: Some("Consolas"),
+    border: None,
+    // The real VS "Divider lines" value (`#FF2D2D30`, Microsoft's own
+    // Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
+    // actually that same doc's *button border* color, a different token.
+    divider: rgba(0x2d2d30),
+    show_tabs: true,
+
+    bg: rgba(0x1e1e1e),
+    // VS's own real "tool window" background -- one shade lighter than
+    // the editor canvas, confirmed against Microsoft's Color Value
+    // Reference for VS 2022 (the Dark theme's "Body background" for
+    // properties/tool-window content is `#FF252526`).
+    sidebar_bg: rgba(0x252526),
+    bg_modeline: rgba(0x2d2d30),
+    fg: text_color(0xd4d4d4),
+    fg_modeline: text_color(0xffffff),
+    caret: rgba(0x4fc1ff),
+    caret_text: text_color(0x4fc1ff),
+    hl_line: rgba(0x2a2d2e),
+    selection: rgba_alpha(0x264f78, 0.55),
+    bracket_match: rgba_alpha(0x4ec9b0, 0.12),
+    search_match: rgba_alpha(0xd7ba7b, 0.12),
+
+    mode_normal: rgba(0x569cd6),
+    mode_insert: rgba(0x4ec9b0),
+    mode_visual: rgba(0xc42b1c),
+    mode_replace: rgba(0xd7ba7b),
+    mode_command: rgba(0x4fc1ff),
+    mode_explorer: rgba(0x569cd6),
+    mode_picker: rgba(0xc586c0),
+    mode_text_dark: text_color(0x1e1e1e),
+    mode_text_light: text_color(0xffffff),
+
+    gutter_fg: text_color(0x9c9c9c),
+
+    syntax_keyword: text_color(0x569cd6),
+    syntax_string: text_color(0xce9178),
+    syntax_comment: text_color(0x74ac64),
+    syntax_function: text_color(0xdcdcaa),
+    syntax_type: text_color(0x4ec9b0),
+    syntax_number: text_color(0xb5cea8),
+    syntax_constant: text_color(0x4fc1ff),
+    syntax_variable: text_color(0x9cdcfe),
+    syntax_operator: text_color(0xc0c0c0),
+    syntax_punctuation: text_color(0xb8b8b8),
+    syntax_attribute: text_color(0x9cdcfe),
+
+    icon_folder: text_color(0xdcb67a),
+    icon_file: text_color(0xd4d4d4),
+    git_modified: text_color(0xe2c08d),
+    git_staged: text_color(0x89d185),
+    git_untracked: text_color(0x6fc3df),
+    git_ignored: text_color(0x999999),
+    git_conflicted: text_color(0xf46a6a),
+};
+
 /// Every theme Fenix ships. `by_name` works off this.
 pub const ALL: &[&Theme] =
-    &[&ORBIT_DARK, &TEMPLEOS, &GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK];
+    &[&ORBIT_DARK, &TEMPLEOS, &GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK, &VISUAL_STUDIO_DARK];
 
 /// Case-insensitive lookup by `Theme::name` -- used for persistence
 /// (the saved file just holds a name) and is the reason `name` exists
@@ -703,7 +808,7 @@ mod tests {
                 theme.caret_text,
             ];
             let line = composite(theme.hl_line, theme.bg);
-            for surface in [theme.bg, line, theme.bg_modeline] {
+            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg] {
                 for color in colors {
                     let ratio = contrast(color, surface);
                     assert!(ratio >= 4.5, "{}: {color:?} on {surface:?}: {ratio:.2}:1", theme.name);
@@ -877,7 +982,16 @@ mod tests {
         let names: Vec<&str> = ALL.iter().map(|t| t.name).collect();
         assert_eq!(
             names,
-            vec!["Orbit Dark", "TempleOS", "Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark"]
+            vec![
+                "Orbit Dark",
+                "TempleOS",
+                "Gruvbox Dark",
+                "Nord",
+                "Dracula",
+                "Solarized Dark",
+                "One Dark",
+                "Visual Studio Dark"
+            ]
         );
     }
 
@@ -888,7 +1002,7 @@ mod tests {
         // no special-casing needed anywhere `syntax_color`/`git_status_
         // color` are called.
         use fenix_explorer::GitStatus;
-        for theme in [&GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK] {
+        for theme in [&GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK, &VISUAL_STUDIO_DARK] {
             assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
             assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
@@ -900,7 +1014,7 @@ mod tests {
 
     #[test]
     fn by_name_resolves_every_new_theme_case_insensitively() {
-        for name in ["Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark"] {
+        for name in ["Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark", "Visual Studio Dark"] {
             assert_eq!(by_name(&name.to_lowercase()).map(|t| t.name), Some(name));
         }
     }
