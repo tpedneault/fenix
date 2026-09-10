@@ -80,13 +80,21 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 /// never body text.
 static SYMBOLS_NERD_FONT_MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/symbols_nerd_font_mono.ttf");
 
+/// Whether `family` names a monospace face actually present in `font_system`'s
+/// database -- a font *name* (a theme's `font_family`, a config override, a
+/// candidate in `default_monospace_family`'s own search list) is never proof
+/// the face is installed on this machine, so every path that turns a name
+/// into a `Family::Name(_)` used for real shaping/measurement checks this
+/// first rather than trusting the name.
+fn is_monospace_installed(font_system: &FontSystem, family: &str) -> bool {
+    font_system.db().faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family))
+}
+
 /// cosmic-text's generic alias can name an uninstalled font (notably
 /// Noto Sans Mono on Windows). Using that name directly permits proportional
 /// fallback, so resolve an actual fixed-pitch face before measuring the grid.
 fn default_monospace_family(font_system: &FontSystem) -> String {
     let db = font_system.db();
-    let installed =
-        |family: &str| db.faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family));
     for family in [
         db.family_name(&Family::Monospace),
         "Cascadia Mono",
@@ -96,7 +104,7 @@ fn default_monospace_family(font_system: &FontSystem) -> String {
         "Liberation Mono",
         "Courier New",
     ] {
-        if installed(family) {
+        if is_monospace_installed(font_system, family) {
             return family.to_owned();
         }
     }
@@ -241,6 +249,16 @@ pub struct TextPipeline {
     /// six call sites need touching just because this field's *source*
     /// changed from theme-only to theme-or-config.
     content_family: Option<&'static str>,
+    /// The raw family `set_font_family` was last called with, *before* the
+    /// installed-font check `content_family` goes through -- kept only so
+    /// the no-op short-circuit at the top of `set_font_family` still
+    /// compares against what the caller actually asked for. Without this,
+    /// a theme/config naming a family that isn't installed (`content_family`
+    /// staying `None`, falling back to `default_family`) would fail that
+    /// equality check every single frame -- `family` is `Some("Consolas")`,
+    /// `self.content_family` is `None` -- re-running the installed check
+    /// and a full shaping pass every redraw instead of once.
+    requested_family: Option<&'static str>,
     /// An installed monospace family, resolved once by FontContext. A concrete
     /// name avoids generic fallback work on every shape; verifying installation
     /// prevents an absent generic alias from selecting proportional text.
@@ -313,6 +331,7 @@ impl TextPipeline {
             sidebar,
             terminal,
             content_family: None,
+            requested_family: None,
             default_family,
             char_width,
             font_size: FONT_SIZE,
@@ -336,11 +355,27 @@ impl TextPipeline {
     /// re-measuring `char_width` (a real shaping pass) and leaking a
     /// new `'static` copy of `family` only happen on an actual switch,
     /// not every redraw.
+    ///
+    /// `family` naming a font is not proof it's installed -- a theme
+    /// (`Theme::font_family`) or a `config.ini` override can equally
+    /// well name one that isn't, unlike `default_family` which
+    /// `default_monospace_family` already verified. Shaping against an
+    /// absent family still "succeeds" (`fontdb` substitutes *some*
+    /// face), just against a face with no guaranteed relationship to the
+    /// requested one's metrics -- a proportional or wide substitute
+    /// throws off `measure_char_width`'s advance-width measurement,
+    /// which every column/caret/selection pixel calculation in this
+    /// pipeline assumes is a real monospace cell. So `family` is
+    /// validated the same way `default_monospace_family` validates its
+    /// own candidates before it's ever turned into `content_family`;
+    /// an uninstalled name falls back to `default_family` exactly like
+    /// `None` would.
     pub fn set_font_family(&mut self, family: Option<&str>) {
-        if self.content_family == family {
+        if self.requested_family == family {
             return;
         }
-        self.content_family = family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
+        self.requested_family = family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
+        self.content_family = self.requested_family.filter(|f| is_monospace_installed(&self.fonts.borrow().font_system, f));
         let family = self.content_family();
         self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
     }
@@ -968,6 +1003,19 @@ mod tests {
             "expected the system default monospace font ({default_width}px) to be narrower \
              than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
         );
+    }
+
+    #[test]
+    fn is_monospace_installed_rejects_a_name_absent_from_the_database() {
+        let fonts = FontSystem::new();
+        assert!(!is_monospace_installed(&fonts, "Fenix deliberately missing monospace"));
+    }
+
+    #[test]
+    fn is_monospace_installed_accepts_a_real_embedded_monospace_face() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        assert!(is_monospace_installed(&fonts, "TempleOS"));
     }
 
     #[test]
