@@ -171,6 +171,13 @@ impl CommandRegistry {
         registry.register("jira.create_issue", "Create a new Jira issue in a tracked project", cmd_jira_create_issue);
         registry.register("jira.submit_edit", "Submit the pending Jira comment/description edit", cmd_jira_submit_edit);
         registry.register("jira.cancel_edit", "Cancel the pending Jira comment/description edit", cmd_jira_cancel_edit);
+        registry.register("agenda.open", "Open the agenda (last view shown)", cmd_agenda_open);
+        registry.register("agenda.board", "Show the agenda as a Kanban board", cmd_agenda_board);
+        registry.register("agenda.list", "Show the agenda as a list", cmd_agenda_list);
+        registry.register("agenda.report", "Show the agenda's time report", cmd_agenda_report);
+        registry.register("agenda.new_task", "Add a new task to the agenda", cmd_agenda_new_task);
+        registry.register("agenda.add_category", "Add a new agenda category", cmd_agenda_add_category);
+        registry.register("agenda.toggle_clock", "Start, stop, or switch the agenda's running timer", cmd_agenda_toggle_clock);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -614,6 +621,34 @@ fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
 
 fn cmd_jira_add_project(ctx: &mut CommandCtx) {
     ctx.app.jira_start_add_project_prompt();
+}
+
+fn cmd_agenda_open(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_open();
+}
+
+fn cmd_agenda_board(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_board();
+}
+
+fn cmd_agenda_list(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_list();
+}
+
+fn cmd_agenda_report(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_report();
+}
+
+fn cmd_agenda_new_task(ctx: &mut CommandCtx) {
+    ctx.app.agenda_start_new_task_prompt();
+}
+
+fn cmd_agenda_add_category(ctx: &mut CommandCtx) {
+    ctx.app.agenda_start_add_category_prompt();
+}
+
+fn cmd_agenda_toggle_clock(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_toggle_clock();
 }
 
 fn cmd_jira_delete_project(ctx: &mut CommandCtx) {

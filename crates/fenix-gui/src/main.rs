@@ -1,3 +1,4 @@
+mod agenda_panel;
 mod app;
 mod commands;
 mod completion;

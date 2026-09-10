@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use fenix_agenda::TaskId;
 use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, Step};
@@ -32,6 +33,7 @@ use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
+use crate::agenda_panel;
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -1978,6 +1980,43 @@ struct JiraPrompt {
     input: String,
 }
 
+/// Which single-line text field the agenda's one shared text prompt is
+/// currently capturing -- mirrors `JiraPromptKind`'s shape (a `{ ... }`
+/// variant per step, carrying forward whatever an earlier step already
+/// captured) rather than a generic minibuffer, matching this codebase's
+/// established "every module rolls its own small `{kind, input}` prompt"
+/// convention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgendaPromptKind {
+    /// `SPC a n`'s first field.
+    NewTaskTitle,
+    /// `SPC a n`'s second field -- the title carried forward so `Enter`
+    /// can create the task once priority/category are picked next.
+    NewTaskDescription { title: String },
+    /// `e` on a task row/detail: a new title.
+    EditTitle { id: TaskId },
+    /// `e`'s second field, offered right after the title.
+    EditDescription { id: TaskId },
+    /// `N`: an entry appended to the task's notes log.
+    AddNote { id: TaskId },
+    /// `e` on an existing note row (detail view): pre-filled with that
+    /// note's current text, submitting calls `AgendaStore::edit_note`.
+    EditNote { id: TaskId, index: usize },
+    /// `T`: a duration string (`"2h 30m"`, loose parsing same as Jira's
+    /// own `LogTime` prompt), logged as a manual `TimeEntry`.
+    ManualTime { id: TaskId },
+    /// `a` in the detail view: a new checklist item.
+    AddSubtask { id: TaskId },
+    /// `SPC a c` (from outside any task): a new `[agenda]` category,
+    /// mirrors `jira_start_add_project_prompt`'s shape.
+    AddCategory,
+}
+
+struct AgendaPrompt {
+    kind: AgendaPromptKind,
+    input: String,
+}
+
 /// Cross-thread wake events -- the only way anything outside the winit
 /// event loop's own thread (the Docker panel's stats poller/log
 /// follower, Phases 5-6) can get `App` to mutate state and request a
@@ -2585,6 +2624,29 @@ enum ActivePicker {
     /// just filtered to headings and labeled by nesting depth
     /// (`markdown::heading_label`) instead of a line number.
     Outline(fenix_picker::PickerState<usize>),
+    /// `s` on an agenda row/detail: `fenix_agenda::Status::ALL`, confirming
+    /// calls `AgendaStore::set_status` (or `move_to_status` from the
+    /// board, so a card's `order` resets to the back of its new column).
+    AgendaStatus(fenix_picker::PickerState<fenix_agenda::Status>),
+    /// `p` on an agenda row/detail: `fenix_agenda::Priority::ALL`,
+    /// confirming calls `AgendaStore::set_priority`.
+    AgendaPriority(fenix_picker::PickerState<fenix_agenda::Priority>),
+    /// `c` on an agenda row/detail: `Config::agenda_categories` plus a
+    /// leading "(none)" entry, confirming calls `AgendaStore::
+    /// set_category`.
+    AgendaCategory(fenix_picker::PickerState<Option<String>>),
+    /// `b` in the detail view: `AgendaStore::dependency_candidates` for
+    /// the task being viewed -- already excludes itself and anything
+    /// that would create a cycle, so confirming can call `add_dependency`
+    /// without it ever being refused.
+    AgendaDependency(fenix_picker::PickerState<TaskId>),
+    /// `SPC a t` when no timer is currently running: every non-archived
+    /// task, confirming calls `AgendaStore::clock_in`. Not offered at all
+    /// when a timer *is* running -- `SPC a t` stops it directly instead
+    /// (see `App::cmd_agenda_toggle_clock`), since switching tasks via a
+    /// picker while one is already running is exactly what `clock_in`
+    /// already does for free the moment you start the next one.
+    AgendaClockIn(fenix_picker::PickerState<TaskId>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -2628,6 +2690,11 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::CompareBase(s) => s.push_char(c),
         ActivePicker::RebaseOnto(s) => s.push_char(c),
         ActivePicker::MergeFrom(s) => s.push_char(c),
+        ActivePicker::AgendaStatus(s) => s.push_char(c),
+        ActivePicker::AgendaPriority(s) => s.push_char(c),
+        ActivePicker::AgendaCategory(s) => s.push_char(c),
+        ActivePicker::AgendaDependency(s) => s.push_char(c),
+        ActivePicker::AgendaClockIn(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
     }
 }
@@ -2669,6 +2736,11 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.backspace(),
         ActivePicker::RebaseOnto(s) => s.backspace(),
         ActivePicker::MergeFrom(s) => s.backspace(),
+        ActivePicker::AgendaStatus(s) => s.backspace(),
+        ActivePicker::AgendaPriority(s) => s.backspace(),
+        ActivePicker::AgendaCategory(s) => s.backspace(),
+        ActivePicker::AgendaDependency(s) => s.backspace(),
+        ActivePicker::AgendaClockIn(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
     }
 }
@@ -2710,6 +2782,11 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::CompareBase(s) => s.move_selection(delta),
         ActivePicker::RebaseOnto(s) => s.move_selection(delta),
         ActivePicker::MergeFrom(s) => s.move_selection(delta),
+        ActivePicker::AgendaStatus(s) => s.move_selection(delta),
+        ActivePicker::AgendaPriority(s) => s.move_selection(delta),
+        ActivePicker::AgendaCategory(s) => s.move_selection(delta),
+        ActivePicker::AgendaDependency(s) => s.move_selection(delta),
+        ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
     }
 }
@@ -2754,6 +2831,11 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.toggle_mark(),
         ActivePicker::RebaseOnto(s) => s.toggle_mark(),
         ActivePicker::MergeFrom(s) => s.toggle_mark(),
+        ActivePicker::AgendaStatus(s) => s.toggle_mark(),
+        ActivePicker::AgendaPriority(s) => s.toggle_mark(),
+        ActivePicker::AgendaCategory(s) => s.toggle_mark(),
+        ActivePicker::AgendaDependency(s) => s.toggle_mark(),
+        ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
     }
 }
@@ -2795,6 +2877,11 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::CompareBase(s) => s.query(),
         ActivePicker::RebaseOnto(s) => s.query(),
         ActivePicker::MergeFrom(s) => s.query(),
+        ActivePicker::AgendaStatus(s) => s.query(),
+        ActivePicker::AgendaPriority(s) => s.query(),
+        ActivePicker::AgendaCategory(s) => s.query(),
+        ActivePicker::AgendaDependency(s) => s.query(),
+        ActivePicker::AgendaClockIn(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
     }
 }
@@ -2836,6 +2923,11 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.len(),
         ActivePicker::RebaseOnto(s) => s.len(),
         ActivePicker::MergeFrom(s) => s.len(),
+        ActivePicker::AgendaStatus(s) => s.len(),
+        ActivePicker::AgendaPriority(s) => s.len(),
+        ActivePicker::AgendaCategory(s) => s.len(),
+        ActivePicker::AgendaDependency(s) => s.len(),
+        ActivePicker::AgendaClockIn(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
     }
 }
@@ -2877,6 +2969,11 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.selected_row(),
         ActivePicker::RebaseOnto(s) => s.selected_row(),
         ActivePicker::MergeFrom(s) => s.selected_row(),
+        ActivePicker::AgendaStatus(s) => s.selected_row(),
+        ActivePicker::AgendaPriority(s) => s.selected_row(),
+        ActivePicker::AgendaCategory(s) => s.selected_row(),
+        ActivePicker::AgendaDependency(s) => s.selected_row(),
+        ActivePicker::AgendaClockIn(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
     }
 }
@@ -2934,6 +3031,11 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::AgendaStatus(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::AgendaPriority(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::AgendaCategory(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::AgendaDependency(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
@@ -4590,6 +4692,104 @@ fn jira_highlights_for_visible_range(
     ranges
 }
 
+/// Loosely parses a duration like Jira's own `LogTime` prompt does
+/// (`"2h 30m"`, `"90m"`, `"1h"`), plus a bare number (`"45"`) treated as
+/// minutes -- typed in, not strictly validated, same posture Jira's
+/// prompt has for its own duration syntax. `None` for anything that
+/// doesn't parse or comes out to zero/negative.
+fn parse_loose_duration(input: &str) -> Option<chrono::Duration> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    let mut total_minutes: i64 = 0;
+    let mut found_any = false;
+    let mut current_number = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            current_number.push(ch);
+        } else if ch.is_whitespace() {
+            continue;
+        } else if ch == 'h' || ch == 'H' {
+            total_minutes += current_number.parse::<i64>().ok()? * 60;
+            current_number.clear();
+            found_any = true;
+        } else if ch == 'm' || ch == 'M' {
+            total_minutes += current_number.parse::<i64>().ok()?;
+            current_number.clear();
+            found_any = true;
+        } else {
+            return None;
+        }
+    }
+    if !current_number.is_empty() {
+        // A bare trailing number with no unit -- treat it as minutes.
+        total_minutes += current_number.parse::<i64>().ok()?;
+        found_any = true;
+    }
+    if !found_any || total_minutes <= 0 { None } else { Some(chrono::Duration::minutes(total_minutes)) }
+}
+
+fn agenda_badge_color(color: agenda_panel::AgendaBadgeColor, theme: &Theme) -> glyphon::Color {
+    match color {
+        agenda_panel::AgendaBadgeColor::Good => theme.git_staged,
+        agenda_panel::AgendaBadgeColor::Warn => theme.git_modified,
+        agenda_panel::AgendaBadgeColor::Bad => theme.git_conflicted,
+        agenda_panel::AgendaBadgeColor::Neutral => theme.gutter_fg,
+    }
+}
+
+/// Resolves a real `BufferKind::Agenda` buffer's per-line syntax-highlight
+/// ranges from its cached `AgendaLine` metadata -- mirrors `jira_
+/// highlights_for_visible_range`, except a line's `badges` is a list
+/// (possibly several, at different columns) rather than a single
+/// `Option`, since the Kanban board packs one card from each of its four
+/// side-by-side columns into a single physical line (see `AgendaLine`'s
+/// own doc comment).
+fn agenda_highlights_for_visible_range(
+    ob: &OpenBuffer,
+    lines: Option<&[Option<agenda_panel::AgendaLine>]>,
+    render_base_line: usize,
+    rows: usize,
+    theme: &Theme,
+) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+    let Some(lines) = lines else { return Vec::new() };
+    let visual_lines = ob.buffer.visual_line_count();
+    let mut ranges = Vec::new();
+    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
+        let Some(Some(meta)) = lines.get(line) else { continue };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_start_byte = ob.buffer.char_to_byte(start);
+        let line_end_byte = ob.buffer.char_to_byte(start + len);
+        match meta.style {
+            agenda_panel::AgendaLineStyle::Empty
+            | agenda_panel::AgendaLineStyle::Detail
+            | agenda_panel::AgendaLineStyle::Note
+            | agenda_panel::AgendaLineStyle::SubtaskDone
+            | agenda_panel::AgendaLineStyle::Footer => {
+                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
+            }
+            agenda_panel::AgendaLineStyle::Title => {
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_function));
+            }
+            agenda_panel::AgendaLineStyle::SectionHeader | agenda_panel::AgendaLineStyle::ColumnHeader => {
+                ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
+            }
+            agenda_panel::AgendaLineStyle::Body => {
+                ranges.push((line_start_byte..line_end_byte, theme.fg));
+            }
+            agenda_panel::AgendaLineStyle::TaskRow | agenda_panel::AgendaLineStyle::SubtaskPending => {}
+        }
+        for &(badge_start, badge_len, color) in &meta.badges {
+            let badge_start_byte = ob.buffer.char_to_byte(start + badge_start);
+            let badge_end_byte = ob.buffer.char_to_byte(start + badge_start + badge_len);
+            ranges.push((badge_start_byte..badge_end_byte, agenda_badge_color(color, theme)));
+        }
+    }
+    ranges
+}
+
 /// One-letter badge for an explorer row's git status.
 fn git_status_marker(status: fenix_explorer::GitStatus) -> &'static str {
     match status {
@@ -5255,6 +5455,11 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             // the edit -- which is why callers go through `App::buffer_
             // edits_are_reverted` rather than asking this directly.
             | BufferKind::Explorer
+            // Every row stands for a task; the buffer is entirely
+            // key/prompt-driven (see `agenda_panel`'s own doc comment) and
+            // wholesale-regenerated on every mutation, never typed into
+            // directly.
+            | BufferKind::Agenda
     )
 }
 
@@ -5941,6 +6146,49 @@ pub struct App {
     /// The active Jira multi-pane session (`SPC j j`), if any -- see
     /// `JiraSession`'s own doc comment.
     jira_session: Option<JiraSession>,
+    /// The personal task/time-tracking agenda's own data (`SPC a`) --
+    /// loaded once at startup from `agenda_path` and saved back after
+    /// every mutation (create/status/priority/category/note/subtask/
+    /// dependency/time), the same "save immediately, not on quit" posture
+    /// `Config` already has. Unlike `jira_session`, this is never `None`:
+    /// there's no credential/setup step, just a local JSON file.
+    agenda_store: fenix_agenda::AgendaStore,
+    /// `fenix_agenda::default_path()`, resolved once at startup.
+    agenda_path: std::path::PathBuf,
+    /// Per-line metadata for the one real `BufferKind::Agenda` buffer,
+    /// keyed by buffer id like `jira_lines` -- but unlike Jira's four
+    /// synced panes, there's only ever one agenda buffer at a time (see
+    /// `agenda_buffer`), re-rendered in place for every view.
+    agenda_lines: HashMap<BufferId, Vec<Option<agenda_panel::AgendaLine>>>,
+    /// The one open agenda buffer, if any -- `open_agenda` creates it on
+    /// first use and reuses it afterward (switching views re-renders the
+    /// same buffer rather than opening a new one each time), the same
+    /// "open or refocus" shape `docker_session`/`jira_session` already
+    /// have, just without their multi-pane machinery.
+    agenda_buffer: Option<BufferId>,
+    /// Which of the four views `agenda_buffer` currently shows.
+    agenda_view: agenda_panel::AgendaView,
+    /// The view to return to on `Esc` from a `Detail` view reached by
+    /// pressing `Enter` on a row -- `None` means "no detail view is
+    /// active" as well as "nothing to go back to."
+    agenda_return_view: Option<agenda_panel::AgendaView>,
+    /// Capturing a new task's title/description, an edit to an existing
+    /// task's title/description, a note, a manual time entry, a new
+    /// subtask, or a new `[agenda]` category -- mirrors `JiraPrompt`'s
+    /// own "next keystrokes are text input" shape.
+    agenda_prompt: Option<AgendaPrompt>,
+    /// An armed `D` (delete task) on an agenda row, awaiting `y`/anything
+    /// else -- mirrors `docker_confirm_remove` exactly.
+    agenda_confirm_delete: Option<fenix_agenda::TaskId>,
+    /// Which task an open `AgendaStatus`/`AgendaPriority`/`AgendaCategory`/
+    /// `AgendaDependency` picker targets -- unlike Jira's own pickers
+    /// (which recover their target from `jira_current_issue_key`, the
+    /// session's own single "currently selected issue"), an agenda picker
+    /// can be opened from a list/board row or a detail view, none of
+    /// which keep a persistent "current task" the way the Jira session
+    /// does, so this is set explicitly by whichever `agenda_start_*_
+    /// picker` opened it.
+    agenda_picker_task: Option<fenix_agenda::TaskId>,
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
     /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `docker_session`/`git_session`/
@@ -6653,6 +6901,17 @@ impl App {
         let recent_files_path = fenix_project::RecentFiles::default_path()
             .unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"));
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
+        // Read-only here, same posture as `known_projects`/`recent_files`
+        // just above: a test that constructs `App` via `with_file` reads
+        // whatever real `agenda.json` happens to exist on the machine
+        // running the suite, but nothing in `with_file` itself ever
+        // writes -- only a later call to a mutating agenda method
+        // (`save_agenda`) does that, the same "load freely, save
+        // deliberately" split `config`/`known_projects` already have. A
+        // test that needs to exercise a save reassigns `agenda_path`
+        // first, mirroring how existing tests reassign `app.config`.
+        let agenda_path = fenix_agenda::default_path().unwrap_or_else(|| PathBuf::from("fenix-agenda.json"));
+        let agenda_store = fenix_agenda::load(&agenda_path);
 
         let mut buffers = BufferList::new();
         let mut dashboard_lines = HashMap::new();
@@ -6831,6 +7090,15 @@ impl App {
             jira_lines: HashMap::new(),
             jira_prompt: None,
             jira_session: None,
+            agenda_store,
+            agenda_path,
+            agenda_lines: HashMap::new(),
+            agenda_buffer: None,
+            agenda_view: agenda_panel::AgendaView::List,
+            agenda_return_view: None,
+            agenda_prompt: None,
+            agenda_confirm_delete: None,
+            agenda_picker_task: None,
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
@@ -17777,6 +18045,652 @@ impl App {
         self.jira_lines.get(&self.focused_buffer_id()).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).and_then(|meta| meta.entry.clone())
     }
 
+    /// What the cursor's current line *and column* targets on the agenda
+    /// buffer -- unlike `jira_entry_at_cursor`/`dashboard_activate_
+    /// selected` (which only ever need the line, since those panels are
+    /// one entity per row), the Kanban board packs one card from each of
+    /// its four side-by-side columns into a single physical line, so the
+    /// column matters too (see `AgendaLine::entry_at`).
+    fn agenda_entry_at_cursor(&self) -> Option<agenda_panel::AgendaEntry> {
+        let cursor = self.cursor();
+        let (line, col) = self.open().buffer.line_col(&cursor);
+        self.agenda_lines.get(&self.focused_buffer_id()).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).and_then(|meta| meta.entry_at(col))
+    }
+
+    /// The task a generic row action (`s`/`p`/`c`/`t`/`T`/`N`/`e`/`x`/`D`)
+    /// applies to -- `Task` and `Dependency` rows both name a real task
+    /// (a "Blocked by" row is still that dependency's own task, just in a
+    /// context that additionally supports `B` to unlink it); `Subtask`
+    /// isn't a task at all, so those keys are meaningless there.
+    ///
+    /// Falls back to the page's own task when nothing resolves under the
+    /// cursor and the current view is `Detail` -- `render_detail`'s
+    /// title/status/description/notes/time lines carry no entry at all
+    /// (only its Blocked-by/Blocks/Subtask *sections* do), so without
+    /// this a row action pressed anywhere else on a task's own detail
+    /// page -- which is most of the page, and the obvious place to press
+    /// one -- found nothing under the cursor and silently fell through
+    /// to Vim's own binding for that same letter instead. A cursor
+    /// actually on a Blocked-by/Blocks row still resolves to *that*
+    /// referenced task first, unchanged.
+    fn agenda_task_id_at_cursor(&self) -> Option<TaskId> {
+        let from_cursor = match self.agenda_entry_at_cursor() {
+            Some(agenda_panel::AgendaEntry::Task(id)) | Some(agenda_panel::AgendaEntry::Dependency(id)) => Some(id),
+            _ => None,
+        };
+        from_cursor.or(match self.agenda_view {
+            agenda_panel::AgendaView::Detail(id) => Some(id),
+            _ => None,
+        })
+    }
+
+    /// `(re-)opens `view` in the one shared agenda buffer -- reuses it if
+    /// still open (switching views just re-renders the same buffer, the
+    /// same "open or refocus" shape `docker_session`/`jira_session` use
+    /// for their own multi-pane sessions, just without the multi-pane
+    /// part: there's no live/async data to keep several panes in sync
+    /// with here, see `agenda_panel`'s own doc comment), or creates it
+    /// fresh the first time.
+    fn open_agenda(&mut self, view: agenda_panel::AgendaView) {
+        self.agenda_view = view;
+        let panel = self.render_agenda_view(view);
+        if let Some(id) = self.agenda_buffer.filter(|id| self.buffers.get(*id).is_some()) {
+            self.set_agenda_buffer(id, panel, false);
+            self.open_buffer_in_focused_pane(id);
+        } else {
+            let id = self.buffers.open_agenda(&panel.text);
+            self.agenda_lines.insert(id, panel.lines);
+            self.agenda_buffer = Some(id);
+            self.open_buffer_in_focused_pane(id);
+        }
+        self.wake_caret();
+    }
+
+    fn render_agenda_view(&self, view: agenda_panel::AgendaView) -> agenda_panel::AgendaPanel {
+        match view {
+            agenda_panel::AgendaView::List => agenda_panel::render_list(&self.agenda_store),
+            agenda_panel::AgendaView::Board => agenda_panel::render_board(&self.agenda_store),
+            agenda_panel::AgendaView::Report => agenda_panel::render_report(&self.agenda_store),
+            agenda_panel::AgendaView::Detail(id) => agenda_panel::render_detail(&self.agenda_store, id),
+        }
+    }
+
+    /// Re-renders whatever `agenda_view` currently is into `agenda_buffer`
+    /// -- called after every mutation (status/priority/category/note/
+    /// subtask/dependency/time change) so the buffer never shows stale
+    /// data. A no-op if the buffer was closed (`SPC b k`) since the last
+    /// mutation.
+    fn refresh_agenda_buffer(&mut self) {
+        let Some(id) = self.agenda_buffer else { return };
+        if self.buffers.get(id).is_none() {
+            self.agenda_buffer = None;
+            return;
+        }
+        let panel = self.render_agenda_view(self.agenda_view);
+        self.set_agenda_buffer(id, panel, true);
+    }
+
+    /// Rewrites `id`'s buffer text from a freshly-rendered `AgendaPanel`.
+    /// `preserve_cursor` -- true from `refresh_agenda_buffer`, false from
+    /// `open_agenda` -- controls whether a pane showing it lands back on
+    /// the same task or resets to the top: switching views (`SPC a k`/
+    /// `l`/`r`, `Enter`, `Esc`) starts fresh at the top like `set_jira_
+    /// buffer` always does, but a *refresh of the same view* (every
+    /// status/priority/category/clock/note/edit/archive/delete/subtask/
+    /// dependency action, all of which call this via `agenda_save_and_
+    /// refresh`) used to reset to the top too -- which meant the row you
+    /// had just acted on was no longer under the cursor, so the *next*
+    /// row-action key (very often pressed right away -- set status, then
+    /// priority, then clock in, in one sitting) found no task there and
+    /// fell straight through to Vim's own binding for that same letter
+    /// instead (`s`/`p`/`c`/`t`/`e`/`x`/`D`/`a`/`b` are all real Vim
+    /// commands) -- indistinguishable, in the moment, from "the keybinds
+    /// don't work."
+    fn set_agenda_buffer(&mut self, id: BufferId, panel: agenda_panel::AgendaPanel, preserve_cursor: bool) {
+        // Captured with the *old* `agenda_lines`/text, before either is
+        // replaced below -- `entry_at` resolves whatever task each pane's
+        // cursor currently sits on, so it can be relocated in the new
+        // render rather than left pointing at a char offset that now
+        // means something else entirely.
+        let panes_and_tasks: Vec<(fenix_window::WindowId, Option<TaskId>)> = if preserve_cursor {
+            self.windows()
+                .windows()
+                .into_iter()
+                .filter(|&pane| self.windows().content(pane) == Some(&id))
+                .map(|pane| {
+                    let task = self.buffers.get(id).and_then(|ob| {
+                        let cursor = self.pane_state(pane).cursor;
+                        let (line, col) = ob.buffer.line_col(&cursor);
+                        self.agenda_lines
+                            .get(&id)
+                            .and_then(|lines| lines.get(line))
+                            .and_then(|meta| meta.as_ref())
+                            .and_then(|meta| meta.entry_at(col))
+                            .and_then(|entry| match entry {
+                                agenda_panel::AgendaEntry::Task(t) | agenda_panel::AgendaEntry::Dependency(t) => Some(t),
+                                // Not tasks -- and a note/time-entry's own
+                                // index can shift on the very edit/removal
+                                // that triggers this refresh, so there's no
+                                // sound "same entry" to relocate to; falling
+                                // back to the page's own top is honest about
+                                // that rather than guessing.
+                                agenda_panel::AgendaEntry::Subtask(_)
+                                | agenda_panel::AgendaEntry::Note(_)
+                                | agenda_panel::AgendaEntry::TimeEntry(_) => None,
+                            })
+                    });
+                    (pane, task)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        self.agenda_lines.insert(id, panel.lines);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            let end = ob.buffer.len_chars();
+            let mut scratch_cursor = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch_cursor, 0, end, &panel.text);
+        }
+        let new_lines = self.agenda_lines.get(&id).cloned().unwrap_or_default();
+        for pane in self.windows().windows() {
+            if self.windows().content(pane) != Some(&id) {
+                continue;
+            }
+            let target_task = panes_and_tasks.iter().find(|(p, _)| *p == pane).and_then(|(_, t)| *t);
+            let target_line = target_task.and_then(|t| {
+                new_lines.iter().position(|line| {
+                    line.as_ref().is_some_and(|meta| {
+                        meta.entries.iter().any(
+                            |(_, e)| matches!(e, agenda_panel::AgendaEntry::Task(id) | agenda_panel::AgendaEntry::Dependency(id) if *id == t),
+                        )
+                    })
+                })
+            });
+            let cursor = match target_line.zip(self.buffers.get(id)) {
+                Some((line, ob)) => Cursor { char_idx: ob.buffer.line_start_char(line), sticky_col: 0 },
+                None => Cursor::at_start(),
+            };
+            let ps = self.pane_state_mut(pane);
+            *ps = PaneState::seeded_at(cursor);
+        }
+    }
+
+    /// Persists `agenda_store` to `agenda_path` -- mirrors `Config::save`'s
+    /// own error handling (surfaced, never a panic: a personal task list
+    /// is a convenience, not something worth crashing the editor over).
+    fn save_agenda(&mut self) {
+        if let Err(err) = fenix_agenda::save(&self.agenda_path, &self.agenda_store) {
+            self.set_error(format!("couldn't save agenda.json: {err}"));
+        }
+    }
+
+    fn agenda_save_and_refresh(&mut self) {
+        self.save_agenda();
+        self.refresh_agenda_buffer();
+    }
+
+    fn agenda_start_status_picker(&mut self, id: TaskId) {
+        let candidates: Vec<_> = fenix_agenda::Status::ALL.iter().map(|&s| fenix_picker::Candidate::new(s.label(), s)).collect();
+        self.agenda_picker_task = Some(id);
+        self.enter_picker(ActivePicker::AgendaStatus(fenix_picker::PickerState::new(candidates)));
+    }
+
+    fn agenda_start_priority_picker(&mut self, id: TaskId) {
+        let candidates: Vec<_> = fenix_agenda::Priority::ALL.iter().map(|&p| fenix_picker::Candidate::new(p.label(), p)).collect();
+        self.agenda_picker_task = Some(id);
+        self.enter_picker(ActivePicker::AgendaPriority(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// A leading "(none)" candidate plus every configured `[agenda]`
+    /// category -- an unconfigured category list just means this picker
+    /// only ever offers "(none)", not an error.
+    fn agenda_start_category_picker(&mut self, id: TaskId) {
+        let mut candidates: Vec<fenix_picker::Candidate<Option<String>>> = vec![fenix_picker::Candidate::new("(none)", None)];
+        candidates.extend(self.config.agenda_categories.iter().map(|c| fenix_picker::Candidate::new(c.clone(), Some(c.clone()))));
+        self.agenda_picker_task = Some(id);
+        self.enter_picker(ActivePicker::AgendaCategory(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `AgendaStore::dependency_candidates` already excludes `id` itself
+    /// and anything that would create a cycle, so every candidate this
+    /// picker offers is one `add_dependency` will actually accept.
+    fn agenda_start_dependency_picker(&mut self, id: TaskId) {
+        let candidates: Vec<_> =
+            self.agenda_store.dependency_candidates(id).into_iter().map(|t| fenix_picker::Candidate::new(t.title.clone(), t.id)).collect();
+        self.agenda_picker_task = Some(id);
+        self.enter_picker(ActivePicker::AgendaDependency(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC a t` when nothing is currently running: candidates are every
+    /// non-archived task (any status -- clocking time on a `Done` task to
+    /// correct a forgotten log is legitimate, so this doesn't filter to
+    /// "still open" the way `dependency_candidates` filters to "wouldn't
+    /// cycle"), grouped by status in `Status::ALL` order the same way the
+    /// list view's own sections are, so the picker reads the same as the
+    /// view you'd otherwise have navigated into just to press `t`.
+    fn agenda_start_clock_in_picker(&mut self) {
+        let mut tasks: Vec<&fenix_agenda::Task> = self.agenda_store.tasks.iter().filter(|t| !t.archived).collect();
+        tasks.sort_by_key(|t| {
+            (fenix_agenda::Status::ALL.iter().position(|&s| s == t.status).unwrap_or(0), std::cmp::Reverse(t.priority), t.order)
+        });
+        let candidates: Vec<_> =
+            tasks.into_iter().map(|t| fenix_picker::Candidate::new(format!("[{}] {}", t.status.label(), t.title), t.id)).collect();
+        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC a t`: stops whatever timer is running, if any; otherwise opens
+    /// a picker to start one. Reachable from anywhere, not just an agenda
+    /// buffer -- the common case is clocking in once and then actually
+    /// going to edit the code the task is about, so this can't require
+    /// the agenda buffer to still be focused the way the in-buffer `t` key
+    /// (`agenda_clock_toggle`) does. There's no separate "pause": the data
+    /// model only ever has a timer running or not (see `ActiveTimer`'s own
+    /// doc comment), and stopping now is exactly what resuming later via
+    /// this same key already covers.
+    pub(crate) fn cmd_agenda_toggle_clock(&mut self) {
+        if self.agenda_store.active_timer.is_some() {
+            self.agenda_store.clock_out();
+            self.agenda_save_and_refresh();
+        } else if self.agenda_store.tasks.iter().any(|t| !t.archived) {
+            self.agenda_start_clock_in_picker();
+        } else {
+            self.set_error("no agenda tasks to clock in on yet -- SPC a n to add one");
+        }
+    }
+
+    fn agenda_clock_toggle(&mut self, id: TaskId) {
+        let already_running_here = matches!(&self.agenda_store.active_timer, Some(t) if t.task_id == id);
+        if already_running_here {
+            self.agenda_store.clock_out();
+        } else {
+            self.agenda_store.clock_in(id);
+        }
+        self.agenda_save_and_refresh();
+    }
+
+    /// `D` on a `Subtask` row deletes it outright (low-stakes, a
+    /// checklist item is trivial to re-add); `D` on a `Task`/`Dependency`
+    /// row arms `agenda_confirm_delete` instead, same "destructive action
+    /// needs a `y`" tier as `docker_confirm_remove`. With nothing under
+    /// the cursor at all, falls back to the page's own task in Detail --
+    /// see `agenda_task_id_at_cursor`'s own doc comment for why.
+    fn agenda_delete_key(&mut self) -> bool {
+        match self.agenda_entry_at_cursor() {
+            Some(agenda_panel::AgendaEntry::Subtask(index)) => {
+                if let agenda_panel::AgendaView::Detail(id) = self.agenda_view {
+                    self.agenda_store.remove_subtask(id, index);
+                    self.agenda_save_and_refresh();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(agenda_panel::AgendaEntry::Task(id)) | Some(agenda_panel::AgendaEntry::Dependency(id)) => {
+                self.agenda_confirm_delete = Some(id);
+                true
+            }
+            // Same "low-stakes, no confirm" posture as `Subtask` above --
+            // an accidental note or a mis-logged time entry is trivial to
+            // re-add, and having to type `y` for every one of those would
+            // make the fix a bigger interruption than the mistake was.
+            Some(agenda_panel::AgendaEntry::Note(index)) => {
+                if let agenda_panel::AgendaView::Detail(id) = self.agenda_view {
+                    self.agenda_store.remove_note(id, index);
+                    self.agenda_save_and_refresh();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(agenda_panel::AgendaEntry::TimeEntry(index)) => {
+                if let agenda_panel::AgendaView::Detail(id) = self.agenda_view {
+                    self.agenda_store.remove_time_entry(id, index);
+                    self.agenda_save_and_refresh();
+                    true
+                } else {
+                    false
+                }
+            }
+            // Same Detail-page fallback as `agenda_task_id_at_cursor` --
+            // nothing under the cursor, but the page itself names a task.
+            None => match self.agenda_view {
+                agenda_panel::AgendaView::Detail(id) => {
+                    self.agenda_confirm_delete = Some(id);
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// `H`/`L` on the board: moves the card under the cursor to the
+    /// previous/next status column -- clamped, not wrapped, at either
+    /// end, same posture `SPC p n`/`SPC p N`'s quickfix stepping already
+    /// has.
+    fn agenda_move_status_key(&mut self, direction: isize) -> bool {
+        let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+        let Some(current) = self.agenda_store.task(id).map(|t| t.status) else { return false };
+        let idx = fenix_agenda::Status::ALL.iter().position(|&s| s == current).unwrap_or(0) as isize;
+        let new_idx = idx + direction;
+        if new_idx < 0 || new_idx as usize >= fenix_agenda::Status::ALL.len() {
+            return false;
+        }
+        self.agenda_store.move_to_status(id, fenix_agenda::Status::ALL[new_idx as usize]);
+        self.agenda_save_and_refresh();
+        true
+    }
+
+    /// `Enter` on an agenda buffer: a `Task`/`Dependency` row opens that
+    /// task's detail view (remembering the view it was reached from, for
+    /// `Esc`, but only the *first* hop into `Detail` -- following a
+    /// `Blocked by`/`Blocks` row from one task's detail to another's
+    /// leaves the original return view alone); a `Subtask` row toggles
+    /// it done; anything else is a no-op (mirrors `dashboard_activate_
+    /// selected`'s "not every line means something" shape).
+    fn agenda_activate_selected(&mut self) {
+        match self.agenda_entry_at_cursor() {
+            Some(agenda_panel::AgendaEntry::Task(id)) | Some(agenda_panel::AgendaEntry::Dependency(id)) => {
+                if !matches!(self.agenda_view, agenda_panel::AgendaView::Detail(_)) {
+                    self.agenda_return_view = Some(self.agenda_view);
+                }
+                self.open_agenda(agenda_panel::AgendaView::Detail(id));
+            }
+            Some(agenda_panel::AgendaEntry::Subtask(index)) => {
+                if let agenda_panel::AgendaView::Detail(id) = self.agenda_view {
+                    self.agenda_store.toggle_subtask(id, index);
+                    self.agenda_save_and_refresh();
+                }
+            }
+            // Neither means anything on `Enter` -- editing a note is `e`,
+            // removing either is `D`; toggling (like a subtask) has no
+            // equivalent for a note or a logged time span.
+            Some(agenda_panel::AgendaEntry::Note(_)) | Some(agenda_panel::AgendaEntry::TimeEntry(_)) => {}
+            None => {}
+        }
+    }
+
+    /// Routes one keypress within a focused `BufferKind::Agenda` buffer to
+    /// a row action; returns whether it was consumed. Only fires in
+    /// Normal mode with no modifier held, so it never shadows Vim's own
+    /// `Ctrl`-prefixed bindings or steals a key while, say, a `/` search
+    /// is being typed on this same buffer.
+    fn agenda_route_key(&mut self, keypress: KeyPress) -> bool {
+        if self.vim.mode() != Mode::Normal || keypress.mods != Mods::default() {
+            return false;
+        }
+        match keypress.code {
+            KeyCode::Named(FenixNamedKey::Escape) => {
+                if matches!(self.agenda_view, agenda_panel::AgendaView::Detail(_)) {
+                    let back = self.agenda_return_view.take().unwrap_or(agenda_panel::AgendaView::List);
+                    self.open_agenda(back);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Char('s') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_start_status_picker(id);
+                true
+            }
+            KeyCode::Char('p') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_start_priority_picker(id);
+                true
+            }
+            KeyCode::Char('c') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_start_category_picker(id);
+                true
+            }
+            KeyCode::Char('t') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_clock_toggle(id);
+                true
+            }
+            KeyCode::Char('T') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::ManualTime { id }, input: String::new() });
+                true
+            }
+            KeyCode::Char('N') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::AddNote { id }, input: String::new() });
+                true
+            }
+            KeyCode::Char('e') => {
+                // A note row takes priority over the generic task-edit
+                // fallback below -- both would otherwise resolve (a note
+                // row carries no `Task`/`Dependency` entry, so `agenda_
+                // task_id_at_cursor` would fall through to "the page's own
+                // task" and open `EditTitle` instead of what's actually
+                // under the cursor).
+                if let (Some(agenda_panel::AgendaEntry::Note(index)), agenda_panel::AgendaView::Detail(id)) =
+                    (self.agenda_entry_at_cursor(), self.agenda_view)
+                {
+                    let text = self.agenda_store.task(id).and_then(|t| t.notes.get(index)).map(|n| n.text.clone()).unwrap_or_default();
+                    self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::EditNote { id, index }, input: text });
+                    return true;
+                }
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                let title = self.agenda_store.task(id).map(|t| t.title.clone()).unwrap_or_default();
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::EditTitle { id }, input: title });
+                true
+            }
+            KeyCode::Char('x') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_store.archive(id);
+                self.agenda_save_and_refresh();
+                true
+            }
+            KeyCode::Char('D') => self.agenda_delete_key(),
+            KeyCode::Char('a') => {
+                let agenda_panel::AgendaView::Detail(id) = self.agenda_view else { return false };
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::AddSubtask { id }, input: String::new() });
+                true
+            }
+            KeyCode::Char('b') => {
+                let agenda_panel::AgendaView::Detail(id) = self.agenda_view else { return false };
+                self.agenda_start_dependency_picker(id);
+                true
+            }
+            KeyCode::Char('B') => {
+                let agenda_panel::AgendaView::Detail(id) = self.agenda_view else { return false };
+                let Some(agenda_panel::AgendaEntry::Dependency(dep)) = self.agenda_entry_at_cursor() else { return false };
+                self.agenda_store.remove_dependency(id, dep);
+                self.agenda_save_and_refresh();
+                true
+            }
+            KeyCode::Char('J') if self.agenda_view == agenda_panel::AgendaView::Board => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_store.reorder_within_status(id, 1);
+                self.agenda_save_and_refresh();
+                true
+            }
+            KeyCode::Char('K') if self.agenda_view == agenda_panel::AgendaView::Board => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_store.reorder_within_status(id, -1);
+                self.agenda_save_and_refresh();
+                true
+            }
+            KeyCode::Char('L') if self.agenda_view == agenda_panel::AgendaView::Board => self.agenda_move_status_key(1),
+            KeyCode::Char('H') if self.agenda_view == agenda_panel::AgendaView::Board => self.agenda_move_status_key(-1),
+            _ => false,
+        }
+    }
+
+    /// `SPC a n`'s first field.
+    pub(crate) fn agenda_start_new_task_prompt(&mut self) {
+        self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::NewTaskTitle, input: String::new() });
+    }
+
+    /// `SPC a c`: mirrors `jira_start_add_project_prompt`'s shape for
+    /// `config.ini`'s own numbered-key list convention.
+    pub(crate) fn agenda_start_add_category_prompt(&mut self) {
+        self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::AddCategory, input: String::new() });
+    }
+
+    /// `SPC a a`: opens (or refocuses) whichever view was last shown.
+    pub(crate) fn cmd_agenda_open(&mut self) {
+        self.open_agenda(self.agenda_view);
+    }
+
+    pub(crate) fn cmd_agenda_list(&mut self) {
+        self.open_agenda(agenda_panel::AgendaView::List);
+    }
+
+    pub(crate) fn cmd_agenda_board(&mut self) {
+        self.open_agenda(agenda_panel::AgendaView::Board);
+    }
+
+    pub(crate) fn cmd_agenda_report(&mut self) {
+        self.open_agenda(agenda_panel::AgendaView::Report);
+    }
+
+    /// What to show in place of the modeline while `agenda_prompt` is
+    /// active -- mirrors `jira_prompt_text`.
+    fn agenda_prompt_text(&self) -> Option<String> {
+        let prompt = self.agenda_prompt.as_ref()?;
+        Some(match &prompt.kind {
+            AgendaPromptKind::NewTaskTitle => format!("New task: {}", prompt.input),
+            AgendaPromptKind::NewTaskDescription { .. } => format!("Description (optional): {}", prompt.input),
+            AgendaPromptKind::EditTitle { .. } => format!("Title: {}", prompt.input),
+            AgendaPromptKind::EditDescription { .. } => format!("Description: {}", prompt.input),
+            AgendaPromptKind::AddNote { .. } => format!("Note: {}", prompt.input),
+            AgendaPromptKind::EditNote { .. } => format!("Edit note: {}", prompt.input),
+            AgendaPromptKind::ManualTime { .. } => format!("Log time (e.g. \"2h 30m\"): {}", prompt.input),
+            AgendaPromptKind::AddSubtask { .. } => format!("Subtask: {}", prompt.input),
+            AgendaPromptKind::AddCategory => format!("New category: {}", prompt.input),
+        })
+    }
+
+    /// Mirrors `jira_prompt_key`'s text-accumulation shape exactly.
+    fn agenda_prompt_key(&mut self, keypress: KeyPress) {
+        if keypress == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(prompt), Some(text)) = (&mut self.agenda_prompt, pasted) {
+                prompt.input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some(prompt) = &mut self.agenda_prompt else { return };
+        match keypress.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.agenda_prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let AgendaPrompt { kind, input } = self.agenda_prompt.take().unwrap();
+                self.agenda_prompt_advance(kind, input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// `Enter` on `agenda_prompt`: advances a multi-field prompt to its
+    /// next field, or submits and mutates `agenda_store`. An empty field
+    /// silently cancels wherever blank genuinely means "nothing to do"
+    /// (a title, a note, a subtask) -- mirrors `jira_prompt_advance`'s own
+    /// "blank input does nothing" guard. `NewTaskDescription`'s field is
+    /// the one exception: a task's description is optional, so blank
+    /// there means "no description," not "cancel the whole thing."
+    fn agenda_prompt_advance(&mut self, kind: AgendaPromptKind, input: String) {
+        let value = input.trim().to_string();
+        match kind {
+            AgendaPromptKind::NewTaskTitle => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::NewTaskDescription { title: value }, input: String::new() });
+            }
+            AgendaPromptKind::NewTaskDescription { title } => {
+                let id = self.agenda_store.create_task(title, value, fenix_agenda::Priority::Medium, None);
+                self.agenda_return_view = Some(self.agenda_view);
+                self.agenda_save_and_refresh();
+                self.open_agenda(agenda_panel::AgendaView::Detail(id));
+            }
+            AgendaPromptKind::EditTitle { id } => {
+                if value.is_empty() {
+                    return;
+                }
+                let current_description = self.agenda_store.task(id).map(|t| t.description.clone()).unwrap_or_default();
+                self.agenda_store.set_title(id, value);
+                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::EditDescription { id }, input: current_description });
+            }
+            AgendaPromptKind::EditDescription { id } => {
+                self.agenda_store.set_description(id, value);
+                self.agenda_save_and_refresh();
+            }
+            AgendaPromptKind::AddNote { id } => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_store.add_note(id, value);
+                self.agenda_save_and_refresh();
+            }
+            AgendaPromptKind::EditNote { id, index } => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_store.edit_note(id, index, value);
+                self.agenda_save_and_refresh();
+            }
+            AgendaPromptKind::ManualTime { id } => {
+                let Some(duration) = parse_loose_duration(&value) else {
+                    self.set_error(format!("couldn't parse duration: {value}"));
+                    return;
+                };
+                self.agenda_store.log_manual_time(id, duration);
+                self.agenda_save_and_refresh();
+            }
+            AgendaPromptKind::AddSubtask { id } => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_store.add_subtask(id, value);
+                self.agenda_save_and_refresh();
+            }
+            AgendaPromptKind::AddCategory => {
+                if value.is_empty() {
+                    return;
+                }
+                self.config.agenda_categories.push(value);
+                if let Err(err) = self.config.save() {
+                    self.set_error(format!("couldn't save config.ini: {err}"));
+                }
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// What to show in place of the modeline while `agenda_confirm_delete`
+    /// is armed -- mirrors `docker_confirm_text`.
+    fn agenda_confirm_text(&self) -> Option<String> {
+        let id = self.agenda_confirm_delete?;
+        let title = self.agenda_store.task(id).map(|t| t.title.as_str()).unwrap_or("this task");
+        Some(format!("Delete \"{title}\"? (y/n)"))
+    }
+
+    /// Mirrors `docker_confirm_key`'s "`y` confirms, anything else
+    /// cancels" shape exactly.
+    fn agenda_confirm_key(&mut self, keypress: KeyPress) {
+        let id = self.agenda_confirm_delete.take();
+        if keypress.code == KeyCode::Char('y') {
+            if let Some(id) = id {
+                self.agenda_store.delete(id);
+                if self.agenda_view == agenda_panel::AgendaView::Detail(id) {
+                    self.agenda_view = self.agenda_return_view.take().unwrap_or(agenda_panel::AgendaView::List);
+                }
+                self.agenda_save_and_refresh();
+            }
+        }
+        self.wake_caret();
+    }
+
     /// A ready-to-use `fenix_jira::JiraClient` built from `Config`'s
     /// `[jira]` settings, or `None` (with a surfaced error) when either
     /// `base_url` or `token` isn't configured yet.
@@ -18773,6 +19687,45 @@ impl App {
                 cursor.char_idx = offset.min(buffer.len_chars());
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
+            }
+            Some(ActivePicker::AgendaStatus(state)) => {
+                let Some(status) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(id) = self.agenda_picker_task.take() else { return };
+                self.agenda_store.move_to_status(id, status);
+                self.agenda_save_and_refresh();
+            }
+            Some(ActivePicker::AgendaPriority(state)) => {
+                let Some(priority) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(id) = self.agenda_picker_task.take() else { return };
+                self.agenda_store.set_priority(id, priority);
+                self.agenda_save_and_refresh();
+            }
+            Some(ActivePicker::AgendaCategory(state)) => {
+                let Some(category) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(id) = self.agenda_picker_task.take() else { return };
+                self.agenda_store.set_category(id, category);
+                self.agenda_save_and_refresh();
+            }
+            Some(ActivePicker::AgendaDependency(state)) => {
+                let Some(dep) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                let Some(id) = self.agenda_picker_task.take() else { return };
+                self.agenda_store.add_dependency(id, dep);
+                self.agenda_save_and_refresh();
+            }
+            Some(ActivePicker::AgendaClockIn(state)) => {
+                let Some(id) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.agenda_store.clock_in(id);
+                self.agenda_save_and_refresh();
             }
             None => {}
         }
@@ -21168,6 +22121,18 @@ impl App {
             self.jira_prompt_key(keypress);
             return;
         }
+        // `D` on an agenda task/dependency row -- same capturing shape as
+        // `docker_confirm_remove`.
+        if self.agenda_confirm_delete.is_some() {
+            self.agenda_confirm_key(keypress);
+            return;
+        }
+        // The agenda's own new-task/edit-title/note/manual-time/subtask/
+        // add-category prompt -- mirrors `jira_prompt` exactly.
+        if self.agenda_prompt.is_some() {
+            self.agenda_prompt_key(keypress);
+            return;
+        }
 
         // `SPC f f`/`SPC f R`/`SPC f D` -- same capturing-prompt tier as
         // everything else here.
@@ -21427,6 +22392,25 @@ impl App {
         // cell is just ordinary Vim text editing on the buffer's real
         // tab-separated content; nothing table-specific is needed for
         // that at all). Only `]`/`[` (next/prev column) and `j`/`k`
+        // The agenda (`SPC a`) is a real Vim-navigable buffer -- ordinary
+        // motions (`hjkl`, `gg`/`G`, `/` search, ...) reach Vim below
+        // unchanged. `Enter` opens a task's detail; every other row
+        // action (`s`/`p`/`c`/`t`/`T`/`N`/`e`/`x`/`D`/`a`/`b`/`B`/`J`/`K`/
+        // `H`/`L`/`Esc`) is claimed by `agenda_route_key` first -- same
+        // "claim the action keys, leave navigation to Vim" shape the
+        // dired block below has.
+        if self.open().kind == BufferKind::Agenda {
+            if keypress.code == KeyCode::Named(FenixNamedKey::Enter) && self.vim.mode() == Mode::Normal && keypress.mods == Mods::default() {
+                self.agenda_activate_selected();
+                self.wake_caret();
+                return;
+            }
+            if self.agenda_route_key(keypress) {
+                self.wake_caret();
+                return;
+            }
+        }
+
         // (reinterpreted: same *elastic column* on the adjacent row, not
         // plain char-based `sticky_col`, which stops tracking "same
         // column" once rows have different raw lengths up to it -- see
@@ -22619,6 +23603,8 @@ impl App {
                 // `SPC b b`; the bare fallback only covers the instant
                 // between the buffer existing and being labelled.
                 self.terminal_buffer_labels.get(&buffer_id).cloned().unwrap_or_else(|| "*terminal*".to_string())
+            } else if ob.kind == BufferKind::Agenda {
+                "*agenda*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -22744,6 +23730,11 @@ impl App {
                 Some(picker @ ActivePicker::RebaseOnto(_)) => ("REBASE ONTO", picker_len(picker)),
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaStatus(_)) => ("AGENDA STATUS", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaPriority(_)) => ("AGENDA PRIORITY", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaCategory(_)) => ("AGENDA CATEGORY", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaDependency(_)) => ("AGENDA DEPENDENCY", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaClockIn(_)) => ("CLOCK IN", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             // Which half of a two-step comparison you're on, spelled
@@ -22791,6 +23782,19 @@ impl App {
                 Some(reg) => format!("   recording @{reg}"),
                 None => String::new(),
             };
+        // Same additive posture as `recording_indicator` -- the agenda's
+        // running timer is easy to forget about once you've actually gone
+        // and started editing the code the task is about, which is
+        // exactly when this needs to stay visible rather than only
+        // showing while the agenda buffer itself is focused.
+        let agenda_timer_indicator = match &self.agenda_store.active_timer {
+            Some(timer) => {
+                let title = self.agenda_store.task(timer.task_id).map(|t| t.title.as_str()).unwrap_or("?");
+                let elapsed = agenda_panel::format_duration(chrono::Local::now() - timer.started_at);
+                format!("   \u{23f1} {title} {elapsed}")
+            }
+            None => String::new(),
+        };
         // A PDF pane has no text and no cursor, so "Ln 1, Col 1" is
         // both wrong and useless there -- it shows where in the
         // *document* the reader is instead, which is the one thing a
@@ -22826,7 +23830,7 @@ impl App {
             })
             .unwrap_or_default();
         let suffix = format!(
-            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{diagnostics_indicator}   Ln {}, Col {} ",
+            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {} ",
             line + 1,
             col + 1
         );
@@ -22862,6 +23866,8 @@ impl App {
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.jira_prompt_text())
+            .or_else(|| self.agenda_confirm_text())
+            .or_else(|| self.agenda_prompt_text())
             .or_else(|| self.mib_insert_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
@@ -23291,6 +24297,7 @@ impl App {
         let docker_lines = self.docker_lines.get(&id).cloned();
         let git_lines = self.git_lines.get(&id).cloned();
         let jira_lines = self.jira_lines.get(&id).cloned();
+        let agenda_lines = self.agenda_lines.get(&id).cloned();
         let diff_lines = self.diff_lines.get(&id).cloned();
         let graph_lines = self.graph_lines.get(&id).cloned();
         let merge_lines = self.merge_lines.get(&id).cloned();
@@ -23339,6 +24346,9 @@ impl App {
         }
         if ob.kind == BufferKind::Jira {
             return jira_highlights_for_visible_range(ob, jira_lines.as_deref(), render_base_line, rows, theme);
+        }
+        if ob.kind == BufferKind::Agenda {
+            return agenda_highlights_for_visible_range(ob, agenda_lines.as_deref(), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Diff {
             return diff_highlights_for_visible_range(ob, diff_lines.as_deref(), render_base_line, rows, theme);
@@ -27794,6 +28804,7 @@ index 0000000..1111111 100644
     #[test]
     fn modeline_reflects_filename_dirty_state_mode_and_position() {
         let mut app = App::with_file(None);
+        app.agenda_store = fenix_agenda::AgendaStore::default(); // isolate from any real leftover active_timer
         app.new_scratch_buffer(); // with_file(None) now opens the dashboard, not a plain scratch buffer
         assert_eq!(app.modeline_text(), "  NORMAL │ [No Name]   Ln 1, Col 1 ");
 
@@ -42356,6 +43367,287 @@ configure_board stm32
         app.restart_project_lsp();
         assert!(!app.lsp_sessions.contains_key(&a_key));
         assert!(app.lsp_sessions.contains_key(&b_key));
+    }
+
+    /// Every agenda test must build its `App` through this, never a bare
+    /// `App::with_file(None)` -- `with_file` loads whatever real `agenda.
+    /// json` exists at the real config-dir path into `agenda_store` (see
+    /// its own doc comment: fine for *reading*, since nothing there
+    /// writes), so a bare call in a test silently mixes real personal
+    /// task data into the test, and a later `agenda_save_and_refresh`
+    /// then overwrites that real file with the test's own fixture data on
+    /// top of it. Confirmed the hard way: a run of this suite clobbered
+    /// this machine's real `agenda.json` with a pile of tasks named "A"/
+    /// "B" and even left a stray dependency pointing at one of them.
+    /// Clears whatever `with_file` just loaded and points `agenda_path`
+    /// at an isolated, auto-cleaned-up temp file for any save the test
+    /// itself triggers -- the same "reassign before touching it" fix its
+    /// own doc comment already prescribed, just actually applied.
+    fn app_with_isolated_agenda(dir: &TempDir) -> App {
+        let mut app = App::with_file(None);
+        app.agenda_store = fenix_agenda::AgendaStore::default();
+        app.agenda_path = dir.path().join("agenda.json");
+        app
+    }
+
+    fn agenda_task_line(app: &App, id: BufferId, task: fenix_agenda::TaskId) -> usize {
+        app.agenda_lines[&id]
+            .iter()
+            .position(|l| {
+                l.as_ref().is_some_and(|m| {
+                    m.entries.iter().any(|(_, e)| matches!(e, agenda_panel::AgendaEntry::Task(t) if *t == task))
+                })
+            })
+            .expect("task has a row in the rendered agenda buffer")
+    }
+
+    #[test]
+    fn agenda_refresh_after_a_row_action_keeps_the_cursor_on_the_same_task() {
+        // Reproduces the reported bug: acting on a task (`s`/`p`/`c`/`t`/
+        // etc.) re-renders the shared agenda buffer via `agenda_save_and_
+        // refresh`, which used to snap every pane's cursor back to line 0
+        // -- almost always a section header, not a task row. The very
+        // next row-action key then found no task under the cursor and
+        // fell straight through to Vim's own binding for that same letter
+        // (`s` substitutes, `p` pastes, `D` deletes to end of line, ...),
+        // which is indistinguishable from "the keybinds don't work."
+        let dir = TempDir::new("agenda_refresh_after_a_row_action_keeps_");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.create_task("B".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.open_agenda(agenda_panel::AgendaView::List);
+
+        let buffer_id = app.agenda_buffer.unwrap();
+        let pane = app.focused_pane_id();
+        let line = agenda_task_line(&app, buffer_id, a);
+        let char_idx = app.buffers.get(buffer_id).unwrap().buffer.line_start_char(line);
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        assert_eq!(app.agenda_task_id_at_cursor(), Some(a), "cursor should resolve to task A before any refresh");
+
+        app.agenda_store.set_priority(a, fenix_agenda::Priority::Urgent);
+        app.agenda_save_and_refresh();
+
+        assert_eq!(
+            app.agenda_task_id_at_cursor(),
+            Some(a),
+            "cursor should still resolve to task A after the refresh a priority change triggers"
+        );
+    }
+
+    #[test]
+    fn switching_agenda_views_resets_the_cursor_to_the_top() {
+        let dir = TempDir::new("switching_agenda_views_resets_the_cursor");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.open_agenda(agenda_panel::AgendaView::List);
+        let buffer_id = app.agenda_buffer.unwrap();
+        let pane = app.focused_pane_id();
+        let line = agenda_task_line(&app, buffer_id, a);
+        let char_idx = app.buffers.get(buffer_id).unwrap().buffer.line_start_char(line);
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+
+        app.open_agenda(agenda_panel::AgendaView::Board);
+
+        assert_eq!(app.pane_state(pane).cursor, Cursor::at_start(), "an explicit view switch should still land at the top");
+    }
+
+    #[test]
+    fn pressing_e_on_a_real_task_row_after_real_vim_navigation_opens_the_edit_prompt() {
+        // Diagnostic for the report that `e` "just moves to the end of
+        // the word" instead of opening the edit prompt -- drives the
+        // cursor down with real Vim motions (`j`), the way a person
+        // actually would, rather than assigning `pane_state.cursor`
+        // directly, to rule out the difference mattering.
+        let dir = TempDir::new("pressing_e_on_a_real_task_row_after_real");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.open_agenda(agenda_panel::AgendaView::List);
+        let buffer_id = app.agenda_buffer.unwrap();
+        let expected_line = agenda_task_line(&app, buffer_id, a);
+
+        for _ in 0..expected_line {
+            app.test_vim_key(KeyPress::char('j'));
+        }
+        let pane = app.focused_pane_id();
+        let (line, _) = app.open().buffer.line_col(&app.pane_state(pane).cursor);
+        assert_eq!(line, expected_line, "real `j` navigation should land on the task's own row");
+        assert_eq!(app.agenda_task_id_at_cursor(), Some(a), "cursor should resolve to the task after real navigation");
+
+        assert!(app.agenda_route_key(KeyPress::char('e')), "`e` should be claimed by agenda_route_key, not fall through to Vim");
+        match &app.agenda_prompt {
+            Some(prompt) => assert!(matches!(prompt.kind, AgendaPromptKind::EditTitle { id } if id == a)),
+            None => panic!("expected `e` to open the EditTitle prompt"),
+        }
+    }
+
+    #[test]
+    fn row_actions_on_a_task_detail_page_apply_to_that_task_even_with_the_cursor_on_its_title() {
+        // The actual reported bug: on a task's own Detail page, the
+        // title/status/description/notes/time lines carry no `AgendaLine`
+        // entry at all (only the Blocked-by/Blocks/Subtask *sections*
+        // do) -- so a cursor sitting anywhere else on the page, which is
+        // most of it and the obvious place to press a row action, used
+        // to resolve no task at all and fall through to Vim's own
+        // binding for that letter (`e` moves to end of word, `s`
+        // substitutes, ...). Cursor stays at its natural start-of-page
+        // position (the title line) -- never moved -- to prove the
+        // fallback, not cursor placement, is what makes this work.
+        let dir = TempDir::new("row_actions_on_a_task_detail_page_apply_");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.open_agenda(agenda_panel::AgendaView::Detail(a));
+        let pane = app.focused_pane_id();
+        let (line, _) = app.open().buffer.line_col(&app.pane_state(pane).cursor);
+        assert_eq!(line, 0, "a freshly opened detail page starts on its own title line");
+        assert_eq!(app.agenda_entry_at_cursor(), None, "the title line itself carries no entry");
+
+        assert!(app.agenda_route_key(KeyPress::char('e')), "`e` on a task's own detail page should edit that task");
+        match &app.agenda_prompt {
+            Some(prompt) => assert!(matches!(prompt.kind, AgendaPromptKind::EditTitle { id } if id == a)),
+            None => panic!("expected `e` to open the EditTitle prompt"),
+        }
+        app.agenda_prompt = None;
+
+        assert!(app.agenda_route_key(KeyPress::char('s')), "`s` on a task's own detail page should change its status");
+        assert!(app.active_picker.is_some(), "expected a status picker to open");
+        app.active_picker = None;
+
+        assert!(app.agenda_route_key(KeyPress::char('D')), "`D` on a task's own detail page should offer to delete it");
+        assert_eq!(app.agenda_confirm_delete, Some(a));
+    }
+
+    fn agenda_entry_line(app: &App, id: BufferId, target: agenda_panel::AgendaEntry) -> usize {
+        app.agenda_lines[&id]
+            .iter()
+            .position(|l| l.as_ref().is_some_and(|m| m.entries.iter().any(|(_, e)| *e == target)))
+            .unwrap_or_else(|| panic!("no rendered row carries {target:?}"))
+    }
+
+    fn move_cursor_to(app: &mut App, buffer_id: BufferId, line: usize) {
+        let pane = app.focused_pane_id();
+        let char_idx = app.buffers.get(buffer_id).unwrap().buffer.line_start_char(line);
+        app.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+    }
+
+    #[test]
+    fn e_on_a_note_row_opens_edit_note_prefilled_with_its_current_text() {
+        let dir = TempDir::new("e_on_a_note_row_opens_edit_note_prefille");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.add_note(a, "original text".to_string());
+        app.open_agenda(agenda_panel::AgendaView::Detail(a));
+        let buffer_id = app.agenda_buffer.unwrap();
+        let line = agenda_entry_line(&app, buffer_id, agenda_panel::AgendaEntry::Note(0));
+        move_cursor_to(&mut app, buffer_id, line);
+
+        assert!(app.agenda_route_key(KeyPress::char('e')));
+
+        match &app.agenda_prompt {
+            Some(prompt) => assert!(matches!(&prompt.kind, AgendaPromptKind::EditNote { id, index } if *id == a && *index == 0)),
+            None => panic!("expected `e` on a note row to open EditNote"),
+        }
+        assert_eq!(app.agenda_prompt.as_ref().unwrap().input, "original text");
+    }
+
+    #[test]
+    fn submitting_edit_note_updates_the_notes_text_in_place() {
+        let dir = TempDir::new("submitting_edit_note_updates_the_notes_t");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.add_note(a, "typo-ed".to_string());
+
+        app.agenda_prompt_advance(AgendaPromptKind::EditNote { id: a, index: 0 }, "fixed text".to_string());
+
+        assert_eq!(app.agenda_store.task(a).unwrap().notes[0].text, "fixed text");
+    }
+
+    #[test]
+    fn d_on_a_note_row_removes_that_note_without_a_confirmation_step() {
+        let dir = TempDir::new("d_on_a_note_row_removes_that_note_withou");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.add_note(a, "keep".to_string());
+        app.agenda_store.add_note(a, "accidental".to_string());
+        app.open_agenda(agenda_panel::AgendaView::Detail(a));
+        let buffer_id = app.agenda_buffer.unwrap();
+        let line = agenda_entry_line(&app, buffer_id, agenda_panel::AgendaEntry::Note(1));
+        move_cursor_to(&mut app, buffer_id, line);
+
+        assert!(app.agenda_route_key(KeyPress::char('D')));
+
+        assert!(app.agenda_confirm_delete.is_none(), "a note delete should not arm the task-delete confirmation");
+        let notes = &app.agenda_store.task(a).unwrap().notes;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "keep");
+    }
+
+    #[test]
+    fn d_on_a_time_entry_row_removes_that_entry() {
+        let dir = TempDir::new("d_on_a_time_entry_row_removes_that_entry");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.log_manual_time(a, chrono::Duration::minutes(30));
+        app.agenda_store.log_manual_time(a, chrono::Duration::minutes(9999));
+        app.open_agenda(agenda_panel::AgendaView::Detail(a));
+        let buffer_id = app.agenda_buffer.unwrap();
+        let line = agenda_entry_line(&app, buffer_id, agenda_panel::AgendaEntry::TimeEntry(1));
+        move_cursor_to(&mut app, buffer_id, line);
+
+        assert!(app.agenda_route_key(KeyPress::char('D')));
+
+        let entries = &app.agenda_store.task(a).unwrap().time_entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].duration(), chrono::Duration::minutes(30));
+    }
+
+    #[test]
+    fn toggle_clock_with_nothing_running_opens_a_picker_and_confirming_clocks_in() {
+        let dir = TempDir::new("toggle_clock_with_nothing_running_opens_");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+
+        app.cmd_agenda_toggle_clock();
+        assert!(matches!(app.active_picker, Some(ActivePicker::AgendaClockIn(_))));
+
+        app.picker_confirm();
+
+        assert!(app.agenda_store.active_timer.is_some());
+        assert_eq!(app.agenda_store.active_timer.as_ref().unwrap().task_id, a);
+    }
+
+    #[test]
+    fn toggle_clock_with_a_timer_running_stops_it_directly_without_a_picker() {
+        let dir = TempDir::new("toggle_clock_with_a_timer_running_stops_");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.agenda_store.clock_in(a);
+
+        app.cmd_agenda_toggle_clock();
+
+        assert!(app.agenda_store.active_timer.is_none());
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.agenda_store.task(a).unwrap().time_entries.len(), 1, "stopping should record the elapsed span");
+    }
+
+    #[test]
+    fn toggle_clock_with_no_tasks_at_all_surfaces_an_error_instead_of_opening_an_empty_picker() {
+        let dir = TempDir::new("toggle_clock_with_no_tasks_at_all_surfac");
+        let mut app = app_with_isolated_agenda(&dir);
+        app.cmd_agenda_toggle_clock();
+        assert!(app.active_picker.is_none());
+        assert!(app.status_message.is_some());
+    }
+
+    #[test]
+    fn modeline_shows_the_running_timers_task_and_elapsed_time() {
+        let dir = TempDir::new("modeline_shows_the_running_timers_task_a");
+        let mut app = app_with_isolated_agenda(&dir);
+        let a = app.agenda_store.create_task("Write the plan".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        assert!(!app.modeline_text().contains("Write the plan"), "no timer running yet, nothing to show");
+
+        app.agenda_store.clock_in(a);
+
+        assert!(app.modeline_text().contains("Write the plan"));
     }
 
 }

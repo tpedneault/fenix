@@ -302,6 +302,23 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('s')], "submit jira edit", "jira.submit_edit");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('x')], "cancel jira edit", "jira.cancel_edit");
 
+        // The personal task/time-tracking agenda -- one shared buffer for
+        // all four views (list/board/report/detail), re-rendered in place
+        // rather than several synced panes like the jira/docker groups
+        // above (see `agenda_panel`'s own doc comment for why). Row
+        // actions (status/priority/category/clock/notes/subtasks/
+        // dependencies/archive/delete) are bare keys on the buffer itself
+        // (`App::agenda_route_key`), not leader bindings -- the same split
+        // the explorer's own dired keys already established.
+        t.label_group(&[spc, KeyPress::char('a')], "agenda");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('k')], "agenda: kanban board", "agenda.board");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('l')], "agenda: list", "agenda.list");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('r')], "agenda: time report", "agenda.report");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('n')], "agenda: new task", "agenda.new_task");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('c')], "agenda: add category", "agenda.add_category");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: start/stop clock", "agenda.toggle_clock");
+
         // VNC console panes (`fenix-vnc`) -- one connection per
         // configured `Config.vnc_hosts` entry, each staying live in the
         // background once opened. Mirrors the docker/jira groups' exact

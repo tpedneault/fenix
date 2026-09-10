@@ -321,6 +321,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -641,6 +642,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-agenda"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "dirs",
+ "fenix-storage",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fenix-buffers"
 version = "0.0.1"
 dependencies = [
@@ -738,6 +750,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "dirs",
+ "fenix-agenda",
  "fenix-buffers",
  "fenix-completion",
  "fenix-config",

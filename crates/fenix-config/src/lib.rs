@@ -130,6 +130,16 @@ pub struct Config {
     /// still fine; it just has to happen between sessions, the same
     /// deal `mib_roots` has.
     pub explorer_bookmarks: Vec<(String, PathBuf)>,
+    /// User-defined agenda categories (`SPC a`'s task manager), in the
+    /// order they appear in `config.ini`'s `[agenda]` section --
+    /// `category1 = Fenix`, `category2 = Personal`, ... A task's own
+    /// category is stored as a plain string rather than an index into
+    /// this list, so removing one here never orphans or crashes loading
+    /// a task that still names it -- it just becomes an unrecognized
+    /// label. Driven by `self` on save (not re-read fresh like
+    /// `vnc_hosts`), same reasoning as `explorer_bookmarks`: there's a
+    /// real in-app add flow for this list, not just hand-editing.
+    pub agenda_categories: Vec<String>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -252,6 +262,7 @@ impl Config {
                 .get("explorer")
                 .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
                 .unwrap_or_default(),
+            agenda_categories: sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default(),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
@@ -291,6 +302,7 @@ impl Config {
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),
+            agenda_categories: Vec::new(),
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -388,6 +400,11 @@ impl Config {
         out.push_str("[explorer]\n");
         for (i, (name, path)) in self.explorer_bookmarks.iter().enumerate() {
             out.push_str(&format!("bookmark{} = {name}|{}\n", i + 1, path.display()));
+        }
+        out.push('\n');
+        out.push_str("[agenda]\n");
+        for (i, category) in self.agenda_categories.iter().enumerate() {
+            out.push_str(&format!("category{} = {}\n", i + 1, ini::quote_if_needed(category)));
         }
         out.push('\n');
         out.push_str("[mib]\n");
@@ -570,6 +587,25 @@ fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix:
         .collect();
     pairs.sort_by_key(|(n, _, _)| *n);
     pairs.into_iter().map(|(_, a, b)| (a, b)).collect()
+}
+
+/// Parses a numbered-key `{prefix}1 = a`, `{prefix}2 = a`, ... list into an
+/// ordered `Vec<String>`, sorted by the numeric ordinal (not the key
+/// string) -- the single-value sibling to `parse_pair_list`, for the
+/// `[agenda]` section's `categoryN` list, which has no second `|`-separated
+/// field to carry. A key that doesn't match `{prefix}N` is silently
+/// skipped, same "a bad entry loses only itself" posture every other field
+/// in this file already has.
+fn parse_single_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<String> {
+    let mut entries: Vec<(usize, String)> = section
+        .iter()
+        .filter_map(|(key, value)| {
+            let n = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
+            Some((n, value.trim().to_string()))
+        })
+        .collect();
+    entries.sort_by_key(|(n, _)| *n);
+    entries.into_iter().map(|(_, v)| v).collect()
 }
 
 #[cfg(test)]
@@ -1081,6 +1117,30 @@ mod tests {
 
         let reloaded = Config::load(path).unwrap();
         assert_eq!(reloaded.explorer_bookmarks, config.explorer_bookmarks);
+    }
+
+    #[test]
+    fn agenda_categories_round_trip_through_save_and_load() {
+        // Same "app has its own add flow" shape as `explorer_bookmarks` --
+        // a save has to carry them, not just whatever was on disk.
+        let path = temp_path("agenda_categories_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.agenda_categories = vec!["Fenix".to_string(), "Personal".to_string()];
+
+        config.save().unwrap();
+
+        let reloaded = Config::load(path).unwrap();
+        assert_eq!(reloaded.agenda_categories, config.agenda_categories);
+    }
+
+    #[test]
+    fn agenda_categories_are_parsed_in_ordinal_order_not_key_string_order() {
+        let path = temp_path("agenda_categories_ordinal");
+        std::fs::write(&path, "[agenda]\ncategory2 = Personal\ncategory10 = Tenth\ncategory1 = Fenix\n").unwrap();
+
+        let config = Config::load(path).unwrap();
+
+        assert_eq!(config.agenda_categories, vec!["Fenix".to_string(), "Personal".to_string(), "Tenth".to_string()]);
     }
 
     #[test]
