@@ -2,6 +2,7 @@ mod refactor;
 mod snippets;
 mod tool_sessions;
 mod session;
+mod editor_ui;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -3462,7 +3463,7 @@ fn remap_highlights_for_display(
 /// directly unit-testable without a GPU.
 fn pane_content_rect(rect: fenix_window::Rect, line_height: f32, has_title: bool) -> fenix_window::Rect {
     if has_title {
-        fenix_window::Rect { y: rect.y + line_height, h: (rect.h - line_height).max(0.0), ..rect }
+        fenix_window::Rect { y: rect.y + 2.0 * line_height, h: (rect.h - 2.0 * line_height).max(0.0), ..rect }
     } else {
         rect
     }
@@ -3849,12 +3850,38 @@ fn gutter_marks_from_hunks(hunks: &[fenix_diff::Hunk]) -> Vec<GutterMark> {
 /// blank line to the next non-blank line's own indent the way some
 /// editors do -- a blank line inside an indented block simply shows no
 /// guides of its own.
-fn indent_guide_columns(leading_columns: usize, indent_width: usize) -> Vec<usize> {
-    if indent_width == 0 {
-        return Vec::new();
+fn indent_guide_columns(leading_columns: usize, indent_width: usize) -> impl Iterator<Item = usize> {
+    // Returning an iterator keeps the visible-row redraw path allocation
+    // free. It used to build and discard one Vec per visible line.
+    let levels = if indent_width == 0 { 0 } else { leading_columns / indent_width };
+    (0..levels).map(move |level| level * indent_width)
+}
+
+/// Coalesces same-column guides that occupy consecutive visible rows.
+///
+/// Rendering every guide independently turns a moderately indented viewport
+/// into hundreds of rectangles (six vertices and a CPU coordinate transform
+/// each) every frame. A guide that continues through neighbouring rows is
+/// visually one uninterrupted line, so preserve the pixels while emitting a
+/// single `(first_row, last_row, column)` rectangle run instead.
+fn indent_guide_runs(guides: &[(usize, usize)]) -> Vec<(usize, usize, usize)> {
+    // The number of simultaneously-active columns is bounded by the nesting
+    // depth, which is normally tiny; a short Vec avoids hashing every guide
+    // in this per-frame hot path.
+    let mut active: Vec<(usize, usize, usize)> = Vec::new(); // (first, last, col)
+    let mut completed = Vec::new();
+    for &(row, col) in guides {
+        match active.iter_mut().find(|run| run.2 == col) {
+            Some(run) if run.1 + 1 == row => run.1 = row,
+            Some(run) => {
+                completed.push(*run);
+                *run = (row, row, col);
+            }
+            None => active.push((row, row, col)),
+        }
     }
-    let levels = leading_columns / indent_width;
-    (0..levels).map(|level| level * indent_width).collect()
+    completed.extend(active);
+    completed
 }
 
 /// Everything `git_refresh_session` re-lists in one shell-out round --
@@ -6037,6 +6064,10 @@ pub struct App {
     /// not any particular view of it, same reasoning `BufferList`'s own
     /// dirty-tracking is buffer-scoped rather than per-pane.
     gutter_hunks: HashMap<BufferId, Vec<GutterMark>>,
+    /// Collapsed structural scope headers, keyed by buffer. The rendered
+    /// row list is derived from the current syntax tree every frame, so an
+    /// edit can never leave stale byte or character offsets behind.
+    code_folds: HashMap<BufferId, HashSet<usize>>,
     /// The active Docker multi-pane session (`SPC d d`), if any -- see
     /// `DockerSession`'s own doc comment.
     docker_session: Option<DockerSession>,
@@ -6590,7 +6621,7 @@ fn cursor_icon_for(geometry: &FrameGeometry, pos: (f32, f32), line_height: f32) 
         return winit::window::CursorIcon::Pointer;
     }
     if let Some((_, rect)) = geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)) {
-        if y >= rect.y + line_height {
+        if y >= rect.y + 2.0 * line_height {
             return winit::window::CursorIcon::Text;
         }
     }
@@ -6629,9 +6660,21 @@ const TAB_CLOSE_CHARS: usize = 3;
 /// tabs that would run past the strip's right edge are simply omitted
 /// (clipped, not scrolled) -- a disclosed v1 simplification.
 fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
+    pane_tab_layout_iter(rect, char_width, tabs.iter().copied())
+}
+
+/// Iterator form of `pane_tab_layout`. The iterator is deliberately
+/// consumed only until the strip is full: a pane remembers every buffer it
+/// has shown, while a tab strip can display only a handful. In particular,
+/// callers must not resolve the display name of every historical buffer on
+/// each redraw just to discard almost all of them here.
+fn pane_tab_layout_iter<I>(rect: fenix_window::Rect, char_width: f32, tabs: I) -> Vec<TabRect>
+where
+    I: IntoIterator<Item = (BufferId, usize)>,
+{
     let mut out = Vec::new();
     let mut x = rect.x;
-    for &(buffer, name_chars) in tabs {
+    for (buffer, name_chars) in tabs {
         let chars = name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS;
         let w = chars as f32 * char_width;
         if x + w > rect.x + rect.w {
@@ -7052,6 +7095,7 @@ impl App {
             docker_menu_open: false,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
+            code_folds: HashMap::new(),
             docker_session: None,
             task_session: None,
             project_last_tasks: HashMap::new(),
@@ -7849,6 +7893,7 @@ impl App {
     /// staying on the same buffer, since nothing else marks "this
     /// buffer changed" the way switching away/back does.
     fn sync_lsp_for_focused_buffer(&mut self) {
+        let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
         let cwd = tool_sessions::root_for_path(&path);
@@ -15849,6 +15894,7 @@ impl App {
     /// another application, and the timer catches Fenix's own terminal
     /// panel, which never takes focus away from the window at all.
     pub(crate) fn poll_files_changed_on_disk(&mut self) {
+        let _profile = crate::profile::Scope::new("poll disk");
         // Advance the maintenance deadline even when watching is disabled.
         // Recovery protects edits independently of external-change detection.
         self.next_disk_check = Instant::now() + DISK_CHECK_INTERVAL;
@@ -21993,6 +22039,7 @@ impl App {
     }
 
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+        let _profile = crate::profile::Scope::new("route_keypress");
         // A Docker which-key menu (`x` on a pane) is purely informational,
         // not a capturing prompt -- cleared unconditionally on *every*
         // keypress before that keypress is dispatched normally below, so
@@ -23425,6 +23472,7 @@ impl App {
     /// otherwise `dd` then `p` in Fenix would silently diverge from
     /// whatever's pasted elsewhere.
     fn push_clipboard_after_edit(&mut self) {
+        let _profile = crate::profile::Scope::new("write clipboard");
         let (text, _linewise) = self.vim.register();
         if text == self.clipboard_mirror {
             return;
@@ -23459,7 +23507,9 @@ impl App {
         let (line, scroll_line) = {
             let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
             let cursor = self.pane_state(pane).cursor;
-            (ob.buffer.line_col(&cursor).0, self.pane_state(pane).scroll_line)
+            let document_line = ob.buffer.line_col(&cursor).0;
+            let display_line = self.folded_display_lines(buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
+            (display_line, self.pane_state(pane).scroll_line)
         };
         let target = scroll_to_include(scroll_line, line, visible_lines);
         if target != scroll_line {
@@ -23829,8 +23879,9 @@ impl App {
                 format!("   {errors}E {warnings}W")
             })
             .unwrap_or_default();
+        let details = self.editor_status_details();
         let suffix = format!(
-            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {} ",
+            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -24286,6 +24337,7 @@ impl App {
         render_base_line: usize,
         rows: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
         // Cloned out ahead of the `self.buffers.get_mut` borrow below --
         // `dashboard_lines` is a different field, but going through a
@@ -25310,13 +25362,17 @@ impl App {
                 .iter()
                 .flat_map(|&(pane, rect)| {
                     let strip = fenix_window::Rect { h: line_height, ..rect };
-                    let names: Vec<(BufferId, usize)> = self
+                    // `pane_tab_layout_iter` stops as soon as the strip is
+                    // full. Keep this lazy so hover hit-testing does not
+                    // resolve names for a pane's entire tab history.
+                    let tabs = self
                         .workspaces
                         .active_pane_tabs()
                         .get(&pane)
-                        .map(|ids| ids.iter().map(|&id| (id, self.buffer_display_name(id).chars().count())).collect())
-                        .unwrap_or_default();
-                    pane_tab_layout(strip, char_width, &names).into_iter().map(move |tab| (pane, tab))
+                        .into_iter()
+                        .flatten()
+                        .map(|&id| (id, self.buffer_display_name(id).chars().count()));
+                    pane_tab_layout_iter(strip, char_width, tabs).into_iter().map(move |tab| (pane, tab))
                 })
                 .collect()
         } else {
@@ -25379,7 +25435,8 @@ impl App {
         let buffer_id = self.focused_buffer_id();
         let Some(ob) = self.buffers.get(buffer_id) else { return };
         let cursor = self.pane_state(pane).cursor;
-        let (line, _) = ob.buffer.line_col(&cursor);
+        let (document_line, _) = ob.buffer.line_col(&cursor);
+        let line = self.folded_display_lines(buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
 
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
@@ -25450,6 +25507,7 @@ impl App {
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
+        if self.click_breadcrumb(&geometry, pos) { return }
         match hit_test(&geometry, pos) {
             Some(ScrollTarget::Sidebar) => {
                 self.sidebar_focused = true;
@@ -25518,8 +25576,8 @@ impl App {
     /// for the focused pane (see `scroll_focused_pane`).
     fn scroll_unfocused_pane(&mut self, pane: fenix_window::WindowId, lines: isize, rect_h: f32, line_height: f32) {
         let Some(&buffer_id) = self.windows().content(pane) else { return };
-        let Some(ob) = self.buffers.get(buffer_id) else { return };
-        let total = ob.buffer.line_count();
+        if self.buffers.get(buffer_id).is_none() { return; }
+        let total = self.folded_display_lines(buffer_id).len();
         let visible = text::lines_that_fit(rect_h, line_height);
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
@@ -25709,6 +25767,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        let _profile = crate::profile::Scope::new("redraw");
         // Cheap per-frame check (an integer comparison against `Buffer::
         // edit_count()`, same "cheap no-op most frames" shape as the PDF
         // resize-tracking and VNC resize-debounce loops just below in
@@ -26246,6 +26305,7 @@ impl App {
             // overlay, focused or not. `buffer_id` was already looked up
             // above, alongside `pane_title`.
             if is_focused {
+                self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
                 // Recomputes `gutter_chars`/`gutter_px` redundantly rather
                 // than reordering the real computation below (`gutter_px`
@@ -26262,7 +26322,13 @@ impl App {
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             let rendered_scroll = pane_state.rendered_scroll;
+            // Scroll positions are display-row based once a scope is
+            // collapsed. This mapping is the single conversion point back
+            // to document rows for every operation below.
+            let display_lines = self.folded_display_lines(buffer_id);
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
+            let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
+            let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
             let mut render_frac = rendered_scroll - rendered_scroll.floor();
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
@@ -26302,7 +26368,9 @@ impl App {
                     dashboard_pad = Some(pad_by_line);
                 }
             }
-            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, render_base_line, pane_visible_lines + 1);
+            let syntax_start = visible_document_lines.first().copied().unwrap_or(0);
+            let syntax_end = visible_document_lines.get(pane_visible_lines).copied().unwrap_or(syntax_start);
+            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
             let tab_stops = self.tab_stops_for(buffer_id);
             // Char-column -> visual-column map for every visible row
             // whose line actually contains a `\t` -- absent (not an
@@ -26326,7 +26394,7 @@ impl App {
             if let Some(ob) = self.buffers.get(buffer_id) {
                 let visual_lines = ob.buffer.visual_line_count();
                 for r in 0..=pane_visible_lines {
-                    let buffer_line = render_base_line + r;
+                    let Some(&buffer_line) = visible_document_lines.get(r) else { continue };
                     if buffer_line >= visual_lines {
                         continue;
                     }
@@ -26340,20 +26408,17 @@ impl App {
                     } else {
                         line_text.chars().take_while(|&c| c == ' ').count()
                     };
-                    indent_guides.extend(indent_guide_columns(leading_columns, indent_width).into_iter().map(|col| (r, col)));
+                    indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
                 }
             }
             let content_spans = match self.buffers.get(buffer_id) {
+                Some(ob) if folds_active => self.folded_content_spans(
+                    ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
+                    line, &tab_stops, pane_state.scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()),
+                ),
                 Some(ob) => self.content_spans(
-                    ob,
-                    render_base_line,
-                    pane_visible_lines + 1,
-                    gutter_chars,
-                    dashboard_pad.as_deref(),
-                    &syntax_highlights,
-                    line,
-                    &tab_stops,
-                    pane_state.scroll_col,
+                    ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
+                    &syntax_highlights, line, &tab_stops, pane_state.scroll_col,
                 ),
                 None => Vec::new(),
             };
@@ -26364,7 +26429,7 @@ impl App {
             // part of the transition (it hasn't panned into view yet) --
             // `None` means "don't draw the hl-line/caret this frame," not
             // a bug.
-            let hl_row = line.checked_sub(render_base_line).filter(|&row| row <= pane_visible_lines);
+            let hl_row = visible_document_lines.iter().position(|&row| row == line).filter(|&row| row <= pane_visible_lines);
 
             // Char column -> visual column, via this row's `col_maps`
             // entry when it has one (a line with a tab), else unchanged
@@ -26390,7 +26455,7 @@ impl App {
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
             };
-            let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused {
+            let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused && !folds_active {
                 (
                     remap_segments(self.visual_selection_segments(pane_visible_lines + 1)),
                     self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
@@ -26398,6 +26463,8 @@ impl App {
                     remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
                     self.focused_caret(hl_row, col, render_base_line, pane_visible_lines).map(|(row, col)| (row, remap_col(row, col))),
                 )
+            } else if is_focused {
+                (Segments::new(), None, Segments::new(), Segments::new(), hl_row.map(|row| (row, remap_col(row, col))))
             } else {
                 (Segments::new(), None, Segments::new(), Segments::new(), None)
             };
@@ -26413,11 +26480,19 @@ impl App {
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
             let (tabs_layout, tab_active, tab_spans) = if theme.show_tabs && !self.pane_titles.contains_key(&pane) {
-                let tab_ids = self.workspaces.active_pane_tabs().get(&pane).cloned().unwrap_or_default();
-                let strip_rect = fenix_window::Rect { x: rect.x, y: rect.y - line_height, w: rect.w, h: line_height };
-                let names: Vec<(BufferId, usize)> =
-                    tab_ids.iter().map(|&id| (id, self.buffer_display_name(id).chars().count())).collect();
-                let layout = pane_tab_layout(strip_rect, char_width, &names);
+                let strip_rect = fenix_window::Rect { x: rect.x, y: rect.y - 2.0 * line_height, w: rect.w, h: line_height };
+                // A pane's list is its complete navigation history, not its
+                // visible tabs. Lazily resolve names so repeated redraws
+                // while moving do work proportional to tabs that fit, not
+                // all files ever visited in that pane.
+                let tabs = self
+                    .workspaces
+                    .active_pane_tabs()
+                    .get(&pane)
+                    .into_iter()
+                    .flatten()
+                    .map(|&id| (id, self.buffer_display_name(id).chars().count()));
+                let layout = pane_tab_layout_iter(strip_rect, char_width, tabs);
                 let active_buffer = self.windows().content(pane).copied();
                 let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
                 let mut active_flags: Vec<bool> = Vec::new();
@@ -26442,6 +26517,7 @@ impl App {
                     spans.push((format!("{truncated}{}", if dirty { "*" } else { "" }), name_color, false));
                     spans.push((" × ".to_string(), theme.gutter_fg, false));
                 }
+                spans.push((format!("\n{}", self.scope_breadcrumbs(buffer_id, pane_state.cursor.char_idx)), theme.fg_modeline, false));
                 (layout, active_flags, spans)
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
@@ -26460,7 +26536,7 @@ impl App {
                     marks
                         .iter()
                         .filter_map(|mark| {
-                            let row = (mark.line.saturating_sub(1)).checked_sub(render_base_line)?;
+                            let row = visible_document_lines.iter().position(|&line| line == mark.line.saturating_sub(1))?;
                             (row <= pane_visible_lines).then_some((row, mark.kind))
                         })
                         .collect()
@@ -26492,6 +26568,7 @@ impl App {
         }
 
         let modeline_pieces = self.modeline_pieces();
+        _profile.mark("CPU pane preparation complete");
         let (badge_bg, badge_fg) = self.mode_colors();
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
@@ -26573,7 +26650,7 @@ impl App {
             .iter()
             .map(|pane| {
                 let title_rect =
-                    fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - line_height, w: pane.rect.w, h: line_height };
+                    fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - 2.0 * line_height, w: pane.rect.w, h: 2.0 * line_height };
                 if pane.tabs_layout.is_empty() {
                     let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
                     text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), color, false)]);
@@ -26832,7 +26909,7 @@ impl App {
             if pane.tabs_layout.is_empty() {
                 continue;
             }
-            let strip_y = pane.rect.y - line_height;
+            let strip_y = pane.rect.y - 2.0 * line_height;
             for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
                 if is_active {
                     bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, line_height, theme.bg);
@@ -26892,10 +26969,17 @@ impl App {
         ];
         for pane in &panes_render {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
-            for &(row, col) in &pane.indent_guides {
+            let active_guide = pane.caret.and_then(|(row, _)| {
+                pane.indent_guides.iter().filter(|(r, _)| *r == row).map(|(_, col)| *col).max()
+                    .map(|col| (row, col))
+            });
+            for (first_row, last_row, col) in indent_guide_runs(&pane.indent_guides) {
                 let x = content_x + col as f32 * char_width;
-                let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
-                bg_rect.push_rect(gpu, x, y, 1.0, line_height, indent_guide_color);
+                let y = pane.rect.y + text::PAD_TOP + first_row as f32 * line_height - pane.content_frac * line_height;
+                let height = (last_row - first_row + 1) as f32 * line_height;
+                let active = active_guide.is_some_and(|(row, column)| column == col && first_row <= row && row <= last_row);
+                let color = if active { glyphon_to_rgba(theme.gutter_fg) } else { indent_guide_color };
+                bg_rect.push_rect(gpu, x, y, 1.0, height, color);
             }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
@@ -27124,6 +27208,7 @@ impl App {
         }
         self.pdf_crop_scratch = crop_scratch;
 
+        _profile.mark("text and geometry preparation complete");
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -27225,7 +27310,13 @@ impl App {
             // silently corrupted.
             popup_rect.clear();
             for &(id, rect) in &popup_rects {
+                popup_rect.push_rect(gpu, rect.x + 3.0, rect.y + 3.0, rect.w, rect.h, [0.0, 0.0, 0.0, 0.25]);
                 popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+                let border = glyphon_to_rgba(theme.gutter_fg);
+                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, 1.0, border);
+                popup_rect.push_rect(gpu, rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, border);
+                popup_rect.push_rect(gpu, rect.x, rect.y, 1.0, rect.h, border);
+                popup_rect.push_rect(gpu, rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, border);
                 // The completion popup's own selected-candidate row --
                 // `theme.selection`, not `theme.hl_line`: same reasoning
                 // the sidebar's own selected-row highlight already
@@ -27267,9 +27358,11 @@ impl App {
             }
             caret_rect.render(&mut pass);
         }
+        _profile.mark("surface acquired and commands encoded");
         gpu.queue.submit(Some(encoder.finish()));
         window.pre_present_notify();
         gpu.queue.present(frame);
+        _profile.mark("present complete");
         text.trim();
     }
 }
@@ -27473,6 +27566,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _profile = crate::profile::Scope::new("about_to_wait");
         let now = Instant::now();
         let mut needs_redraw = false;
 
@@ -27817,10 +27911,10 @@ mod tests {
     }
 
     #[test]
-    fn pane_content_rect_with_a_title_shrinks_from_the_top_by_one_line_height() {
+    fn pane_content_rect_with_a_title_reserves_tabs_and_breadcrumbs() {
         let rect = fenix_window::Rect { x: 10.0, y: 20.0, w: 300.0, h: 400.0 };
         let shrunk = pane_content_rect(rect, 20.0, true);
-        assert_eq!(shrunk, fenix_window::Rect { x: 10.0, y: 40.0, w: 300.0, h: 380.0 });
+        assert_eq!(shrunk, fenix_window::Rect { x: 10.0, y: 60.0, w: 300.0, h: 360.0 });
         // The bottom edge is preserved -- this is exactly what lets the
         // existing divider-line logic (and every other bottom/right-edge
         // check) work unmodified for a titled pane.
@@ -27893,6 +27987,26 @@ mod tests {
         let tabs = [(first, TAB_MIN_NAME_CHARS), (second, TAB_MIN_NAME_CHARS)];
         let layout = pane_tab_layout(rect, 8.0, &tabs);
         assert_eq!(layout.len(), 1, "the second tab doesn't fit and should be dropped, not overflow the strip");
+    }
+
+    #[test]
+    fn pane_tab_layout_iter_stops_resolving_tabs_once_the_strip_is_full() {
+        use std::cell::Cell;
+
+        let app = App::with_file(None);
+        let buffer = app.focused_buffer_id();
+        let one_tab_width = (TAB_MIN_NAME_CHARS + TAB_CHROME_CHARS) as f32 * 8.0;
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: one_tab_width, h: 20.0 };
+        let seen = Cell::new(0);
+        let tabs = (0..100).map(|_| {
+            seen.set(seen.get() + 1);
+            (buffer, TAB_MIN_NAME_CHARS)
+        });
+
+        let layout = pane_tab_layout_iter(rect, 8.0, tabs);
+
+        assert_eq!(layout.len(), 1);
+        assert_eq!(seen.get(), 2, "the iterator only needs the first fitting tab and the next one that proves the strip is full");
     }
 
     #[test]
@@ -27986,14 +28100,14 @@ mod tests {
 
     #[test]
     fn indent_guide_columns_is_empty_for_an_unindented_line() {
-        assert_eq!(indent_guide_columns(0, 4), Vec::<usize>::new());
+        assert_eq!(indent_guide_columns(0, 4).collect::<Vec<_>>(), Vec::<usize>::new());
     }
 
     #[test]
     fn indent_guide_columns_gives_one_guide_per_complete_level_at_its_own_start() {
-        assert_eq!(indent_guide_columns(4, 4), vec![0]);
-        assert_eq!(indent_guide_columns(8, 4), vec![0, 4]);
-        assert_eq!(indent_guide_columns(12, 4), vec![0, 4, 8]);
+        assert_eq!(indent_guide_columns(4, 4).collect::<Vec<_>>(), vec![0]);
+        assert_eq!(indent_guide_columns(8, 4).collect::<Vec<_>>(), vec![0, 4]);
+        assert_eq!(indent_guide_columns(12, 4).collect::<Vec<_>>(), vec![0, 4, 8]);
     }
 
     #[test]
@@ -28001,12 +28115,24 @@ mod tests {
         // 6 columns of leading whitespace at a 4-column indent width is
         // one complete level (0..4) plus 2 stray columns -- no guide for
         // an incomplete level.
-        assert_eq!(indent_guide_columns(6, 4), vec![0]);
+        assert_eq!(indent_guide_columns(6, 4).collect::<Vec<_>>(), vec![0]);
     }
 
     #[test]
     fn indent_guide_columns_is_empty_when_indent_width_is_zero() {
-        assert_eq!(indent_guide_columns(8, 0), Vec::<usize>::new());
+        assert_eq!(indent_guide_columns(8, 0).collect::<Vec<_>>(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn indent_guide_runs_merges_contiguous_rows_but_not_gaps() {
+        let runs = indent_guide_runs(&[
+            (0, 0), (0, 4), (1, 0), (1, 4), (2, 0), (3, 4),
+        ]);
+
+        assert_eq!(runs.len(), 3);
+        assert!(runs.contains(&(0, 2, 0)), "column zero remains continuous through rows 0..=2");
+        assert!(runs.contains(&(0, 1, 4)), "column four's first continuous segment is merged");
+        assert!(runs.contains(&(3, 3, 4)), "a blank/missing guide row breaks the line rather than bridging it");
     }
 
     #[test]

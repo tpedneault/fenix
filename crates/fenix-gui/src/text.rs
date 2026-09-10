@@ -508,6 +508,7 @@ impl TextPipeline {
     /// afterward (the closure would move it) -- a plain contains-key
     /// check plus a fresh `get_mut` avoids the conflict.
     pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)]) {
+        let _profile = crate::profile::Scope::new("shape pane");
         let spans = self.rich_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
 
@@ -534,6 +535,7 @@ impl TextPipeline {
     /// (`h` isn't a parameter: a title strip is always `line_height`,
     /// unlike a pane's own content area).
     pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
+        let _profile = crate::profile::Scope::new("shape title");
         let spans = self.rich_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
 
@@ -543,7 +545,7 @@ impl TextPipeline {
             self.titles.insert(pane, buf);
         }
         let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
-        buf.set_size(Some(w), Some(self.line_height));
+        buf.set_size(Some(w), Some(2.0 * self.line_height));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
@@ -945,6 +947,23 @@ pub fn visible_line_count(window_height: f32, modeline_height: f32, line_height:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "manual shaping latency benchmark"]
+    fn profile_icon_shaping() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        for text in [" \u{f15b} ", "\u{f15b}", "main.rs ×"] {
+            let family = if text.starts_with("main") { "Consolas" } else { ICON_FONT_FAMILY };
+            let mut buffer = GlyphBuffer::new(&mut fonts, Metrics::new(16.0, 20.0));
+            buffer.set_size(Some(1000.0), Some(40.0));
+            let start = std::time::Instant::now();
+            for _ in 0..30 {
+                buffer.set_text(text, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+                buffer.shape_until_scroll(&mut fonts, false);
+            }
+            eprintln!("shape {text:?}: {:?} per frame", start.elapsed() / 30);
+        }
+    }
     use super::*;
 
     #[test]
