@@ -111,9 +111,12 @@ fn empty_line(message: &str) -> (String, Option<GitLine>) {
     (format!("    {message}"), Some(GitLine { style: GitLineStyle::Empty, entry: None, dim_from: None, badge: None }))
 }
 
-/// `[XY]` using git's own porcelain status letters verbatim (e.g. `.M`
-/// unstaged-modified, `M.` staged-modified, `??` untracked, `UU`
-/// conflict) -- colored by whichever half is "the interesting one": a
+/// Git's own porcelain status letters verbatim, as a two-char string
+/// (e.g. `.M` unstaged-modified, `M.` staged-modified, `??` untracked,
+/// `UU` conflict) -- not shown directly (see `describe_status` for the
+/// readable word `render_file_tree` actually displays), but still the
+/// source of truth for which LED color a row gets: colored by whichever
+/// half is "the interesting one": a
 /// conflict always wins, else the staged (index) half if it's changed,
 /// else the unstaged (worktree) half. Verified against git's own
 /// documented porcelain v2 status-letter meanings (`M` modified, `A`
@@ -134,6 +137,40 @@ fn status_color(c: char) -> GitBadgeColor {
         'M' | 'T' => GitBadgeColor::Warn,
         'D' => GitBadgeColor::Bad,
         _ => GitBadgeColor::Neutral,
+    }
+}
+
+/// A file's status LED -- a plain body-font glyph, not a Nerd Font icon,
+/// same "must stay legible even without a Nerd Font installed" reasoning
+/// `editor_ui.rs`'s own `ƒ` scope marker documents.
+const STATUS_LED: char = '■';
+
+/// A human-readable status word for the two-letter porcelain code
+/// `file_status_badge` returns -- e.g. "staged, modified" for `M `,
+/// "modified" for ` M`, "untracked" for `??`. Uses the same "the staged
+/// half wins if it changed, else the worktree half" priority
+/// `file_status_badge`'s own color already applies, so the word never
+/// disagrees with which half the LED's color reflects.
+fn describe_status(letters: &str) -> &'static str {
+    let mut chars = letters.chars();
+    let index = chars.next().unwrap_or('.');
+    let worktree = chars.next().unwrap_or('.');
+    if index == 'U' || worktree == 'U' {
+        return "conflict";
+    }
+    let (c, staged) = if index != '.' { (index, true) } else { (worktree, false) };
+    match (c, staged) {
+        ('?', _) => "untracked",
+        ('A', _) => "staged, new",
+        ('M', true) => "staged, modified",
+        ('M', false) => "modified",
+        ('D', true) => "staged, deleted",
+        ('D', false) => "deleted",
+        ('R', _) => "staged, renamed",
+        ('C', _) => "staged, copied",
+        ('T', true) => "staged, type changed",
+        ('T', false) => "type changed",
+        _ => "changed",
     }
 }
 
@@ -222,9 +259,12 @@ pub fn render_unstaged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> 
 /// Shared by `render_staged`/`render_unstaged`: `files` grouped into a
 /// collapsible directory tree (`Tab` toggles a directory under the
 /// cursor, see `app.rs`'s `git_toggle_dir_expand`), each file row led
-/// by its `[XY]` badge. `expanded_dirs` is the pane's own persisted set
-/// of expanded directory paths -- a fresh/never-toggled directory starts
-/// collapsed, showing just its name.
+/// by a status LED and trailing a readable status word (`describe_
+/// status`) rather than the raw `[XY]` porcelain code -- the code still
+/// decides the LED's color, it just no longer has to double as the only
+/// human-readable part of the row. `expanded_dirs` is the pane's own
+/// persisted set of expanded directory paths -- a fresh/never-toggled
+/// directory starts collapsed, showing just its name.
 fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_message: &str) -> GitPanel {
     let mut b = Builder::new();
     if files.is_empty() {
@@ -246,15 +286,17 @@ fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_
             } else {
                 let f = row.file.expect("file rows always carry a FileEntry");
                 let (letters, color) = file_status_badge(&f);
-                let prefix = format!("{margin}[{letters}] ");
+                let prefix = format!("{margin}{STATUS_LED} ");
                 let badge_len = prefix.chars().count();
-                let line = format!("{prefix}{}", row.name);
+                let name = &row.name;
+                let dim_from = prefix.chars().count() + name.chars().count() + 2;
+                let line = format!("{prefix}{name}  {}", describe_status(&letters));
                 b.push(
                     &line,
                     Some(GitLine {
                         style: GitLineStyle::File,
                         entry: Some(GitEntry::File(row.path)),
-                        dim_from: None,
+                        dim_from: Some(dim_from),
                         badge: Some((badge_len, color)),
                     }),
                 );
@@ -265,7 +307,7 @@ fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_
 }
 
 /// The Branches pane's own content -- the checked-out branch marked
-/// with a `*` badge, every other with a blank one; `+N`/`-M` after the
+/// with a status LED, every other with a blank one; `+N`/`-M` after the
 /// name when the branch is ahead/behind its upstream.
 pub fn render_branches(branches: &[Branch]) -> GitPanel {
     let mut b = Builder::new();
@@ -274,8 +316,8 @@ pub fn render_branches(branches: &[Branch]) -> GitPanel {
         b.push(&text, meta);
     } else {
         for br in branches {
-            let marker = if br.current { "*" } else { " " };
-            let prefix = format!("  [{marker}] ");
+            let marker = if br.current { STATUS_LED } else { ' ' };
+            let prefix = format!("  {marker} ");
             let badge_len = prefix.chars().count();
             let tracking = match (br.ahead, br.behind) {
                 (0, 0) => String::new(),
@@ -587,9 +629,9 @@ mod tests {
     }
 
     #[test]
-    fn render_unstaged_shows_the_raw_status_letters_as_the_badge() {
+    fn render_unstaged_shows_a_led_and_the_readable_status_word() {
         let panel = render_unstaged(&[file("a.txt", '.', 'M')], &HashSet::new());
-        assert!(panel.text.contains("[.M] a.txt"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} a.txt  modified")));
     }
 
     #[test]
@@ -621,10 +663,10 @@ mod tests {
         assert!(panel.text.contains("v src/"));
         // The file row shows only its basename, indented deeper than
         // its parent directory row, not the full "src/a.txt" path.
-        assert!(panel.text.contains("    [.M] a.txt"));
+        assert!(panel.text.contains(&format!("    {STATUS_LED} a.txt  modified")));
         assert!(!panel.text.contains("src/a.txt"));
         // A root-level file (no directory) renders exactly as before.
-        assert!(panel.text.contains("  [.D] root.txt"));
+        assert!(panel.text.contains(&format!("  {STATUS_LED} root.txt  deleted")));
     }
 
     #[test]
@@ -671,6 +713,18 @@ mod tests {
     }
 
     #[test]
+    fn describe_status_agrees_with_which_half_the_color_reflects() {
+        assert_eq!(describe_status("M."), "staged, modified");
+        assert_eq!(describe_status(".M"), "modified");
+        assert_eq!(describe_status("A."), "staged, new");
+        assert_eq!(describe_status(".D"), "deleted");
+        assert_eq!(describe_status("D."), "staged, deleted");
+        assert_eq!(describe_status("??"), "untracked");
+        assert_eq!(describe_status("UU"), "conflict");
+        assert_eq!(describe_status("AU"), "conflict");
+    }
+
+    #[test]
     fn file_status_badge_marks_a_conflict_bad_regardless_of_which_side() {
         assert_eq!(file_status_badge(&file("a.txt", 'U', 'U')).1, GitBadgeColor::Bad);
         assert_eq!(file_status_badge(&file("a.txt", 'A', 'U')).1, GitBadgeColor::Bad);
@@ -679,8 +733,8 @@ mod tests {
     #[test]
     fn render_branches_marks_the_current_branch() {
         let panel = render_branches(&[branch("main", true), branch("feature", false)]);
-        assert!(panel.text.contains("[*] main"));
-        assert!(panel.text.contains("[ ] feature"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} main")));
+        assert!(panel.text.contains("  feature"));
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(entries[0].badge.map(|(_, c)| c), Some(GitBadgeColor::Good));
         assert_eq!(entries[1].badge.map(|(_, c)| c), Some(GitBadgeColor::Neutral));

@@ -45,22 +45,29 @@ pub enum DockerBadgeColor {
     Neutral,
 }
 
-/// A single-letter badge + its color bucket for a container's `State`
-/// field -- verified against Docker's own documented container state
-/// machine (created, running, paused, restarting, exited, dead,
-/// removing; https://docs.docker.com/reference/cli/docker/container/ls/),
-/// not guessed. Any other/unrecognized value (including an empty
-/// string) falls back to "N" (none) rather than guessing at a letter.
-fn container_status_badge(state: &str) -> (&'static str, DockerBadgeColor) {
+/// A container's `State` field, bucketed into a coarse health color --
+/// verified against Docker's own documented container state machine
+/// (created, running, paused, restarting, exited, dead, removing;
+/// https://docs.docker.com/reference/cli/docker/container/ls/), not
+/// guessed. Any other/unrecognized value (including an empty string)
+/// falls back to `Neutral` rather than guessing at a bucket.
+///
+/// No longer returns a letter (`"R"`/`"P"`/`"~"`/...) alongside the
+/// color -- this row is deliberately terse (see `render_containers`'s
+/// own doc comment), and a cryptic single letter wasn't actually
+/// carrying meaning a user could read at a glance beyond the color
+/// itself. The status LED answers exactly what this row has always
+/// promised to answer, "which one, and is it healthy" -- the exact
+/// state (paused vs. restarting, say) is one selection away in the
+/// Status pane (`render_details`), same as image/status/live stats
+/// already are.
+fn container_status_color(state: &str) -> DockerBadgeColor {
     match state {
-        "running" => ("R", DockerBadgeColor::Good),
-        "paused" => ("P", DockerBadgeColor::Warn),
-        "restarting" => ("~", DockerBadgeColor::Warn),
-        "created" => ("C", DockerBadgeColor::Neutral),
-        "exited" => ("X", DockerBadgeColor::Bad),
-        "dead" => ("D", DockerBadgeColor::Bad),
-        "removing" => ("V", DockerBadgeColor::Bad),
-        _ => ("N", DockerBadgeColor::Neutral),
+        "running" => DockerBadgeColor::Good,
+        "paused" | "restarting" => DockerBadgeColor::Warn,
+        "created" => DockerBadgeColor::Neutral,
+        "exited" | "dead" | "removing" => DockerBadgeColor::Bad,
+        _ => DockerBadgeColor::Neutral,
     }
 }
 
@@ -85,7 +92,7 @@ pub struct DockerLine {
     /// Char column where the dim (status/size) portion of the line
     /// begins. `None` for every other style.
     pub dim_from: Option<usize>,
-    /// A Containers-pane row's `[X]` status prefix: its char length
+    /// A Containers-pane row's status LED prefix: its char length
     /// (so the range `0..len` can be colored) and which color bucket
     /// to use. `None` for every other row -- only Containers rows have
     /// a status badge at all.
@@ -121,25 +128,30 @@ impl Builder {
     }
 }
 
+/// A container's status LED -- a plain body-font glyph, not a Nerd Font
+/// icon, on the same "must stay legible even without a Nerd Font
+/// installed" reasoning `editor_ui.rs`'s own `ƒ` scope marker documents.
+const STATUS_LED: char = '■';
+
 /// The Containers pane's own content -- no in-buffer header (the pane's
 /// own title bar already says "Containers") and, deliberately, nothing
-/// but a colored one-letter status badge plus the name: image/status/
-/// live stats all used to be crammed onto this same row and routinely
-/// got clipped by the pane's real-world width, so that information
-/// moved to the Status pane instead (see `render_details`) -- this row
-/// only needs to answer "which one, and is it healthy" at a glance.
-/// The action-key footer hint that used to live here is gone too, for
-/// the same reason -- see `x`'s new "show this pane's keys" menu in
-/// `app.rs` (`docker_menu_popup`) instead of a line that competed with
-/// real content for the same clipped width.
+/// but a colored status LED plus the name: image/status/live stats all
+/// used to be crammed onto this same row and routinely got clipped by
+/// the pane's real-world width, so that information moved to the Status
+/// pane instead (see `render_details`) -- this row only needs to answer
+/// "which one, and is it healthy" at a glance. The action-key footer
+/// hint that used to live here is gone too, for the same reason -- see
+/// `x`'s new "show this pane's keys" menu in `app.rs`
+/// (`docker_menu_popup`) instead of a line that competed with real
+/// content for the same clipped width.
 pub fn render_containers(containers: &[Container]) -> DockerPanel {
     let mut b = Builder::new();
     if containers.is_empty() {
         b.push("    No containers found", Some(DockerLine { style: DockerLineStyle::Empty, entry: None, dim_from: None, badge: None }));
     } else {
         for c in containers {
-            let (letter, color) = container_status_badge(&c.state);
-            let prefix = format!("  [{letter}] ");
+            let color = container_status_color(&c.state);
+            let prefix = format!("  {STATUS_LED} ");
             let badge_len = prefix.chars().count();
             let line = format!("{prefix}{}", c.name);
             b.push(
@@ -370,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn render_containers_rows_only_show_the_badge_and_name() {
+    fn render_containers_rows_only_show_the_led_and_name() {
         let panel = render_containers(&[container("id1", "web")]);
-        assert!(panel.text.contains("[R] web"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} web")));
         assert!(!panel.text.contains("nginx"));
         assert!(!panel.text.contains("Up 3 days"));
     }
@@ -385,16 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn container_status_badge_covers_every_documented_docker_state() {
-        assert_eq!(container_status_badge("running"), ("R", DockerBadgeColor::Good));
-        assert_eq!(container_status_badge("paused"), ("P", DockerBadgeColor::Warn));
-        assert_eq!(container_status_badge("restarting"), ("~", DockerBadgeColor::Warn));
-        assert_eq!(container_status_badge("created"), ("C", DockerBadgeColor::Neutral));
-        assert_eq!(container_status_badge("exited"), ("X", DockerBadgeColor::Bad));
-        assert_eq!(container_status_badge("dead"), ("D", DockerBadgeColor::Bad));
-        assert_eq!(container_status_badge("removing"), ("V", DockerBadgeColor::Bad));
-        assert_eq!(container_status_badge("something-unexpected"), ("N", DockerBadgeColor::Neutral));
-        assert_eq!(container_status_badge(""), ("N", DockerBadgeColor::Neutral));
+    fn container_status_color_covers_every_documented_docker_state() {
+        assert_eq!(container_status_color("running"), DockerBadgeColor::Good);
+        assert_eq!(container_status_color("paused"), DockerBadgeColor::Warn);
+        assert_eq!(container_status_color("restarting"), DockerBadgeColor::Warn);
+        assert_eq!(container_status_color("created"), DockerBadgeColor::Neutral);
+        assert_eq!(container_status_color("exited"), DockerBadgeColor::Bad);
+        assert_eq!(container_status_color("dead"), DockerBadgeColor::Bad);
+        assert_eq!(container_status_color("removing"), DockerBadgeColor::Bad);
+        assert_eq!(container_status_color("something-unexpected"), DockerBadgeColor::Neutral);
+        assert_eq!(container_status_color(""), DockerBadgeColor::Neutral);
     }
 
     #[test]
@@ -402,7 +414,7 @@ mod tests {
         let panel = render_containers(&[container_with_state("id1", "web", "paused")]);
         let entry = panel.lines[0].as_ref().unwrap();
         assert_eq!(entry.badge.map(|(_, c)| c), Some(DockerBadgeColor::Warn));
-        assert!(panel.text.contains("[P] web"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} web")));
     }
 
     #[test]

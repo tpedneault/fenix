@@ -18,8 +18,15 @@ use crate::git_panel::{GitBadgeColor, GitEntry, GitLine, GitLineStyle, GitPanel}
 /// start (or end of line, for the last).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphSpan {
-    /// The `│ ●─╮` rail art -- dim, structural.
+    /// The `│ ─╮` connector art -- dim, structural.
     Rails,
+    /// The single `●`/`*` (or `◆` for a merge) glyph marking an actual
+    /// commit's own row, at its lane's column -- split out from `Rails`
+    /// so a real commit reads as the accent among its otherwise-dim
+    /// connector lines, the same "this row is the thing, not the
+    /// scaffolding around it" distinction a status LED elsewhere in this
+    /// crate draws with color rather than a different character.
+    Node,
     Hash,
     /// `(main, origin/main)` -- where each branch actually points, which
     /// is the whole reason to look at a graph.
@@ -186,7 +193,16 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
 
         let rail = rails.finish(rail_width);
         let mut line = format!("{rail} {:<hash_width$} ", commit.short_hash);
-        let mut spans = vec![(0, GraphSpan::Rails), (rail_width + 1, GraphSpan::Hash)];
+        let node_col = lane_col(row.lane);
+        let mut spans = Vec::new();
+        if node_col > 0 {
+            spans.push((0, GraphSpan::Rails));
+        }
+        spans.push((node_col, GraphSpan::Node));
+        if node_col + 1 < rail_width {
+            spans.push((node_col + 1, GraphSpan::Rails));
+        }
+        spans.push((rail_width + 1, GraphSpan::Hash));
         if !commit.refs.is_empty() {
             spans.push((line.chars().count(), GraphSpan::Refs));
             line.push_str(&format!("({}) ", commit.refs.join(", ")));
@@ -525,7 +541,7 @@ mod tests {
         let meta = panel.lines[0].as_ref().unwrap();
         assert_eq!(meta.commit.as_deref(), Some("abc1234"));
         let kinds: Vec<GraphSpan> = meta.spans.iter().map(|(_, k)| *k).collect();
-        assert_eq!(kinds, vec![GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Refs, GraphSpan::Subject]);
+        assert_eq!(kinds, vec![GraphSpan::Node, GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Refs, GraphSpan::Subject]);
         assert!(meta.spans.windows(2).all(|w| w[0].0 < w[1].0), "span starts must ascend: {:?}", meta.spans);
     }
 
@@ -535,7 +551,7 @@ mod tests {
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let kinds: Vec<GraphSpan> = panel.lines[0].as_ref().unwrap().spans.iter().map(|(_, k)| *k).collect();
-        assert_eq!(kinds, vec![GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Subject]);
+        assert_eq!(kinds, vec![GraphSpan::Node, GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Subject]);
     }
 
     #[test]

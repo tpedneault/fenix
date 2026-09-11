@@ -71,15 +71,22 @@ pub struct AgendaLine {
     pub style: AgendaLineStyle,
     pub entries: Vec<(usize, AgendaEntry)>,
     pub badges: Vec<(usize, usize, AgendaBadgeColor)>,
+    /// Char column where a `TaskRow`'s trailing priority word begins,
+    /// dimmed from there to the end of the line -- mirrors `git_panel::
+    /// GitLine::dim_from`. `None` for every other style, and for a
+    /// Kanban `TaskRow` (`render_board` packs several cards per physical
+    /// line, so a single "dim from here to the end" column can't
+    /// describe all of them at once the way one task per line can).
+    pub dim_from: Option<usize>,
 }
 
 impl AgendaLine {
     fn plain(style: AgendaLineStyle) -> Self {
-        Self { style, entries: Vec::new(), badges: Vec::new() }
+        Self { style, entries: Vec::new(), badges: Vec::new(), dim_from: None }
     }
 
     fn row(style: AgendaLineStyle, entry: AgendaEntry) -> Self {
-        Self { style, entries: vec![(0, entry)], badges: Vec::new() }
+        Self { style, entries: vec![(0, entry)], badges: Vec::new(), dim_from: None }
     }
 
     /// What a cursor at `column` (0-based char offset into the line)
@@ -155,6 +162,11 @@ fn push_footer(b: &mut Builder, hints: &str, extra: Option<&str>) {
     };
     b.push_plain(&line, AgendaLineStyle::Footer);
 }
+
+/// A status LED -- a plain body-font glyph, not a Nerd Font icon, same
+/// "must stay legible even without a Nerd Font installed" reasoning
+/// `editor_ui.rs`'s own `ƒ` scope marker documents.
+const STATUS_LED: char = '■';
 
 fn priority_color(p: Priority) -> AgendaBadgeColor {
     match p {
@@ -245,9 +257,11 @@ pub fn render_list(store: &AgendaStore) -> AgendaPanel {
 }
 
 fn push_task_row(b: &mut Builder, store: &AgendaStore, task: &Task) {
-    let prefix = format!("  [{}] ", task.priority.label());
+    let prefix = format!("  {STATUS_LED} ");
     let badge_len = prefix.chars().count();
-    let mut line = format!("{prefix}{}{}", task.title, category_tag(task));
+    let middle = format!("{}{}", task.title, category_tag(task));
+    let dim_from = prefix.chars().count() + middle.chars().count();
+    let mut line = format!("{prefix}{middle}  · {}", task.priority.label());
     let elapsed = store.elapsed_on(task.id);
     if elapsed > chrono::Duration::zero() {
         line.push_str(&format!("  · {}", format_duration(elapsed)));
@@ -261,6 +275,7 @@ fn push_task_row(b: &mut Builder, store: &AgendaStore, task: &Task) {
             style: AgendaLineStyle::TaskRow,
             entries: vec![(0, AgendaEntry::Task(task.id))],
             badges: vec![(0, badge_len, priority_color(task.priority))],
+            dim_from: Some(dim_from),
         }),
     );
 }
@@ -334,8 +349,8 @@ pub fn render_board(store: &AgendaStore) -> AgendaPanel {
         // tasks) so clicking/cursoring onto either row of a card resolves
         // to that card's task.
         let entries2 = entries1.clone();
-        b.push(&line1, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries1, badges: badges1 }));
-        b.push(&line2, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries2, badges: Vec::new() }));
+        b.push(&line1, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries1, badges: badges1, dim_from: None }));
+        b.push(&line2, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries2, badges: Vec::new(), dim_from: None }));
         if row + 1 < max_cards {
             b.push_blank();
         }
@@ -446,7 +461,7 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
     let badge_len = format!("[{}]", task.status.label()).chars().count();
     b.push(
         &status_line,
-        Some(AgendaLine { style: AgendaLineStyle::Detail, entries: Vec::new(), badges: vec![(0, badge_len, status_color(task.status))] }),
+        Some(AgendaLine { style: AgendaLineStyle::Detail, entries: Vec::new(), badges: vec![(0, badge_len, status_color(task.status))], dim_from: None }),
     );
     b.push_blank();
 
@@ -468,9 +483,21 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
         b.push_plain("  (none) -- press b to add one", AgendaLineStyle::Empty);
     } else {
         for dep in blocked_by {
-            let marker = if dep.status == Status::Done { "[done]" } else { "[open]" };
-            let line = format!("  {marker} {}", dep.title);
-            b.push_row(&line, AgendaLineStyle::TaskRow, AgendaEntry::Dependency(dep.id));
+            let done = dep.status == Status::Done;
+            let marker = if done { STATUS_LED } else { CHECKBOX_PENDING };
+            let color = if done { AgendaBadgeColor::Good } else { AgendaBadgeColor::Neutral };
+            let prefix = format!("  {marker} ");
+            let badge_len = prefix.chars().count();
+            let line = format!("{prefix}{}", dep.title);
+            b.push(
+                &line,
+                Some(AgendaLine {
+                    style: AgendaLineStyle::TaskRow,
+                    entries: vec![(0, AgendaEntry::Dependency(dep.id))],
+                    badges: vec![(0, badge_len, color)],
+                    dim_from: None,
+                }),
+            );
         }
     }
     b.push_blank();
@@ -534,9 +561,14 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
     b.finish()
 }
 
+/// A pending subtask's hollow-square companion to `STATUS_LED` -- same
+/// plain body-font pairing real checkbox UIs use for "not done yet",
+/// legible without a Nerd Font the same way `STATUS_LED` already is.
+const CHECKBOX_PENDING: char = '□';
+
 fn push_subtask_row(b: &mut Builder, index: usize, subtask: &Subtask) {
     let (mark, style) =
-        if subtask.done { ("[x]", AgendaLineStyle::SubtaskDone) } else { ("[ ]", AgendaLineStyle::SubtaskPending) };
+        if subtask.done { (STATUS_LED, AgendaLineStyle::SubtaskDone) } else { (CHECKBOX_PENDING, AgendaLineStyle::SubtaskPending) };
     let line = format!("  {mark} {}", subtask.text);
     b.push_row(&line, style, AgendaEntry::Subtask(index));
 }
@@ -563,7 +595,7 @@ mod tests {
         let panel = render_list(&store);
 
         assert!(panel.text.contains("Todo (1)"));
-        assert!(panel.text.contains("[High] Write the plan (Fenix)"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} Write the plan (Fenix)  · High")));
         let row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Task(id))).unwrap();
         assert_eq!(row.entry_at(0), Some(AgendaEntry::Task(id)));
         assert_eq!(row.badges[0].2, AgendaBadgeColor::Warn);
@@ -661,13 +693,15 @@ mod tests {
         assert!(panel.text.contains("Full description"));
         assert!(panel.text.contains("Draft outline"));
         assert!(panel.text.contains("started working on it"));
-        assert!(panel.text.contains("[open] Dep"));
+        assert!(panel.text.contains(&format!("{CHECKBOX_PENDING} Dep")));
 
         let subtask_row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| matches!(e, AgendaEntry::Subtask(_)))).unwrap();
         assert_eq!(subtask_row.entry_at(0), Some(AgendaEntry::Subtask(0)));
+        assert!(panel.text.contains(&format!("{CHECKBOX_PENDING} Draft outline")));
 
         let dep_row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Dependency(dep))).unwrap();
         assert_eq!(dep_row.entry_at(0), Some(AgendaEntry::Dependency(dep)));
+        assert_eq!(dep_row.badges[0].2, AgendaBadgeColor::Neutral);
     }
 
     #[test]

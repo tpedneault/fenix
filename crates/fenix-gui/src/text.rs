@@ -22,12 +22,13 @@ use crate::theme::Theme;
 pub const FONT_SIZE: f32 = 16.0;
 /// Navigation chrome shares the editor's font family but is intentionally
 /// smaller. At the body size, icon ascenders fill a 20px tab row edge to
-/// edge; this leaves a calm, consistent vertical inset for two-line titles.
-const TITLE_FONT_SCALE: f32 = 0.875;
+/// edge; this leaves a calm, consistent vertical inset for the tab strip
+/// and breadcrumb bar, each its own single-line buffer.
+pub const TITLE_FONT_SCALE: f32 = 0.875;
 /// The modeline is a persistent status surface rather than editor content.
 /// A slightly smaller face gives its metadata room to breathe while keeping
 /// the mode badge and clock immediately legible.
-const MODELINE_FONT_SCALE: f32 = 0.875;
+pub const MODELINE_FONT_SCALE: f32 = 0.875;
 /// Default/starting line height, and the ratio (`LINE_HEIGHT /
 /// FONT_SIZE` = 1.25) every runtime font-size change preserves.
 pub const LINE_HEIGHT: f32 = 20.0;
@@ -87,6 +88,35 @@ static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_fon
 /// how `ICON_FONT_FAMILY` is only ever selected for icon-flagged spans,
 /// never body text.
 static SYMBOLS_NERD_FONT_MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/symbols_nerd_font_mono.ttf");
+
+/// Folds placed glyphs -- `(byte start, x, advance)` -- into one
+/// `(left, right)` pixel span per requested byte range. Split out of
+/// `TextPipeline::title_span_bounds` so the range matching is testable
+/// without a GPU (a `TextPipeline` needs a real surface; this doesn't).
+///
+/// A glyph belongs to the range its `start` falls inside, so ranges must
+/// not overlap -- which is exactly true of the tab strip's, since each
+/// tab's spans are appended one after another into a single string. A
+/// range no glyph falls into yields `None`, not a zero-width span at the
+/// origin, so callers can tell "nothing here" from "something at x=0".
+fn span_bounds(
+    glyphs: impl Iterator<Item = (usize, f32, f32)>,
+    ranges: &[(usize, usize)],
+) -> Vec<Option<(f32, f32)>> {
+    let mut out: Vec<Option<(f32, f32)>> = vec![None; ranges.len()];
+    for (start, x, w) in glyphs {
+        for (slot, &(from, to)) in out.iter_mut().zip(ranges) {
+            if start < from || start >= to {
+                continue;
+            }
+            *slot = Some(match *slot {
+                Some((l, r)) => (l.min(x), r.max(x + w)),
+                None => (x, x + w),
+            });
+        }
+    }
+    out
+}
 
 /// Whether `family` names a monospace face actually present in `font_system`'s
 /// database -- a font *name* (a theme's `font_family`, a config override, a
@@ -218,6 +248,13 @@ pub struct TextPipeline {
     /// popups specifically need that; titles have no such conflict since
     /// nothing else destroys/resizes a title buffer mid-frame).
     titles: HashMap<PaneId, GlyphBuffer>,
+    /// The breadcrumb bar directly beneath a tabbed pane's `titles`
+    /// buffer -- its own single-line `GlyphBuffer` (not a second line of
+    /// `titles`) specifically so it can have its own on-screen height
+    /// (`app::breadcrumb_strip_height`), shorter than the tab strip's.
+    /// Same lazy-create/retain lifecycle as `titles`; empty for any pane
+    /// without a tab strip.
+    breadcrumbs: HashMap<PaneId, GlyphBuffer>,
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
     /// The modeline's right-aligned date/time clock -- a *separate*
@@ -282,6 +319,20 @@ pub struct TextPipeline {
     /// second font enters the mix -- callers needing per-column pixel
     /// math should use `char_width()`, not the `CHAR_WIDTH` constant.
     char_width: f32,
+    /// The same real, measured advance width, but at the tab-strip/
+    /// breadcrumb text's own smaller size (`title_metrics`'s `TITLE_
+    /// FONT_SCALE`-scaled font), not the body's. Tab/breadcrumb layout
+    /// math (`pane_tab_layout_iter`, `click_breadcrumb`) that used the
+    /// body `char_width` here used to compute wider-than-real cell
+    /// widths, so the background/hit-test geometry it produced drifted
+    /// further right of the actually-smaller rendered glyphs with every
+    /// tab -- this is that same measurement taken at the *right* size.
+    title_char_width: f32,
+    /// The same measurement again at the modeline's own scaled size
+    /// (`modeline_metrics`) -- what the modeline's column math (the mode
+    /// segment's trailing divider, the clock's divider and fit estimate)
+    /// has to use, for the same reason `title_char_width` exists.
+    modeline_char_width: f32,
     /// Live font size/line height -- start at `FONT_SIZE`/`LINE_HEIGHT`,
     /// adjustable at runtime via `set_font_size` (`SPC t =`/`-`/`0`).
     /// `line_height` always preserves the original `LINE_HEIGHT /
@@ -315,21 +366,25 @@ impl TextPipeline {
 
         let mut modeline = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
-        modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
+        modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT));
 
         let mut clock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         clock.set_wrap(Wrap::None);
-        clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
+        clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT));
 
         let mut sidebar = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
-        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT + 8.0)));
+        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT)));
 
         let mut terminal = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         terminal.set_wrap(Wrap::None);
         terminal.set_size(Some(gpu.size.width as f32), Some(terminal_height(LINE_HEIGHT)));
 
         let char_width = Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
+        let title_char_width =
+            Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE * TITLE_FONT_SCALE, LINE_HEIGHT);
+        let modeline_char_width =
+            Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT);
         // The borrow has to end before `fonts` is moved into `Self`.
         drop(guard);
 
@@ -340,6 +395,7 @@ impl TextPipeline {
             popup_renderer,
             content_buffers: HashMap::new(),
             titles: HashMap::new(),
+            breadcrumbs: HashMap::new(),
             popups: HashMap::new(),
             modeline,
             clock,
@@ -349,6 +405,8 @@ impl TextPipeline {
             requested_family: None,
             default_family,
             char_width,
+            title_char_width,
+            modeline_char_width,
             font_size: FONT_SIZE,
             line_height: LINE_HEIGHT,
         }
@@ -393,6 +451,14 @@ impl TextPipeline {
         self.content_family = self.requested_family.filter(|f| is_monospace_installed(&self.fonts.borrow().font_system, f));
         let family = self.content_family();
         self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
+        self.title_char_width =
+            Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size * TITLE_FONT_SCALE, self.line_height);
+        self.modeline_char_width = Self::measure_char_width(
+            &mut self.fonts.borrow_mut().font_system,
+            family,
+            self.font_size * MODELINE_FONT_SCALE,
+            self.line_height,
+        );
     }
 
     /// The active font's real monospace advance width in pixels --
@@ -402,15 +468,53 @@ impl TextPipeline {
         self.char_width
     }
 
+    /// Same as `char_width`, but measured at the tab-strip/breadcrumb
+    /// text's own smaller size -- callers laying out or hit-testing the
+    /// tab strip or breadcrumb bar (`pane_tab_layout_iter`, `click_
+    /// breadcrumb`) must use this, not `char_width`, or their geometry
+    /// drifts right of the actually-narrower rendered glyphs.
+    pub fn title_char_width(&self) -> f32 {
+        self.title_char_width
+    }
+
+    /// Same again at the modeline's own smaller size -- callers doing
+    /// column math against modeline or clock text (`modeline_clock_fits`,
+    /// the mode divider's position) must use this, not `char_width`.
+    pub fn modeline_char_width(&self) -> f32 {
+        self.modeline_char_width
+    }
+
+    /// The clock's own on-screen left edge in pixels, measured from the
+    /// glyphs glyphon actually placed. `set_clock_rich` lays the clock
+    /// out right-aligned inside a box whose left edge is the window's
+    /// (its `TextArea` is pushed at `left: 0.0`), so the leftmost glyph's
+    /// `x` *is* that edge -- with no char-count estimate, which
+    /// `App::modeline_clock_fits`'s doc comment records as having failed
+    /// twice here already, and no assumption about how an `Align::Right`
+    /// line reports its own width (`line_w` is the box, not the text).
+    /// `None` when the clock is hidden: its buffer holds no glyphs then.
+    pub fn clock_left_edge(&self) -> Option<f32> {
+        self.clock
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .fold(None, |acc: Option<f32>, glyph| Some(acc.map_or(glyph.x, |left| left.min(glyph.x))))
+    }
+
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
 
-    /// The modeline bar's own height -- `line_height` plus a little
-    /// breathing room, tracking font size the same way every other
-    /// line-height-derived measurement now does.
+    /// The modeline bar's own height -- exactly one line box, no extra
+    /// vertical padding, tracking font size the same way every other
+    /// line-height-derived measurement does. That's the design's own
+    /// figure: its `.modeline-b` is a zero-vertical-padding row whose
+    /// height is purely its (already down-scaled, `MODELINE_FONT_SCALE`)
+    /// text's line box, which makes the modeline the slimmest of the
+    /// three chrome bars -- shorter than the breadcrumb bar, which is in
+    /// turn shorter than the tab strip. It used to add 8px on top of
+    /// that, which read as a bar noticeably taller than the design's.
     pub fn modeline_height(&self) -> f32 {
-        self.line_height + 8.0
+        self.line_height
     }
 
     /// Where the modeline/clock text areas' `top` should sit so their
@@ -467,6 +571,10 @@ impl TextPipeline {
             buf.set_metrics(title_metrics);
             buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         }
+        for buf in self.breadcrumbs.values_mut() {
+            buf.set_metrics(title_metrics);
+            buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        }
         for buf in self.content_buffers.values_mut() {
             buf.set_metrics(metrics);
             buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -478,6 +586,14 @@ impl TextPipeline {
 
         let family = self.content_family();
         self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
+        self.title_char_width =
+            Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size * TITLE_FONT_SCALE, self.line_height);
+        self.modeline_char_width = Self::measure_char_width(
+            &mut self.fonts.borrow_mut().font_system,
+            family,
+            self.font_size * MODELINE_FONT_SCALE,
+            self.line_height,
+        );
     }
 
     /// Measures `family`'s real advance width at `font_size`/`line_height`
@@ -555,10 +671,12 @@ impl TextPipeline {
         self.content_buffers.retain(|id, _| keep.contains(id));
     }
 
-    /// Sets one pane's title-bar text -- same rich-span/lazy-create
+    /// Sets one pane's tab-strip text -- same rich-span/lazy-create
     /// mechanism as `set_pane_rich`, but always exactly one line tall
-    /// (`h` isn't a parameter: a title strip is always `line_height`,
-    /// unlike a pane's own content area).
+    /// (`h` isn't a parameter: this buffer only ever holds the tab row;
+    /// the breadcrumb row below it is `set_pane_breadcrumb_rich`'s own
+    /// separate buffer, not a second line of this one -- the only way to
+    /// give the two rows independent on-screen heights).
     pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
         let _profile = crate::profile::Scope::new("shape title");
         let spans = self.rich_spans(segments);
@@ -570,15 +688,56 @@ impl TextPipeline {
             self.titles.insert(pane, buf);
         }
         let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
-        buf.set_size(Some(w), Some(2.0 * self.line_height));
+        buf.set_size(Some(w), Some(self.line_height));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
-    /// Drops every title `GlyphBuffer` not in `keep` -- same reasoning as
-    /// `retain_panes`.
+    /// Sets one pane's breadcrumb-bar text -- `set_pane_title_rich`'s
+    /// sibling, same mechanism, own buffer (`self.breadcrumbs`) so it can
+    /// be positioned and sized independently of the tab row above it.
+    pub fn set_pane_breadcrumb_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
+        let _profile = crate::profile::Scope::new("shape breadcrumb");
+        let spans = self.rich_spans(segments);
+        let default_attrs = Attrs::new().family(self.content_family());
+
+        if !self.breadcrumbs.contains_key(&pane) {
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, self.title_metrics());
+            buf.set_wrap(Wrap::None);
+            self.breadcrumbs.insert(pane, buf);
+        }
+        let buf = self.breadcrumbs.get_mut(&pane).expect("just inserted if missing");
+        buf.set_size(Some(w), Some(self.line_height));
+        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+    }
+
+    /// Where each of `ranges` (byte ranges into the string last handed to
+    /// `set_pane_title_rich`) actually landed, as `(left, right)` pixel
+    /// offsets from the title text's own origin -- read back from the
+    /// glyphs glyphon placed, so it accounts for everything a character
+    /// count cannot: the icon font's advance differing from the body
+    /// font's (they do differ, substantially -- the bundled Nerd Font's
+    /// cell is ~1.8x a typical body font's at the same size), spaces
+    /// inside an icon-flagged span falling back to some third face, and
+    /// any non-ASCII filename whose glyphs aren't one cell wide.
+    ///
+    /// A range with no glyphs (an empty or fully-clipped span) yields
+    /// `None` rather than a degenerate rect. Ranges are matched by glyph
+    /// `start`, which is a byte offset into that same string.
+    pub fn title_span_bounds(&self, pane: PaneId, ranges: &[(usize, usize)]) -> Vec<Option<(f32, f32)>> {
+        let Some(buffer) = self.titles.get(&pane) else { return vec![None; ranges.len()] };
+        let glyphs = buffer.layout_runs().flat_map(|run| run.glyphs.iter()).map(|g| (g.start, g.x, g.w));
+        span_bounds(glyphs, ranges)
+    }
+
+    /// Drops every title/breadcrumb `GlyphBuffer` not in `keep` -- same
+    /// reasoning as `retain_panes`. The two buffers share one pane
+    /// lifecycle (a breadcrumb bar never outlives its pane's tab strip),
+    /// so one `keep` list retires both together.
     pub fn retain_titles(&mut self, keep: &[PaneId]) {
         self.titles.retain(|id, _| keep.contains(id));
+        self.breadcrumbs.retain(|id, _| keep.contains(id));
     }
 
     /// Sets the modeline text as a sequence of differently-colored spans
@@ -708,6 +867,7 @@ impl TextPipeline {
         theme: &Theme,
         panes: &[(PaneId, Rect, f32)],
         titles: &[(PaneId, Rect)],
+        breadcrumbs: &[(PaneId, Rect)],
         sidebar_open: bool,
         terminal_open: bool,
     ) {
@@ -718,7 +878,7 @@ impl TextPipeline {
 
         let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
-        let mut areas = Vec::with_capacity(panes.len() + titles.len() + 2);
+        let mut areas = Vec::with_capacity(panes.len() + titles.len() + breadcrumbs.len() + 2);
         for &(pane, rect, content_frac) in panes {
             let Some(buffer) = self.content_buffers.get(&pane) else { continue };
             areas.push(TextArea {
@@ -737,19 +897,44 @@ impl TextPipeline {
             });
         }
 
-        // A pane's title strip -- `rect` here is the *strip itself*
-        // (its own top-left/size, computed by the caller as `line_
-        // height`-tall and sitting just above that pane's now-shrunk
-        // content rect), not the pane's full original rect.
+        // A pane's tab strip -- `rect` here is the strip's own bar (its
+        // own top-left/size, computed by the caller as `app::tab_strip_
+        // height`-tall and sitting at the top of that pane's reserved
+        // title area), not the pane's full original rect. The bar is
+        // taller than one text line (see `app::TAB_STRIP_PAD`), so the
+        // single line of text is vertically centered within it rather
+        // than pinned to its top.
         for &(pane, rect) in titles {
             let Some(buffer) = self.titles.get(&pane) else { continue };
+            // Glyph rasterization lands one pixel low of true center;
+            // the `- 1.0` compensates for that optical offset.
+            let top = rect.y + (rect.h - self.line_height) / 2.0 - 1.0;
             areas.push(TextArea {
                 buffer,
                 left: rect.x + PAD_LEFT,
-                // The smaller title metrics nearly center glyphs within the
-                // 20px line box. Glyph rasterization still lands one pixel
-                // low, so compensate for that optical offset.
-                top: rect.y - 1.0,
+                top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + rect.h) as i32,
+                },
+                default_color: theme.fg_modeline,
+                custom_glyphs: &[],
+            });
+        }
+
+        // The breadcrumb bar directly beneath a tabbed pane's tab strip --
+        // same centering as the tab strip above, just against its own
+        // (shorter) `app::breadcrumb_strip_height` bar.
+        for &(pane, rect) in breadcrumbs {
+            let Some(buffer) = self.breadcrumbs.get(&pane) else { continue };
+            let top = rect.y + (rect.h - self.line_height) / 2.0 - 1.0;
+            areas.push(TextArea {
+                buffer,
+                left: rect.x + PAD_LEFT,
+                top,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
@@ -1209,6 +1394,64 @@ mod tests {
         let (font_size, line_height) = resolve_font_size(24.0);
         assert_eq!(font_size, 24.0);
         assert_eq!(line_height, 24.0 * (LINE_HEIGHT / FONT_SIZE));
+    }
+
+    #[test]
+    fn span_bounds_tiles_adjacent_ranges_without_overlapping_them() {
+        // Three tabs' worth of glyphs laid end to end, the shape the tab
+        // strip actually produces: every glyph belongs to exactly one
+        // range, and each range's span must stop where the next begins.
+        let glyphs = [(0, 0.0, 10.0), (1, 10.0, 4.0), (2, 14.0, 4.0), (3, 18.0, 10.0), (4, 28.0, 4.0)];
+        let bounds = span_bounds(glyphs.into_iter(), &[(0, 3), (3, 5)]);
+        assert_eq!(bounds, vec![Some((0.0, 18.0)), Some((18.0, 32.0))]);
+        let (first, second) = (bounds[0].unwrap(), bounds[1].unwrap());
+        assert_eq!(first.1, second.0, "a tab's right edge must be the next tab's left edge, with no gap or overlap");
+    }
+
+    #[test]
+    fn span_bounds_reports_nothing_rather_than_a_zero_width_span_at_the_origin() {
+        let glyphs = [(0, 0.0, 10.0)];
+        assert_eq!(span_bounds(glyphs.into_iter(), &[(5, 9)]), vec![None]);
+    }
+
+    #[test]
+    fn span_bounds_takes_the_extremes_regardless_of_glyph_order() {
+        let glyphs = [(2, 30.0, 5.0), (0, 10.0, 5.0), (1, 20.0, 5.0)];
+        assert_eq!(span_bounds(glyphs.into_iter(), &[(0, 3)]), vec![Some((10.0, 35.0))]);
+    }
+
+    /// The reason tab geometry is measured from shaped glyphs instead of
+    /// computed from character counts. The bundled icon font is a "Mono"
+    /// build, which makes its *own* glyphs uniform -- not the same width
+    /// as the body font's cell. Treating one icon as one body cell is
+    /// what made every tab's drawn rect drift further right of its own
+    /// text than the last one's. If this ever starts passing as "equal",
+    /// the char-count shortcut becomes tempting again; it still wouldn't
+    /// hold for a CJK filename or a fallback face, so measure anyway.
+    #[test]
+    fn the_icon_fonts_cell_is_not_the_body_fonts_cell() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        let body = default_monospace_family(&fonts);
+        let size = FONT_SIZE * TITLE_FONT_SCALE;
+
+        let advance = |fonts: &mut FontSystem, family: &str, s: &str| -> f32 {
+            let mut buffer = GlyphBuffer::new(fonts, Metrics::new(size, size * 1.25));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(4000.0), Some(size * 1.25));
+            buffer.set_text(s, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
+            buffer.shape_until_scroll(fonts, false);
+            buffer.layout_runs().next().expect("shaped").glyphs.iter().map(|g| g.w).sum()
+        };
+
+        let body_cell = advance(&mut fonts, &body, "M");
+        let icon_cell = advance(&mut fonts, crate::icon::ICON_FONT_FAMILY, "\u{f15b}");
+        assert!(body_cell > 0.0 && icon_cell > 0.0, "both faces must actually shape");
+        assert!(
+            (icon_cell - body_cell).abs() > 0.5,
+            "icon cell {icon_cell} vs body cell {body_cell}: if these really matched, this test is the thing to \
+             re-check -- but tab geometry must still come from measured glyphs, not character counts"
+        );
     }
 
     #[test]
