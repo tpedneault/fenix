@@ -67,6 +67,16 @@ pub fn icon_for(name: &str, is_dir: bool, expanded: bool) -> char {
     }
 }
 
+/// A compact document-navigation icon. Tcl's shell glyph is useful in an
+/// explorer, but reads as a literal `$` when it sits inline with breadcrumb
+/// labels, so navigation deliberately uses the neutral code-file glyph.
+pub fn navigation_icon_for(name: &str) -> char {
+    match Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("tcl" | "tm") => FILE_CODE,
+        _ => icon_for(name, false, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +101,12 @@ mod tests {
         // authoritative glyph table, not assumed.
         assert_eq!(icon_for("script.tcl", false, false), SHELL);
         assert_eq!(icon_for("Cargo.toml", false, false), TOML);
+    }
+
+    #[test]
+    fn navigation_uses_a_document_icon_for_tcl_not_a_literal_dollar_sign() {
+        assert_eq!(navigation_icon_for("script.tcl"), FILE_CODE);
+        assert_eq!(navigation_icon_for("main.rs"), RUST);
     }
 
     #[test]

@@ -20,6 +20,14 @@ use crate::theme::Theme;
 /// `TextPipeline::font_size()`, adjustable at runtime via `SPC t =`/`SPC
 /// t -`/`SPC t 0` -- see `TextPipeline::set_font_size`.
 pub const FONT_SIZE: f32 = 16.0;
+/// Navigation chrome shares the editor's font family but is intentionally
+/// smaller. At the body size, icon ascenders fill a 20px tab row edge to
+/// edge; this leaves a calm, consistent vertical inset for two-line titles.
+const TITLE_FONT_SCALE: f32 = 0.875;
+/// The modeline is a persistent status surface rather than editor content.
+/// A slightly smaller face gives its metadata room to breathe while keeping
+/// the mode badge and clock immediately legible.
+const MODELINE_FONT_SCALE: f32 = 0.875;
 /// Default/starting line height, and the ratio (`LINE_HEIGHT /
 /// FONT_SIZE` = 1.25) every runtime font-size change preserves.
 pub const LINE_HEIGHT: f32 = 20.0;
@@ -283,6 +291,13 @@ pub struct TextPipeline {
 }
 
 impl TextPipeline {
+    fn title_metrics(&self) -> Metrics {
+        Metrics::new(self.font_size * TITLE_FONT_SCALE, self.line_height)
+    }
+
+    fn modeline_metrics(&self) -> Metrics {
+        Metrics::new(self.font_size * MODELINE_FONT_SCALE, self.line_height)
+    }
     /// `fonts` is shared with every other frame -- see `FontContext`.
     pub fn new(gpu: &GpuState, fonts: Rc<RefCell<FontContext>>) -> Self {
         // Bound to a named guard rather than `&mut *fonts.borrow_mut()`:
@@ -298,11 +313,11 @@ impl TextPipeline {
             TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
         let font_system = &mut ctx.font_system;
 
-        let mut modeline = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut modeline = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
-        let mut clock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        let mut clock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         clock.set_wrap(Wrap::None);
         clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT + 8.0));
 
@@ -398,6 +413,14 @@ impl TextPipeline {
         self.line_height + 8.0
     }
 
+    /// Where the modeline/clock text areas' `top` should sit so their
+    /// `line_height`-tall row lands centered in the taller `modeline_
+    /// height()` bar, computed rather than a hand-tuned constant -- so it
+    /// stays centered if either measurement ever changes independently.
+    fn modeline_text_top(&self, modeline_top: f32) -> f32 {
+        modeline_top + (self.modeline_height() - self.line_height) / 2.0
+    }
+
     /// `SPC t =`/`SPC t -`/`SPC t 0`: grows, shrinks, or resets the body
     /// text size at runtime, clamped to `[MIN_FONT_SIZE, MAX_FONT_SIZE]`.
     /// `line_height` always scales with it, preserving the original
@@ -430,16 +453,18 @@ impl TextPipeline {
         self.line_height = line_height;
         let metrics = Metrics::new(self.font_size, self.line_height);
 
-        self.modeline.set_metrics(metrics);
+        let modeline_metrics = self.modeline_metrics();
+        self.modeline.set_metrics(modeline_metrics);
         self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
-        self.clock.set_metrics(metrics);
+        self.clock.set_metrics(modeline_metrics);
         self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.sidebar.set_metrics(metrics);
         self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.terminal.set_metrics(metrics);
         self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        let title_metrics = Metrics::new(self.font_size * TITLE_FONT_SCALE, self.line_height);
         for buf in self.titles.values_mut() {
-            buf.set_metrics(metrics);
+            buf.set_metrics(title_metrics);
             buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         }
         for buf in self.content_buffers.values_mut() {
@@ -540,7 +565,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.titles.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, self.title_metrics());
             buf.set_wrap(Wrap::None);
             self.titles.insert(pane, buf);
         }
@@ -721,7 +746,10 @@ impl TextPipeline {
             areas.push(TextArea {
                 buffer,
                 left: rect.x + PAD_LEFT,
-                top: rect.y,
+                // The smaller title metrics nearly center glyphs within the
+                // 20px line box. Glyph rasterization still lands one pixel
+                // low, so compensate for that optical offset.
+                top: rect.y - 1.0,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
@@ -740,10 +768,11 @@ impl TextPipeline {
             right: gpu.config.width as i32,
             bottom: gpu.config.height as i32,
         };
+        let modeline_text_top = self.modeline_text_top(modeline_top);
         areas.push(TextArea {
             buffer: &self.modeline,
             left: PAD_LEFT,
-            top: modeline_top + 4.0,
+            top: modeline_text_top,
             scale: 1.0,
             bounds: modeline_bounds,
             default_color: theme.fg_modeline,
@@ -755,7 +784,7 @@ impl TextPipeline {
             // left edge; its own `Align::Right` layout is what actually
             // pushes the glyphs to sit at the box's *right* edge.
             left: 0.0,
-            top: modeline_top + 4.0,
+            top: modeline_text_top,
             scale: 1.0,
             bounds: modeline_bounds,
             default_color: theme.fg_modeline,

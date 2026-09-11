@@ -3469,12 +3469,49 @@ fn pane_content_rect(rect: fenix_window::Rect, line_height: f32, has_title: bool
     }
 }
 
+/// Insets a tab strip's own rect by `PAD_LEFT` on the left -- the same
+/// left margin the strip's text (icon/filename/close glyphs) actually
+/// renders at (`text.rs`'s title `TextArea` uses `rect.x + PAD_LEFT`).
+/// Both call sites that lay out tabs from this rect (`redraw`, for
+/// drawing, and `frame_geometry`, for hit-testing) go through this one
+/// function so they can never drift apart -- before this existed, both
+/// independently used the strip's raw, un-inset rect, so every tab's
+/// background fill, divider, and click target sat a constant `PAD_LEFT`
+/// to the left of the glyphs actually drawn over it: dividers cut through
+/// the tail of the previous tab's own text instead of the gap between
+/// tabs, and a click square on the last tab's visible `×` landed `PAD_
+/// LEFT` short of it.
+fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
+    fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
+}
+
 /// The modeline's bottom-right clock text -- real local wall-clock time,
 /// re-formatted fresh every `redraw()` (no caching/dirty-tracking) so it
 /// naturally freeloads on the existing ~500ms caret-blink redraw cadence
 /// instead of needing its own timer plumbing.
 fn modeline_clock_text() -> String {
     format_clock(chrono::Local::now())
+}
+
+/// Turn the modeline's deliberately plain, testable text into a calmer
+/// visual hierarchy: the active document/status text stays at full
+/// contrast, while later metadata fields and the dots between them recede
+/// to `gutter_fg`. The three-character separators become compact centered
+/// dots without changing the line's width.
+fn modeline_suffix_spans(suffix: &str, theme: &Theme, foreground: glyphon::Color) -> Vec<(String, glyphon::Color)> {
+    if foreground != theme.fg_modeline {
+        return vec![(suffix.to_string(), foreground)];
+    }
+
+    let mut spans = Vec::new();
+    for (index, field) in suffix.split("   ").enumerate() {
+        if index != 0 {
+            spans.push((" · ".to_string(), theme.gutter_fg));
+        }
+        let color = if index == 0 { foreground } else { theme.gutter_fg };
+        spans.push((field.to_string(), color));
+    }
+    spans
 }
 
 /// Pure formatting split out from `modeline_clock_text` so it's
@@ -3855,6 +3892,18 @@ fn indent_guide_columns(leading_columns: usize, indent_width: usize) -> impl Ite
     // free. It used to build and discard one Vec per visible line.
     let levels = if indent_width == 0 { 0 } else { leading_columns / indent_width };
     (0..levels).map(move |level| level * indent_width)
+}
+
+/// The final document row represented by a pane's display-row slice.
+/// A pane is often taller than its buffer; in that case there is no row at
+/// `visible_rows`, but syntax highlighting must still extend through the
+/// buffer's final row rather than silently stopping at the first one.
+fn visible_document_end_line(display_lines: &[usize], visible_rows: usize) -> usize {
+    display_lines
+        .get(visible_rows)
+        .or_else(|| display_lines.last())
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Coalesces same-column guides that occupy consecutive visible rows.
@@ -23709,7 +23758,7 @@ impl App {
         // already have below.
         if let Some(msg) = &self.status_message {
             if msg.set_at.elapsed() < MESSAGE_DURATION {
-                return (self.mode_badge_label(), format!("│ {} ", msg.text));
+                return (self.mode_badge_label(), format!("{} ", msg.text));
             }
         }
         if self.main_view == MainView::Explorer {
@@ -23719,16 +23768,16 @@ impl App {
                         if explorer.marks.is_empty() { String::new() } else { format!(" [{} marked]", explorer.marks.len()) };
                     match self.explorer_purpose {
                         ExplorerPurpose::Browse => {
-                            format!("│ {}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                            format!("{}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
                         }
                         ExplorerPurpose::PickProjectDir => {
-                            format!("│ {}   S to add as a project, q to cancel ", explorer.cwd.display())
+                            format!("{}   S to add as a project, q to cancel ", explorer.cwd.display())
                         }
                         ExplorerPurpose::PickMibRootDir => {
-                            format!("│ {}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
+                            format!("{}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
                         }
                         ExplorerPurpose::FindFrom => {
-                            format!("│ {}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
+                            format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
                         }
                     }
                 }
@@ -23793,12 +23842,12 @@ impl App {
             // silently answers the opposite question.
             let suffix = match &self.active_picker {
                 Some(ActivePicker::CompareBase(_)) => {
-                    format!("│ {count} refs   pick the ref to compare *against* (the base) ")
+                    format!("{count} refs   pick the ref to compare *against* (the base) ")
                 }
                 Some(ActivePicker::CompareHead { base, .. }) => {
-                    format!("│ {count} refs   {base}...?   pick the ref whose changes you want to see ")
+                    format!("{count} refs   {base}...?   pick the ref whose changes you want to see ")
                 }
-                _ => format!("│ {count} matches "),
+                _ => format!("{count} matches "),
             };
             return (label, suffix);
         }
@@ -23856,7 +23905,7 @@ impl App {
             } else {
                 format!("Page {}/{}   {}", session.current_page + 1, session.page_count, pdf_zoom_label(session))
             };
-            return (mode_label, format!("│ {filename}{workspace_indicator}   {position} "));
+            return (mode_label, format!("{filename}{workspace_indicator}   {position} "));
         }
         // Error/warning counts for whatever the focused buffer's own
         // language server last published for its path, if any -- the
@@ -23881,7 +23930,7 @@ impl App {
             .unwrap_or_default();
         let details = self.editor_status_details();
         let suffix = format!(
-            "│ {filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -25089,17 +25138,28 @@ impl App {
         let available = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING);
         if available == 0 || state.picker.is_empty() { return None; }
         let selected = state.picker.selected()?;
-        let mut extra = Vec::new();
-        if !selected.payload.detail.is_empty() { extra.push(selected.payload.detail.clone()); }
-        if !selected.payload.documentation.is_empty() { extra.push(selected.payload.documentation.clone()); }
-        extra.push(format!("{}/{}  ↑↓ choose · Tab/Enter accept · C-e close", state.picker.selected_row() + 1, state.picker.len()));
-        extra.truncate(available.saturating_sub(1).min(3));
+        // Keep the list and the selected item's explanation visually
+        // distinct. A completion popup is navigated as a list first; raw
+        // LSP detail/documentation appended as anonymous rows made it look
+        // like extra candidates and pushed useful choices off screen.
+        let mut extra: Vec<(String, glyphon::Color)> = Vec::new();
+        if !selected.payload.detail.is_empty() {
+            extra.push((format!("DETAIL  {}", completion::clipped_line(&selected.payload.detail, 72)), self.theme.caret_text));
+        }
+        if !selected.payload.documentation.is_empty() {
+            for (index, line) in selected.payload.documentation.lines().filter(|line| !line.trim().is_empty()).take(2).enumerate() {
+                let prefix = if index == 0 { "DOCS    " } else { "        " };
+                extra.push((format!("{prefix}{}", completion::clipped_line(line, 72)), self.theme.fg_modeline));
+            }
+        }
+        extra.push((format!("{}/{}  ↑↓ choose · Tab/Enter accept · C-e close", state.picker.selected_row() + 1, state.picker.len()), self.theme.gutter_fg));
+        extra.truncate(available.saturating_sub(1).min(4));
         let shown_rows = (available - extra.len()).min(COMPLETION_MAX_ROWS);
         let offset = completion::scroll_offset(state.picker.selected_row(), self.completion_scroll, shown_rows);
         let rows: Vec<_> = state.picker.visible_rows(offset, shown_rows).collect();
         let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(1.0).min(text::WHICH_KEY_MAX_WIDTH);
         let longest = rows.iter().map(|(_, c)| c.label.chars().count() + 10)
-            .chain(extra.iter().map(|s| s.chars().count().min(72))).max().unwrap_or(20);
+            .chain(extra.iter().map(|(s, _)| s.chars().count().min(72))).max().unwrap_or(20);
         let width = (longest as f32 * char_width + COMPLETION_PADDING).max(text::WHICH_KEY_MIN_WIDTH).min(max_width);
         let columns = ((width - COMPLETION_PADDING).max(0.0) / char_width) as usize;
         let label_columns = columns.saturating_sub(10);
@@ -25118,9 +25178,9 @@ impl App {
             spans.push((label, color, false));
             spans.push((format!("{}{}", " ".repeat(padding), completion::clipped_line(candidate.payload.source.label(), columns.saturating_sub(label_columns + 2))), theme.fg_modeline, false));
         }
-        for line in &extra {
+        for (line, color) in &extra {
             spans.push(("\n".into(), theme.fg_modeline, false));
-            spans.push((completion::clipped_line(line, columns), theme.fg_modeline, false));
+            spans.push((completion::clipped_line(line, columns), *color, false));
         }
         let height = (rows.len() + extra.len()) as f32 * line_height + COMPLETION_PADDING;
         let rect = popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
@@ -25361,7 +25421,7 @@ impl App {
             panes
                 .iter()
                 .flat_map(|&(pane, rect)| {
-                    let strip = fenix_window::Rect { h: line_height, ..rect };
+                    let strip = tab_strip_rect(fenix_window::Rect { h: line_height, ..rect });
                     // `pane_tab_layout_iter` stops as soon as the strip is
                     // full. Keep this lazy so hover hit-testing does not
                     // resolve names for a pane's entire tab history.
@@ -26369,7 +26429,7 @@ impl App {
                 }
             }
             let syntax_start = visible_document_lines.first().copied().unwrap_or(0);
-            let syntax_end = visible_document_lines.get(pane_visible_lines).copied().unwrap_or(syntax_start);
+            let syntax_end = visible_document_end_line(visible_document_lines, pane_visible_lines);
             let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
             let tab_stops = self.tab_stops_for(buffer_id);
             // Char-column -> visual-column map for every visible row
@@ -26480,7 +26540,8 @@ impl App {
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
             let (tabs_layout, tab_active, tab_spans) = if theme.show_tabs && !self.pane_titles.contains_key(&pane) {
-                let strip_rect = fenix_window::Rect { x: rect.x, y: rect.y - 2.0 * line_height, w: rect.w, h: line_height };
+                let strip_rect =
+                    tab_strip_rect(fenix_window::Rect { x: rect.x, y: rect.y - 2.0 * line_height, w: rect.w, h: line_height });
                 // A pane's list is its complete navigation history, not its
                 // visible tabs. Lazily resolve names so repeated redraws
                 // while moving do work proportional to tabs that fit, not
@@ -26502,7 +26563,7 @@ impl App {
                     let name_color =
                         if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
                     let name = self.buffer_display_name(tab.buffer);
-                    let icon_ch = icon::icon_for(&name, false, false);
+                    let icon_ch = icon::navigation_icon_for(&name);
                     let dirty = self
                         .buffers
                         .get(tab.buffer)
@@ -26517,7 +26578,8 @@ impl App {
                     spans.push((format!("{truncated}{}", if dirty { "*" } else { "" }), name_color, false));
                     spans.push((" × ".to_string(), theme.gutter_fg, false));
                 }
-                spans.push((format!("\n{}", self.scope_breadcrumbs(buffer_id, pane_state.cursor.char_idx)), theme.fg_modeline, false));
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+                spans.extend(self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx));
                 (layout, active_flags, spans)
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
@@ -26675,7 +26737,12 @@ impl App {
         }
         let existing_chars = {
             let (mode_label, suffix) = &modeline_pieces;
-            let badge = format!(" {:^width$}", mode_label, width = text::MODE_BADGE_CHARS);
+            // One trailing space beyond the label's own centered box --
+            // the colored badge rect below stays exactly `MODE_BADGE_CHARS`
+            // wide, so this renders past its edge on the plain modeline
+            // background, giving the badge breathing room instead of the
+            // filename butting straight up against its right edge.
+            let badge = format!(" {:^width$} ", mode_label, width = text::MODE_BADGE_CHARS);
             let existing_chars = badge.chars().count() + suffix.chars().count();
             // An unexpired error message tints the suffix red (`git_
             // conflicted`'s accent -- no dedicated error color exists
@@ -26685,7 +26752,12 @@ impl App {
             let is_error_message =
                 self.status_message.as_ref().is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
             let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
-            text.set_modeline_text(&[(badge.as_str(), badge_fg), (suffix.as_str(), suffix_fg)]);
+            let suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            let mut spans = Vec::with_capacity(suffix_spans.len() + 1);
+            spans.push((badge, badge_fg));
+            spans.extend(suffix_spans);
+            let refs: Vec<(&str, glyphon::Color)> = spans.iter().map(|(text, color)| (text.as_str(), *color)).collect();
+            text.set_modeline_text(&refs);
             existing_chars
         };
         // A *separate* buffer/`TextArea` from the modeline's own, right-
@@ -26815,6 +26887,9 @@ impl App {
             }
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
+        // A hairline boundary makes the status surface feel intentionally
+        // separate from the editor canvas without adding visual weight.
+        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
         // Starts at PAD_LEFT, matching where the badge text itself starts
         // rendering (`text.rs`'s modeline TextArea uses the same left
         // inset) -- starting this at the window edge instead left the
@@ -26825,7 +26900,7 @@ impl App {
         // blanking this out), so there's no longer a "raw text, no badge"
         // state to skip this for.
         let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
-        bg_rect.push_rect(gpu, text::PAD_LEFT, modeline_top, badge_width, modeline_height, badge_bg);
+        bg_rect.push_rect(gpu, 0.0, modeline_top, text::PAD_LEFT + badge_width, modeline_height, badge_bg);
         // Popup backgrounds are deliberately *not* pushed into this batch --
         // see the big comment at the two-pass render sequence below for why.
         if show_sidebar {
@@ -26910,13 +26985,29 @@ impl App {
                 continue;
             }
             let strip_y = pane.rect.y - 2.0 * line_height;
+            let breadcrumb_y = strip_y + line_height;
+            // Breadcrumbs are navigation chrome, but a shade closer to the
+            // editing canvas than the tab row. This gives the two rows a
+            // deliberate hierarchy rather than making them look like two
+            // unrelated toolbars.
+            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, line_height, theme.sidebar_bg);
+            // Drawn *before* the per-tab loop below, not after: this used to
+            // be pushed last and, being full-width, painted straight over
+            // the bottom pixel of every active tab's accent underline --
+            // shrinking a deliberately 2px-tall indicator down to a barely-
+            // there sliver. Pushing it first lets the underline paint over
+            // it instead, so the accent renders at its full intended weight.
+            bg_rect.push_rect(gpu, pane.rect.x, strip_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
             for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
                 if is_active {
                     bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, line_height, theme.bg);
+                    // A compact accent underline anchors the selected tab
+                    // without introducing a heavy outline around every tab.
+                    bg_rect.push_rect(gpu, tab.body.x, strip_y + line_height - 2.0, tab.body.w, 2.0, theme.mode_normal);
                 }
                 bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, line_height, theme.divider);
             }
-            bg_rect.push_rect(gpu, pane.rect.x, strip_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
+            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
         }
         // Inline git gutter marks (Part 5) -- a thin colored bar, one per
         // changed line still in view. Sits within the pane's own left
@@ -27990,6 +28081,16 @@ mod tests {
     }
 
     #[test]
+    fn syntax_range_reaches_a_short_buffer_last_line() {
+        // A maximized editor normally has many more available rows than a
+        // short file. The old fallback used the first row in this case, so
+        // only line one received syntax colors.
+        assert_eq!(visible_document_end_line(&[0, 1, 2], 40), 2);
+        assert_eq!(visible_document_end_line(&[7, 8, 9, 10], 2), 9);
+        assert_eq!(visible_document_end_line(&[], 40), 0);
+    }
+
+    #[test]
     fn pane_tab_layout_iter_stops_resolving_tabs_once_the_strip_is_full() {
         use std::cell::Cell;
 
@@ -28932,11 +29033,11 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.agenda_store = fenix_agenda::AgendaStore::default(); // isolate from any real leftover active_timer
         app.new_scratch_buffer(); // with_file(None) now opens the dashboard, not a plain scratch buffer
-        assert_eq!(app.modeline_text(), "  NORMAL │ [No Name]   Ln 1, Col 1 ");
+        assert_eq!(app.modeline_text(), "  NORMAL [No Name]   Ln 1, Col 1   Plain text   Indent 4   UTF-8   No EOL ");
 
         app.test_insert('a');
         app.test_insert('b');
-        assert_eq!(app.modeline_text(), "  NORMAL │ [No Name] [+]   Ln 1, Col 3 ");
+        assert_eq!(app.modeline_text(), "  NORMAL [No Name] [+]   Ln 1, Col 3   Plain text   Indent 4   UTF-8   No EOL ");
     }
 
     #[test]
@@ -34420,6 +34521,24 @@ configure_board stm32
         assert!(joined.contains("set"));
         assert!(joined.contains("seek"));
         assert_eq!(selected_row, Some(1));
+    }
+
+    #[test]
+    fn completion_popup_labels_detail_and_documentation_separately() {
+        let mut app = App::with_file(None);
+        let mut item = completion::Item::text("render_widget".to_string(), completion::Source::Lsp);
+        item.detail = "Widget renderer".to_string();
+        item.documentation = "Creates a widget.\nReturns the rendered handle.".to_string();
+        app.completion = Some(CompletionState {
+            prefix_start: 0,
+            picker: fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new("render_widget", item)]),
+        });
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: 100.0 };
+        let (_, spans, _) = app.completion_popup(800.0, 580.0, rect, Some((0, 0)), 0.0, 0.0).unwrap();
+        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert!(joined.contains("DETAIL Widget renderer"), "{joined}");
+        assert!(joined.contains("DOCS Creates a widget."));
+        assert!(joined.contains("Returns the rendered handle."));
     }
 
     #[test]

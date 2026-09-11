@@ -158,8 +158,43 @@ impl App {
         format!("{language_label}   Indent {}   UTF-8   {ending}", self.vim.indent_width())
     }
 
+    #[cfg(test)]
     pub(super) fn scope_breadcrumbs(&self, id: BufferId, char_idx: usize) -> String {
         self.breadcrumb_parts(id, char_idx).into_iter().map(|(text, _)| text).collect::<Vec<_>>().join(" › ")
+    }
+
+    /// Presentation-ready breadcrumbs for the two-line VS-style title area.
+    /// Icons make the hierarchy scannable while the muted separators avoid
+    /// competing with the document's actual syntax colors.
+    pub(super) fn breadcrumb_spans(&self, id: BufferId, char_idx: usize) -> Vec<(String, glyphon::Color, bool)> {
+        let mut spans = Vec::new();
+        // The tab's own content has a leading cell before its icon. Give the
+        // breadcrumb the identical inset so the two navigation rows share a
+        // clean left edge and icon overhang never touches the window edge.
+        spans.push((" ".to_string(), self.theme.fg_modeline, false));
+        for (index, (label, target)) in self.breadcrumb_parts(id, char_idx).into_iter().enumerate() {
+            if index != 0 {
+                spans.push(("  ›  ".to_string(), self.theme.gutter_fg, false));
+            }
+            match target {
+                BreadcrumbTarget::Directory(_) => {
+                    spans.push((format!("{} ", icon::icon_for("folder", true, false)), self.theme.icon_folder, true));
+                    spans.push((label, self.theme.fg_modeline, false));
+                }
+                BreadcrumbTarget::Symbols => {
+                    spans.push((format!("{} ", icon::navigation_icon_for(&label)), self.theme.icon_file, true));
+                    spans.push((label, self.theme.fg_modeline, false));
+                }
+                BreadcrumbTarget::Line(_) => {
+                    // `ƒ` is deliberately body-font text rather than a
+                    // font-specific glyph: it remains a clear function
+                    // marker even when a system lacks Nerd Fonts.
+                    spans.push(("ƒ ".to_string(), self.theme.syntax_function, false));
+                    spans.push((label, self.theme.fg_modeline, false));
+                }
+            }
+        }
+        spans
     }
 
     fn breadcrumb_parts(&self, id: BufferId, char_idx: usize) -> Vec<(String, BreadcrumbTarget)> {
@@ -198,8 +233,14 @@ impl App {
                 || (pane == self.focused_pane_id() && self.main_view != MainView::Editor) { continue }
             let Some(&id) = self.windows().content(pane) else { continue };
             let parts = self.breadcrumb_parts(id, self.pane_state(pane).cursor.char_idx);
-            let mut x = rect.x + text::PAD_LEFT;
-            for (label, action) in parts {
+            // Matches the leading inset emitted by `breadcrumb_spans`.
+            let mut x = rect.x + text::PAD_LEFT + width;
+            for (index, (label, action)) in parts.into_iter().enumerate() {
+                // Keep hit targets aligned with the visible icon and muted
+                // separator chrome emitted by `breadcrumb_spans`: two cells
+                // for each item's marker, and five for each inter-item gap.
+                if index != 0 { x += 5.0 * width; }
+                x += 2.0 * width;
                 let end = x + label.chars().count() as f32 * width;
                 if pos.0 >= x && pos.0 < end {
                     self.windows_mut().focus(pane);
@@ -242,6 +283,9 @@ mod tests {
         let parts = app.breadcrumb_parts(id, offset);
         assert_eq!(parts.iter().filter_map(|(_, action)| match action { BreadcrumbTarget::Line(line) => Some(*line), _ => None }).collect::<Vec<_>>(), vec![0, 1]);
         assert!(app.scope_breadcrumbs(id, offset).contains("fn inner()"));
+        let rendered = app.breadcrumb_spans(id, offset);
+        assert!(rendered.iter().any(|(text, _, _)| text == "ƒ "), "scope breadcrumbs carry a stable function marker");
+        assert!(rendered.iter().any(|(text, _, _)| text.contains('›')), "hierarchy separators remain visible between breadcrumb items");
         assert_eq!(app.open().buffer.text(), source);
     }
 
