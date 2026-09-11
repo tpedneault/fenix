@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::edit::{to_input_edit, RawEdit};
 use crate::highlight::{resolve_overlaps, RawCapture};
@@ -28,6 +28,12 @@ struct InlineGrammar {
     /// parse alone was never a concern either.
     parser: RefCell<Parser>,
     query: Query,
+}
+
+fn is_scope_node(node: Node<'_>) -> bool {
+    node.start_position().row < node.end_position().row && matches!(node.kind(),
+        "function_item" | "impl_item" | "mod_item" | "struct_item" | "enum_item" |
+        "function_definition" | "class_definition" | "method_definition" | "procedure")
 }
 
 impl InlineGrammar {
@@ -64,6 +70,47 @@ pub struct SyntaxState {
 }
 
 impl SyntaxState {
+    /// Every multiline declaration-like node as `(start_row, end_row)`.
+    /// Consumers that present a structural outline or folding controls use
+    /// this rather than guessing from indentation, which is unreliable for
+    /// Tcl and for brace-free languages.
+    pub fn scope_ranges(&self) -> Vec<(usize, usize)> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let mut cursor = tree.walk();
+        let mut ranges = Vec::new();
+        loop {
+            let node = cursor.node();
+            if is_scope_node(node) {
+                ranges.push((node.start_position().row, node.end_position().row));
+            }
+            if cursor.goto_first_child() { continue }
+            loop {
+                if cursor.goto_next_sibling() { break }
+                if !cursor.goto_parent() { ranges.sort_unstable(); ranges.dedup(); return ranges }
+            }
+        }
+    }
+
+    /// Scope headers for an explicitly requested document navigation picker.
+    pub fn scope_lines(&self) -> Vec<usize> {
+        self.scope_ranges().into_iter().map(|(start, _)| start).collect()
+    }
+    /// Enclosing multiline scopes, outermost first, using the current tree.
+    pub fn enclosing_scopes(&self, byte: usize) -> Vec<(usize, usize)> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let root = tree.root_node();
+        let byte = byte.min(root.end_byte());
+        let Some(mut node) = root.descendant_for_byte_range(byte, byte) else { return Vec::new() };
+        let mut result = Vec::new();
+        loop {
+            if is_scope_node(node) {
+                result.push((node.start_position().row, node.end_position().row));
+            }
+            match node.parent() { Some(parent) => node = parent, None => break }
+        }
+        result.reverse();
+        result
+    }
     /// Seeds the initial parse tree from `source` (the buffer's full text
     /// at the time highlighting starts).
     pub fn new(lang: LanguageId, source: &str) -> Self {
@@ -165,6 +212,15 @@ impl SyntaxState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcl_document_scopes_include_procedures() {
+        let source = "proc mathutils::sum {numbers} {\n    set total 0\n    return $total\n}\n\nproc mathutils::average {numbers} {\n    return 0\n}\n";
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        assert_eq!(state.scope_lines(), vec![0, 5]);
+        assert_eq!(state.scope_ranges(), vec![(0, 3), (5, 7)]);
+        assert_eq!(state.enclosing_scopes(source.find("set total").unwrap()), vec![(0, 3)]);
+    }
 
     /// Tcl gets no LSP -- there is no server for it -- so the
     /// tree-sitter query *is* the whole of its code intelligence, and
@@ -497,4 +553,3 @@ mod tests {
         assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
     }
 }
-

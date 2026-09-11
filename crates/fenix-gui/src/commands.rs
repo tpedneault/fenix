@@ -244,6 +244,9 @@ impl CommandRegistry {
         );
         registry.register("code.toggle_checkbox", "Toggle the GFM task checkbox on the current line", cmd_toggle_checkbox);
         registry.register("code.outline", "Fuzzy-find a Markdown heading and jump to it", cmd_outline);
+        registry.register("code.scope_parent", "Jump to the enclosing scope header", |ctx| ctx.app.jump_scope_parent());
+        registry.register("code.breadcrumbs", "Navigate this document's scope headers", |ctx| ctx.app.picker_document_scopes());
+        registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
         registry.register("mib.lookup_telecommand", "Fuzzy-find a MIB telecommand and view its details", cmd_mib_lookup_telecommand);

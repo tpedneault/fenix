@@ -380,6 +380,12 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('s')], "symbols", "code.symbols");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('x')], "toggle checkbox", "code.toggle_checkbox");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('o')], "outline", "code.outline");
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('u')], "enclosing scope", "code.scope_parent");
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('b')], "breadcrumbs", "code.breadcrumbs");
+        // `z`, not `f` -- `SPC c f` is already "indent region"
+        // (`code.format_selection`, above); `z` matches real Vim's own
+        // `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('z')], "toggle fold", "code.toggle_fold");
 
         // SCOS-2000 MIB lookup/insertion -- letters kept identical to
         // the reference elisp implementation's own scheme for muscle-
