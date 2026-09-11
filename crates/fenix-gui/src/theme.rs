@@ -21,9 +21,6 @@ pub struct Theme {
     /// Thin colored frame drawn around the whole window when `Some`.
     /// `None` (today's only behavior) draws nothing.
     pub border: Option<[f32; 4]>,
-    /// The line drawn along a window split's boundary, between two
-    /// adjacent panes.
-    pub divider: [f32; 4],
     /// Whether each pane's title strip renders as a clickable row of open-
     /// buffer tabs (`App::pane_tab_layout`) instead of today's plain
     /// single-line title. A per-theme opt-in rather than a blanket
@@ -231,7 +228,6 @@ pub const ORBIT_DARK: Theme = Theme {
     name: "Orbit Dark",
     font_family: None,
     border: None,
-    divider: rgba(0x565f89),
     show_tabs: false,
 
     bg: rgba(0x1a1b26),
@@ -303,7 +299,6 @@ pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
     font_family: Some("TempleOS"),
     border: Some(rgba(0x0000aa)),
-    divider: rgba(0x0000aa),
     show_tabs: false,
 
     bg: rgba(0xffffff),
@@ -408,7 +403,6 @@ pub const GRUVBOX_DARK: Theme = Theme {
     name: "Gruvbox Dark",
     font_family: None,
     border: None,
-    divider: rgba(0x665c54),
     show_tabs: false,
 
     bg: rgba(0x1d2021),
@@ -462,7 +456,6 @@ pub const NORD: Theme = Theme {
     name: "Nord",
     font_family: None,
     border: None,
-    divider: rgba(0x4c566a),
     show_tabs: false,
 
     bg: rgba(0x2e3440),
@@ -516,7 +509,6 @@ pub const DRACULA: Theme = Theme {
     name: "Dracula",
     font_family: None,
     border: None,
-    divider: rgba(0x6272a4),
     show_tabs: false,
 
     bg: rgba(0x282a36),
@@ -570,7 +562,6 @@ pub const SOLARIZED_DARK: Theme = Theme {
     name: "Solarized Dark",
     font_family: None,
     border: None,
-    divider: rgba(0x586e75),
     show_tabs: false,
 
     bg: rgba(0x002b36),
@@ -624,7 +615,6 @@ pub const ONE_DARK: Theme = Theme {
     name: "One Dark",
     font_family: None,
     border: None,
-    divider: rgba(0x5c6370),
     show_tabs: false,
 
     bg: rgba(0x282c34),
@@ -694,7 +684,6 @@ pub const VISUAL_STUDIO_DARK: Theme = Theme {
     // The real VS "Divider lines" value (`#FF2D2D30`, Microsoft's own
     // Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
     // actually that same doc's *button border* color, a different token.
-    divider: rgba(0x2d2d30),
     show_tabs: true,
 
     bg: rgba(0x1e1e1e),
