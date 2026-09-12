@@ -22,6 +22,12 @@ pub struct TagEntry {
     pub name: String,
     pub file: PathBuf,
     pub line: usize,
+    /// A proc's argument list exactly as written in its definition --
+    /// `{name {greeting hello} args}` -- from ctags' `signature:` field
+    /// (`--fields=+S`, which Universal Ctags fills for Tcl procs).
+    /// `None` for a namespace, or a ctags build that doesn't emit it.
+    /// `tcl::proc_signature` turns it into a usage line.
+    pub signature: Option<String>,
 }
 
 /// Strips a Windows "verbatim"/extended-length path prefix (`\\?\`, or
@@ -64,7 +70,7 @@ fn windows_friendly_path(root: &Path) -> PathBuf {
 /// definitions found" apart from "ctags never actually ran."
 pub fn run(root: &Path, language: &str) -> Vec<TagEntry> {
     let mut cmd = Command::new("ctags");
-    cmd.arg("--fields=+n").arg(format!("--languages={language}"));
+    cmd.arg("--fields=+nS").arg(format!("--languages={language}"));
     // Universal Ctags' own default file mapping for Tcl is `*.tcl *.tk
     // *.wish *.exp` -- notably missing `.tm` (Tcl Modules, a common
     // real-world packaging convention: a namespace's procs defined at
@@ -178,7 +184,8 @@ fn parse(text: &str) -> Vec<TagEntry> {
             Some(ns) if !ns.is_empty() => format!("{}::{name}", ns.trim_start_matches("::")),
             _ => name.to_string(),
         };
-        entries.push(TagEntry { name: qualified_name, file: PathBuf::from(file), line });
+        let signature = fields[4..].iter().find_map(|f| f.strip_prefix("signature:")).map(str::to_string);
+        entries.push(TagEntry { name: qualified_name, file: PathBuf::from(file), line, signature });
     }
     entries
 }
@@ -248,6 +255,10 @@ mod tests {
         assert_eq!(entries[1].line, 2);
         assert_eq!(entries[2].name, "top_level_proc");
         assert_eq!(entries[2].line, 7);
+        // `--fields=+S`: the argument list as written, procs only.
+        assert_eq!(entries[0].signature, None);
+        assert_eq!(entries[1].signature.as_deref(), Some("{name}"));
+        assert_eq!(entries[2].signature.as_deref(), Some("{}"));
 
         fs::remove_dir_all(&dir).ok();
     }

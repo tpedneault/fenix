@@ -632,7 +632,26 @@ for anyone curious to poke around or build on it.
   an optional external symbols file (see
   [Configuration](#configuration)). Namespaced procs show their fully-
   qualified path (`myns::subns::proc`, no leading `::`), not just the
-  bare proc name.
+  bare proc name. Every built-in carries Tcl's own usage line as its
+  detail row (`lappend varName ?value ...?`, generated from a real
+  `tclsh`), a project proc carries its argument list in the same
+  notation (`util::greet name ?greeting? ?arg ...?`, from the ctags
+  scan or the buffer's own text), and typing an ensemble name and a
+  space (`string `, `dict `, `binary encode `) or a dash inside a
+  command that takes flags (`lsort -`, `regexp -`) opens the popup on
+  exactly that command's subcommands or options. `K` in a Tcl buffer
+  shows the same signature for the built-in or proc under the cursor,
+  plus an ensemble's subcommand list, with no language server involved.
+- **Doxygen docs for Tcl**: a project that generates Doxygen XML
+  (`GENERATE_XML = YES`; 1.8.17 is the last Doxygen with a Tcl parser)
+  can point Fenix at it with a `[doxygen]` section in `.fenix/
+  project.ini` (`xml_dir = docs/xml`, relative to the project root).
+  `K` on a documented proc then shows its brief, description, `@param`
+  table and `@return` note under the signature, its completion
+  candidate carries the brief, and `SPC c s` lists the brief next to
+  the name so the picker matches on what a proc *does*. Fenix only
+  reads what the last `doxygen` run wrote -- generating it stays the
+  build's job -- and `SPC c T` reloads it along with the ctags scan.
 - **Language servers (LSP)**: a real `lsp-types`/JSON-RPC client, spawned
   per-language on demand for whichever buffer you open, with a built-in
   default command for Python
