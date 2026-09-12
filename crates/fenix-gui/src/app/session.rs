@@ -406,7 +406,7 @@ impl App {
         }
         let placeholder_used = frames.iter().any(|frame| frame.workspaces.iter().any(|workspace| workspace.windows.windows().iter().any(|pane| workspace.windows.content(*pane) == Some(&placeholder))));
         if !placeholder_used {
-            self.buffers.close(placeholder);
+            self.close_buffer(placeholder);
             self.dashboard_lines.remove(&placeholder);
         }
         self.workspaces = frames.remove(0);
