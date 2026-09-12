@@ -54,25 +54,68 @@ pub fn signature(path: &str) -> Option<&'static str> {
     tcl_signatures::SIGNATURES.binary_search_by(|(candidate, _)| candidate.cmp(&path)).ok().map(|i| tcl_signatures::SIGNATURES[i].1)
 }
 
+/// The entries exactly one word below `path`, as `(word, usage)` --
+/// subcommands and `-flag` options alike, in table (sorted) order.
+fn children(path: &str) -> impl Iterator<Item = (&'static str, &'static str)> {
+    let path = path.strip_prefix("::").unwrap_or(path);
+    let prefix = format!("{path} ");
+    let start = tcl_signatures::SIGNATURES.partition_point(|(candidate, _)| *candidate < prefix.as_str());
+    let width = prefix.len();
+    tcl_signatures::SIGNATURES[start..]
+        .iter()
+        .take_while(move |(candidate, _)| candidate.starts_with(&prefix))
+        .filter_map(move |(candidate, usage)| {
+            let rest = &candidate[width..];
+            (!rest.contains(' ')).then_some((rest, *usage))
+        })
+}
+
 /// The direct subcommands of `path` with their own usage lines --
 /// `subcommands("string")` starts `("bytelength", "string bytelength
 /// string"), ("cat", ...)`, `subcommands("string is")` lists the
 /// character classes, and `subcommands("puts")` is empty because `puts`
 /// isn't an ensemble. Only one level down: `subcommands("binary")`
-/// yields `decode`/`encode`/`format`/`scan`, not `encode hex`. Comes
-/// back in table (sorted) order.
+/// yields `decode`/`encode`/`format`/`scan`, not `encode hex`. Never
+/// includes a `-flag` -- those are `options`.
 pub fn subcommands(path: &str) -> Vec<(&'static str, &'static str)> {
-    let path = path.strip_prefix("::").unwrap_or(path);
-    let prefix = format!("{path} ");
-    let start = tcl_signatures::SIGNATURES.partition_point(|(candidate, _)| *candidate < prefix.as_str());
-    tcl_signatures::SIGNATURES[start..]
-        .iter()
-        .take_while(|(candidate, _)| candidate.starts_with(&prefix))
-        .filter_map(|(candidate, usage)| {
-            let rest = &candidate[prefix.len()..];
-            (!rest.contains(' ')).then_some((rest, *usage))
-        })
-        .collect()
+    children(path).filter(|(word, _)| !word.starts_with('-')).collect()
+}
+
+/// The `-flag` options `path` accepts, each paired with the command's
+/// own usage line (the one place the flag is explained): `options(
+/// "lsort")` is `-ascii`, `-command`, ... `-unique`; `options("string
+/// compare")` is `-length` and `-nocase`; `options("set")` is empty.
+pub fn options(path: &str) -> Vec<(&'static str, &'static str)> {
+    children(path).filter(|(word, _)| word.starts_with('-')).collect()
+}
+
+/// The options for a cursor whose command's leading words are `words`
+/// -- those of the longest prefix of `words` that has any, so `lsort
+/// -unique -` still offers `lsort`'s (the `-unique` already typed
+/// isn't a command with options of its own) and `string compare
+/// -nocase -` offers `string compare`'s. Empty when no prefix is a
+/// command with options.
+pub fn options_at(words: &[&str]) -> Vec<(&'static str, &'static str)> {
+    (1..=words.len())
+        .rev()
+        .map(|n| options(&words[..n].join(" ")))
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
+}
+
+/// The `-flag` being typed at the end of `text` (the cursor's line up
+/// to the cursor), as `(char offset of the dash, the flag so far)`:
+/// `"lsort -"` is `Some((6, "-"))`, `"lsort -uni"` is `Some((6,
+/// "-uni"))`, `"regexp --"` is `Some((7, "--"))`. `None` when the last
+/// word doesn't start with a dash, or the dash is glued to something
+/// (`end-1`, `$a-`) rather than starting a word.
+pub fn option_prefix(text: &str) -> Option<(usize, &str)> {
+    let start = text.rfind(|c: char| c.is_whitespace() || is_command_boundary(c)).map_or(0, |i| i + 1);
+    let word = &text[start..];
+    if !word.starts_with('-') || !word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return None;
+    }
+    Some((text[..start].chars().count(), word))
 }
 
 /// A character that starts a new Tcl command (or a script body a command
@@ -226,7 +269,8 @@ mod tests {
         assert_eq!(signature("lappend"), Some("lappend varName ?value ...?"));
         assert_eq!(signature("::string"), signature("string"));
         assert_eq!(signature("my_proc"), None);
-        assert_eq!(signature("string compare -nocase"), None);
+        assert_eq!(signature("string compare -nocase"), signature("string compare"), "an option entry carries its command's usage line");
+        assert_eq!(signature("string compare -bogus"), None);
     }
 
     #[test]
@@ -240,6 +284,43 @@ mod tests {
         assert!(subcommands("string is").iter().any(|(name, _)| *name == "alnum"));
         assert!(subcommands("puts").is_empty());
         assert!(subcommands("nonsense").is_empty());
+        assert!(subcommands("lsort").is_empty(), "flags are options, not subcommands");
+    }
+
+    #[test]
+    fn options_lists_a_commands_flags_with_its_own_usage_line() {
+        let lsort: Vec<&str> = options("lsort").into_iter().map(|(name, _)| name).collect();
+        assert!(lsort.contains(&"-unique") && lsort.contains(&"-dictionary"), "{lsort:?}");
+        assert!(lsort.iter().all(|name| name.starts_with('-')), "{lsort:?}");
+        let compare: Vec<&str> = options("string compare").into_iter().map(|(name, _)| name).collect();
+        assert_eq!(compare, ["-length", "-nocase"]);
+        assert_eq!(options("string compare")[0].1, signature("string compare").unwrap());
+        assert!(options("regexp").iter().any(|(name, _)| *name == "--"));
+        assert!(options("puts").iter().any(|(name, _)| *name == "-nonewline"), "a man-page override for a command the probe can't reach");
+        assert!(options("set").is_empty());
+        assert!(options("string").is_empty(), "the ensemble itself has no flags, its subcommands do");
+    }
+
+    #[test]
+    fn options_at_uses_the_longest_prefix_that_has_options() {
+        assert_eq!(options_at(&["lsort"]), options("lsort"));
+        assert_eq!(options_at(&["lsort", "-unique"]), options("lsort"));
+        assert_eq!(options_at(&["string", "compare", "-nocase"]), options("string compare"));
+        assert!(options_at(&["set", "x"]).is_empty());
+        assert!(options_at(&["string"]).is_empty());
+        assert!(options_at(&[]).is_empty());
+    }
+
+    #[test]
+    fn option_prefix_finds_a_flag_being_typed_at_the_end_of_the_line() {
+        assert_eq!(option_prefix("lsort -"), Some((6, "-")));
+        assert_eq!(option_prefix("lsort -uni"), Some((6, "-uni")));
+        assert_eq!(option_prefix("regexp --"), Some((7, "--")));
+        assert_eq!(option_prefix("set x [lsort -d"), Some((13, "-d")));
+        assert_eq!(option_prefix("lsort"), None);
+        assert_eq!(option_prefix("lsort "), None);
+        assert_eq!(option_prefix("lindex $l end-"), None, "a dash glued to a word is arithmetic, not a flag");
+        assert_eq!(option_prefix("expr {$a -"), Some((9, "-")), "the dash alone can't tell -- `options_at` rules this out by the words before it");
     }
 
     #[test]
@@ -279,7 +360,8 @@ mod tests {
     fn signature_at_falls_back_to_the_longest_known_prefix() {
         let usage = |path: &str| signature(path).unwrap();
         assert_eq!(signature_at(&["string"], "compare"), Some(("string compare".to_string(), usage("string compare"))));
-        assert_eq!(signature_at(&["string", "compare"], "-nocase"), Some(("string compare".to_string(), usage("string compare"))));
+        assert_eq!(signature_at(&["string", "compare"], "-nocase"), Some(("string compare -nocase".to_string(), usage("string compare"))), "an option entry carries its command's usage line");
+        assert_eq!(signature_at(&["string", "compare", "-nocase"], "$s"), Some(("string compare -nocase".to_string(), usage("string compare"))));
         assert_eq!(signature_at(&[], "string"), Some(("string".to_string(), usage("string"))));
         assert_eq!(signature_at(&[], "my_proc"), None);
         assert_eq!(signature_at(&["my_proc"], "string"), None, "an argument named like a command is not that command");

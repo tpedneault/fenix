@@ -8952,23 +8952,13 @@ impl App {
             return;
         }
         let cursor = self.cursor();
-        let ob = self.open();
-        // No identifier at the cursor normally means nothing to complete
-        // -- except right after an ensemble's leading words (`string |`),
-        // where the subcommand list is exactly what's wanted before a
-        // single character of it has been typed.
-        let (start, prefix) = match completion::prefix_at_cursor(&ob.buffer, &cursor) {
-            Some(found) => found,
-            None if !self.tcl_subcommand_candidates(cursor.char_idx).is_empty() => (cursor.char_idx, String::new()),
-            None => {
-                self.completion = None;
-                return;
-            }
+        let Some((start, prefix, candidates)) = self.completion_at_cursor() else {
+            self.completion = None;
+            return;
         };
 
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), cursor.char_idx, self.open().buffer.edit_count()));
         self.completion_selected = false;
-        let candidates = self.candidates_for_prefix_at(start);
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         self.completion = Some(CompletionState { prefix_start: start, picker });
@@ -9062,11 +9052,10 @@ impl App {
     fn force_open_completion(&mut self) {
         self.completion_selected = false;
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), self.cursor().char_idx, self.open().buffer.edit_count()));
-        let cursor = self.cursor();
-        let ob = self.open();
-        let (prefix_start, prefix) =
-            completion::prefix_at_cursor(&ob.buffer, &cursor).unwrap_or((cursor.char_idx, String::new()));
-        let candidates = self.candidates_for_prefix_at(prefix_start);
+        let (prefix_start, prefix, candidates) = match self.completion_at_cursor() {
+            Some(found) => found,
+            None => (self.cursor().char_idx, String::new(), self.completion_candidates()),
+        };
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         let lsp_attached = self.focused_lsp_context().is_some();
@@ -9116,15 +9105,69 @@ impl App {
             .collect()
     }
 
-    /// The candidate pool for a completion whose prefix starts at
-    /// `prefix_start`: only the enclosing ensemble's subcommands when
-    /// the cursor is in subcommand position (nothing else is valid
-    /// there, and the full pool would bury the twenty that are), the
-    /// ordinary `completion_candidates` pool otherwise. Shared by
-    /// `sync_completion` and `force_open_completion`.
-    fn candidates_for_prefix_at(&mut self, prefix_start: usize) -> Vec<fenix_picker::Candidate<completion::Item>> {
-        let subcommands = self.tcl_subcommand_candidates(prefix_start);
-        if subcommands.is_empty() { self.completion_candidates() } else { subcommands }
+    /// The `-flag` completion in progress at the cursor, if the cursor
+    /// is at the end of a dash-word inside a Tcl command that takes
+    /// options: `lsort -|` and `lsort -uni|` both give `(char offset of
+    /// the dash, "-"/"-uni", lsort's options)`, and `string compare
+    /// -nocase -|` gives `string compare`'s (see `tcl::options_at`).
+    /// `None` when there's no dash-word at the cursor, or the command
+    /// (`set x -`, `expr {$a -`) has no options for it to be -- so an
+    /// arithmetic minus never opens a popup. Same `Keyword`/detail
+    /// shape as `tcl_subcommand_candidates`.
+    fn tcl_option_completion(&self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
+        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
+            return None;
+        }
+        let cursor = self.cursor();
+        let before = self.line_before(cursor.char_idx);
+        let (dash_col, flag) = fenix_completion::tcl::option_prefix(&before)?;
+        let words = fenix_completion::tcl::command_words_before(&before[..before.len() - flag.len()])?;
+        let options = fenix_completion::tcl::options_at(&words);
+        if options.is_empty() {
+            return None;
+        }
+        let line_start = cursor.char_idx - before.chars().count();
+        let candidates = options
+            .into_iter()
+            .map(|(name, usage)| {
+                let mut item = completion::Item::text(name.to_string(), completion::Source::Keyword);
+                item.detail = usage.to_string();
+                fenix_picker::Candidate::new(name.to_string(), item)
+            })
+            .collect();
+        Some((line_start + dash_col, flag.to_string(), candidates))
+    }
+
+    /// What the popup would complete at the cursor right now: the
+    /// prefix's start, the prefix itself, and the pool to filter with
+    /// it. In order: a `-flag` inside a command with options (`lsort
+    /// -u|`); an identifier prefix (`lsort -u` never reaches here, since
+    /// `-` isn't an identifier char), whose pool is the enclosing
+    /// ensemble's subcommands when it sits in subcommand position
+    /// (`string co|` -- nothing else is valid there, and the full pool
+    /// would bury the twenty that are) and the ordinary
+    /// `completion_candidates` pool otherwise; or, with no prefix at
+    /// all, the subcommand pool alone when the cursor sits right after
+    /// an ensemble's leading words (`string |`). `None` when there's
+    /// nothing to complete -- `sync_completion` closes the popup then,
+    /// while `force_open_completion` (`Ctrl-Space`) falls back to the
+    /// whole pool on an empty prefix.
+    fn completion_at_cursor(&mut self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
+        if let Some(option) = self.tcl_option_completion() {
+            return Some(option);
+        }
+        let cursor = self.cursor();
+        match completion::prefix_at_cursor(&self.open().buffer, &cursor) {
+            Some((start, prefix)) => {
+                let subcommands = self.tcl_subcommand_candidates(start);
+                let pool = if subcommands.is_empty() { self.completion_candidates() } else { subcommands };
+                Some((start, prefix, pool))
+            }
+            None => {
+                let subcommands = self.tcl_subcommand_candidates(cursor.char_idx);
+                (!subcommands.is_empty()).then(|| (cursor.char_idx, String::new(), subcommands))
+            }
+        }
     }
 
     /// The completion candidate pool for whatever buffer is focused right
@@ -30594,6 +30637,88 @@ configure_board stm32
         app.sync_completion();
 
         assert!(app.completion.is_none(), "`string compare` takes strings next, not more subcommands");
+    }
+
+    #[test]
+    fn sync_completion_offers_a_commands_options_once_a_dash_is_typed() {
+        let dir = TempDir::new("completion_options_dash");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("set l [lsort -");
+
+        app.sync_completion();
+
+        let labels = completion_labels(&app);
+        assert!(labels.contains(&"-unique".to_string()) && labels.contains(&"-dictionary".to_string()), "{labels:?}");
+        assert!(labels.iter().all(|label| label.starts_with('-')), "only flags belong here: {labels:?}");
+        assert_eq!(selected_completion(&app).detail, "lsort ?-option value ...? list");
+        assert_eq!(app.completion.as_ref().unwrap().prefix_start, "set l [lsort ".len(), "the prefix starts at the dash, so accepting replaces it");
+    }
+
+    #[test]
+    fn sync_completion_narrows_the_options_by_the_typed_flag() {
+        let dir = TempDir::new("completion_options_prefix");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("lsort -uni");
+        app.sync_completion();
+        assert_eq!(completion_labels(&app), ["-unique"]);
+
+        app.accept_completion();
+
+        assert_eq!(app.open().buffer.text(), "lsort -unique");
+    }
+
+    #[test]
+    fn options_are_still_offered_after_an_earlier_option() {
+        let dir = TempDir::new("completion_options_second");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("string compare -nocase -");
+
+        app.sync_completion();
+
+        assert_eq!(completion_labels(&app), ["-length", "-nocase"]);
+    }
+
+    #[test]
+    fn a_dash_that_is_not_a_flag_opens_nothing() {
+        for text in ["set x -", "expr {$a -", "lindex $l end-", "puts [expr 3 -"] {
+            let dir = TempDir::new("completion_options_minus");
+            let file = dir.write("foo.tcl", "");
+            let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+            app.test_vim_key(KeyPress::char('i'));
+            app.test_insert_str(text);
+
+            app.sync_completion();
+
+            assert!(app.completion.is_none(), "{text:?} should not open the popup");
+        }
+    }
+
+    #[test]
+    fn option_completion_never_fires_in_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_options_non_tcl");
+        let file = dir.write("foo.txt", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("lsort -");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn k_on_an_option_names_the_command_it_belongs_to() {
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_option", "lsort -unique $l\n", 8); // on `-unique`
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("lsort ?-option value ...? list"));
     }
 
     #[test]
