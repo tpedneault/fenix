@@ -1,5 +1,33 @@
 use crate::tcl_signatures;
 
+/// One `proc` definition found in a Tcl source's own text: its name as
+/// written (`greet`, or `::util::greet` for a qualified definition)
+/// and its argument list exactly as written (`{name {greeting hello}
+/// args}`, braces included -- the same shape ctags' `signature:` field
+/// has, so `proc_signature` reads both).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcDef {
+    pub name: String,
+    pub args: String,
+    /// The namespace the definition sits in, from enclosing `namespace
+    /// eval` blocks -- `util` for a `proc greet` inside `namespace eval
+    /// util {..}`, empty at the top level. What `qualified_name` joins
+    /// with `name` unless the name is already qualified.
+    pub namespace: String,
+}
+
+impl ProcDef {
+    /// `util::greet` -- the name the ctags index would list this under
+    /// (never a leading `::`, same convention as `ctags::TagEntry`).
+    pub fn qualified_name(&self) -> String {
+        if self.name.contains("::") || self.namespace.is_empty() {
+            self.name.trim_start_matches("::").to_string()
+        } else {
+            format!("{}::{}", self.namespace, self.name)
+        }
+    }
+}
+
 /// Every `proc` name defined in one Tcl source's own text.
 ///
 /// The point is highlighting a file that isn't part of an indexed
@@ -8,38 +36,174 @@ use crate::tcl_signatures;
 /// body text, because `ctags` -- the only other source of user-defined
 /// names -- has nothing to index when there's no project root, and
 /// hasn't been re-run since the proc was typed even when there is.
+/// See `proc_definitions_in` for the scan itself.
+pub fn procs_defined_in(source: &str) -> Vec<String> {
+    proc_definitions_in(source).into_iter().map(|def| def.name).collect()
+}
+
+/// Every `proc` definition in `source`, with its argument list -- what
+/// `procs_defined_in` is built on, and what gives a proc defined in the
+/// buffer being edited a signature (`proc_signature`) before ctags has
+/// been re-run.
 ///
 /// A deliberately literal scan rather than a parse: `proc` is only a
 /// definition at the start of a command, which after leading whitespace
 /// is the start of a line or just past a `{`/`[`/`;`, and that is
-/// cheap enough to redo whenever the buffer changes. A name inside a
-/// string or a comment can slip through; the cost of that is one extra
-/// word being colored as a command, which is the same thing that
-/// happens for any real proc defined in another file.
-pub fn procs_defined_in(source: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in source.lines() {
-        // Commands can be chained on one line (`set a 1 ; proc b {} {}`),
-        // and a proc is routinely nested inside a `namespace eval {`
-        // block, so every command boundary on the line is a candidate
-        // start -- not just the line's own.
-        for piece in line.split(['{', '[', ';', '}', ']']) {
-            let piece = piece.trim_start();
-            let Some(rest) = piece.strip_prefix("proc") else { continue };
-            if !rest.starts_with(char::is_whitespace) {
+/// cheap enough to redo whenever the buffer changes. The argument list
+/// is the one word after the name, read with brace matching so a
+/// multi-line `{a\n b}` survives. A `proc` inside a string or a
+/// comment can slip through; the cost of that is one extra word being
+/// colored as a command, which is the same thing that happens for any
+/// real proc defined in another file. Namespaces are tracked by
+/// matching the braces of `namespace eval NAME {` blocks, so a proc
+/// nested in one is reported under it.
+pub fn proc_definitions_in(source: &str) -> Vec<ProcDef> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut defs = Vec::new();
+    // Open `namespace eval` blocks: (namespace name, brace depth its
+    // body opened at).
+    let mut namespaces: Vec<(String, usize)> = Vec::new();
+    let mut depth = 0usize;
+    let mut at_command_start = true;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if at_command_start && !c.is_whitespace() {
+            at_command_start = false;
+            if let Some((word, next)) = read_word(&chars, i) {
+                if word == "proc" {
+                    if let Some((name, next)) = read_word(&chars, next) {
+                        if !name.starts_with('$') && !name.starts_with('[') {
+                            let (args, next) = read_word(&chars, next).unwrap_or((String::new(), next));
+                            let namespace = namespaces.last().map(|(ns, _)| ns.clone()).unwrap_or_default();
+                            defs.push(ProcDef { name, args, namespace });
+                            i = next;
+                            continue;
+                        }
+                    }
+                } else if word == "namespace" {
+                    if let Some((sub, next)) = read_word(&chars, next) {
+                        if sub == "eval" {
+                            if let Some((name, next)) = read_word(&chars, next) {
+                                // The body's opening brace is the next
+                                // non-blank char; its depth after opening
+                                // is what closes the block.
+                                let mut j = next;
+                                while j < chars.len() && chars[j].is_whitespace() { j += 1; }
+                                if chars.get(j) == Some(&'{') {
+                                    let name = name.trim_start_matches("::").to_string();
+                                    let full = match namespaces.last() {
+                                        Some((outer, _)) if !outer.is_empty() => format!("{outer}::{name}"),
+                                        _ => name,
+                                    };
+                                    namespaces.push((full, depth + 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match c {
+            '{' | '[' => { depth += 1; at_command_start = true; }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                if namespaces.last().is_some_and(|(_, opened)| *opened > depth) {
+                    namespaces.pop();
+                }
+                at_command_start = true;
+            }
+            ';' | '\n' => at_command_start = true,
+            '#' if at_command_start => {
+                // A comment runs to the end of the line.
+                while i < chars.len() && chars[i] != '\n' { i += 1; }
                 continue;
             }
-            let Some(name) = rest.split_whitespace().next() else { continue };
-            // A `$`-substituted or bracketed name isn't a literal
-            // definition this can resolve, and a comment's `proc` is
-            // not a definition at all.
-            if name.starts_with('$') || name.starts_with('#') {
-                continue;
+            _ => {}
+        }
+        i += 1;
+    }
+    defs
+}
+
+/// The Tcl word starting at `from` (after any whitespace), and the index
+/// just past it: a braced word with its braces (nesting respected), a
+/// quoted word with its quotes, or a bare word up to the next blank or
+/// command-ending char. `None` at the end of the text or when the word
+/// would be empty.
+fn read_word(chars: &[char], from: usize) -> Option<(String, usize)> {
+    let mut i = from;
+    while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') { i += 1; }
+    let start = i;
+    match chars.get(i)? {
+        '{' => {
+            let mut level = 0usize;
+            while i < chars.len() {
+                match chars[i] {
+                    '{' => level += 1,
+                    '}' => { level -= 1; if level == 0 { i += 1; break; } }
+                    _ => {}
+                }
+                i += 1;
             }
-            names.push(name.to_string());
+        }
+        '"' => {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' { i += 1; }
+            i = (i + 1).min(chars.len());
+        }
+        _ => {
+            while i < chars.len() && !chars[i].is_whitespace() && !matches!(chars[i], ';' | '{' | '}' | '[' | ']') { i += 1; }
         }
     }
-    names
+    (i > start).then(|| (chars[start..i].iter().collect(), i))
+}
+
+/// The words of a Tcl list as written: `{name {greeting hello} args}`
+/// or `name {greeting hello} args` gives `name`, `{greeting hello}`,
+/// `args`. Outer braces are stripped once; inner braced words keep
+/// theirs so `proc_signature` can tell a `{name default}` pair from a
+/// plain name.
+pub fn tcl_list_words(list: &str) -> Vec<String> {
+    let list = list.trim();
+    let inner = list.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(list);
+    let chars: Vec<char> = inner.chars().collect();
+    let mut words = Vec::new();
+    let mut i = 0;
+    loop {
+        while i < chars.len() && chars[i].is_whitespace() { i += 1; }
+        let Some((word, next)) = read_word(&chars, i) else { break };
+        words.push(word);
+        i = next;
+    }
+    words
+}
+
+/// A user proc's usage line in Tcl's own convention, from its argument
+/// list as written: `proc_signature("util::greet", "{name {greeting
+/// hello} args}")` is `util::greet name ?greeting? ?arg ...?` -- a
+/// `{name default}` pair is optional, a trailing `args` is variadic.
+/// The same shape `signature` gives built-ins, so hover and completion
+/// treat both alike.
+pub fn proc_signature(name: &str, args: &str) -> String {
+    let words = tcl_list_words(args);
+    let mut out = name.to_string();
+    for (i, word) in words.iter().enumerate() {
+        out.push(' ');
+        if word.starts_with('{') {
+            let pair = tcl_list_words(word);
+            match pair.first() {
+                Some(name) if pair.len() >= 2 => { out.push('?'); out.push_str(name); out.push('?'); }
+                Some(name) => out.push_str(name),
+                None => out.push_str("{}"),
+            }
+        } else if word == "args" && i + 1 == words.len() {
+            out.push_str("?arg ...?");
+        } else {
+            out.push_str(word);
+        }
+    }
+    out
 }
 
 /// The usage line Tcl itself reports for an exact command path --
@@ -419,6 +583,52 @@ set x 1 ; proc gamma {} {}
 ").is_empty());
         assert!(procs_defined_in("set procs 3
 ").is_empty());
+    }
+
+    #[test]
+    fn proc_definitions_keep_the_argument_list_and_the_enclosing_namespace() {
+        let source = "namespace eval util {\n    proc greet {name {greeting hello} args} {\n        puts \"$greeting $name\"\n    }\n    namespace eval inner { proc deep {x} {} }\n}\nproc plain {a b} {}\nproc ::qualified::name {} {}\nproc single x {}\n";
+        let defs = proc_definitions_in(source);
+        let summary: Vec<(String, String, String)> = defs.iter().map(|d| (d.qualified_name(), d.args.clone(), d.namespace.clone())).collect();
+        assert_eq!(summary, vec![
+            ("util::greet".to_string(), "{name {greeting hello} args}".to_string(), "util".to_string()),
+            ("util::inner::deep".to_string(), "{x}".to_string(), "util::inner".to_string()),
+            ("plain".to_string(), "{a b}".to_string(), String::new()),
+            ("qualified::name".to_string(), "{}".to_string(), String::new()),
+            ("single".to_string(), "x".to_string(), String::new()),
+        ]);
+    }
+
+    #[test]
+    fn a_multi_line_argument_list_is_read_whole() {
+        let defs = proc_definitions_in("proc f {\n    a\n    {b 2}\n} {}\n");
+        assert_eq!(defs[0].args, "{\n    a\n    {b 2}\n}");
+        assert_eq!(proc_signature("f", &defs[0].args), "f a ?b?");
+    }
+
+    #[test]
+    fn a_proc_in_a_comment_is_not_a_definition() {
+        assert!(proc_definitions_in("# proc commented {} {}\n").is_empty());
+        assert_eq!(proc_definitions_in("set x 1 ;# proc trailing {} {}\nproc real {} {}\n").len(), 1);
+    }
+
+    #[test]
+    fn proc_signature_uses_tcls_own_optional_and_variadic_notation() {
+        assert_eq!(proc_signature("util::greet", "{name {greeting hello} args}"), "util::greet name ?greeting? ?arg ...?");
+        assert_eq!(proc_signature("plain", "{a b}"), "plain a b");
+        assert_eq!(proc_signature("noargs", "{}"), "noargs");
+        assert_eq!(proc_signature("single", "x"), "single x");
+        assert_eq!(proc_signature("f", "{args}"), "f ?arg ...?");
+        assert_eq!(proc_signature("f", "{args tail}"), "f args tail", "`args` is only variadic in last position");
+        assert_eq!(proc_signature("f", "{{opt {a b}}}"), "f ?opt?", "a default containing spaces is still one pair");
+    }
+
+    #[test]
+    fn tcl_list_words_splits_on_blanks_and_respects_braces() {
+        assert_eq!(tcl_list_words("{a {b c} d}"), ["a", "{b c}", "d"]);
+        assert_eq!(tcl_list_words("a {b c} d"), ["a", "{b c}", "d"]);
+        assert_eq!(tcl_list_words("{}"), Vec::<String>::new());
+        assert_eq!(tcl_list_words("  {x}  "), ["x"]);
     }
 
     #[test]

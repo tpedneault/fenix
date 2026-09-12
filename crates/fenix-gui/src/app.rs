@@ -8563,7 +8563,7 @@ impl App {
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
         let Some((language, text_document, position)) = self.focused_lsp_context() else {
-            self.lsp_hover = self.tcl_builtin_hover();
+            self.lsp_hover = self.tcl_hover();
             return;
         };
         let buffer = self.focused_buffer_id();
@@ -8578,9 +8578,10 @@ impl App {
     /// usage line for the built-in the cursor is on (or is inside an
     /// argument of -- `K` on the `$s` in `string compare $s $t` still
     /// names `string compare`), plus the subcommand list for an
-    /// ensemble. `None` on a user proc, a variable, whitespace, or in a
-    /// non-Tcl buffer -- see `tcl::hover_text`.
-    fn tcl_builtin_hover(&self) -> Option<String> {
+    /// ensemble (`tcl::hover_text`); failing that, the signature of a
+    /// user proc by that name (`user_proc_signature`). `None` on a
+    /// variable, whitespace, an unknown word, or in a non-Tcl buffer.
+    fn tcl_hover(&mut self) -> Option<String> {
         if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
             return None;
         }
@@ -8592,8 +8593,37 @@ impl App {
         let chars: Vec<char> = text.chars().collect();
         let before: String = chars[..word_start].iter().collect();
         let word: String = chars[word_start..word_end].iter().collect();
-        let words = fenix_completion::tcl::command_words_before(&before)?;
-        fenix_completion::tcl::hover_text(&words, &word)
+        if let Some(words) = fenix_completion::tcl::command_words_before(&before) {
+            if let Some(text) = fenix_completion::tcl::hover_text(&words, &word) {
+                return Some(text);
+            }
+        }
+        self.user_proc_signature(&word)
+    }
+
+    /// The usage line for a user-defined proc called `name` -- `util::
+    /// greet name ?greeting? ?arg ...?` -- from the focused buffer's own
+    /// definitions first (a proc typed a minute ago, before ctags has
+    /// been re-run) and the project's ctags index second. `name` is
+    /// matched as written (`::` stripped) against the qualified name,
+    /// then by its bare last segment, so `greet` inside `namespace eval
+    /// util` finds `util::greet` without the caller having to resolve
+    /// namespaces -- a `greet` in two namespaces gets whichever comes
+    /// first, a known imprecision. `None` when nothing defines it.
+    fn user_proc_signature(&mut self, name: &str) -> Option<String> {
+        let name = name.trim_start_matches("::");
+        let bare = name.rsplit("::").next().unwrap_or(name);
+        let mut known: Vec<(String, String)> = fenix_completion::tcl::proc_definitions_in(&self.open().buffer.text())
+            .into_iter()
+            .map(|def| (def.qualified_name(), def.args))
+            .collect();
+        let root = self.project_root.clone();
+        known.extend(self.tcl_tags(root.as_deref()).into_iter().filter_map(|tag| Some((tag.name, tag.signature?))));
+        let found = known
+            .iter()
+            .find(|(qualified, _)| qualified == name)
+            .or_else(|| known.iter().find(|(qualified, _)| qualified.rsplit("::").next() == Some(bare)))?;
+        Some(fenix_completion::tcl::proc_signature(&found.0, &found.1))
     }
 
     /// `gd` -- requests `textDocument/definition`.
@@ -8823,7 +8853,8 @@ impl App {
             }
             for tag in self.tcl_tags(root) {
                 if seen.insert(tag.name.clone()) {
-                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail: String::new() };
+                    let detail = tag.signature.as_deref().map(|args| fenix_completion::tcl::proc_signature(&tag.name, args)).unwrap_or_default();
+                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail };
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
@@ -30722,6 +30753,53 @@ configure_board stm32
     }
 
     #[test]
+    fn k_on_a_proc_defined_in_the_buffer_shows_its_argument_list_in_tcls_notation() {
+        let source = "namespace eval util {\n    proc greet {name {greeting hello} args} {\n        puts \"$greeting $name\"\n    }\n}\nutil::greet Tom\ngreet Tom\n";
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_user_proc", source, source.find("util::greet Tom").unwrap() + 2);
+
+        app.request_hover();
+        assert_eq!(app.lsp_hover.as_deref(), Some("util::greet name ?greeting? ?arg ...?"));
+
+        // The bare name resolves too -- how the proc is called from
+        // inside its own namespace.
+        let col = source.find("greet Tom\n").unwrap();
+        app.test_set_cursor(Cursor { char_idx: col, sticky_col: col });
+        app.request_hover();
+        assert_eq!(app.lsp_hover.as_deref(), Some("util::greet name ?greeting? ?arg ...?"));
+    }
+
+    #[test]
+    fn k_on_a_proc_from_the_ctags_index_shows_its_signature() {
+        let dir = TempDir::new("hover_ctags_proc");
+        dir.write("lib.tcl", "proc helper {path {mode r}} {\n    return [open $path $mode]\n}\n");
+        let file = dir.write("main.tcl", "set fh [helper /tmp/x]\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_set_cursor(Cursor { char_idx: 9, sticky_col: 9 }); // on `helper`
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("helper path ?mode?"));
+    }
+
+    #[test]
+    fn a_ctags_candidate_shows_the_procs_signature_as_its_detail() {
+        let dir = TempDir::new("completion_ctags_detail");
+        dir.write("lib.tcl", "proc helper {path {mode r}} {}\n");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("helpe");
+
+        app.sync_completion();
+
+        let selected = selected_completion(&app);
+        assert_eq!(selected.label, "helper");
+        assert_eq!(selected.detail, "helper path ?mode?");
+    }
+
+    #[test]
     fn accepting_a_subcommand_inserts_it_after_the_space() {
         let dir = TempDir::new("completion_accept_subcommand");
         let file = dir.write("foo.tcl", "");
@@ -31478,7 +31556,7 @@ configure_board stm32
         let lib = dir.write("lib.tcl", "puts start\n\nproc my_target_proc {} {\n    return 1\n}\n");
         let mut app = App::with_file(None);
 
-        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3, signature: None };
         let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
         app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
         app.picker_confirm();
@@ -31498,7 +31576,7 @@ configure_board stm32
         let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('l')); // off column 0, so the return position is checkable
 
-        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3, signature: None };
         let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
         app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
         app.picker_confirm();
