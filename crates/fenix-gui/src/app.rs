@@ -5484,6 +5484,16 @@ impl WorkspaceList {
         &mut self.workspaces[self.active].pane_tabs
     }
 
+    /// Drops `id` from every pane's tab strip in every workspace here --
+    /// the tab-strip half of closing a buffer (`App::close_buffer`).
+    fn forget_buffer(&mut self, id: BufferId) {
+        for workspace in &mut self.workspaces {
+            for tabs in workspace.pane_tabs.values_mut() {
+                tabs.retain(|&tab| tab != id);
+            }
+        }
+    }
+
     fn active_name(&self) -> &str {
         &self.workspaces[self.active].name
     }
@@ -7191,7 +7201,7 @@ impl App {
                 // entry in the buffer switcher nobody asked for.
                 let placeholder = app.focused_buffer_id();
                 app.open_pdf_path(path);
-                if app.session.pending.is_none() { app.buffers.close(placeholder); }
+                if app.session.pending.is_none() { app.close_buffer(placeholder); }
             } else {
                 app.open_startup_file(path);
             }
@@ -10858,7 +10868,7 @@ impl App {
         if self.vnc_focused.as_deref() == Some(name) {
             self.set_vnc_focused(None);
         }
-        self.buffers.close(session.buffer);
+        self.close_buffer(session.buffer);
         self.workspaces.switch_to_index(session.workspace_index);
         self.workspaces.remove_active();
         self.refresh_project_root();
@@ -11302,7 +11312,7 @@ impl App {
         if let Some(worker) = &self.pdf_worker {
             worker.send(fenix_pdf::PdfRequest::Close { key: session.doc_key });
         }
-        self.buffers.close(session.buffer);
+        self.close_buffer(session.buffer);
         self.pane_titles.remove(&session.pane);
         self.pdf_display_names.remove(&session.buffer);
         if self.pdf_outline_panes.remove(key).is_some() {
@@ -11744,7 +11754,7 @@ impl App {
             self.workspaces.active_pane_tabs_mut().remove(&pane);
         }
         if let Some(buffer) = buffer {
-            self.buffers.close(buffer);
+            self.close_buffer(buffer);
             self.pdf_outline_lines.remove(&buffer);
             self.pdf_outline_source.remove(&buffer);
         }
@@ -11914,7 +11924,7 @@ impl App {
             self.workspaces.active_pane_tabs_mut().remove(&pane);
         }
         if let Some(buffer) = buffer {
-            self.buffers.close(buffer);
+            self.close_buffer(buffer);
             self.pdf_search_result_lines.remove(&buffer);
             self.pdf_search_source.remove(&buffer);
         }
@@ -13447,6 +13457,25 @@ impl App {
         self.cycle_buffer(-1);
     }
 
+    /// The one way a buffer leaves the registry. `BufferList::close`
+    /// only knows about buffers; the tab strips (`Workspace::pane_tabs`)
+    /// remember every buffer a pane has shown, across every workspace of
+    /// every frame, and a `BufferId` left in one of them after the
+    /// registry forgot it is a ghost tab: it renders as `[No Name]`,
+    /// and clicking it points the pane at a buffer that no longer
+    /// exists -- which the next `open()` panics on. Retargeting panes
+    /// that *show* `id` is still each caller's job (`kill_buffer_now`
+    /// falls back to the MRU-next buffer, a session close takes the
+    /// whole workspace with it); this only makes sure nothing keeps
+    /// *listing* it.
+    fn close_buffer(&mut self, id: BufferId) {
+        self.buffers.close(id);
+        self.workspaces.forget_buffer(id);
+        for frame in self.frames.iter_mut().flatten() {
+            frame.workspaces.forget_buffer(id);
+        }
+    }
+
     /// The unconditional half of buffer-closing: closes the focused
     /// buffer no matter what state it's in. Any pane (in this window
     /// tree) currently showing it falls back to the MRU-next open buffer,
@@ -13525,7 +13554,7 @@ impl App {
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
         self.close_terminal_buffer(id);
-        self.buffers.close(id);
+        self.close_buffer(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
         if self.refactor_preview.as_ref().is_some_and(|p| p.buffer == id) { self.refactor_preview = None; }
@@ -14955,7 +14984,7 @@ impl App {
             session.status_buffer,
             session.logs_buffer,
         ] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.docker_lines.remove(&id);
         }
         for pane in [
@@ -16995,7 +17024,7 @@ impl App {
     pub(crate) fn forge_close(&mut self) {
         let Some(session) = self.forge_session.take() else { return };
         for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.git_lines.remove(&id);
             self.diff_lines.remove(&id);
             self.diff_models.remove(&id);
@@ -17043,7 +17072,7 @@ impl App {
             self.workspaces.active_scroll_anims_mut().remove(&compose.pane);
             self.workspaces.active_pane_tabs_mut().remove(&compose.pane);
         }
-        self.buffers.close(compose.buffer);
+        self.close_buffer(compose.buffer);
         if self.windows().windows().contains(&compose.returning_to) {
             self.windows_mut().focus(compose.returning_to);
         }
@@ -17418,7 +17447,7 @@ impl App {
     pub(crate) fn merge_close(&mut self) {
         let Some(session) = self.merge_session.take() else { return };
         for id in [session.files_buffer, session.merge_buffer] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.git_lines.remove(&id);
             self.merge_lines.remove(&id);
         }
@@ -18041,7 +18070,7 @@ impl App {
     pub(crate) fn compare_close(&mut self) {
         let Some(session) = self.compare_session.take() else { return };
         for id in [session.commits_buffer, session.diff_buffer] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.git_lines.remove(&id);
             self.diff_lines.remove(&id);
             self.diff_models.remove(&id);
@@ -18059,7 +18088,7 @@ impl App {
     pub(crate) fn history_close(&mut self) {
         let Some(session) = self.history_session.take() else { return };
         for id in [session.graph_buffer, session.refs_buffer, session.detail_buffer] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.git_lines.remove(&id);
             self.graph_lines.remove(&id);
             self.diff_lines.remove(&id);
@@ -18105,7 +18134,7 @@ impl App {
             session.stash_buffer,
             session.main_buffer,
         ] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.git_lines.remove(&id);
             self.diff_lines.remove(&id);
             self.diff_models.remove(&id);
@@ -18334,10 +18363,10 @@ impl App {
         // picker now (`ActivePicker::JiraStatusFilter`), not a buffer --
         // no cleanup needed here for it.
         if let Some(edit) = self.jira_edit.take() {
-            self.buffers.close(edit.edit_buffer);
+            self.close_buffer(edit.edit_buffer);
         }
         for id in [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer] {
-            self.buffers.close(id);
+            self.close_buffer(id);
             self.jira_lines.remove(&id);
         }
         for pane in [session.projects_pane, session.users_pane, session.issues_pane, session.detail_pane] {
@@ -19695,7 +19724,7 @@ impl App {
     fn jira_edit_restore(&mut self) -> Option<JiraEditSession> {
         let session = self.jira_edit.take()?;
         self.set_pane_content(session.pane, session.original_buffer);
-        self.buffers.close(session.edit_buffer);
+        self.close_buffer(session.edit_buffer);
         Some(session)
     }
 
@@ -36496,6 +36525,59 @@ configure_board stm32
 
         for pane in app.windows().windows() {
             assert_eq!(app.windows().content(pane), Some(&scratch_id));
+        }
+    }
+
+    /// The report: two files open, focus the first, `SPC b k` -- the
+    /// tab strip kept a tab for the closed buffer (rendered as
+    /// `[No Name]`, since the registry no longer knows it), and clicking
+    /// that ghost pointed the pane at a dead `BufferId`, which the next
+    /// `open()` panicked on.
+    #[test]
+    fn kill_buffer_drops_the_closed_buffer_from_the_panes_tab_strip() {
+        let dir = TempDir::new("kill_buffer_tab_strip");
+        let a = dir.write("a.txt", "a");
+        let b = dir.write("b.txt", "b");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        app.test_open_path(&b);
+        let a_id = app.buffers.open_path(&a); // reuses a's existing id
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a_id); // back on the first file
+        assert_eq!(app.workspaces.active_pane_tabs()[&pane].len(), 3);
+
+        app.kill_buffer();
+
+        let tabs = &app.workspaces.active_pane_tabs()[&pane];
+        assert!(!tabs.contains(&a_id), "the closed buffer must leave the strip: {tabs:?}");
+        assert_eq!(tabs.len(), 2);
+        for &id in tabs {
+            assert!(app.buffers.get(id).is_some(), "every tab must name a live buffer, {id:?} does not");
+        }
+    }
+
+    /// Buffers are shared across workspaces (one global `BufferList`),
+    /// so a close from one workspace has to reach the tab strips of the
+    /// others too -- otherwise switching back and clicking the stale
+    /// tab is the same crash one workspace over.
+    #[test]
+    fn kill_buffer_drops_the_closed_buffer_from_every_workspaces_tab_strips() {
+        let dir = TempDir::new("kill_buffer_tab_strip_workspaces");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        app.test_open_path(&a);
+        let a_id = app.focused_buffer_id();
+        app.new_workspace(); // seeded with a; workspace-1 still lists a too
+
+        app.kill_buffer();
+
+        for workspace in &app.workspaces.workspaces {
+            for (pane, tabs) in &workspace.pane_tabs {
+                assert!(!tabs.contains(&a_id), "{}: pane {pane:?} still lists the closed buffer", workspace.name);
+                for &id in tabs {
+                    assert!(app.buffers.get(id).is_some(), "{}: tab {id:?} names a closed buffer", workspace.name);
+                }
+            }
         }
     }
 
