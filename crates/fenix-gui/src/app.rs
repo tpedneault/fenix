@@ -8556,17 +8556,44 @@ impl App {
         if let Some(state) = &mut self.completion { state.picker = picker; }
     }
     /// `K` -- requests `textDocument/hover` for the cursor's current
-    /// position. A no-op (no error message; this fires on every `K`
-    /// press, including ones with genuinely nothing to say) if no
-    /// server is attached to the focused buffer.
+    /// position. With no server attached to the focused buffer, a Tcl
+    /// buffer still answers from the built-in signature table
+    /// (`tcl_builtin_hover`); anything else is a no-op (no error
+    /// message; this fires on every `K` press, including ones with
+    /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let Some((language, text_document, position)) = self.focused_lsp_context() else {
+            self.lsp_hover = self.tcl_builtin_hover();
+            return;
+        };
         let buffer = self.focused_buffer_id();
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
         let params = lsp_types::HoverParams { text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position }, work_done_progress_params: Default::default() };
         if let Ok(id) = session.client.request::<lsp_types::request::HoverRequest>(params) {
             session.pending.insert(id, PendingLspRequest::Hover { buffer });
         }
+    }
+
+    /// What `K` shows in a Tcl buffer with no language server: Tcl's own
+    /// usage line for the built-in the cursor is on (or is inside an
+    /// argument of -- `K` on the `$s` in `string compare $s $t` still
+    /// names `string compare`), plus the subcommand list for an
+    /// ensemble. `None` on a user proc, a variable, whitespace, or in a
+    /// non-Tcl buffer -- see `tcl::hover_text`.
+    fn tcl_builtin_hover(&self) -> Option<String> {
+        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
+            return None;
+        }
+        let cursor = self.cursor();
+        let buffer = &self.open().buffer;
+        let (line, col) = buffer.line_col(&cursor);
+        let text = buffer.line(line).to_string();
+        let (word_start, word_end) = fenix_completion::tcl::word_at(&text, col)?;
+        let chars: Vec<char> = text.chars().collect();
+        let before: String = chars[..word_start].iter().collect();
+        let word: String = chars[word_start..word_end].iter().collect();
+        let words = fenix_completion::tcl::command_words_before(&before)?;
+        fenix_completion::tcl::hover_text(&words, &word)
     }
 
     /// `gd` -- requests `textDocument/definition`.
@@ -8789,13 +8816,14 @@ impl App {
                     let item = fenix_completion::CompletionItem {
                         label: keyword.to_string(),
                         kind: fenix_completion::CompletionKind::Keyword,
+                        detail: fenix_completion::tcl::signature(keyword).unwrap_or_default().to_string(),
                     };
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
             for tag in self.tcl_tags(root) {
                 if seen.insert(tag.name.clone()) {
-                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag };
+                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail: String::new() };
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
@@ -8925,14 +8953,23 @@ impl App {
         }
         let cursor = self.cursor();
         let ob = self.open();
-        let Some((start, prefix)) = completion::prefix_at_cursor(&ob.buffer, &cursor) else {
-            self.completion = None;
-            return;
+        // No identifier at the cursor normally means nothing to complete
+        // -- except right after an ensemble's leading words (`string |`),
+        // where the subcommand list is exactly what's wanted before a
+        // single character of it has been typed.
+        let (start, prefix) = match completion::prefix_at_cursor(&ob.buffer, &cursor) {
+            Some(found) => found,
+            None if !self.tcl_subcommand_candidates(cursor.char_idx).is_empty() => (cursor.char_idx, String::new()),
+            None => {
+                self.completion = None;
+                return;
+            }
         };
 
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), cursor.char_idx, self.open().buffer.edit_count()));
         self.completion_selected = false;
-        let mut picker = fenix_picker::PickerState::new(self.completion_candidates());
+        let candidates = self.candidates_for_prefix_at(start);
+        let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         self.completion = Some(CompletionState { prefix_start: start, picker });
         // A server attached to this buffer may still fill the popup
@@ -9029,7 +9066,7 @@ impl App {
         let ob = self.open();
         let (prefix_start, prefix) =
             completion::prefix_at_cursor(&ob.buffer, &cursor).unwrap_or((cursor.char_idx, String::new()));
-        let candidates = self.completion_candidates();
+        let candidates = self.candidates_for_prefix_at(prefix_start);
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         let lsp_attached = self.focused_lsp_context().is_some();
@@ -9039,6 +9076,55 @@ impl App {
             self.request_lsp_completion(prefix_start);
         }
         self.completion_scroll = 0;
+    }
+
+    /// The text of the focused buffer's line up to char offset `at` --
+    /// what `tcl::command_words_before` reads the enclosing command's
+    /// leading words from.
+    fn line_before(&self, at: usize) -> String {
+        let buffer = &self.open().buffer;
+        let (line, _) = buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
+        (buffer.line_start_char(line)..at).filter_map(|i| buffer.char_at(i)).collect()
+    }
+
+    /// Subcommand candidates for the Tcl ensemble the cursor is inside,
+    /// when `at` (the completion prefix's start) sits right after its
+    /// leading words: `string |` and `string co|` both get `string`'s
+    /// subcommands, `binary encode |` gets `hex`/`base64`/`uuencode`,
+    /// `string is |` gets the character classes. Empty for a non-Tcl
+    /// buffer, for a position that isn't right after a command's
+    /// leading words, or for a command that has no subcommands (`puts
+    /// |`). Each candidate's detail is Tcl's own usage line for it.
+    /// Keyed as `Keyword` -- the same "this is the language's own
+    /// vocabulary" bucket the command names themselves use.
+    fn tcl_subcommand_candidates(&self, at: usize) -> Vec<fenix_picker::Candidate<completion::Item>> {
+        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
+            return Vec::new();
+        }
+        let before = self.line_before(at);
+        let Some(words) = fenix_completion::tcl::command_words_before(&before) else { return Vec::new() };
+        if words.is_empty() {
+            return Vec::new();
+        }
+        fenix_completion::tcl::subcommands(&words.join(" "))
+            .into_iter()
+            .map(|(name, usage)| {
+                let mut item = completion::Item::text(name.to_string(), completion::Source::Keyword);
+                item.detail = usage.to_string();
+                fenix_picker::Candidate::new(name.to_string(), item)
+            })
+            .collect()
+    }
+
+    /// The candidate pool for a completion whose prefix starts at
+    /// `prefix_start`: only the enclosing ensemble's subcommands when
+    /// the cursor is in subcommand position (nothing else is valid
+    /// there, and the full pool would bury the twenty that are), the
+    /// ordinary `completion_candidates` pool otherwise. Shared by
+    /// `sync_completion` and `force_open_completion`.
+    fn candidates_for_prefix_at(&mut self, prefix_start: usize) -> Vec<fenix_picker::Candidate<completion::Item>> {
+        let subcommands = self.tcl_subcommand_candidates(prefix_start);
+        if subcommands.is_empty() { self.completion_candidates() } else { subcommands }
     }
 
     /// The completion candidate pool for whatever buffer is focused right
@@ -25408,7 +25494,12 @@ impl App {
         let shown_rows = (available - extra.len()).min(COMPLETION_MAX_ROWS);
         let offset = completion::scroll_offset(state.picker.selected_row(), self.completion_scroll, shown_rows);
         let rows: Vec<_> = state.picker.visible_rows(offset, shown_rows).collect();
-        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(1.0).min(text::WHICH_KEY_MAX_WIDTH);
+        // Sized to its text up to the window, not to `WHICH_KEY_MAX_
+        // WIDTH` -- same reasoning as `prompt_popup`: that cap is tuned
+        // for short which-key labels, while the DETAIL row here carries
+        // a full usage line (`tcl::signature`, up to 72 columns) that
+        // would otherwise be cut off at any font size above the default.
+        let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(1.0);
         let longest = rows.iter().map(|(_, c)| c.label.chars().count() + 10)
             .chain(extra.iter().map(|(s, _)| s.chars().count().min(72))).max().unwrap_or(20);
         let width = (longest as f32 * char_width + COMPLETION_PADDING).max(text::WHICH_KEY_MIN_WIDTH).min(max_width);
@@ -25476,10 +25567,13 @@ impl App {
             spans.push((line.to_string(), theme.fg_modeline, false));
         }
 
+        // Sized to its longest line up to the window, not to `WHICH_KEY_
+        // MAX_WIDTH` -- see `prompt_popup` for why that cap doesn't apply
+        // to free text: a usage line (`tcl::hover_text` wraps its
+        // subcommand list at 72 columns) was being cut mid-word.
         let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
-        let width = (longest as f32 * char_width + COMPLETION_PADDING)
-            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
+        let width = (longest as f32 * char_width + COMPLETION_PADDING).clamp(text::WHICH_KEY_MIN_WIDTH, max_width);
         let height = lines.len() as f32 * line_height + COMPLETION_PADDING;
         let rect =
             popup::resolve(popup::Anchor::BelowPoint { x: caret_x, y: caret_y + line_height }, width, height, window_width, modeline_top);
@@ -30417,6 +30511,191 @@ configure_board stm32
         assert!(!labels.contains(&"proc".to_string())); // doesn't match "se"
     }
 
+    /// Labels of every row the open popup would list, in picker order.
+    fn completion_labels(app: &App) -> Vec<String> {
+        let state = app.completion.as_ref().expect("the popup should be open");
+        state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect()
+    }
+
+    fn selected_completion(app: &App) -> &completion::Item {
+        &app.completion.as_ref().expect("the popup should be open").picker.selected().expect("a non-empty popup has a selection").payload
+    }
+
+    // -- Ensemble subcommands and signatures ------------------------------
+
+    #[test]
+    fn sync_completion_offers_an_ensembles_subcommands_right_after_its_name_and_a_space() {
+        let dir = TempDir::new("completion_ensemble_space");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("string ");
+
+        app.sync_completion();
+
+        let labels = completion_labels(&app);
+        assert!(labels.contains(&"compare".to_string()) && labels.contains(&"map".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"set".to_string()), "only subcommands are valid here, not the whole keyword pool: {labels:?}");
+        assert!(!labels.contains(&"string".to_string()), "{labels:?}");
+        assert_eq!(selected_completion(&app).source, completion::Source::Keyword);
+    }
+
+    #[test]
+    fn sync_completion_narrows_the_subcommands_by_what_has_been_typed() {
+        let dir = TempDir::new("completion_ensemble_prefix");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("set x [string com");
+
+        app.sync_completion();
+
+        let labels = completion_labels(&app);
+        assert!(labels.contains(&"compare".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"length".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"concat".to_string()), "a `com` keyword must not leak in from the general pool: {labels:?}");
+        assert_eq!(selected_completion(&app).detail, "string compare ?-nocase? ?-length int? string1 string2");
+    }
+
+    #[test]
+    fn sync_completion_walks_nested_ensembles_one_level_at_a_time() {
+        let dir = TempDir::new("completion_ensemble_nested");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("binary encode ");
+
+        app.sync_completion();
+
+        assert_eq!(completion_labels(&app), ["base64", "hex", "uuencode"]);
+    }
+
+    #[test]
+    fn sync_completion_stays_closed_after_a_command_with_no_subcommands() {
+        let dir = TempDir::new("completion_no_subcommands");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("puts ");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none(), "`puts` has nothing to offer after a space");
+    }
+
+    #[test]
+    fn sync_completion_stays_closed_once_the_subcommand_itself_is_complete() {
+        let dir = TempDir::new("completion_after_subcommand");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("string compare ");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none(), "`string compare` takes strings next, not more subcommands");
+    }
+
+    #[test]
+    fn accepting_a_subcommand_inserts_it_after_the_space() {
+        let dir = TempDir::new("completion_accept_subcommand");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("string len");
+        app.sync_completion();
+
+        app.accept_completion();
+
+        assert_eq!(app.open().buffer.text(), "string length");
+    }
+
+    #[test]
+    fn a_keyword_candidate_shows_tcls_own_usage_line_as_its_detail() {
+        let dir = TempDir::new("completion_keyword_detail");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("lappen");
+
+        app.sync_completion();
+
+        let selected = selected_completion(&app);
+        assert_eq!(selected.label, "lappend");
+        assert_eq!(selected.detail, "lappend varName ?value ...?");
+    }
+
+    #[test]
+    fn subcommand_completion_never_fires_in_a_non_tcl_buffer() {
+        let dir = TempDir::new("completion_ensemble_non_tcl");
+        let file = dir.write("foo.txt", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("string ");
+
+        app.sync_completion();
+
+        assert!(app.completion.is_none());
+    }
+
+    fn tcl_app_with_cursor_on(name: &str, text: &str, col: usize) -> (TempDir, App) {
+        let dir = TempDir::new(name);
+        let file = dir.write("foo.tcl", text);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_set_cursor(Cursor { char_idx: col, sticky_col: col });
+        (dir, app)
+    }
+
+    #[test]
+    fn k_in_a_tcl_buffer_with_no_server_shows_the_builtins_signature() {
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_signature", "string compare $a $b\n", 9); // on `compare`
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("string compare ?-nocase? ?-length int? string1 string2"));
+    }
+
+    #[test]
+    fn k_inside_a_builtins_arguments_still_names_that_builtin() {
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_argument", "puts [string compare -nocase $a $b]\n", 23); // on `-nocase`
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("string compare ?-nocase? ?-length int? string1 string2"));
+    }
+
+    #[test]
+    fn k_on_an_ensemble_lists_its_subcommands() {
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_ensemble", "string compare $a $b\n", 2); // on `string`
+
+        app.request_hover();
+
+        let text = app.lsp_hover.as_deref().expect("`string` is a known built-in");
+        assert!(text.starts_with("string subcommand ?arg ...?\nsubcommands: bytelength, cat, compare,"), "{text}");
+    }
+
+    #[test]
+    fn k_on_a_user_proc_or_whitespace_shows_nothing() {
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_unknown", "my_proc $a $b\n", 2);
+        app.request_hover();
+        assert_eq!(app.lsp_hover, None);
+
+        app.test_set_cursor(Cursor { char_idx: 7, sticky_col: 7 }); // the space after `my_proc`
+        app.request_hover();
+        assert_eq!(app.lsp_hover, None);
+    }
+
+    #[test]
+    fn k_outside_a_tcl_buffer_with_no_server_shows_nothing() {
+        let dir = TempDir::new("hover_non_tcl");
+        let file = dir.write("foo.txt", "string compare\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover, None);
+    }
+
     // -- What the completion popup does with Escape ---------------------
     //
     // Verified against a real `vim -s` replay under a PTY, and against
@@ -35075,7 +35354,7 @@ configure_board stm32
     }
 
     fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<completion::Item> {
-        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind }.into())
+        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind, detail: String::new() }.into())
     }
 
     #[test]
@@ -35160,6 +35439,31 @@ configure_board stm32
         let (popup_rect, _, _) = app.completion_popup(300.0, 40.0, rect, Some((0, 290)), 0.0, 0.0).unwrap();
         assert!(popup_rect.x + popup_rect.w <= 300.0 + 0.01);
         assert!(popup_rect.y + popup_rect.h <= 40.0 + 0.01);
+    }
+
+    /// A 72-column usage line at the default font is ~550px -- wider
+    /// than the 480px which-key cap the hover and completion popups used
+    /// to inherit, which cut `string`'s subcommand list mid-word.
+    #[test]
+    fn hover_and_completion_popups_grow_to_fit_a_full_usage_line() {
+        let mut app = App::with_file(None);
+        let line = "subcommands: bytelength, cat, compare, equal, first, index, is, last, le";
+        assert_eq!(line.chars().count(), 72, "the widest line `tcl::hover_text` produces");
+        let needed = line.chars().count() as f32 * text::CHAR_WIDTH;
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 1200.0, h: 600.0 };
+
+        app.lsp_hover = Some(format!("string subcommand ?arg ...?
+{line}"));
+        let (hover_rect, _) = app.hover_popup(1200.0, 600.0, rect, Some((0, 0)), 0.0, 0.0).unwrap();
+        assert!(hover_rect.w >= needed, "hover popup {}px can't show a {needed}px line", hover_rect.w);
+        assert!(hover_rect.w > text::WHICH_KEY_MAX_WIDTH);
+
+        let mut item = completion::Item::text("string".into(), completion::Source::Keyword);
+        item.detail = line.to_string();
+        let picker = fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new("string".to_string(), item)]);
+        app.completion = Some(CompletionState { prefix_start: 0, picker });
+        let (completion_rect, _, _) = app.completion_popup(1200.0, 600.0, rect, Some((0, 0)), 0.0, 0.0).unwrap();
+        assert!(completion_rect.w >= needed, "completion popup {}px can't show a {needed}px DETAIL row", completion_rect.w);
     }
 
     #[test]
