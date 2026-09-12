@@ -3636,26 +3636,53 @@ fn format_clock(now: chrono::DateTime<chrono::Local>) -> String {
 /// not to need one.
 const MODE_GLYPH: char = '\u{25B2}';
 
-/// The modeline's own internal hairlines -- the rule closing the mode
-/// segment and the one opening the clock's. Deliberately *not*
-/// `theme.divider`: that one is calibrated to separate panes against
-/// `theme.bg`, and on shipped themes (Visual Studio Dark, TempleOS) it
-/// is literally the same color as `bg_modeline`, so a rule drawn in it
-/// is invisible on this bar specifically. The design specifies a
-/// translucent overlay for exactly that reason -- an overlay reads
-/// against whatever the bar underneath happens to be, rather than
-/// having to be re-tuned per theme. This is that overlay in the
-/// modeline's own foreground rather than a hardcoded white, so it still
-/// holds if a theme ever ships a light modeline.
-fn modeline_rule_color(theme: &Theme) -> [f32; 4] {
-    let [r, g, b, _] = glyphon_to_rgba(theme.fg_modeline);
-    // The design's own figure is 0.06, but that's a CSS border on a bar
-    // rendered much larger than one of these 1px rules ends up on a real
-    // display -- at 0.06 the rule is there in the framebuffer and simply
-    // can't be seen. This is the same intent (present, quiet, structural)
-    // at an alpha that actually reads.
-    [r, g, b, 0.28]
+/// The unsaved-changes marker in a tab, drawn in `mode_insert` after the
+/// filename. A plain Geometric-Shapes character like `MODE_GLYPH`, for
+/// the same reason: the tab strip is a body-font text run, and this
+/// glyph is in every ordinary monospace face.
+const DIRTY_GLYPH: char = '\u{25CF}';
+
+/// A hairline that reads on whatever surface it's drawn over: the
+/// surface's own foreground at low alpha. Deliberately *not* `theme.
+/// divider`: that one is a fixed colour, and on shipped themes (Visual
+/// Studio Dark, TempleOS) it is literally the same value as `bg_modeline`
+/// -- so every pane divider, tab separator and title-strip rule drawn
+/// in it was present in the framebuffer and invisible on screen. The
+/// design specifies a translucent overlay for exactly this reason: an
+/// overlay is visible against any bar underneath it without per-theme
+/// tuning, and taking it from the surface's foreground (rather than a
+/// hardcoded white) keeps it right if a theme ever ships a light one.
+///
+/// Two surfaces, two strengths. Chrome rules are short and sit between
+/// text (the modeline's mode/clock dividers), so they can afford 0.28;
+/// canvas rules run the full height or width of a pane and would read
+/// as bars at that strength, so they sit lower. The design's own 0.06
+/// is a CSS border on a bar rendered far larger than a 1px rule ends up
+/// on a real display -- at 0.06 the rule is drawn and simply can't be
+/// seen.
+fn rule_over(surface_fg: glyphon::Color, alpha: f32) -> [f32; 4] {
+    let [r, g, b, _] = glyphon_to_rgba(surface_fg);
+    [r, g, b, alpha]
 }
+
+/// Hairlines drawn over `bg_modeline` -- the modeline's internal rules,
+/// the tab strip's bottom edge, a pane title bar's edges.
+fn chrome_rule_color(theme: &Theme) -> [f32; 4] {
+    rule_over(theme.fg_modeline, 0.28)
+}
+
+/// Hairlines drawn over `bg`/`sidebar_bg` -- dividers between panes,
+/// under the breadcrumb bar, beside the sidebar, above the terminal.
+fn canvas_rule_color(theme: &Theme) -> [f32; 4] {
+    rule_over(theme.fg, 0.18)
+}
+
+/// The groove *between* adjacent tabs. Darker than the strip rather
+/// than lighter, as the design specifies (`rgba(0,0,0,0.3)`): a light
+/// hairline between two tabs reads as a third, thinner tab, where a
+/// dark one reads as the gap between them. Black at alpha rather than a
+/// theme colour for the same reason the rules above are overlays.
+const TAB_GROOVE: [f32; 4] = [0.0, 0.0, 0.0, 0.3];
 /// The mode segment written exactly as it renders: the leading `MODE_
 /// GLYPH`, the label centered in its fixed `MODE_BADGE_CHARS` field
 /// (which is what gives the suffix after it a stable starting column
@@ -6874,10 +6901,12 @@ struct TabRect {
 /// of content length" posture as `WHICH_KEY_MIN_WIDTH`/`_MAX_WIDTH`.
 const TAB_MIN_NAME_CHARS: usize = 6;
 const TAB_MAX_NAME_CHARS: usize = 20;
-/// Extra chars reserved for `" {icon} "` + a worst-case one-char dirty
-/// marker + `" × "`, on top of the (clamped) filename itself -- matches
-/// `App::redraw`'s own tab-span formatting exactly, so the background
-/// rect this produces never clips the text it lays under.
+/// Extra chars reserved for `" {icon} "` (3) + the worst-case `" ●"`
+/// dirty marker (2) + `" × "` (3), on top of the (clamped) filename
+/// itself. Only an allocator's estimate now -- the drawn and hit-tested
+/// rects come from the shaped glyphs (see `PaneRender::tab_ranges`) --
+/// so this need only be generous enough that a tab which fits by this
+/// count also fits once measured.
 const TAB_CHROME_CHARS: usize = 8;
 /// The close glyph's own `" × "` width, in chars, carved out of a tab's
 /// right edge.
@@ -26305,6 +26334,18 @@ impl App {
             /// color is enough rather than reusing `GutterMarkKind`.
             /// Empty for every other pane kind.
             row_accents: Vec<(usize, [f32; 4])>,
+            /// Rows (relative to `render_base_line`, like `gutter_marks`)
+            /// that get a hairline drawn along their bottom edge -- a
+            /// Jira/Agenda/Git section header, so a detail page has
+            /// visible structure without the header row itself changing
+            /// shape. Empty for every other pane kind.
+            row_rules: Vec<usize>,
+            /// The scroll-position track for a pane whose content is
+            /// taller than the pane: `(thumb_top, thumb_height)` as
+            /// fractions of the content height. `None` when everything
+            /// fits (nothing to indicate) or for a pane whose content
+            /// isn't rows of text (VNC, PDF, a terminal).
+            scroll_track: Option<(f32, f32)>,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -26441,6 +26482,8 @@ impl App {
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
+                    row_rules: Vec::new(),
+                    scroll_track: None,
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26527,6 +26570,8 @@ impl App {
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
+                        row_rules: Vec::new(),
+                        scroll_track: None,
                         indent_guides: Vec::new(),
                     });
                     continue;
@@ -26601,6 +26646,8 @@ impl App {
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
+                        row_rules: Vec::new(),
+                        scroll_track: None,
                         indent_guides: Vec::new(),
                     });
                     continue;
@@ -26640,6 +26687,8 @@ impl App {
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
+                    row_rules: Vec::new(),
+                    scroll_track: None,
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26677,6 +26726,8 @@ impl App {
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
+                    row_rules: Vec::new(),
+                    scroll_track: None,
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26926,15 +26977,27 @@ impl App {
                     // breadcrumb bar is its own buffer), so these offsets
                     // start at 0 and stay in that string's own space.
                     let icon_span = format!(" {icon_ch} ");
-                    let name_span = format!("{label}{}", if dirty { "*" } else { "" });
+                    let name_span = label;
+                    // An unsaved tab carries a small dot in the insert
+                    // accent after its name -- the design's own marker --
+                    // rather than an asterisk glued onto the filename. A
+                    // coloured mark reads as *state*; `*` read as part of
+                    // the name. Its own span so it takes the accent while
+                    // the name keeps `name_color`, and inside the tab's
+                    // byte range so the measured tab bounds absorb the
+                    // extra width with no layout change.
+                    let dirty_span = if dirty { format!(" {DIRTY_GLYPH}") } else { String::new() };
                     let close_span = " × ".to_string();
                     let tab_start = byte;
-                    byte += icon_span.len() + name_span.len();
+                    byte += icon_span.len() + name_span.len() + dirty_span.len();
                     let close_start = byte;
                     byte += close_span.len();
                     ranges.push((tab_start, byte, close_start, byte));
                     spans.push((icon_span, theme.icon_file, true));
                     spans.push((name_span, name_color, false));
+                    if !dirty_span.is_empty() {
+                        spans.push((dirty_span, rgba_to_glyphon(theme.mode_insert), false));
+                    }
                     spans.push((close_span, theme.gutter_fg, false));
                 }
                 let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
@@ -27001,6 +27064,49 @@ impl App {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
+            // Section headers in the three panels that have them, so the
+            // drawing loop can close each one with a hairline. The
+            // header row's text keeps its own shape; only a rule beneath
+            // it changes, which is what separates "Description" from the
+            // first line of the description without touching the grid.
+            let row_rules: Vec<usize> = {
+                let is_header = |line: usize| -> bool {
+                    match self.buffers.get(buffer_id).map(|ob| ob.kind) {
+                        Some(BufferKind::Jira) => self.jira_lines.get(&buffer_id).is_some_and(|lines| {
+                            matches!(lines.get(line), Some(Some(l)) if l.style == jira_panel::JiraLineStyle::SectionHeader)
+                        }),
+                        Some(BufferKind::Agenda) => self.agenda_lines.get(&buffer_id).is_some_and(|lines| {
+                            matches!(lines.get(line), Some(Some(l)) if l.style == agenda_panel::AgendaLineStyle::SectionHeader)
+                        }),
+                        Some(BufferKind::Git) => self.git_lines.get(&buffer_id).is_some_and(|lines| {
+                            matches!(lines.get(line), Some(Some(l)) if l.style == git_panel::GitLineStyle::Header)
+                        }),
+                        _ => false,
+                    }
+                };
+                visible_document_lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, &line)| *row <= pane_visible_lines && is_header(line))
+                    .map(|(row, _)| row)
+                    .collect()
+            };
+            // Where the viewport sits in the buffer, as fractions of the
+            // content height -- only when there's more content than fits,
+            // since a track for a buffer that fits would just be a full-
+            // height bar saying nothing. Uses `rendered_scroll` (the
+            // animated position) rather than `scroll_line`, so the thumb
+            // glides with the text during a smooth scroll instead of
+            // jumping ahead of it.
+            let scroll_track = {
+                let total = display_lines.len().max(1);
+                let visible = (pane_visible_lines + 1).min(total);
+                (total > visible).then(|| {
+                    let top = (rendered_scroll.max(0.0) / total as f32).min(1.0);
+                    let height = visible as f32 / total as f32;
+                    (top, height)
+                })
+            };
 
             panes_render.push(PaneRender {
                 pane,
@@ -27027,6 +27133,8 @@ impl App {
                 gutter_marks,
                 indent_guides,
                 row_accents,
+                row_rules,
+                scroll_track,
             });
         }
 
@@ -27351,7 +27459,7 @@ impl App {
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
         // A hairline boundary makes the status surface feel intentionally
         // separate from the editor canvas without adding visual weight.
-        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
+        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, chrome_rule_color(&theme));
         // A full-height accent rail instead of a filled badge box behind
         // the mode label -- Signal Rail's own "read the mode from the
         // eye-corner" bit, borrowed from a mixing console's channel-status
@@ -27379,7 +27487,7 @@ impl App {
         // a fractional x rasterizes across two columns at partial coverage
         // each, which on an already-faint rule is the difference between a
         // hairline and a smudge you can't see at all.
-        let rule = modeline_rule_color(&theme);
+        let rule = chrome_rule_color(&theme);
         let mode_divider_x = (text::PAD_LEFT + (mode_segment_chars as f32 - 1.0) * modeline_char_width).round();
         bg_rect.push_rect(gpu, mode_divider_x, modeline_top, 1.0, modeline_height, rule);
         // One `PAD_LEFT` gap ahead of the clock's own measured left edge.
@@ -27420,7 +27528,7 @@ impl App {
             // color/weight as the ones between split panes, so there's a
             // visible seam now that it's no longer a different color
             // from the content area next to it.
-            bg_rect.push_rect(gpu, text::SIDEBAR_WIDTH - 1.0, 0.0, 2.0, modeline_top, theme.divider);
+            bg_rect.push_rect(gpu, text::SIDEBAR_WIDTH - 1.0, 0.0, 1.0, modeline_top, canvas_rule_color(&theme));
         }
         if show_terminal {
             let terminal_top = modeline_top - terminal_h;
@@ -27439,7 +27547,7 @@ impl App {
             }
             // A thin divider along the strip's own top edge, same
             // reasoning as the sidebar's own right-edge divider.
-            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, 2.0, theme.divider);
+            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, 1.0, canvas_rule_color(&theme));
         }
         // Divider lines along every split boundary the layout computed --
         // drawn from each pane's own right/bottom edge, so two adjacent
@@ -27448,10 +27556,10 @@ impl App {
         // (nothing to divide from past the window edge).
         for pane in &panes_render {
             if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, pane.rect.y, 2.0, pane.rect.h, theme.divider);
+                bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, pane.rect.y, 1.0, pane.rect.h, canvas_rule_color(&theme));
             }
             if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
+                bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 1.0, canvas_rule_color(&theme));
             }
         }
         // Title-bar backgrounds -- same `bg_modeline` color the modeline
@@ -27468,8 +27576,23 @@ impl App {
         for &(_, rect) in &title_rects {
             bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
         }
+        // The height of the top-edge accent bar that marks "this is the
+        // active one" -- on the selected tab, and on the focused pane's
+        // title bar. One value so the two read as the same mark.
+        const ACTIVE_ACCENT_HEIGHT: f32 = 3.0;
         for pane in &panes_render {
+            let is_focused_pane = pane.pane == focused_pane;
             if pane.tabs_layout.is_empty() {
+                // A plain-title pane (a dashboard section, a terminal, a
+                // split on a theme without tabs) has no active tab to
+                // carry the accent, so its title bar carries it directly
+                // when the pane is focused. Before this the only cue in a
+                // split was the title text's colour, which doesn't read
+                // across three panes at a glance.
+                if is_focused_pane {
+                    let top = pane.rect.y - pane_chrome_height(line_height, pane.has_breadcrumb);
+                    bg_rect.push_rect(gpu, pane.rect.x, top, pane.rect.w, ACTIVE_ACCENT_HEIGHT, theme.mode_normal);
+                }
                 continue;
             }
             let strip_y = pane.rect.y - title_reserved_height(line_height);
@@ -27490,19 +27613,26 @@ impl App {
             // accent line's bottom edge (a bottom underline), which made
             // draw order load-bearing; now that the accent is a top-edge
             // bar (below), the two never occupy the same pixels.
-            bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, chrome_rule_color(&theme));
             for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
                 if is_active {
                     bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
                     // A top-edge accent bar marks the selected tab --
                     // Signal Rail's own convention (mirrors the modeline's
                     // mode rail) -- rather than a bottom underline a
-                    // divider line could paint over.
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, 3.0, theme.mode_normal);
+                    // divider line could paint over. In the accent only
+                    // on the *focused* pane: every pane in a split has an
+                    // active tab, so if they all carried the accent the
+                    // bar would say nothing about which pane keys go to.
+                    // An unfocused pane's active tab keeps the bar in the
+                    // muted colour its name already uses, so it still
+                    // reads as "selected here", just not "focused".
+                    let accent = if is_focused_pane { theme.mode_normal } else { glyphon_to_rgba(theme.gutter_fg) };
+                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, ACTIVE_ACCENT_HEIGHT, accent);
                 }
-                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
+                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, TAB_GROOVE);
             }
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, canvas_rule_color(&theme));
         }
         // Inline git gutter marks (Part 5) -- a thin colored bar, one per
         // changed line still in view. Sits within the pane's own left
@@ -27540,6 +27670,32 @@ impl App {
                 let x = pane.rect.x + GUTTER_MARK_MARGIN;
                 let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
                 bg_rect.push_rect(gpu, x, y, GUTTER_MARK_WIDTH, line_height, color);
+            }
+            // A section header's closing hairline, along the bottom edge
+            // of its row and inset to the text's own left margin so it
+            // reads as part of the text column, not a pane divider. Same
+            // rule colour as every other line drawn over the canvas.
+            for &row in &pane.row_rules {
+                let x = pane.rect.x + text::PAD_LEFT;
+                let y = pane.rect.y + text::PAD_TOP + (row + 1) as f32 * line_height - pane.content_frac * line_height - 1.0;
+                bg_rect.push_rect(gpu, x, y.round(), pane.rect.w - 2.0 * text::PAD_LEFT, 1.0, canvas_rule_color(&theme));
+            }
+            // The scroll track: a faint full-height lane at the pane's
+            // right edge with a thumb at the viewport's position. Inside
+            // the pane's own right margin (`PAD_LEFT` mirrors it), so no
+            // column math anywhere changes, and nothing to drag in this
+            // version -- it's a read-out. `scroll_track` is `None` when
+            // the buffer fits, so a short file shows no lane at all.
+            if let Some((top, height)) = pane.scroll_track {
+                const TRACK_WIDTH: f32 = 2.0;
+                const TRACK_MIN_THUMB: f32 = 12.0;
+                let x = pane.rect.x + pane.rect.w - text::PAD_LEFT / 2.0 - TRACK_WIDTH / 2.0;
+                let lane_y = pane.rect.y + text::PAD_TOP;
+                let lane_h = (pane.rect.h - 2.0 * text::PAD_TOP).max(0.0);
+                let thumb_h = (height * lane_h).max(TRACK_MIN_THUMB).min(lane_h);
+                let thumb_y = lane_y + (top * lane_h).min(lane_h - thumb_h);
+                bg_rect.push_rect(gpu, x.round(), lane_y, TRACK_WIDTH, lane_h, rule_over(theme.fg, 0.06));
+                bg_rect.push_rect(gpu, x.round(), thumb_y.round(), TRACK_WIDTH, thumb_h, rule_over(theme.fg, 0.22));
             }
         }
         // Indentation guides -- a thin vertical line per indent level
@@ -27598,7 +27754,15 @@ impl App {
                 if caret_alpha > 0.0 {
                     let (caret_x, caret_y) =
                         caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
-                    let [r, g, b, a] = theme.caret;
+                    // The caret takes the active mode's own accent -- the
+                    // colour the modeline rail and label already use -- so
+                    // the rail, the label and the cursor all say the same
+                    // thing from three places on screen. Only the hue comes
+                    // from the mode; the theme's `caret` still sets how
+                    // opaque it is, so a theme tuned for a translucent caret
+                    // stays that way.
+                    let [r, g, b, _] = badge_bg;
+                    let [_, _, _, a] = theme.caret;
                     // Insert keeps the thin bar (an I-beam-style "about to
                     // type here" marker); every other mode (Normal, Visual,
                     // Replace, Command) gets a full-cell block, matching real
