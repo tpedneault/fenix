@@ -226,9 +226,15 @@ impl App {
     pub(super) fn click_breadcrumb(&mut self, geometry: &FrameGeometry, pos: (f32, f32)) -> bool {
         if !self.theme.show_tabs { return false }
         let height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
-        let width = self.text.as_ref().map(|t| t.char_width()).unwrap_or(text::CHAR_WIDTH);
+        // Breadcrumb text renders at `text::TITLE_FONT_SCALE` of the body
+        // font (same as the tab strip above it), so hit-testing its glyph
+        // positions needs that narrower measurement, not the body `char_
+        // width` -- see `title_char_width`'s own doc comment.
+        let width = self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+        let tab_h = tab_strip_height(height);
+        let total_h = title_reserved_height(height);
         for &(pane, rect) in &geometry.panes {
-            if !rect.contains_point(pos.0, pos.1) || pos.1 < rect.y + height || pos.1 >= rect.y + 2.0 * height
+            if !rect.contains_point(pos.0, pos.1) || pos.1 < rect.y + tab_h || pos.1 >= rect.y + total_h
                 || self.pane_titles.contains_key(&pane) || !geometry.tabs.iter().any(|(id, _)| *id == pane)
                 || (pane == self.focused_pane_id() && self.main_view != MainView::Editor) { continue }
             let Some(&id) = self.windows().content(pane) else { continue };

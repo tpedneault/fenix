@@ -60,8 +60,14 @@ pub struct JiraLine {
     /// `Some` only for a `Project`/`User`/`Issue` row -- what the cursor
     /// resolves to via `*_entry_at_cursor`.
     pub entry: Option<JiraEntry>,
-    /// A row's `[X]` prefix: its char length (so the range `0..len` can
-    /// be colored) and which color bucket to use.
+    /// Char column where the dim portion of the line begins -- mirrors
+    /// `git_panel::GitLine::dim_from`. `None` for every row except an
+    /// `Issue` row's trailing readable status word (`render_issues`).
+    pub dim_from: Option<usize>,
+    /// A row's status LED prefix (`Issue`) or identifier badge
+    /// (`Project`'s key, `Detail`'s issue-detail status line): char
+    /// length (so the range `0..len` can be colored) and which color
+    /// bucket to use.
     pub badge: Option<(usize, JiraBadgeColor)>,
 }
 
@@ -95,7 +101,7 @@ impl Builder {
 }
 
 fn empty_line(message: &str) -> (String, Option<JiraLine>) {
-    (format!("    {message}"), Some(JiraLine { style: JiraLineStyle::Empty, entry: None, badge: None }))
+    (format!("    {message}"), Some(JiraLine { style: JiraLineStyle::Empty, entry: None, dim_from: None, badge: None }))
 }
 
 /// A status name's badge color -- a coarse, best-effort bucket since a
@@ -131,6 +137,7 @@ pub fn render_projects(projects: &[(String, String)]) -> JiraPanel {
                 Some(JiraLine {
                     style: JiraLineStyle::Project,
                     entry: Some(JiraEntry::Project(key.clone())),
+                    dim_from: None,
                     badge: Some((badge_len, JiraBadgeColor::Neutral)),
                 }),
             );
@@ -149,14 +156,24 @@ pub fn render_users(users: &[(String, String)]) -> JiraPanel {
     } else {
         for (id, name) in users {
             let line = format!("  {name} ({id})");
-            b.push(&line, Some(JiraLine { style: JiraLineStyle::User, entry: Some(JiraEntry::User(id.clone())), badge: None }));
+            b.push(&line, Some(JiraLine { style: JiraLineStyle::User, entry: Some(JiraEntry::User(id.clone())), dim_from: None, badge: None }));
         }
     }
     b.finish()
 }
 
+/// A status LED -- a plain body-font glyph, not a Nerd Font icon, same
+/// "must stay legible even without a Nerd Font installed" reasoning
+/// `editor_ui.rs`'s own `ƒ` scope marker documents.
+const STATUS_LED: char = '■';
+
 /// The Issues pane's own content -- the selected user's assigned issues
-/// (scoped to every tracked project), each row led by its status badge.
+/// (scoped to every tracked project), each row led by a status LED and
+/// trailing its own status word, dimmed -- the status name itself is
+/// already exactly what `issue.status` carries (a self-hosted
+/// instance's workflow names aren't known ahead of time, so this can't
+/// be shortened to a letter the way Docker's fixed state machine can),
+/// just no longer bracketed at the front of the row.
 pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
     let mut b = Builder::new();
     if issues.is_empty() {
@@ -164,14 +181,17 @@ pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
         b.push(&text, meta);
     } else {
         for issue in issues {
-            let prefix = format!("  [{}] ", issue.status);
+            let prefix = format!("  {STATUS_LED} ");
             let badge_len = prefix.chars().count();
-            let line = format!("{prefix}{} {}", issue.key, issue.summary);
+            let middle = format!("{} {}", issue.key, issue.summary);
+            let dim_from = prefix.chars().count() + middle.chars().count() + 2;
+            let line = format!("{prefix}{middle}  {}", issue.status);
             b.push(
                 &line,
                 Some(JiraLine {
                     style: JiraLineStyle::Issue,
                     entry: Some(JiraEntry::Issue(issue.key.clone())),
+                    dim_from: Some(dim_from),
                     badge: Some((badge_len, status_color(&issue.status))),
                 }),
             );
@@ -184,28 +204,29 @@ pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
 /// continuation lines under the value's own start column -- same
 /// "hanging indent" convention as `docker_panel::push_detail_line`.
 /// Unlike Docker/Git's own version, every wrapped line -- first and
-/// continuation alike -- stays plain `Detail` style with no `dim_from`
-/// split to track: `JiraLine` has no such field, since a Jira Detail
-/// row is dimmed in its *entirety* rather than only past some column
-/// (see `jira_highlights_for_visible_range`'s own doc comment).
+/// continuation alike -- stays plain `Detail` style with `dim_from`
+/// left `None`: a Jira Detail row is dimmed in its *entirety* rather
+/// than only past some column (see `jira_highlights_for_visible_range`'s
+/// own doc comment), so there's no split column to track here the way
+/// `render_issues`' status word needs one.
 fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     let prefix = format!("    {label}: ");
     let indent = " ".repeat(prefix.chars().count());
     let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(prefix.chars().count()).max(20);
     let mut wrapped = crate::wrap::wrap_text(value, wrap_width).into_iter();
     let first = wrapped.next().unwrap_or_default();
-    b.push(&format!("{prefix}{first}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+    b.push(&format!("{prefix}{first}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, dim_from: None, badge: None }));
     for continuation in wrapped {
-        b.push(&format!("{indent}{continuation}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+        b.push(&format!("{indent}{continuation}"), Some(JiraLine { style: JiraLineStyle::Detail, entry: None, dim_from: None, badge: None }));
     }
 }
 
 fn push_blank(b: &mut Builder) {
-    b.push("", Some(JiraLine { style: JiraLineStyle::Empty, entry: None, badge: None }));
+    b.push("", Some(JiraLine { style: JiraLineStyle::Empty, entry: None, dim_from: None, badge: None }));
 }
 
 fn push_title(b: &mut Builder, d: &IssueDetail) {
-    b.push(&format!("{}: {}", d.key, d.summary), Some(JiraLine { style: JiraLineStyle::Title, entry: None, badge: None }));
+    b.push(&format!("{}: {}", d.key, d.summary), Some(JiraLine { style: JiraLineStyle::Title, entry: None, dim_from: None, badge: None }));
 }
 
 /// `[Status]` on its own line, right under the title -- the same
@@ -214,7 +235,7 @@ fn push_title(b: &mut Builder, d: &IssueDetail) {
 fn push_status_badge(b: &mut Builder, status: &str) {
     let line = format!("[{status}]");
     let badge_len = line.chars().count();
-    b.push(&line, Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: Some((badge_len, status_color(status))) }));
+    b.push(&line, Some(JiraLine { style: JiraLineStyle::Detail, entry: None, dim_from: None, badge: Some((badge_len, status_color(status))) }));
 }
 
 /// A section heading plus its own underline row (`"----"`, sized to the
@@ -222,9 +243,9 @@ fn push_status_badge(b: &mut Builder, status: &str) {
 /// heading, the closest plain-text equivalent to how Jira's real issue
 /// view visually breaks Description/Activity into their own sections.
 fn push_section_header(b: &mut Builder, title: &str) {
-    b.push(title, Some(JiraLine { style: JiraLineStyle::SectionHeader, entry: None, badge: None }));
+    b.push(title, Some(JiraLine { style: JiraLineStyle::SectionHeader, entry: None, dim_from: None, badge: None }));
     let underline = "-".repeat(title.chars().count());
-    b.push(&underline, Some(JiraLine { style: JiraLineStyle::Detail, entry: None, badge: None }));
+    b.push(&underline, Some(JiraLine { style: JiraLineStyle::Detail, entry: None, dim_from: None, badge: None }));
 }
 
 /// Word-wraps one already-newline-split description/comment `line` (a
@@ -239,7 +260,7 @@ fn push_section_header(b: &mut Builder, title: &str) {
 fn push_wrapped_body(b: &mut Builder, indent: &str, line: &str) {
     let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(indent.chars().count()).max(20);
     for wrapped in crate::wrap::wrap_text(line, wrap_width) {
-        b.push(&format!("{indent}{wrapped}"), Some(JiraLine { style: JiraLineStyle::Body, entry: None, badge: None }));
+        b.push(&format!("{indent}{wrapped}"), Some(JiraLine { style: JiraLineStyle::Body, entry: None, dim_from: None, badge: None }));
     }
 }
 
@@ -314,7 +335,7 @@ pub fn render_detail(detail: Option<&IssueDetail>) -> JiraPanel {
                         push_blank(&mut b);
                     }
                     let header = format!("  {} @ {}", c.author, format_timestamp(&c.created));
-                    b.push(&header, Some(JiraLine { style: JiraLineStyle::Comment, entry: None, badge: None }));
+                    b.push(&header, Some(JiraLine { style: JiraLineStyle::Comment, entry: None, dim_from: None, badge: None }));
                     for line in c.body.lines() {
                         push_wrapped_body(&mut b, "    ", line);
                     }
@@ -382,7 +403,7 @@ mod tests {
     #[test]
     fn render_issues_lists_entries_with_the_right_entry_and_badge() {
         let panel = render_issues(&[issue("PROJ-1", "Fix the thing", "Done", Some("John Doe"))]);
-        assert!(panel.text.contains("[Done] PROJ-1 Fix the thing"));
+        assert!(panel.text.contains(&format!("{STATUS_LED} PROJ-1 Fix the thing  Done")));
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(entries[0].entry, Some(JiraEntry::Issue("PROJ-1".to_string())));
         assert_eq!(entries[0].badge.map(|(_, c)| c), Some(JiraBadgeColor::Good));

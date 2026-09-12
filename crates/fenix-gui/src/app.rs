@@ -1696,6 +1696,11 @@ struct GitSession {
     stash_buffer: BufferId,
     main_buffer: BufferId,
     repo_root: PathBuf,
+    /// Which left-column section the accordion was last sized for. The
+    /// weights are only reapplied when this stops matching the focused
+    /// pane, so a deliberate `SPC w` resize survives until you move to
+    /// another section, instead of being undone on the very next frame.
+    accordion_focus: Option<fenix_window::WindowId>,
     /// Last-listed files/branches/commits/stashes, cached so `git_sync_
     /// main`/action handlers can look up whichever row is under the
     /// cursor without re-shelling `git` on every keystroke -- same
@@ -3345,6 +3350,15 @@ fn glyphon_to_rgba(color: glyphon::Color) -> [f32; 4] {
     [color.r() as f32 / 255.0, color.g() as f32 / 255.0, color.b() as f32 / 255.0, 1.0]
 }
 
+/// The inverse of `glyphon_to_rgba` -- the modeline's mode label now
+/// renders *in* its mode's accent color (Signal Rail's rail-plus-label
+/// treatment) rather than as contrasting text over a filled badge box,
+/// so the same `[f32; 4]` `mode_colors()` already hands the rail needs
+/// to also become a `glyphon::Color` for the label's own glyphs.
+fn rgba_to_glyphon(color: [f32; 4]) -> glyphon::Color {
+    glyphon::Color::rgb((color[0] * 255.0).round() as u8, (color[1] * 255.0).round() as u8, (color[2] * 255.0).round() as u8)
+}
+
 /// Skips the first `n` characters of `s` for horizontal scroll --
 /// returns the remaining substring plus how many *bytes* that was, so
 /// a caller matching byte-offset syntax-highlight ranges against the
@@ -3453,20 +3467,95 @@ fn remap_highlights_for_display(
 /// usually the footer hint or a long file path) -- centering everything
 /// against one shared width left the banner sitting off-center, visibly
 /// left of the pane's true middle, which is what this fixes.
+/// Turns the shares a right-nested stack of panes should end up with
+/// into the per-split ratios that produce them.
+///
+/// Panes stacked by repeatedly splitting the last one form a chain where
+/// each split hands the entire remainder of the stack to its own second
+/// subtree. So a split's ratio isn't its pane's share of the whole
+/// column, it's that pane's share of whatever is left at that depth --
+/// which is why an evenly-weighted stack needs visibly uneven ratios
+/// (1/2, 1/3, 1/4 ...), and why setting them all to one value produces
+/// the halving cascade this replaced.
+///
+/// Returns `shares.len() - 1` ratios, one per split, since an n-pane
+/// chain has n-1 of them -- the last two panes share a split, and it's
+/// the second-to-last pane's ratio that sets it. Deliberately not one
+/// ratio per pane: zipping panes against ratios is the obvious way to
+/// apply these, and a trailing ratio would land on that shared split a
+/// second time and overwrite the value that had just sized it.
+fn stack_split_ratios(shares: &[f32]) -> Vec<f32> {
+    let mut remaining: f32 = shares.iter().sum();
+    shares
+        .iter()
+        .take(shares.len().saturating_sub(1))
+        .map(|share| {
+            let ratio = if remaining > 0.0 { share / remaining } else { 0.5 };
+            remaining -= share;
+            ratio
+        })
+        .collect()
+}
+
+/// Extra vertical padding baked into the tab strip's own background bar
+/// on top of one line of text -- the design's `.tab-b` padding (8px) a
+/// single shared `line_height` slot couldn't express: the tab row is
+/// supposed to read as the taller, more prominent of the two chrome
+/// rows, not just another `line_height`-tall strip.
+const TAB_STRIP_PAD: f32 = 8.0;
+/// Same idea for the breadcrumb bar directly below it, but far smaller --
+/// the design's `.crumbs-b` is deliberately the quieter, more compact
+/// second row (a few px of padding vs. the tab row's).
+const BREADCRUMB_STRIP_PAD: f32 = 2.0;
+
+/// The tab strip's own on-screen height -- one line of (smaller-scale)
+/// text plus `TAB_STRIP_PAD`, never just `line_height` alone.
+fn tab_strip_height(line_height: f32) -> f32 {
+    line_height + TAB_STRIP_PAD
+}
+
+/// The breadcrumb bar's own on-screen height, shorter than the tab strip
+/// above it -- see `tab_strip_height`.
+fn breadcrumb_strip_height(line_height: f32) -> f32 {
+    line_height + BREADCRUMB_STRIP_PAD
+}
+
+/// Total chrome height a titled pane reserves above its content: the tab
+/// strip plus the breadcrumb bar, each its own height rather than two
+/// equal `line_height` slots.
+fn title_reserved_height(line_height: f32) -> f32 {
+    tab_strip_height(line_height) + breadcrumb_strip_height(line_height)
+}
+
 /// A pane's actual *content* rect, given its full layout rect and
-/// whether it has a title bar (`App::pane_titles`) -- `has_title`
-/// shrinks it by one `line_height` from the top, reserving that strip
-/// for the title; `false` returns `rect` unchanged. Extracted as a
-/// pure function (rather than left inline in `redraw()`'s per-pane
-/// loop) specifically so the "does a title actually shrink the content
-/// area, and does an untitled pane stay untouched" invariant is
-/// directly unit-testable without a GPU.
-fn pane_content_rect(rect: fenix_window::Rect, line_height: f32, has_title: bool) -> fenix_window::Rect {
-    if has_title {
-        fenix_window::Rect { y: rect.y + 2.0 * line_height, h: (rect.h - 2.0 * line_height).max(0.0), ..rect }
-    } else {
-        rect
-    }
+/// whether it carries a breadcrumb bar under its title row
+/// (`App::pane_has_breadcrumb`).
+///
+/// Every pane reserves a title row. Only a pane that actually renders
+/// breadcrumbs reserves the shorter bar beneath it as well -- an
+/// informational panel (the Git dashboard's sections, Docker's, a
+/// terminal) has no cursor position to describe, never draws anything
+/// there, and used to get a blank strip of chrome under its title for
+/// its trouble. This parameter used to be `has_title`, which every live
+/// caller passed `true`: the distinction that actually varies between
+/// panes is the breadcrumb, not the title.
+///
+/// Extracted as a pure function (rather than left inline in `redraw()`'s
+/// per-pane loop) specifically so the "how much does a pane's chrome
+/// take off the top" invariant is directly unit-testable without a GPU.
+fn pane_content_rect(rect: fenix_window::Rect, line_height: f32, has_breadcrumb: bool) -> fenix_window::Rect {
+    let h = pane_chrome_height(line_height, has_breadcrumb);
+    fenix_window::Rect { y: rect.y + h, h: (rect.h - h).max(0.0), ..rect }
+}
+
+/// How much vertical space a pane's chrome takes off the top of it --
+/// the title/tab row always, plus the breadcrumb bar only for the panes
+/// that render one. The single source of truth for that height: the
+/// content rect, the background fill, the title text's own position and
+/// mouse hit-testing all derive from this, so a pane can't end up with
+/// its content starting somewhere its chrome doesn't stop.
+fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
+    if has_breadcrumb { title_reserved_height(line_height) } else { tab_strip_height(line_height) }
 }
 
 /// Insets a tab strip's own rect by `PAD_LEFT` on the left -- the same
@@ -3538,6 +3627,49 @@ fn format_clock(now: chrono::DateTime<chrono::Local>) -> String {
 /// window's edge. A coarse fit *estimate* has no such consequence if
 /// it's slightly off: worst case the clock shows with a little visual
 /// overlap, or hides one column earlier than it strictly needed to.
+/// The mode segment's leading glyph -- the design's own `▲` ahead of the
+/// mode name, drawn in the mode's accent color along with the label, so
+/// the rail, the glyph, and the word all read as one signal. A plain
+/// Geometric-Shapes character, not a Nerd Font icon: the modeline is a
+/// single body-font text run (`set_modeline_text` takes no icon-font
+/// flag), and this glyph is common enough in ordinary monospace faces
+/// not to need one.
+const MODE_GLYPH: char = '\u{25B2}';
+
+/// The modeline's own internal hairlines -- the rule closing the mode
+/// segment and the one opening the clock's. Deliberately *not*
+/// `theme.divider`: that one is calibrated to separate panes against
+/// `theme.bg`, and on shipped themes (Visual Studio Dark, TempleOS) it
+/// is literally the same color as `bg_modeline`, so a rule drawn in it
+/// is invisible on this bar specifically. The design specifies a
+/// translucent overlay for exactly that reason -- an overlay reads
+/// against whatever the bar underneath happens to be, rather than
+/// having to be re-tuned per theme. This is that overlay in the
+/// modeline's own foreground rather than a hardcoded white, so it still
+/// holds if a theme ever ships a light modeline.
+fn modeline_rule_color(theme: &Theme) -> [f32; 4] {
+    let [r, g, b, _] = glyphon_to_rgba(theme.fg_modeline);
+    // The design's own figure is 0.06, but that's a CSS border on a bar
+    // rendered much larger than one of these 1px rules ends up on a real
+    // display -- at 0.06 the rule is there in the framebuffer and simply
+    // can't be seen. This is the same intent (present, quiet, structural)
+    // at an alpha that actually reads.
+    [r, g, b, 0.28]
+}
+/// The mode segment written exactly as it renders: the leading `MODE_
+/// GLYPH`, the label centered in its fixed `MODE_BADGE_CHARS` field
+/// (which is what gives the suffix after it a stable starting column
+/// regardless of which mode is active), then two trailing spaces. Those
+/// two are a *guaranteed* gap -- the centered field's own right padding
+/// disappears for a full-width label like `FINDFROM`, so the divider
+/// `redraw` draws at this segment's end would otherwise sit flush
+/// against the suffix for some modes and not others. Shared by `redraw`
+/// and the test-only `modeline_text` so assertions describe what's
+/// actually on screen.
+fn modeline_mode_segment(mode_label: &str) -> String {
+    format!(" {MODE_GLYPH} {mode_label:^width$}  ", width = text::MODE_BADGE_CHARS)
+}
+
 fn modeline_clock_fits(existing_chars: usize, window_width: f32, char_width: f32, clock_chars: usize) -> bool {
     let existing_px = existing_chars as f32 * char_width;
     let clock_px = clock_chars as f32 * char_width;
@@ -4472,7 +4604,12 @@ fn git_highlights_for_visible_range(
                 ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
             }
             git_panel::GitLineStyle::Header => ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword)),
-            git_panel::GitLineStyle::Detail => {
+            // `File` shares `Detail`'s dim-from-here handling -- its
+            // trailing readable status word (`describe_status`) is the
+            // same kind of secondary info a `Detail` row's own dim
+            // suffix already marks, just on a row that also carries a
+            // leading badge.
+            git_panel::GitLineStyle::Detail | git_panel::GitLineStyle::File => {
                 if let Some(dim_from) = meta.dim_from {
                     let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
                     ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
@@ -4483,7 +4620,7 @@ fn git_highlights_for_visible_range(
             // an unknown mix underneath), so the whole row reads as
             // secondary/structural rather than a real change.
             git_panel::GitLineStyle::Dir => ranges.push((line_start_byte..line_end_byte, theme.gutter_fg)),
-            git_panel::GitLineStyle::File | git_panel::GitLineStyle::Branch | git_panel::GitLineStyle::Commit | git_panel::GitLineStyle::Stash => {}
+            git_panel::GitLineStyle::Branch | git_panel::GitLineStyle::Commit | git_panel::GitLineStyle::Stash => {}
         }
         if let Some((badge_len, color)) = meta.badge {
             let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
@@ -4688,6 +4825,14 @@ fn graph_highlights_for_visible_range(
                 // Rails are structure, not content -- dim, so the
                 // subjects beside them stay the thing you read.
                 graph_view::GraphSpan::Rails => theme.gutter_fg,
+                // The same accent the modeline's own mode rail and the
+                // active tab's top-edge bar use -- Signal Rail's one
+                // accent vocabulary, reused here instead of a fifth
+                // one-off color. `mode_normal` is `bg_rect`'s `[f32; 4]`
+                // shape (it colors a filled rect everywhere else it's
+                // used), so it needs the same conversion `rgba_to_glyphon`
+                // gives the modeline's own rail-colored label text.
+                graph_view::GraphSpan::Node => rgba_to_glyphon(theme.mode_normal),
                 graph_view::GraphSpan::Hash => theme.syntax_number,
                 // Where each branch actually points: the one thing this
                 // view exists to answer at a glance.
@@ -4718,8 +4863,9 @@ fn jira_badge_color(color: jira_panel::JiraBadgeColor, theme: &Theme) -> glyphon
 /// Resolves a real `BufferKind::Jira` buffer's per-line syntax-highlight
 /// ranges from its cached `JiraLine` metadata -- mirrors `git_highlights_
 /// for_visible_range`. `Empty`/`Detail`/`Comment` rows render dimmed in
-/// their entirety (unlike Git's `Detail`, there's no `dim_from` split --
-/// see `jira_panel::JiraLine`'s own doc comment for why).
+/// their entirety (unlike `Issue`'s own `dim_from`-driven trailing status
+/// word -- see `jira_panel::push_detail_line`'s doc comment for why the
+/// Detail pane's own label/value rows still don't need a split column).
 fn jira_highlights_for_visible_range(
     ob: &OpenBuffer,
     lines: Option<&[Option<jira_panel::JiraLine>]>,
@@ -4758,7 +4904,16 @@ fn jira_highlights_for_visible_range(
             jira_panel::JiraLineStyle::Body => {
                 ranges.push((line_start_byte..line_end_byte, theme.fg));
             }
-            jira_panel::JiraLineStyle::Project | jira_panel::JiraLineStyle::User | jira_panel::JiraLineStyle::Issue => {}
+            // `Issue`'s trailing status word -- same "dim past this
+            // column" role `git_panel::GitLineStyle::File`'s own
+            // `dim_from` plays.
+            jira_panel::JiraLineStyle::Issue => {
+                if let Some(dim_from) = meta.dim_from {
+                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
+                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
+                }
+            }
+            jira_panel::JiraLineStyle::Project | jira_panel::JiraLineStyle::User => {}
         }
         if let Some((badge_len, color)) = meta.badge {
             let badge_end_byte = ob.buffer.char_to_byte(start + badge_len);
@@ -4855,7 +5010,18 @@ fn agenda_highlights_for_visible_range(
             agenda_panel::AgendaLineStyle::Body => {
                 ranges.push((line_start_byte..line_end_byte, theme.fg));
             }
-            agenda_panel::AgendaLineStyle::TaskRow | agenda_panel::AgendaLineStyle::SubtaskPending => {}
+            // A list-view `TaskRow`'s trailing priority word (and any
+            // elapsed-time/waiting-on-a-dependency suffix after it) --
+            // same "dim past this column" role `git_panel::GitLineStyle::
+            // File`'s own `dim_from` plays. `None` on a Kanban `TaskRow`
+            // (see `AgendaLine::dim_from`'s own doc comment for why).
+            agenda_panel::AgendaLineStyle::TaskRow => {
+                if let Some(dim_from) = meta.dim_from {
+                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
+                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
+                }
+            }
+            agenda_panel::AgendaLineStyle::SubtaskPending => {}
         }
         for &(badge_start, badge_len, color) in &meta.badges {
             let badge_start_byte = ob.buffer.char_to_byte(start + badge_start);
@@ -5879,6 +6045,16 @@ pub struct App {
     /// UI state that recomputes correctly the moment the mouse next moves
     /// in a reactivated frame, unlike `cursor_pos` itself.
     current_cursor_icon: Option<winit::window::CursorIcon>,
+    /// Every visible tab's on-screen rect, as measured from the glyphs
+    /// the last `redraw` actually shaped and drawn (see the `title_span_
+    /// bounds` call there). Mouse hit-testing reads this rather than
+    /// re-deriving tab positions from character counts, which is what
+    /// used to let a click and the pixel it landed on disagree -- and,
+    /// more visibly, let a tab's own highlight sit right of the tab.
+    /// Empty until the first frame, and on a theme with `show_tabs`
+    /// off; `frame_geometry` falls back to no tabs in both cases, which
+    /// is correct for each.
+    tab_geometry: Vec<(fenix_window::WindowId, TabRect)>,
     /// What `explorer` (the full-buffer listing) is currently for --
     /// meaningless while `main_view != Explorer`. See `ExplorerPurpose`'s
     /// own doc comment.
@@ -6603,6 +6779,12 @@ struct FrameGeometry {
     sidebar_rect: Option<fenix_window::Rect>,
     terminal_rect: Option<fenix_window::Rect>,
     panes: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
+    /// Which of `panes` render a breadcrumb bar under their title, and
+    /// so reserve two rows of chrome instead of one
+    /// (`App::pane_has_breadcrumb`). Hit-testing needs it to know where
+    /// a pane's chrome stops and its text begins -- that boundary is a
+    /// row higher on an informational panel than on an editing pane.
+    breadcrumb_panes: Vec<fenix_window::WindowId>,
     /// Every visible tab, across every pane, when the active theme has
     /// `show_tabs` -- empty for every other theme (see `App::frame_
     /// geometry`). Checked by `hit_test`/`cursor_icon_for` before the
@@ -6669,8 +6851,8 @@ fn cursor_icon_for(geometry: &FrameGeometry, pos: (f32, f32), line_height: f32) 
     if geometry.sidebar_rect.is_some_and(|rect| rect.contains_point(x, y)) {
         return winit::window::CursorIcon::Pointer;
     }
-    if let Some((_, rect)) = geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)) {
-        if y >= rect.y + 2.0 * line_height {
+    if let Some((id, rect)) = geometry.panes.iter().find(|(_, rect)| rect.contains_point(x, y)) {
+        if y >= rect.y + pane_chrome_height(line_height, geometry.breadcrumb_panes.contains(id)) {
             return winit::window::CursorIcon::Text;
         }
     }
@@ -6701,13 +6883,18 @@ const TAB_CHROME_CHARS: usize = 8;
 /// right edge.
 const TAB_CLOSE_CHARS: usize = 3;
 
-/// Lays out `tabs` left-to-right within `rect` (a pane's title-strip rect,
-/// exactly `line_height` tall) -- pure and GPU-free like `pane_content_
+/// Lays out `tabs` left-to-right within `rect` (a pane's own tab-strip
+/// rect, `tab_strip_height` tall) -- pure and GPU-free like `pane_content_
 /// rect`, so the same geometry backs both hit-testing (`frame_geometry`)
 /// and drawing (`redraw`) without the two ever disagreeing about where a
-/// tab is. `tabs` is `(buffer, filename char count)` pairs, left to right;
-/// tabs that would run past the strip's right edge are simply omitted
-/// (clipped, not scrolled) -- a disclosed v1 simplification.
+/// tab is. `char_width` must be `TextPipeline::title_char_width()`, not
+/// `char_width()` -- tab-strip text renders at the smaller title-scaled
+/// font, and laying tabs out with the body font's wider cell measurement
+/// drifts every tab's background/hit-test rect right of its own actually-
+/// narrower rendered text, worse with each subsequent tab. `tabs` is
+/// `(buffer, filename char count)` pairs, left to right; tabs that would
+/// run past the strip's right edge are simply omitted (clipped, not
+/// scrolled) -- a disclosed v1 simplification.
 fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
     pane_tab_layout_iter(rect, char_width, tabs.iter().copied())
 }
@@ -7110,6 +7297,7 @@ impl App {
             terminal_buffers_opened: 0,
             cursor_pos: None,
             current_cursor_icon: None,
+            tab_geometry: Vec::new(),
             explorer_purpose: ExplorerPurpose::Browse,
             explorer_prompt: None,
             explorer_conflict: None,
@@ -10326,7 +10514,7 @@ impl App {
         // Every pane reserves its top line for a title bar, so the shell
         // gets what is left -- measured the same way `redraw` does, or
         // the last row would render underneath the pane below it.
-        let content = pane_content_rect(*rect, line_height, true);
+        let content = pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane));
         let rows = (text::lines_that_fit(content.h, line_height).max(1)) as u16;
         (rows, cols)
     }
@@ -14799,6 +14987,68 @@ impl App {
         self.wake_caret();
     }
 
+    /// Sizes the git dashboard's left column so the section you're in
+    /// gets room to actually work in, and the other five stay visible as
+    /// a compact peek -- lazygit's own accordion behaviour, which this
+    /// panel's layout was already modelled on.
+    ///
+    /// It replaces a cascade that sized sections by how late they were
+    /// split off rather than by anything to do with their content: each
+    /// `split` halves the pane it lands on, so stacking six of them left
+    /// Staged with 42% of the column for its one `Nothing staged` line
+    /// while Commits and Stash got ~5% each -- about one row apiece once
+    /// the title bar is taken out, which is why a commit subject was
+    /// always clipped.
+    ///
+    /// Reapplied only when focus actually moves between sections (see
+    /// `GitSession::accordion_focus`), and skipped entirely while Main
+    /// is focused, so reading a diff leaves the left column wherever you
+    /// last had it.
+    fn apply_git_accordion(&mut self) {
+        let Some(session) = &self.git_session else { return };
+        if self.workspaces.active_index() != session.workspace_index {
+            return;
+        }
+        let stack = [
+            session.status_pane,
+            session.staged_pane,
+            session.unstaged_pane,
+            session.branches_pane,
+            session.commits_pane,
+            session.stash_pane,
+        ];
+        let already = session.accordion_focus;
+        let focused = self.focused_pane_id();
+        if !stack.contains(&focused) || already == Some(focused) {
+            return;
+        }
+
+        // Bounded by the tree's own `[0.1, 0.9]` ratio clamp: the
+        // outermost split's ratio *is* the first section's share of the
+        // whole column, so no section can go below 10% without being
+        // clamped back -- which would desynchronise every ratio under it
+        // in the chain, since each is computed against what the ones
+        // above left over.
+        //
+        // 0.45 rather than the 0.5 that floor nominally permits: at 0.5
+        // the unfocused sections land on exactly 0.1, and summing six
+        // f32 shares overshoots 1.0 just enough to push the first ratio
+        // to 0.09999999 (the clamp test below catches this). Half a
+        // section's worth of headroom costs ~2 rows on the focused pane
+        // and makes the arithmetic robust. Still ~22 rows focused and
+        // ~5 unfocused, against the 1 row Commits used to get.
+        const FOCUSED_SHARE: f32 = 0.45;
+        let other = (1.0 - FOCUSED_SHARE) / (stack.len() - 1) as f32;
+
+        let shares: Vec<f32> = stack.iter().map(|p| if *p == focused { FOCUSED_SHARE } else { other }).collect();
+        for (pane, ratio) in stack.iter().zip(stack_split_ratios(&shares)) {
+            self.windows_mut().set_split_near(*pane, ratio);
+        }
+        if let Some(session) = &mut self.git_session {
+            session.accordion_focus = Some(focused);
+        }
+    }
+
     /// `SPC g g`: opens (or, if one's already open, refocuses/refreshes)
     /// the Lazygit-style multi-pane session -- Status/Files/Branches/
     /// Commits/Stash stacked on the left, Main (diff view) on the right,
@@ -14923,6 +15173,7 @@ impl App {
             stash_buffer,
             main_buffer,
             repo_root,
+            accordion_focus: None,
             files,
             branches,
             commits,
@@ -22393,7 +22644,7 @@ impl App {
                 (Some(gpu), Some(text)) => {
                     text::visible_line_count(gpu.size.height as f32, text.modeline_height(), text.line_height())
                 }
-                (Some(gpu), None) => text::visible_line_count(gpu.size.height as f32, text::LINE_HEIGHT + 8.0, text::LINE_HEIGHT),
+                (Some(gpu), None) => text::visible_line_count(gpu.size.height as f32, text::LINE_HEIGHT, text::LINE_HEIGHT),
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
@@ -23990,7 +24241,7 @@ impl App {
     #[cfg(test)]
     fn modeline_text(&self) -> String {
         let (mode_label, suffix) = self.modeline_pieces();
-        format!(" {mode_label:^width$}{suffix}", width = text::MODE_BADGE_CHARS)
+        format!("{}{suffix}", modeline_mode_segment(mode_label))
     }
 
     /// (badge background, badge text color) for the current mode. Visual's
@@ -25407,6 +25658,21 @@ impl App {
     /// staying in sync with what's on screen: `WindowTree::layout`'s
     /// own pane rects, computed from the exact same `pane_area` both
     /// callers would otherwise have to build by hand.
+    /// Whether `pane` renders a breadcrumb bar under its title row, and
+    /// so has to reserve room for one. True only for an ordinary
+    /// file-editing pane on a theme that shows tabs -- exactly the
+    /// condition `redraw` builds tab/breadcrumb spans under, kept here
+    /// so the geometry and the content can't disagree about it.
+    ///
+    /// A pane in `pane_titles` is a fixed-purpose panel (a Git or Docker
+    /// dashboard section, a terminal, a table view): it has a
+    /// descriptive title rather than tabs, and no cursor position to
+    /// describe a path to, so a breadcrumb row there would only ever be
+    /// blank.
+    fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
+        self.theme.show_tabs && !self.pane_titles.contains_key(&pane)
+    }
+
     fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {
         let pane_area = fenix_window::Rect {
             x: sidebar_px,
@@ -25415,31 +25681,20 @@ impl App {
             h: (modeline_top - terminal_h).max(0.0),
         };
         let panes = self.windows().layout(pane_area);
-        let tabs = if self.theme.show_tabs {
-            let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
-            let char_width = self.text.as_ref().map(|t| t.char_width()).unwrap_or(text::CHAR_WIDTH);
-            panes
-                .iter()
-                .flat_map(|&(pane, rect)| {
-                    let strip = tab_strip_rect(fenix_window::Rect { h: line_height, ..rect });
-                    // `pane_tab_layout_iter` stops as soon as the strip is
-                    // full. Keep this lazy so hover hit-testing does not
-                    // resolve names for a pane's entire tab history.
-                    let tabs = self
-                        .workspaces
-                        .active_pane_tabs()
-                        .get(&pane)
-                        .into_iter()
-                        .flatten()
-                        .map(|&id| (id, self.buffer_display_name(id).chars().count()));
-                    pane_tab_layout_iter(strip, char_width, tabs).into_iter().map(move |tab| (pane, tab))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // The tabs the last frame measured and drew, not a fresh estimate.
+        // Re-deriving them here from character counts is what used to make
+        // a click land on a different tab than the one under the cursor:
+        // that estimate can't account for the icon font's advance (much
+        // wider than the body font's) and so drifted further right with
+        // every tab. `redraw` publishes the real, shaped bounds into
+        // `tab_geometry`, so hit-testing and pixels now come from one
+        // measurement instead of two disagreeing calculations. Cheaper
+        // too -- this used to resolve display names on every mouse move.
+        let tabs = if self.theme.show_tabs { self.tab_geometry.clone() } else { Vec::new() };
+        let breadcrumb_panes = panes.iter().map(|(id, _)| *id).filter(|id| self.pane_has_breadcrumb(*id)).collect();
         FrameGeometry {
             panes,
+            breadcrumb_panes,
             pane_area,
             sidebar_rect: (sidebar_px > 0.0).then_some(fenix_window::Rect { x: 0.0, y: 0.0, w: sidebar_px, h: modeline_top }),
             terminal_rect: (terminal_h > 0.0)
@@ -25458,7 +25713,7 @@ impl App {
     /// just to share five one-line computations.
     fn frame_metrics(&self, window_height: f32) -> (f32, f32, f32) {
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
-        let modeline_height = self.text.as_ref().map(|t| t.modeline_height()).unwrap_or(text::LINE_HEIGHT + 8.0);
+        let modeline_height = self.text.as_ref().map(|t| t.modeline_height()).unwrap_or(text::LINE_HEIGHT);
         let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
         let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
         let show_terminal = self.terminal_open;
@@ -25502,7 +25757,7 @@ impl App {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else { return };
-        let content_rect = pane_content_rect(*rect, line_height, true);
+        let content_rect = pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane));
         let visible_lines = text::lines_that_fit(content_rect.h, line_height);
 
         let scroll_line = match target {
@@ -25754,11 +26009,9 @@ impl App {
                 } else if pane == self.focused_pane_id() {
                     self.scroll_focused_pane(lines);
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
-                    // Every pane always renders a title bar (`redraw`'s own
-                    // `pane_content_rect(rect, line_height, true)`) -- match
-                    // that shrink so `max_scroll` agrees with what's actually
-                    // visible.
-                    let rect_h = pane_content_rect(*rect, line_height, true).h;
+                    // Match `redraw`'s own chrome shrink for this pane so
+                    // `max_scroll` agrees with what's actually visible.
+                    let rect_h = pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h;
                     self.scroll_unfocused_pane(pane, lines, rect_h, line_height);
                 }
             }
@@ -25868,15 +26121,27 @@ impl App {
         // which `TextPipeline::set_font_family` resolves to the fast
         // concrete-name fallback rather than the slow generic one).
         let font_family = self.config.font_family.as_deref().or(theme.font_family);
-        let (char_width, line_height, modeline_height) = match &mut self.text {
+        let (char_width, line_height, modeline_height, modeline_char_width) = match &mut self.text {
             Some(text) => {
                 text.set_font_family(font_family);
-                (text.char_width(), text.line_height(), text.modeline_height())
+                (text.char_width(), text.line_height(), text.modeline_height(), text.modeline_char_width())
             }
-            None => (text::CHAR_WIDTH, text::LINE_HEIGHT, text::LINE_HEIGHT + 8.0),
+            None => (
+                text::CHAR_WIDTH,
+                text::LINE_HEIGHT,
+                text::LINE_HEIGHT,
+                text::CHAR_WIDTH * text::MODELINE_FONT_SCALE,
+            ),
         };
         let visible_lines = text::visible_line_count(window_height, modeline_height, line_height);
         let caret_is_block = self.caret_is_block();
+        // Resize the git dashboard's sections to suit whichever one is
+        // focused, before anything reads the layout. Done here, once a
+        // frame, rather than at each of the many places that can move
+        // focus (number keys, Tab, `SPC w` navigation, a mouse click):
+        // it's a cheap idempotent no-op whenever focus hasn't actually
+        // moved, and this way no focus path can forget to trigger it.
+        self.apply_git_accordion();
 
         // Whether this frame is the one with editor focus, and so the
         // one that draws the single-instance UI: the which-key popup,
@@ -25989,10 +26254,35 @@ impl App {
             /// Parallel to `tabs_layout` -- whether each tab is the
             /// pane's currently-active buffer.
             tab_active: Vec<bool>,
-            /// The whole strip's rich-text spans, in the exact left-to-
+            /// The tab strip's own rich-text spans, in the exact left-to-
             /// right order `tabs_layout` lays the tabs out in -- handed
             /// straight to `set_pane_title_rich`.
             tab_spans: Vec<(String, glyphon::Color, bool)>,
+            /// Whether this pane renders a breadcrumb bar beneath its
+            /// title row, and so reserved room for one
+            /// (`App::pane_has_breadcrumb`). Carried on the render
+            /// rather than recomputed in the drawing block, both
+            /// because `self.pane_titles` is off-limits once `text`/`bg_
+            /// rect` hold their borrows, and so the background fill and
+            /// the content rect can't disagree about where the chrome
+            /// ends.
+            has_breadcrumb: bool,
+            /// Per tab, `(body_start, body_end, close_start, close_end)`
+            /// byte offsets into the concatenated `tab_spans` string.
+            /// Parallel to `tabs_layout`. These are what turn the strip's
+            /// *shaped* glyphs back into per-tab pixel bounds after
+            /// `set_pane_title_rich` runs -- `tabs_layout`'s own rects are
+            /// only an allocator's estimate (see `pane_tab_layout_iter`),
+            /// and an estimate built from character counts cannot match a
+            /// row that mixes the body font with the much wider icon font.
+            tab_ranges: Vec<(usize, usize, usize, usize)>,
+            /// The breadcrumb bar's rich-text spans, directly below the
+            /// tab strip -- kept as its own field (not appended to `tab_
+            /// spans` with a newline) since the two rows now render as
+            /// separate `GlyphBuffer`s at separate heights (see `tab_
+            /// strip_height`/`breadcrumb_strip_height`), not two lines of
+            /// one shared buffer. Empty whenever `tab_spans` is.
+            breadcrumb_spans: Vec<(String, glyphon::Color, bool)>,
             /// Inline git gutter marks (`App::gutter_hunks`) currently
             /// visible in this pane -- `(row, kind)`, `row` already
             /// relative to this frame's own `render_base_line` like
@@ -26006,6 +26296,15 @@ impl App {
             /// own content start). Empty for every pane but an ordinary
             /// text buffer's.
             indent_guides: Vec<(usize, usize)>,
+            /// A thin left-margin accent bar marking where a Jira comment
+            /// or Agenda note starts -- `(row, color)`, `row` relative to
+            /// `render_base_line` like `gutter_marks`. Same rendering
+            /// role as `gutter_marks`, just not git-diff-shaped: every
+            /// row here gets the *same* color (one accent per buffer,
+            /// not a per-hunk Added/Modified/Deleted choice), so a plain
+            /// color is enough rather than reusing `GutterMarkKind`.
+            /// Empty for every other pane kind.
+            row_accents: Vec<(usize, [f32; 4])>,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -26053,16 +26352,18 @@ impl App {
                 .cloned()
                 .or_else(|| self.table_view_header(buffer_id))
                 .unwrap_or_else(|| self.buffer_display_name(buffer_id));
-            // Every pane always has a title now, so its *content* area
-            // is always shrunk by one `line_height` from the top,
-            // reserving that strip for the title bar drawn later below.
-            // `rect.y + rect.h` (the pane's bottom edge) is unchanged by
-            // a top-only shrink, so every existing bit of geometry that
-            // keys off it (the divider-line loop, `pane_area`'s own
-            // bounds checks) needs no changes at all -- only this local
-            // `rect` binding, used for everything downstream in this
-            // pane's own block, is adjusted.
-            let rect = pane_content_rect(rect, line_height, true);
+            // Every pane has a title bar, and an editing pane a
+            // breadcrumb bar under it too, so its *content* area is
+            // shrunk from the top by whichever of those it actually
+            // renders (`pane_chrome_height`). `rect.y + rect.h` (the
+            // pane's bottom edge) is unchanged by a top-only shrink, so
+            // every existing bit of geometry that keys off it (the
+            // divider-line loop, `pane_area`'s own bounds checks) needs
+            // no changes at all -- only this local `rect` binding, used
+            // for everything downstream in this pane's own block, is
+            // adjusted.
+            let has_breadcrumb = self.pane_has_breadcrumb(pane);
+            let rect = pane_content_rect(rect, line_height, has_breadcrumb);
             let is_focused = pane == focused_pane;
             let pane_visible_lines = text::lines_that_fit(rect.h, line_height);
             // An Explorer/Picker overlay temporarily *replaces* the
@@ -26135,7 +26436,11 @@ impl App {
                     tabs_layout: Vec::new(),
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
+                    breadcrumb_spans: Vec::new(),
+                    tab_ranges: Vec::new(),
+                    has_breadcrumb,
                     gutter_marks: Vec::new(),
+                    row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26217,7 +26522,11 @@ impl App {
                         tabs_layout: Vec::new(),
                         tab_active: Vec::new(),
                         tab_spans: Vec::new(),
+                        breadcrumb_spans: Vec::new(),
+                        tab_ranges: Vec::new(),
+                        has_breadcrumb,
                         gutter_marks: Vec::new(),
+                        row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                     });
                     continue;
@@ -26287,7 +26596,11 @@ impl App {
                         tabs_layout: Vec::new(),
                         tab_active: Vec::new(),
                         tab_spans: Vec::new(),
+                        breadcrumb_spans: Vec::new(),
+                        tab_ranges: Vec::new(),
+                        has_breadcrumb,
                         gutter_marks: Vec::new(),
+                        row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                     });
                     continue;
@@ -26322,7 +26635,11 @@ impl App {
                     tabs_layout: Vec::new(),
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
+                    breadcrumb_spans: Vec::new(),
+                    tab_ranges: Vec::new(),
+                    has_breadcrumb,
                     gutter_marks: Vec::new(),
+                    row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26355,7 +26672,11 @@ impl App {
                     tabs_layout: Vec::new(),
                     tab_active: Vec::new(),
                     tab_spans: Vec::new(),
+                    breadcrumb_spans: Vec::new(),
+                    tab_ranges: Vec::new(),
+                    has_breadcrumb,
                     gutter_marks: Vec::new(),
+                    row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                 });
                 continue;
@@ -26539,9 +26860,24 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans) = if theme.show_tabs && !self.pane_titles.contains_key(&pane) {
-                let strip_rect =
-                    tab_strip_rect(fenix_window::Rect { x: rect.x, y: rect.y - 2.0 * line_height, w: rect.w, h: line_height });
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges) = if theme.show_tabs
+                && !self.pane_titles.contains_key(&pane)
+            {
+                // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
+                // body font (see `TextPipeline::title_metrics`), so its
+                // real glyphs are narrower per cell than the body `char_
+                // width` used elsewhere in this loop -- laying tabs out
+                // with that wider body measurement drifted the background/
+                // hit-test geometry further right of the actually-smaller
+                // rendered text with every tab.
+                let title_char_width =
+                    self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+                let strip_rect = tab_strip_rect(fenix_window::Rect {
+                    x: rect.x,
+                    y: rect.y - title_reserved_height(line_height),
+                    w: rect.w,
+                    h: tab_strip_height(line_height),
+                });
                 // A pane's list is its complete navigation history, not its
                 // visible tabs. Lazily resolve names so repeated redraws
                 // while moving do work proportional to tabs that fit, not
@@ -26553,10 +26889,12 @@ impl App {
                     .into_iter()
                     .flatten()
                     .map(|&id| (id, self.buffer_display_name(id).chars().count()));
-                let layout = pane_tab_layout_iter(strip_rect, char_width, tabs);
+                let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
                 let active_buffer = self.windows().content(pane).copied();
                 let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
                 let mut active_flags: Vec<bool> = Vec::new();
+                let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+                let mut byte = 0usize;
                 for tab in &layout {
                     let is_active = Some(tab.buffer) == active_buffer;
                     active_flags.push(is_active);
@@ -26568,21 +26906,41 @@ impl App {
                         .buffers
                         .get(tab.buffer)
                         .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
-                    // `TAB_CLOSE_CHARS` (the `" × "` segment below) is
-                    // already reserved out of the tab's own width by
-                    // `pane_tab_layout` -- this budget is just for the
-                    // icon/gap/dirty-marker segment ahead of it.
-                    let name_budget = (((tab.body.w - tab.close.w) / char_width).floor() as usize).saturating_sub(3);
-                    let truncated = truncate_tab_name(&name, name_budget);
-                    spans.push((format!(" {icon_ch} "), theme.icon_file, true));
-                    spans.push((format!("{truncated}{}", if dirty { "*" } else { "" }), name_color, false));
-                    spans.push((" × ".to_string(), theme.gutter_fg, false));
+                    // Truncated against `TAB_MAX_NAME_CHARS` directly, and
+                    // padded up to `TAB_MIN_NAME_CHARS`, rather than
+                    // derived back out of `tab.body.w`. That round trip
+                    // (width -> budget -> text) was one half of why the
+                    // drawn tab never matched its own glyphs: it assumed
+                    // every rendered cell is `title_char_width` wide, which
+                    // the icon span in particular is not.
+                    let truncated = truncate_tab_name(&name, TAB_MAX_NAME_CHARS);
+                    let label = if truncated.chars().count() < TAB_MIN_NAME_CHARS {
+                        format!("{truncated:<width$}", width = TAB_MIN_NAME_CHARS)
+                    } else {
+                        truncated
+                    };
+                    // Byte ranges into the concatenated strip string, so
+                    // `TextPipeline::title_span_bounds` can report where
+                    // this tab and its close glyph actually landed once
+                    // shaped. The title buffer holds only the tab row (the
+                    // breadcrumb bar is its own buffer), so these offsets
+                    // start at 0 and stay in that string's own space.
+                    let icon_span = format!(" {icon_ch} ");
+                    let name_span = format!("{label}{}", if dirty { "*" } else { "" });
+                    let close_span = " × ".to_string();
+                    let tab_start = byte;
+                    byte += icon_span.len() + name_span.len();
+                    let close_start = byte;
+                    byte += close_span.len();
+                    ranges.push((tab_start, byte, close_start, byte));
+                    spans.push((icon_span, theme.icon_file, true));
+                    spans.push((name_span, name_color, false));
+                    spans.push((close_span, theme.gutter_fg, false));
                 }
-                spans.push(("\n".to_string(), theme.fg_modeline, false));
-                spans.extend(self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx));
-                (layout, active_flags, spans)
+                let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
+                (layout, active_flags, spans, crumbs, ranges)
             } else {
-                (Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
             // Inline git gutter marks (Part 5) currently in view -- every
@@ -26605,6 +26963,45 @@ impl App {
                 })
                 .unwrap_or_default();
 
+            // A Jira comment's or Agenda note's own header row gets a
+            // thin left-margin accent, same rendering role as a git
+            // gutter mark but one flat color per buffer kind rather than
+            // a per-hunk choice -- see `PaneRender::row_accents`'s own
+            // doc comment for why this isn't just another `GutterMark`.
+            let row_accents: Vec<(usize, [f32; 4])> = match self.buffers.get(buffer_id).map(|ob| ob.kind) {
+                Some(BufferKind::Jira) => self
+                    .jira_lines
+                    .get(&buffer_id)
+                    .map(|lines| {
+                        visible_document_lines
+                            .iter()
+                            .enumerate()
+                            .filter(|(row, &line)| {
+                                *row <= pane_visible_lines
+                                    && matches!(lines.get(line), Some(Some(l)) if l.style == jira_panel::JiraLineStyle::Comment)
+                            })
+                            .map(|(row, _)| (row, theme.mode_command))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Some(BufferKind::Agenda) => self
+                    .agenda_lines
+                    .get(&buffer_id)
+                    .map(|lines| {
+                        visible_document_lines
+                            .iter()
+                            .enumerate()
+                            .filter(|(row, &line)| {
+                                *row <= pane_visible_lines
+                                    && matches!(lines.get(line), Some(Some(l)) if l.style == agenda_panel::AgendaLineStyle::Note)
+                            })
+                            .map(|(row, _)| (row, glyphon_to_rgba(theme.syntax_function)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -26624,14 +27021,18 @@ impl App {
                 tabs_layout,
                 tab_active,
                 tab_spans,
+                breadcrumb_spans,
+                tab_ranges,
+                has_breadcrumb,
                 gutter_marks,
                 indent_guides,
+                row_accents,
             });
         }
 
         let modeline_pieces = self.modeline_pieces();
         _profile.mark("CPU pane preparation complete");
-        let (badge_bg, badge_fg) = self.mode_colors();
+        let (badge_bg, _badge_fg) = self.mode_colors();
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
         // (bottom) -- least likely to sit under whatever they're looking
@@ -26702,28 +27103,78 @@ impl App {
 
         // Title-bar strips for every pane -- `pane.rect` here is already
         // the *shrunk* content rect (see the top-of-loop adjustment
-        // above), so the strip itself sits exactly one `line_height`
-        // above it, same width. The focused pane's title is colored with
-        // the same accent `caret_text` uses elsewhere (the which-key
-        // popup's key column), so which pane has focus reads at a glance
-        // across a split -- every other pane's title stays the plain
-        // `fg_modeline` it always has.
-        let title_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = panes_render
-            .iter()
-            .map(|pane| {
-                let title_rect =
-                    fenix_window::Rect { x: pane.rect.x, y: pane.rect.y - 2.0 * line_height, w: pane.rect.w, h: 2.0 * line_height };
-                if pane.tabs_layout.is_empty() {
-                    let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                    text.set_pane_title_rich(pane.pane, title_rect.w, &[(pane.title.as_str(), color, false)]);
-                } else {
-                    let refs: Vec<(&str, glyphon::Color, bool)> =
-                        pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-                    text.set_pane_title_rich(pane.pane, title_rect.w, &refs);
+        // above), so the whole reserved title area sits exactly `title_
+        // reserved_height` above it, same width, split into its own
+        // `tab_strip_height`-tall row and (for a tabbed pane only) a
+        // shorter `breadcrumb_strip_height`-tall row beneath it -- two
+        // separate `GlyphBuffer`s (`tab_text_rects`/`breadcrumb_text_
+        // rects`) rather than two lines of one buffer, since that's the
+        // only way to give them different heights. `title_rects` stays
+        // the *full* reserved area, used only for the flat background
+        // fill below. The focused pane's title is colored with the same
+        // accent `caret_text` uses elsewhere (the which-key popup's key
+        // column), so which pane has focus reads at a glance across a
+        // split -- every other pane's title stays the plain `fg_modeline`
+        // it always has.
+        let mut title_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::with_capacity(panes_render.len());
+        let mut tab_text_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::with_capacity(panes_render.len());
+        let mut breadcrumb_text_rects: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        let tab_h = tab_strip_height(line_height);
+        for pane in &mut panes_render {
+            // Exactly the height this pane's content rect was shrunk by,
+            // from the same flag -- an informational panel's chrome is
+            // the title row alone, so its background fill stops where
+            // its content starts instead of painting a blank breadcrumb
+            // strip over the first row of the list.
+            let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
+            let top = pane.rect.y - chrome_h;
+            let title_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: chrome_h };
+            let tab_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: tab_h };
+            if pane.tabs_layout.is_empty() {
+                let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)]);
+            } else {
+                let refs: Vec<(&str, glyphon::Color, bool)> =
+                    pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &refs);
+                // Now that the strip is shaped, replace each tab's
+                // estimated rect with where its glyphs actually landed.
+                // This is the whole fix for the active tab's highlight
+                // sitting right of its own tab: everything that draws a
+                // tab (background, top accent, divider) and everything
+                // that hit-tests one reads `tabs_layout`, so correcting
+                // it here corrects all of them at once, and correcting it
+                // from measured glyph bounds means it stays correct for
+                // any filename, icon, dirty marker, font, or DPI rather
+                // than for the one case a constant was tuned against.
+                //
+                // `text_origin` is the same `rect.x + PAD_LEFT` the title
+                // `TextArea` is pushed at (see `TextPipeline::prepare`),
+                // which is what puts these buffer-relative offsets into
+                // the same screen space as `pane.rect`.
+                let probes: Vec<(usize, usize)> =
+                    pane.tab_ranges.iter().flat_map(|&(bs, be, cs, ce)| [(bs, be), (cs, ce)]).collect();
+                let bounds = text.title_span_bounds(pane.pane, &probes);
+                let text_origin = pane.rect.x + text::PAD_LEFT;
+                for (tab, measured) in pane.tabs_layout.iter_mut().zip(bounds.chunks_exact(2)) {
+                    let (Some((body_left, body_right)), Some((close_left, close_right))) = (measured[0], measured[1]) else {
+                        continue;
+                    };
+                    tab.body.x = text_origin + body_left;
+                    tab.body.w = body_right - body_left;
+                    tab.close.x = text_origin + close_left;
+                    tab.close.w = close_right - close_left;
                 }
-                (pane.pane, title_rect)
-            })
-            .collect();
+                let crumb_rect =
+                    fenix_window::Rect { x: pane.rect.x, y: top + tab_h, w: pane.rect.w, h: breadcrumb_strip_height(line_height) };
+                let crumb_refs: Vec<(&str, glyphon::Color, bool)> =
+                    pane.breadcrumb_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+                text.set_pane_breadcrumb_rich(pane.pane, crumb_rect.w, &crumb_refs);
+                breadcrumb_text_rects.push((pane.pane, crumb_rect));
+            }
+            title_rects.push((pane.pane, title_rect));
+            tab_text_rects.push((pane.pane, tab_rect));
+        }
         text.retain_titles(&live_panes);
         if let Some((sidebar_spans, _, _)) = &sidebar_render {
             let sidebar_refs: Vec<(&str, glyphon::Color, bool)> =
@@ -26735,15 +27186,15 @@ impl App {
                 terminal_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_terminal_rich(&terminal_refs);
         }
-        let existing_chars = {
+        let (existing_chars, mode_segment_chars) = {
             let (mode_label, suffix) = &modeline_pieces;
-            // One trailing space beyond the label's own centered box --
-            // the colored badge rect below stays exactly `MODE_BADGE_CHARS`
-            // wide, so this renders past its edge on the plain modeline
-            // background, giving the badge breathing room instead of the
-            // filename butting straight up against its right edge.
-            let badge = format!(" {:^width$} ", mode_label, width = text::MODE_BADGE_CHARS);
-            let existing_chars = badge.chars().count() + suffix.chars().count();
+            // `modeline_mode_segment` owns this string's exact shape (the
+            // leading glyph, the fixed-width centered label, the trailing
+            // gap) -- see its own doc comment. The rail itself is much
+            // narrower than `PAD_LEFT`, so it never touches this text.
+            let badge = modeline_mode_segment(mode_label);
+            let mode_segment_chars = badge.chars().count();
+            let existing_chars = mode_segment_chars + suffix.chars().count();
             // An unexpired error message tints the suffix red (`git_
             // conflicted`'s accent -- no dedicated error color exists
             // yet, and this reads as a reasonable semantic reuse
@@ -26754,11 +27205,15 @@ impl App {
             let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
             let suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
             let mut spans = Vec::with_capacity(suffix_spans.len() + 1);
-            spans.push((badge, badge_fg));
+            // The label reads *in* the mode's own accent now (Signal
+            // Rail's rail-plus-label treatment), not as contrasting text
+            // over a filled box -- `badge_fg` (`mode_text_dark`/`_light`)
+            // was that box's own contrast color and is unused here now.
+            spans.push((badge, rgba_to_glyphon(badge_bg)));
             spans.extend(suffix_spans);
             let refs: Vec<(&str, glyphon::Color)> = spans.iter().map(|(text, color)| (text.as_str(), *color)).collect();
             text.set_modeline_text(&refs);
-            existing_chars
+            (existing_chars, mode_segment_chars)
         };
         // A *separate* buffer/`TextArea` from the modeline's own, right-
         // aligned via cosmic-text's own `Align::Right` layout rather than
@@ -26774,11 +27229,18 @@ impl App {
         let clock_text = modeline_clock_text();
         let clock_chars = clock_text.chars().count();
         let box_width = window_width - text::PAD_LEFT;
-        if modeline_clock_fits(existing_chars, window_width, char_width, clock_chars) {
+        // `modeline_char_width`, not the body `char_width`: both this
+        // text and the clock render at `MODELINE_FONT_SCALE`, so the body
+        // measurement over-estimated every column here.
+        let clock_shown = modeline_clock_fits(existing_chars, window_width, modeline_char_width, clock_chars);
+        if clock_shown {
             text.set_clock_rich(box_width, &[(clock_text.as_str(), theme.fg_modeline)]);
         } else {
             text.set_clock_rich(box_width, &[]);
         }
+        // Measured after shaping, not estimated from `clock_chars` -- see
+        // `TextPipeline::clock_left_edge`.
+        let clock_left = text.clock_left_edge();
 
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
         // The row (if any) the currently-open popup wants highlighted --
@@ -26890,17 +27352,43 @@ impl App {
         // A hairline boundary makes the status surface feel intentionally
         // separate from the editor canvas without adding visual weight.
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
-        // Starts at PAD_LEFT, matching where the badge text itself starts
-        // rendering (`text.rs`'s modeline TextArea uses the same left
-        // inset) -- starting this at the window edge instead left the
-        // rendered label overflowing past the badge's right edge, throwing
-        // off how centered it looked inside the colored badge. Always
-        // drawn now: `modeline_pieces` always returns real badge content
-        // (a capturing prompt's own text lives in its own popup instead of
-        // blanking this out), so there's no longer a "raw text, no badge"
-        // state to skip this for.
-        let badge_width = (1.0 + text::MODE_BADGE_CHARS as f32) * char_width;
-        bg_rect.push_rect(gpu, 0.0, modeline_top, text::PAD_LEFT + badge_width, modeline_height, badge_bg);
+        // A full-height accent rail instead of a filled badge box behind
+        // the mode label -- Signal Rail's own "read the mode from the
+        // eye-corner" bit, borrowed from a mixing console's channel-status
+        // LED. Narrower than `PAD_LEFT`, so the label text (which still
+        // starts rendering at `PAD_LEFT`, per `text.rs`'s modeline
+        // TextArea) always has a small gap of plain modeline background
+        // between it and the rail, without needing its own tuned offset.
+        // Always drawn: `modeline_pieces` always returns real badge
+        // content (a capturing prompt's own text lives in its own popup
+        // instead of blanking this out), so there's no "no mode" state to
+        // skip this for.
+        const MODE_RAIL_WIDTH: f32 = 5.0;
+        bg_rect.push_rect(gpu, 0.0, modeline_top, MODE_RAIL_WIDTH, modeline_height, badge_bg);
+        // The design's two vertical hairlines: one closing the mode
+        // segment, one opening the clock's. They're what make the
+        // modeline read as rail | mode | info | clock -- real dividers
+        // that are part of the layout rather than more separator dots
+        // competing with the `·` ones already inside the info run.
+        //
+        // Both are placed from `modeline_char_width`-based column math
+        // against the same `PAD_LEFT` origin the modeline's own TextArea
+        // renders from, so they land in the text's own gaps rather than
+        // through a glyph.
+        // Both x positions are rounded to whole pixels: a 1px-wide rect at
+        // a fractional x rasterizes across two columns at partial coverage
+        // each, which on an already-faint rule is the difference between a
+        // hairline and a smudge you can't see at all.
+        let rule = modeline_rule_color(&theme);
+        let mode_divider_x = (text::PAD_LEFT + (mode_segment_chars as f32 - 1.0) * modeline_char_width).round();
+        bg_rect.push_rect(gpu, mode_divider_x, modeline_top, 1.0, modeline_height, rule);
+        // One `PAD_LEFT` gap ahead of the clock's own measured left edge.
+        // `None` when the clock is hidden, which is also exactly when this
+        // rule should be skipped -- a rule with nothing after it would
+        // just be a stray mark at the right edge.
+        if let Some(clock_left) = clock_left {
+            bg_rect.push_rect(gpu, (clock_left - text::PAD_LEFT).round(), modeline_top, 1.0, modeline_height, rule);
+        }
         // Popup backgrounds are deliberately *not* pushed into this batch --
         // see the big comment at the two-pass render sequence below for why.
         if show_sidebar {
@@ -26984,30 +27472,37 @@ impl App {
             if pane.tabs_layout.is_empty() {
                 continue;
             }
-            let strip_y = pane.rect.y - 2.0 * line_height;
-            let breadcrumb_y = strip_y + line_height;
+            let strip_y = pane.rect.y - title_reserved_height(line_height);
+            let strip_h = tab_strip_height(line_height);
+            let breadcrumb_y = strip_y + strip_h;
+            let breadcrumb_h = breadcrumb_strip_height(line_height);
             // Breadcrumbs are navigation chrome, but a shade closer to the
-            // editing canvas than the tab row. This gives the two rows a
-            // deliberate hierarchy rather than making them look like two
-            // unrelated toolbars.
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, line_height, theme.sidebar_bg);
-            // Drawn *before* the per-tab loop below, not after: this used to
-            // be pushed last and, being full-width, painted straight over
-            // the bottom pixel of every active tab's accent underline --
-            // shrinking a deliberately 2px-tall indicator down to a barely-
-            // there sliver. Pushing it first lets the underline paint over
-            // it instead, so the accent renders at its full intended weight.
-            bg_rect.push_rect(gpu, pane.rect.x, strip_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
+            // editing canvas than the tab row -- and, per the design's own
+            // `.crumbs-b`, a visibly shorter bar than the tab row above it
+            // (`breadcrumb_h` < `strip_h`), not just a second copy of the
+            // same-height strip. This gives the two rows a deliberate
+            // hierarchy rather than making them look like two unrelated
+            // toolbars of identical weight.
+            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, breadcrumb_h, theme.sidebar_bg);
+            // The strip's own bottom divider. Order relative to the
+            // per-tab loop below no longer matters for this rect
+            // specifically -- it used to double as the active tab's own
+            // accent line's bottom edge (a bottom underline), which made
+            // draw order load-bearing; now that the accent is a top-edge
+            // bar (below), the two never occupy the same pixels.
+            bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
             for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
                 if is_active {
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, line_height, theme.bg);
-                    // A compact accent underline anchors the selected tab
-                    // without introducing a heavy outline around every tab.
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y + line_height - 2.0, tab.body.w, 2.0, theme.mode_normal);
+                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
+                    // A top-edge accent bar marks the selected tab --
+                    // Signal Rail's own convention (mirrors the modeline's
+                    // mode rail) -- rather than a bottom underline a
+                    // divider line could paint over.
+                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, 3.0, theme.mode_normal);
                 }
-                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, line_height, theme.divider);
+                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
             }
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + line_height - 1.0, pane.rect.w, 1.0, theme.divider);
+            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
         }
         // Inline git gutter marks (Part 5) -- a thin colored bar, one per
         // changed line still in view. Sits within the pane's own left
@@ -27032,6 +27527,16 @@ impl App {
                     GutterMarkKind::Modified => theme.git_modified,
                     GutterMarkKind::Deleted => theme.git_conflicted,
                 });
+                let x = pane.rect.x + GUTTER_MARK_MARGIN;
+                let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
+                bg_rect.push_rect(gpu, x, y, GUTTER_MARK_WIDTH, line_height, color);
+            }
+            // A Jira comment's or Agenda note's own left-margin accent --
+            // same geometry as a gutter mark, just never sharing a pane
+            // with one (a Jira/Agenda buffer has no git gutter marks of
+            // its own), so reusing the identical bar position reads as
+            // "the same kind of thing" rather than a second convention.
+            for &(row, color) in &pane.row_accents {
                 let x = pane.rect.x + GUTTER_MARK_MARGIN;
                 let y = pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
                 bg_rect.push_rect(gpu, x, y, GUTTER_MARK_WIDTH, line_height, color);
@@ -27112,7 +27617,7 @@ impl App {
 
         let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
             panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
-        text.prepare(gpu, theme, &prepare_panes, &title_rects, show_sidebar, show_terminal);
+        text.prepare(gpu, theme, &prepare_panes, &tab_text_rects, &breadcrumb_text_rects, show_sidebar, show_terminal);
 
         // Creates each visible VNC session's texture the first time it's
         // needed (a fresh session, or one whose resolution just changed
@@ -27455,6 +27960,13 @@ impl App {
         gpu.queue.present(frame);
         _profile.mark("present complete");
         text.trim();
+        // Publish the tab geometry this frame actually drew, so mouse
+        // hit-testing (`frame_geometry`) uses the exact same measured
+        // rects rather than recomputing an estimate that disagrees with
+        // them. Assigned here, after the `text`/`bg_rect` borrows above
+        // have all been released.
+        self.tab_geometry =
+            panes_render.iter().flat_map(|p| p.tabs_layout.iter().map(|t| (p.pane, *t))).collect();
     }
 }
 
@@ -27995,21 +28507,94 @@ mod tests {
         }
     }
 
+    /// The layout the git dashboard's accordion asks for has to be the
+    /// layout it gets. Walks the ratios through the same right-nested
+    /// subdivision `Node::layout_into` performs, and checks each pane
+    /// ends up with the share it was given -- the property that actually
+    /// matters, rather than the intermediate ratios.
     #[test]
-    fn pane_content_rect_without_a_title_is_unchanged() {
+    fn stack_split_ratios_reproduce_the_shares_they_were_given() {
+        let cases: [&[f32]; 4] = [
+            &[0.5, 0.1, 0.1, 0.1, 0.1, 0.1],  // first section focused
+            &[0.1, 0.1, 0.1, 0.1, 0.5, 0.1],  // Commits focused -- the case from the bug report
+            &[0.1, 0.1, 0.1, 0.1, 0.1, 0.5],  // last section focused
+            &[0.25, 0.25, 0.25, 0.25],        // an evenly weighted stack
+        ];
+        for shares in cases {
+            let ratios = stack_split_ratios(shares);
+            assert_eq!(ratios.len(), shares.len() - 1, "an n-pane chain has n-1 splits");
+            // Subdivide a unit column exactly the way the window tree does:
+            // every split takes its ratio of what the ones above left, and
+            // the final pane inherits whatever remains.
+            let mut remaining = 1.0_f32;
+            for (i, share) in shares.iter().enumerate() {
+                let got = match ratios.get(i) {
+                    Some(ratio) => remaining * ratio,
+                    None => remaining,
+                };
+                assert!(
+                    (got - share).abs() < 1e-5,
+                    "{shares:?}: pane {i} asked for {share} of the column but the ratios give it {got}"
+                );
+                remaining -= got;
+            }
+        }
+    }
+
+    /// Every ratio the accordion produces must be one the window tree
+    /// will actually accept -- it clamps to [0.1, 0.9], and a clamped
+    /// ratio silently throws off every pane below it in the chain.
+    #[test]
+    fn the_accordion_shares_stay_inside_the_window_trees_ratio_clamp() {
+        // Must track `apply_git_accordion`'s own FOCUSED_SHARE.
+        let focused_share = 0.45_f32;
+        let other = (1.0 - focused_share) / 5.0;
+        for focused in 0..6 {
+            let shares: Vec<f32> = (0..6).map(|i| if i == focused { focused_share } else { other }).collect();
+            for (i, ratio) in stack_split_ratios(&shares).iter().enumerate() {
+                assert!(
+                    (0.1..=0.9).contains(ratio),
+                    "focusing section {focused} needs split {i} at {ratio}, outside the clamp the tree enforces"
+                );
+            }
+        }
+    }
+
+    /// An informational panel (a Git/Docker dashboard section, a
+    /// terminal) reserves its title row and nothing more. It used to
+    /// reserve the breadcrumb bar as well and then never draw into it,
+    /// which put a blank strip of chrome between every panel's title
+    /// and its first row.
+    #[test]
+    fn pane_content_rect_without_a_breadcrumb_reserves_only_the_title_row() {
         let rect = fenix_window::Rect { x: 10.0, y: 20.0, w: 300.0, h: 400.0 };
-        assert_eq!(pane_content_rect(rect, 20.0, false), rect);
+        let shrunk = pane_content_rect(rect, 20.0, false);
+        assert_eq!(shrunk, fenix_window::Rect { x: 10.0, y: 48.0, w: 300.0, h: 372.0 });
+        assert_eq!(rect.y + rect.h, shrunk.y + shrunk.h);
     }
 
     #[test]
-    fn pane_content_rect_with_a_title_reserves_tabs_and_breadcrumbs() {
+    fn pane_content_rect_with_a_breadcrumb_reserves_the_tab_strip_and_the_bar_under_it() {
         let rect = fenix_window::Rect { x: 10.0, y: 20.0, w: 300.0, h: 400.0 };
         let shrunk = pane_content_rect(rect, 20.0, true);
-        assert_eq!(shrunk, fenix_window::Rect { x: 10.0, y: 60.0, w: 300.0, h: 360.0 });
+        assert_eq!(shrunk, fenix_window::Rect { x: 10.0, y: 70.0, w: 300.0, h: 350.0 });
         // The bottom edge is preserved -- this is exactly what lets the
         // existing divider-line logic (and every other bottom/right-edge
         // check) work unmodified for a titled pane.
         assert_eq!(rect.y + rect.h, shrunk.y + shrunk.h);
+    }
+
+    /// The two have to differ by exactly the breadcrumb bar: the
+    /// background fill and the content rect are computed from this same
+    /// height, so if it ever disagreed with what's actually rendered a
+    /// panel would either show a blank strip again or paint its chrome
+    /// over its own first row.
+    #[test]
+    fn a_breadcrumb_costs_exactly_one_breadcrumb_bar_of_content_height() {
+        let with = pane_chrome_height(20.0, true);
+        let without = pane_chrome_height(20.0, false);
+        assert_eq!(without, tab_strip_height(20.0));
+        assert!((with - without - breadcrumb_strip_height(20.0)).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -28139,6 +28724,7 @@ mod tests {
             close: fenix_window::Rect { x: 80.0, y: 0.0, w: 20.0, h: 20.0 },
         };
         let geometry = FrameGeometry {
+            breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: None,
             terminal_rect: None,
@@ -28165,6 +28751,7 @@ mod tests {
             close: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
         };
         let geometry = FrameGeometry {
+            breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: Some(fenix_window::Rect { x: -200.0, y: 0.0, w: 200.0, h: 200.0 }),
             terminal_rect: None,
@@ -28180,7 +28767,7 @@ mod tests {
         let app = App::with_file(None);
         let pane = app.focused_pane_id();
         let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
-        let geometry = FrameGeometry { pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
+        let geometry = FrameGeometry { breadcrumb_panes: Vec::new(), pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
         assert_eq!(cursor_icon_for(&geometry, (40.0, 50.0), 20.0), winit::window::CursorIcon::Text);
         // Within the title strip itself (not on a tab, since there are
         // none here) -- the plain arrow, not an I-beam.
@@ -28190,6 +28777,7 @@ mod tests {
     #[test]
     fn cursor_icon_for_empty_space_outside_every_region_is_the_plain_arrow() {
         let geometry = FrameGeometry {
+            breadcrumb_panes: Vec::new(),
             pane_area: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             sidebar_rect: None,
             terminal_rect: None,
@@ -29033,11 +29621,11 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.agenda_store = fenix_agenda::AgendaStore::default(); // isolate from any real leftover active_timer
         app.new_scratch_buffer(); // with_file(None) now opens the dashboard, not a plain scratch buffer
-        assert_eq!(app.modeline_text(), "  NORMAL [No Name]   Ln 1, Col 1   Plain text   Indent 4   UTF-8   No EOL ");
+        assert_eq!(app.modeline_text(), " \u{25B2}  NORMAL   [No Name]   Ln 1, Col 1   Plain text   Indent 4   UTF-8   No EOL ");
 
         app.test_insert('a');
         app.test_insert('b');
-        assert_eq!(app.modeline_text(), "  NORMAL [No Name] [+]   Ln 1, Col 3   Plain text   Indent 4   UTF-8   No EOL ");
+        assert_eq!(app.modeline_text(), " \u{25B2}  NORMAL   [No Name] [+]   Ln 1, Col 3   Plain text   Indent 4   UTF-8   No EOL ");
     }
 
     #[test]
@@ -37105,7 +37693,7 @@ configure_board stm32
         assert!(app.git_session.as_ref().unwrap().unstaged_expanded_dirs.contains("sub"));
         let text = app.buffers.get(unstaged_buffer).unwrap().buffer.text();
         assert!(text.contains("v sub/"), "expected an expanded marker, got: {text:?}");
-        assert!(text.contains("[.M] a.txt"), "expected the file shown by basename, got: {text:?}");
+        assert!(text.contains("a.txt  modified"), "expected the file shown by basename, got: {text:?}");
         assert!(!text.contains("sub/a.txt"), "the file row should show only its basename: {text:?}");
 
         // The cursor stayed on the directory's own row (line 0) even

@@ -5,13 +5,23 @@ use std::path::Path;
 /// the same row's rich-text spans exactly like `content_spans` already
 /// mixes gutter-number spans with content-text spans.
 ///
-/// Already installed on this machine (`fc-list` shows it at
-/// `~/.local/share/fonts/NFM.ttf`, one of several Nerd Fonts present),
-/// and `cosmic_text::FontSystem::new()` loads system fonts by family
-/// name automatically -- no bundling needed. On a machine without a
-/// Nerd Font these codepoints render as tofu; disclosed, not solved,
-/// same posture as every other environment-dependent choice in this
-/// project so far.
+/// The face is **bundled**, not assumed installed: `text.rs` embeds
+/// `assets/fonts/symbols_nerd_font_mono.ttf` and registers it into the
+/// shared `FontSystem` font database at `TextPipeline::new`, so these
+/// codepoints resolve identically on Windows and Linux with nothing for
+/// the user to install. Redistribution is covered by the SIL Open Font
+/// License 1.1 (Copyright (c) 2014, Ryan L McIntyre), whose text ships
+/// next to the font as `assets/fonts/LICENSE-symbols-nerd-font.txt` --
+/// the OFL permits bundling precisely on the condition that the notice
+/// travels with the binary.
+///
+/// One thing this family is *not*: the same cell width as the body
+/// font. It's the `...Mono` build, which makes every icon the same
+/// width as every other icon, not the same width as a body character
+/// (it measures ~1.8x one at the same pt size -- see `text.rs`'s
+/// `the_icon_fonts_cell_is_not_the_body_fonts_cell`). Anything laying
+/// out a row that mixes the two must measure the shaped glyphs rather
+/// than multiply a character count by one cell width.
 pub const ICON_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
 
 // Codepoints verified two ways before being hardcoded here: against the

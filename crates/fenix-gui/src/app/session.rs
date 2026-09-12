@@ -81,6 +81,65 @@ impl Session {
     }
 }
 
+/// Drops the panes of a saved layout that can't be restored, promoting
+/// the survivors the way closing a window does. `None` when nothing in
+/// it can be restored at all.
+///
+/// A pane whose buffer had no document (every generated panel buffer --
+/// see `BufferKind::is_session_owned`) comes back pointed at one shared
+/// placeholder, so a whole panel restores as N copies of the start
+/// screen instead of the dashboard it was.
+///
+/// Pruning rather than discarding the whole workspace is what handles
+/// the case that actually shows up in a real session file: using the
+/// Git dashboard opens a real file into one of its panes, which leaves
+/// a workspace of six unrestorable panes and one genuine document. That
+/// mix is neither wholly a panel (so the save side's own check lets it
+/// through) nor worth restoring intact. Keeping only the document turns
+/// it into an ordinary one-pane workspace and loses nothing the user
+/// could have got back anyway.
+///
+/// Judged from the saved data alone, with no need to know which buffer
+/// kinds produced it -- which is also what lets it clean up sessions
+/// written before any of this was prevented.
+fn prune_unrestorable(layout: Layout<Pane>) -> Option<Layout<Pane>> {
+    match layout {
+        Layout::Leaf(pane) => pane.document.is_some().then_some(Layout::Leaf(pane)),
+        Layout::Split { kind, ratio, first, second } => {
+            match (prune_unrestorable(*first), prune_unrestorable(*second)) {
+                (Some(first), Some(second)) => {
+                    Some(Layout::Split { kind, ratio, first: Box::new(first), second: Box::new(second) })
+                }
+                // The sibling takes the whole space, exactly as it would
+                // if the other pane had been closed by hand.
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
+/// Where `focused` (an index into a layout's leaves, left to right) ends
+/// up once `prune_unrestorable` has removed the undocumented ones --
+/// how many survivors precede it, clamped into the pruned list. Without
+/// this a restored workspace can open focused on a different pane than
+/// the one that was focused when it was saved.
+fn remap_focus(layout: &Layout<Pane>, focused: usize) -> usize {
+    fn leaves(layout: &Layout<Pane>, out: &mut Vec<bool>) {
+        match layout {
+            Layout::Leaf(pane) => out.push(pane.document.is_some()),
+            Layout::Split { first, second, .. } => {
+                leaves(first, out);
+                leaves(second, out);
+            }
+        }
+    }
+    let mut documented = Vec::new();
+    leaves(layout, &mut documented);
+    let kept = documented.iter().filter(|&&d| d).count();
+    documented[..focused.min(documented.len())].iter().filter(|&&d| d).count().min(kept.saturating_sub(1))
+}
+
 impl App {
     fn capture_session(&self) -> Session {
         let mut documents = Vec::new();
@@ -166,21 +225,11 @@ impl App {
     /// it.
     fn workspace_is_ephemeral_session(&self, workspace: &Workspace) -> bool {
         workspace.windows.windows().into_iter().all(|pane| {
-            workspace.windows.content(pane).and_then(|id| self.buffers.get(*id)).is_some_and(|ob| {
-                matches!(
-                    ob.kind,
-                    BufferKind::Docker
-                        | BufferKind::Git
-                        | BufferKind::Jira
-                        | BufferKind::Vnc
-                        | BufferKind::Pdf
-                        | BufferKind::PdfOutline
-                        | BufferKind::PdfSearchResults
-                        | BufferKind::TaskOutput
-                        | BufferKind::Debug
-                        | BufferKind::Terminal
-                )
-            })
+            workspace
+                .windows
+                .content(pane)
+                .and_then(|id| self.buffers.get(*id))
+                .is_some_and(|ob| ob.kind.is_session_owned())
         })
     }
 
@@ -289,6 +338,42 @@ impl App {
         self.dashboard_lines.insert(placeholder, dashboard.lines);
         let mut frames = Vec::new();
         for frame in saved.frames {
+            // `capture_session` no longer writes a panel workspace at all
+            // (see `workspace_is_ephemeral_session`), but sessions saved
+            // before that are already on disk, and one of those restores
+            // the Git dashboard's seven-pane shape with every pane
+            // showing the same placeholder. Drop those here too, so an
+            // existing broken session heals on the next launch instead
+            // of needing the user to close six dead panes by hand.
+            //
+            // Kept when it would empty the frame, mirroring the save
+            // side: a frame has to have at least one workspace.
+            let pruned: Vec<(SavedWorkspace, Option<SavedWorkspace>)> = frame
+                .workspaces
+                .into_iter()
+                .map(|w| {
+                    let focused = remap_focus(&w.layout, w.focused);
+                    let kept = prune_unrestorable(w.layout.clone())
+                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused });
+                    (w, kept)
+                })
+                .collect();
+            // Nothing restorable anywhere in this frame: keep it exactly
+            // as saved rather than hand on an empty workspace list,
+            // which is not a state the rest of the app is built for.
+            // That's also what preserves the deliberate behaviour for a
+            // *single* transient pane -- it comes back as the start
+            // screen.
+            let keep_all = pruned.iter().all(|(_, kept)| kept.is_none());
+            let active = pruned[..frame.active.min(pruned.len())].iter().filter(|(_, k)| k.is_some()).count();
+            let (kept, active) = if keep_all {
+                (pruned.into_iter().map(|(original, _)| original).collect(), frame.active)
+            } else {
+                let kept: Vec<SavedWorkspace> = pruned.into_iter().filter_map(|(_, kept)| kept).collect();
+                let active = active.min(kept.len().saturating_sub(1));
+                (kept, active)
+            };
+            let frame = SavedFrame { workspaces: kept, active };
             let mut workspaces = Vec::new();
             for workspace in frame.workspaces {
                 let mut states = Vec::new();
@@ -449,6 +534,147 @@ mod tests {
         assert_eq!(restored.open().kind, BufferKind::Dashboard);
         assert_eq!(restored.open().buffer.text(), dashboard::render(restored.known_projects.roots(), restored.recent_files.paths()).text);
         assert!(restored.dashboard_lines.contains_key(&restored.focused_buffer_id()));
+    }
+
+    /// A multi-pane panel workspace must not be written to the session
+    /// at all. Its panes hold session-owned buffers that restore can't
+    /// rebuild, so saving the layout brings back the right *shape* with
+    /// every pane pointed at the same placeholder -- the Git dashboard
+    /// coming back as seven identical dashboards.
+    ///
+    /// The Git panel is the case that regressed: six `Git` panes plus
+    /// one `Diff` pane for its Main view, and `Diff` was missing from
+    /// the list that decided this, so the whole workspace looked
+    /// restorable. Built here with that exact mix rather than a single
+    /// kind, so classifying only the obvious ones wouldn't pass.
+    #[test]
+    fn a_panel_workspace_is_left_out_of_the_session_even_when_its_panes_differ_in_kind() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+
+        // A real file workspace, so the panel isn't the only one here --
+        // the all-ephemeral frame keeps its workspaces deliberately.
+        let file = temp.0.join("real.txt");
+        std::fs::write(&file, "keep me\n").unwrap();
+        app.open_startup_file(&file);
+        let file_workspaces = app.workspaces.workspaces.len();
+
+        // A panel workspace shaped like the Git dashboard's.
+        let status = app.buffers.open_git("status");
+        app.workspaces.new_workspace(status, Cursor::at_start());
+        let main = app.buffers.open_diff("diff");
+        let main_pane = app.windows_mut().split(SplitKind::Vertical, main);
+        app.workspaces.active_pane_states_mut().insert(main_pane, PaneState::seeded_at(Cursor::at_start()));
+        assert_eq!(app.workspaces.workspaces.len(), file_workspaces + 1, "panel opened in its own workspace");
+        assert_eq!(app.open().kind, BufferKind::Diff, "the Main pane is a Diff buffer, not a Git one");
+
+        assert!(app.checkpoint_session());
+        let restored = temp.restore();
+
+        assert_eq!(
+            restored.workspaces.workspaces.len(),
+            file_workspaces,
+            "the panel workspace should have been skipped, not restored as placeholder panes"
+        );
+        for workspace in &restored.workspaces.workspaces {
+            let panes = workspace.windows.windows();
+            let kinds: Vec<_> =
+                panes.iter().filter_map(|p| workspace.windows.content(*p)).filter_map(|id| restored.buffers.get(*id)).map(|ob| ob.kind).collect();
+            assert!(
+                !kinds.contains(&BufferKind::Diff) && !kinds.contains(&BufferKind::Git),
+                "no session-owned pane should survive a restore, got {kinds:?}"
+            );
+        }
+    }
+
+    /// A session written *before* panel workspaces were excluded is
+    /// already on disk for anyone upgrading, and restoring one brings
+    /// back a multi-pane panel as that many copies of the start screen.
+    /// Restore drops those, so the bad session heals on next launch
+    /// rather than leaving six dead panes to close by hand.
+    #[test]
+    fn a_session_saved_with_placeholder_only_panels_drops_them_on_restore() {
+        let temp = Temp::new();
+        let file = temp.0.join("real.txt");
+        std::fs::write(&file, "keep me\n").unwrap();
+
+        // Hand-built the way the old code would have written it: a real
+        // file workspace, plus a panel workspace whose panes all record
+        // no document at all.
+        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
+        let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
+        let saved = Session {
+            version: VERSION,
+            documents: vec![Document {
+                path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
+                conflict: false, recovery: None, cursor: 0,
+            }],
+            frames: vec![SavedFrame {
+                active: 1,
+                workspaces: vec![
+                    SavedWorkspace { name: "workspace-1".into(), focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace {
+                        name: "workspace-2".into(),
+                        focused: 0,
+                        layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
+                    },
+                ],
+            }],
+            focused_frame: 0,
+        };
+        saved.validate().expect("the broken shape is still a structurally valid session");
+        std::fs::write(temp.0.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        let restored = temp.restore();
+        assert_eq!(restored.workspaces.workspaces.len(), 1, "the placeholder-only panel workspace should be gone");
+        let kept = &restored.workspaces.workspaces[0];
+        assert_eq!(kept.windows.windows().len(), 1, "the real file workspace is untouched");
+        assert_eq!(restored.workspaces.active, 0, "active index follows the workspace that survived");
+    }
+
+    /// The shape a real session file actually ends up in: using the Git
+    /// dashboard opens a file into one of its panes, so the workspace is
+    /// six unrestorable panes *and* one genuine document. Neither wholly
+    /// a panel nor worth restoring intact -- the document survives on its
+    /// own, the six placeholders don't.
+    #[test]
+    fn a_panel_workspace_that_had_a_file_opened_into_it_keeps_only_the_file() {
+        let temp = Temp::new();
+        let file = temp.0.join("opened.txt");
+        std::fs::write(&file, "the one real pane
+").unwrap();
+
+        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
+        let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
+        // Six placeholder panes with the document third from the left,
+        // so a passing result can't come from just taking the first or
+        // last leaf.
+        let panel = split(
+            Layout::Leaf(pane(None)),
+            split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(Some(0))), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None))))),
+        );
+        let saved = Session {
+            version: VERSION,
+            documents: vec![Document {
+                path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
+                conflict: false, recovery: None, cursor: 0,
+            }],
+            frames: vec![SavedFrame {
+                active: 0,
+                workspaces: vec![SavedWorkspace { name: "panel".into(), focused: 2, layout: panel }],
+            }],
+            focused_frame: 0,
+        };
+        saved.validate().expect("structurally valid");
+        std::fs::write(temp.0.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        let restored = temp.restore();
+        assert_eq!(restored.workspaces.workspaces.len(), 1);
+        let kept = &restored.workspaces.workspaces[0];
+        assert_eq!(kept.windows.windows().len(), 1, "only the documented pane should survive");
+        let id = *kept.windows.content(kept.windows.windows()[0]).unwrap();
+        assert_eq!(restored.buffers.get(id).unwrap().buffer.path(), Some(std::path::absolute(&file).unwrap().as_path()));
+        assert_eq!(restored.buffers.get(id).unwrap().kind, BufferKind::Text, "the survivor is the real file, not a placeholder");
     }
 
     #[test]

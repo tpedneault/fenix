@@ -70,6 +70,19 @@ mod rect_tests {
     }
 }
 
+/// How lopsided one split is allowed to get. Applies to every way a
+/// ratio can be set -- dragged (`resize_focused`), computed
+/// (`set_split_near`), or restored from a saved session -- so no path
+/// can produce a pane too small to see or to aim at with a mouse.
+///
+/// Worth knowing when computing a whole stack's proportions: in a
+/// right-nested chain the outermost split's ratio *is* the first pane's
+/// share of the whole, so no pane in such a stack can be given less
+/// than `MIN_RATIO` of the total without the clamp quietly overriding
+/// it and throwing every ratio below it off.
+const MIN_RATIO: f32 = 0.1;
+const MAX_RATIO: f32 = 0.9;
+
 enum Node<T> {
     Leaf { id: WindowId, content: T },
     Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },
@@ -102,7 +115,7 @@ impl<T> WindowTree<T> {
             Ok(match layout {
                 Layout::Leaf(content) => { let id = alloc_id(); leaves.push(id); Node::Leaf { id, content } }
                 Layout::Split { kind, ratio, first, second } => {
-                    if !ratio.is_finite() || !(0.1..=0.9).contains(&ratio) { return Err("invalid split ratio"); }
+                    if !ratio.is_finite() || !(MIN_RATIO..=MAX_RATIO).contains(&ratio) { return Err("invalid split ratio"); }
                     Node::Split { kind, ratio, first: Box::new(visit(*first, depth + 1, leaves)?), second: Box::new(visit(*second, depth + 1, leaves)?) }
                 }
             })
@@ -230,18 +243,32 @@ impl<T> Node<T> {
     }
 
     fn resize_near(&mut self, target: WindowId, delta: f32) -> bool {
+        self.adjust_near(target, &|ratio| ratio + delta)
+    }
+
+    fn set_near(&mut self, target: WindowId, ratio: f32) -> bool {
+        self.adjust_near(target, &|_| ratio)
+    }
+
+    /// Finds the split holding `target` as an immediate leaf child and
+    /// replaces its ratio with `f(current)`, clamped. Note "immediate
+    /// leaf child": in a right-nested stack each pane resolves to its
+    /// own split this way, except the last two, which share one -- so a
+    /// caller walking a stack should drive it from each split's *first*
+    /// pane and stop before the final one.
+    fn adjust_near(&mut self, target: WindowId, f: &dyn Fn(f32) -> f32) -> bool {
         match self {
             Node::Leaf { .. } => false,
             Node::Split { ratio, first, second, .. } => {
                 let first_is_target = matches!(&**first, Node::Leaf { id, .. } if *id == target);
                 let second_is_target = matches!(&**second, Node::Leaf { id, .. } if *id == target);
                 if first_is_target || second_is_target {
-                    *ratio = (*ratio + delta).clamp(0.1, 0.9);
+                    *ratio = f(*ratio).clamp(MIN_RATIO, MAX_RATIO);
                     true
-                } else if first.resize_near(target, delta) {
+                } else if first.adjust_near(target, f) {
                     true
                 } else {
-                    second.resize_near(target, delta)
+                    second.adjust_near(target, f)
                 }
             }
         }
@@ -411,6 +438,17 @@ impl<T> WindowTree<T> {
     pub fn resize_focused(&mut self, delta: f32) {
         let focused = self.focused;
         self.root_mut().resize_near(focused, delta);
+    }
+
+    /// Sets -- rather than nudges -- the ratio of the split holding
+    /// `target` as an immediate leaf child. The absolute counterpart to
+    /// `resize_focused`, for callers computing a whole stack's
+    /// proportions at once instead of dragging one edge; see
+    /// `Node::adjust_near` for which split a given pane resolves to, and
+    /// `MIN_RATIO` for the clamp a computed layout has to stay inside.
+    /// Returns whether such a split was found.
+    pub fn set_split_near(&mut self, target: WindowId, ratio: f32) -> bool {
+        self.root_mut().set_near(target, ratio)
     }
 
     /// Resets every split's ratio to an even 0.5 -- `SPC w =`.
