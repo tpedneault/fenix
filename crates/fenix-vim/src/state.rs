@@ -67,6 +67,10 @@ pub enum VimEvent {
     /// this value -- a hint for the host app to persist it, the same
     /// "escape hatch" role `RequestSave` plays for `:w`.
     IndentWidthChanged(usize),
+    /// `:set iskeyword=...`/`+=`/`-=` just changed the extra word-class
+    /// characters to this set -- same persist-it hint as
+    /// `IndentWidthChanged`, for the same reason.
+    IsKeywordChanged(Vec<char>),
     /// A "big jump" motion (`gg`/`G`, `%`, an initial `/`/`?` search, or
     /// `*`/`#`) just moved the cursor -- carries the char index it moved
     /// *from*, for a host-owned jumplist (`Ctrl-O`/`Ctrl-I`) to record.
@@ -382,6 +386,17 @@ pub struct VimState {
     /// sw=N` (see `substitute::run_ex_command`), persisted by the host
     /// app the same way it already persists the theme/font size.
     indent_width: usize,
+    /// Real Vim's own `'iskeyword'` option, narrowed to just the
+    /// punctuation characters it adds on top of "every alphanumeric
+    /// character" (see `charclass::classify`'s own doc comment for why)
+    /// -- starts at `DEFAULT_ISKEYWORD_EXTRA` (just `_`, Vim's actual
+    /// factory default), runtime-configurable via `:set iskeyword=...`/
+    /// `+=`/`-=` (see `substitute::run_ex_command`), persisted by the
+    /// host app the same way `indent_width` already is. Consulted by
+    /// every `w`/`e`/`b`-family motion, `iw`/`aw`, and `*`/`#` search --
+    /// never by `W`/`E`/`B` (real Vim's WORD motions are always
+    /// whitespace-only, regardless of `iskeyword`).
+    iskeyword_extra: Vec<char>,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -431,6 +446,7 @@ impl VimState {
             last_search: None,
             hlsearch_active: false,
             indent_width: indent::DEFAULT_INDENT_WIDTH,
+            iskeyword_extra: crate::charclass::DEFAULT_ISKEYWORD_EXTRA.to_vec(),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -456,6 +472,23 @@ impl VimState {
         if width > 0 {
             self.indent_width = width;
         }
+    }
+
+    /// The extra (beyond alphanumeric) word-class characters real Vim's
+    /// `'iskeyword'` currently holds -- for the host app to seed from a
+    /// persisted setting at startup and to re-persist after `:set
+    /// iskeyword=...`/`+=`/`-=` changes it (see `VimEvent::
+    /// IsKeywordChanged`).
+    pub fn iskeyword_extra(&self) -> &[char] {
+        &self.iskeyword_extra
+    }
+
+    /// Sets the extra `'iskeyword'` characters directly -- used by the
+    /// host app to apply a persisted setting at startup, mirroring
+    /// `:set iskeyword=...`'s own effect (a full replacement, not an
+    /// addition).
+    pub fn set_iskeyword_extra(&mut self, chars: Vec<char>) {
+        self.iskeyword_extra = chars;
     }
 
     /// Which kind of selection Visual mode is making. Only meaningful
@@ -979,7 +1012,7 @@ impl VimState {
                 let cmd = std::mem::take(&mut self.command_line);
                 self.mode = Mode::Normal;
                 let last_search = self.last_search.as_ref().map(|(pattern, _)| pattern.as_str());
-                return crate::substitute::run_ex_command(&cmd, buffer, cursor, &mut self.indent_width, last_search);
+                return crate::substitute::run_ex_command(&cmd, buffer, cursor, &mut self.indent_width, &mut self.iskeyword_extra, last_search);
             }
             KeyCode::Named(NamedKey::Backspace) => {
                 self.command_line.pop();
@@ -1249,12 +1282,12 @@ impl VimState {
             }
             VimAction::Motion(m @ Motion::MatchingBracket) => {
                 let before = cursor.char_idx;
-                apply_motion(buffer, cursor, m, count);
+                apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
                 if cursor.char_idx != before {
                     self.pending_jump = Some(before);
                 }
             }
-            VimAction::Motion(m) => apply_motion(buffer, cursor, m, count),
+            VimAction::Motion(m) => apply_motion(buffer, cursor, m, count, &self.iskeyword_extra),
             VimAction::Operator(op) => {
                 self.pending_op = Some(op);
                 self.pending_op_count = count;
@@ -1330,7 +1363,7 @@ impl VimState {
                 // Count support skipped here (real Vim's "3D" also pulls in
                 // the next 2 full lines, a nuance not worth the complexity
                 // for this action) -- always behaves as a plain d$/c$/y$.
-                let range = range_for_motion(buffer, cursor, Motion::LineEnd, 1);
+                let range = range_for_motion(buffer, cursor, Motion::LineEnd, 1, &self.iskeyword_extra);
                 self.finish_operator(buffer, cursor, op, range, false);
             }
             VimAction::ChangeLine => {
@@ -1364,7 +1397,7 @@ impl VimState {
             VimAction::RepeatFind { reverse } => {
                 if let Some((m, _)) = self.last_find {
                     let m = if reverse { reverse_find_motion(m) } else { m };
-                    apply_motion(buffer, cursor, m, count);
+                    apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
                 }
             }
             VimAction::EnterSearch { forward } => {
@@ -1426,10 +1459,10 @@ impl VimState {
         self.last_find = Some((m, c));
         if let Some(op) = self.pending_op.take() {
             let total_count = self.pending_op_count.saturating_mul(count);
-            let range = range_for_motion(buffer, cursor, m, total_count);
+            let range = range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra);
             self.finish_operator(buffer, cursor, op, range, m.is_linewise());
         } else {
-            apply_motion(buffer, cursor, m, count);
+            apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
         }
     }
 
@@ -1625,7 +1658,7 @@ impl VimState {
                     cursor.char_idx += 1;
                 }
             }
-            InsertEntry::LineStart => cursor.char_idx = motion::target(buffer, cursor, Motion::LineFirstNonBlank),
+            InsertEntry::LineStart => cursor.char_idx = motion::target(buffer, cursor, Motion::LineFirstNonBlank, &self.iskeyword_extra),
             InsertEntry::LineEnd => {
                 let (line, _) = buffer.line_col(cursor);
                 cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
@@ -1783,11 +1816,11 @@ impl VimState {
                     }
                     PendingTarget::Motion(m) => {
                         let m = adjust_for_change_word(op, m, buffer, cursor);
-                        (range_for_motion(buffer, cursor, m, total_count), m.is_linewise())
+                        (range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra), m.is_linewise())
                     }
                     // Counts on text objects aren't supported ("2diw" behaves
                     // like "diw") -- a disclosed simplification.
-                    PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj), textobject::is_linewise(obj)),
+                    PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj, &self.iskeyword_extra), textobject::is_linewise(obj)),
                 };
                 self.finish_operator(buffer, cursor, op, range, linewise);
             }
@@ -1913,8 +1946,8 @@ impl VimState {
     /// that same simplification.
     fn surround_target_range(&self, buffer: &Buffer, cursor: &Cursor, target: PendingTarget) -> Range<usize> {
         match target {
-            PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, 1),
-            PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj),
+            PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, 1, &self.iskeyword_extra),
+            PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj, &self.iskeyword_extra),
         }
     }
 
@@ -1990,8 +2023,8 @@ impl VimState {
                 self.pending_comment = false;
                 let total_count = self.pending_comment_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
                 let range = match target {
-                    PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, total_count),
-                    PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj),
+                    PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra),
+                    PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj, &self.iskeyword_extra),
                 };
                 self.pending_comment_lines = Some(range_to_lines(buffer, &range));
             }
@@ -2067,7 +2100,7 @@ impl VimState {
             self.pending_pulse = Some(at..(at + block.chars().count()));
             // Vim leaves the cursor on the first non-blank of the pasted
             // block's first line, not at column 0 -- matches `^`.
-            cursor.char_idx = motion::target(buffer, &Cursor { char_idx: at, sticky_col: 0 }, Motion::LineFirstNonBlank);
+            cursor.char_idx = motion::target(buffer, &Cursor { char_idx: at, sticky_col: 0 }, Motion::LineFirstNonBlank, &self.iskeyword_extra);
         } else {
             let text = text.repeat(count);
             let at = if after { (cursor.char_idx + 1).min(buffer.len_chars()) } else { cursor.char_idx };
@@ -2146,7 +2179,7 @@ impl VimState {
             match *action {
                 // Counts aren't supported in Visual mode -- the selection
                 // is already explicit, unlike Normal mode's motions.
-                VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1),
+                VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1, &self.iskeyword_extra),
                 VisualAction::Apply(op) => {
                     self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
                     if self.visual_kind == VisualKind::Block {
@@ -2350,9 +2383,9 @@ fn reverse_find_motion(m: Motion) -> Motion {
     }
 }
 
-fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32) {
+fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, iskeyword_extra: &[char]) {
     for _ in 0..count.max(1) {
-        let target = motion::target(buffer, cursor, m);
+        let target = motion::target(buffer, cursor, m, iskeyword_extra);
         if target == cursor.char_idx {
             break; // no progress (already at a boundary) -- stop instead of spinning
         }
@@ -2368,9 +2401,9 @@ fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32) {
 /// without mutating `cursor` -- used to compute an operator's range
 /// (`3dw`, `d3w`) without moving the cursor before the delete/change/yank
 /// actually happens.
-fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32) -> usize {
+fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32, iskeyword_extra: &[char]) -> usize {
     let mut probe = *cursor;
-    apply_motion(buffer, &mut probe, m, count);
+    apply_motion(buffer, &mut probe, m, count, iskeyword_extra);
     probe.char_idx
 }
 
@@ -2498,8 +2531,8 @@ fn lines_content_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<u
     start..end
 }
 
-fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32) -> Range<usize> {
-    let target = motion_target_repeated(buffer, cursor, motion, count);
+fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32, iskeyword_extra: &[char]) -> Range<usize> {
+    let target = motion_target_repeated(buffer, cursor, motion, count, iskeyword_extra);
     if motion.is_linewise() {
         let (cur_line, _) = buffer.line_col(cursor);
         let (tgt_line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
@@ -4163,6 +4196,162 @@ mod tests {
         assert_eq!(vim.indent_width(), 2);
         vim.set_indent_width(0); // rejected, division-by-zero guard
         assert_eq!(vim.indent_width(), 2);
+    }
+
+    /// Real Vim's actual factory default: `_` is a keyword character, so
+    /// `testing_variables` is one word to `w`/`e`/`b` -- confirms
+    /// `VimState::new()` starts there (not, say, empty), since that's
+    /// the behavior every other word-motion test in this file already
+    /// depends on implicitly.
+    #[test]
+    fn word_motions_treat_underscore_as_part_of_the_word_by_default() {
+        let mut b = buf("testing_variables end
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, "e");
+
+        assert_eq!(c.char_idx, "testing_variables".len() - 1); // end of "testing_variables", not "testing"
+    }
+
+    /// `:set iskeyword-=_` is real Vim's own way to get exactly the
+    /// snake_case-aware word motion some other editors (Doom Emacs's
+    /// evil-mode among them) ship as their own default: `_` becomes a
+    /// punctuation-class boundary of its own, so `e` on
+    /// `testing_variables` stops at the end of `testing`.
+    #[test]
+    fn set_iskeyword_minus_equals_underscore_makes_it_a_word_boundary() {
+        let mut b = buf("testing_variables end
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword-=_");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::IsKeywordChanged(Vec::new()));
+        assert_eq!(vim.mode(), Mode::Normal);
+
+        keys(&mut vim, &mut b, &mut c, "e");
+        assert_eq!(c.char_idx, "testing".len() - 1); // end of "testing"
+
+        // `_` now starts its own little punctuation run, same as any
+        // other single non-word character -- one more `e` (which
+        // "advances at least one char" even from a one-char run) lands
+        // right on it.
+        keys(&mut vim, &mut b, &mut c, "e");
+        assert_eq!(c.char_idx, "testing".len()); // the underscore itself
+    }
+
+    /// `iw`/`aw` is built on the exact same per-character boundary scan
+    /// `w`/`e`/`b` are (`charclass::classify`), so `:set iskeyword-=_`
+    /// reaches it too -- unlike `*`/`#`, which wrap the extracted word
+    /// in a fixed regex `` boundary and deliberately keep the old,
+    /// underscore-inclusive behavior regardless of this option (see
+    /// `search::word_under_cursor_pattern`'s own doc comment for why).
+    #[test]
+    fn set_iskeyword_minus_equals_underscore_also_narrows_iw() {
+        let mut b = buf("testing_variables end
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword-=_");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+
+        keys(&mut vim, &mut b, &mut c, "diw");
+        assert_eq!(b.text(), "_variables end
+"); // just "testing" removed, not the whole identifier
+    }
+
+    /// Real Vim's factory default restored via an explicit `:set
+    /// iskeyword=_` (no `+`/`-`) -- a full replacement, matching
+    /// `set_iskeyword_extra`'s own doc comment.
+    #[test]
+    fn set_iskeyword_equals_replaces_the_whole_set() {
+        let mut b = buf("a-b c_d
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword-=_");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword=-");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::IsKeywordChanged(vec!['-']));
+
+        c.char_idx = 0;
+        keys(&mut vim, &mut b, &mut c, "e");
+        assert_eq!(c.char_idx, 2); // "a-b" is now one word (- included, _ isn't)
+    }
+
+    #[test]
+    fn set_iskeyword_plus_equals_adds_a_character() {
+        let mut b = buf("a$b c
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword+=$");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::IsKeywordChanged(vec!['_', '$']));
+
+        keys(&mut vim, &mut b, &mut c, "e");
+        assert_eq!(c.char_idx, 2); // "a$b" reads as one word
+    }
+
+    #[test]
+    fn set_iskeyword_to_the_same_value_reports_no_change() {
+        let mut b = buf("hi
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword+=_"); // already there
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::None);
+    }
+
+    /// `isk` is real Vim's own abbreviation for `iskeyword` -- confirms
+    /// it's accepted, not just the spelled-out name.
+    #[test]
+    fn isk_is_an_accepted_abbreviation_for_iskeyword() {
+        let mut b = buf("testing_variables
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set isk-=_");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::IsKeywordChanged(Vec::new()));
+
+        keys(&mut vim, &mut b, &mut c, "e");
+        assert_eq!(c.char_idx, "testing".len() - 1);
+    }
+
+    #[test]
+    fn set_iskeyword_extra_applies_a_persisted_setting_directly() {
+        let mut vim = VimState::new();
+        assert_eq!(vim.iskeyword_extra(), &['_']);
+        vim.set_iskeyword_extra(Vec::new());
+        assert_eq!(vim.iskeyword_extra(), &[] as &[char]);
+        vim.set_iskeyword_extra(vec!['_', '-']);
+        assert_eq!(vim.iskeyword_extra(), &['_', '-']);
+    }
+
+    /// A multi-character token (an attempted range, real Vim's own
+    /// `48-57`-style syntax) isn't supported -- silently skipped rather
+    /// than misread as a single weird character.
+    #[test]
+    fn a_multi_character_iskeyword_token_is_silently_skipped() {
+        let mut b = buf("hi
+");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+
+        keys(&mut vim, &mut b, &mut c, ":set iskeyword+=48-57");
+        let ev = named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        assert_eq!(ev, VimEvent::None);
+        assert_eq!(vim.iskeyword_extra(), &['_']);
     }
 
     #[test]

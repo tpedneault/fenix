@@ -23,7 +23,17 @@ for anyone curious to poke around or build on it.
   (`/`, `?`, `n`, `N`, `*`, `#`) with a live incsearch preview and
   persistent match highlighting while it's active, `:s` substitute with
   backreferences, indentation (`>>`/`<<`, auto-indent, `:set
-  shiftwidth=N`).
+  shiftwidth=N`). `'iskeyword'` is real Vim's own option, not a
+  bespoke one: `w`/`e`/`b` and `iw`/`aw` treat `_` as part of a word by
+  default (`testing_variables` is one word, real Vim's own factory
+  default), same as `*`/`#`, which always search the whole
+  underscore-inclusive identifier regardless of this setting (see the
+  caveat below); `:set iskeyword-=_` narrows that to the snake_case-
+  aware navigation some other editors (Doom Emacs's evil-mode among
+  them) ship as their own default instead, so `e` on `testing_variables`
+  stops at the end of `testing` -- `:set iskeyword+=X`/`iskeyword=X,Y`
+  add to or replace the set outright. Persisted across restarts the
+  same way `shiftwidth` already is.
 - **Macros** (`q{a-zA-Z}` to record, a second bare `q` to stop, `@
   {register}` to replay, `@@` to repeat whichever was last played,
   `3@a`-style count prefix): real Vim's own model, not a separate
@@ -1428,7 +1438,11 @@ runtime (picking a theme, font size, `:set shiftwidth=N`); you can also
 hand-edit it directly. Every key is optional — a missing or unparsable
 value just falls back to the built-in default instead of failing to
 load. A value's surrounding whitespace is always trimmed; wrap it in
-double quotes (`key = " "`) to keep whitespace that actually matters.
+double quotes (`key = " "`) to keep whitespace that actually matters
+(`iskeyword_extra = ""`, an explicitly *empty* extra set, needs this —
+an unquoted empty value is indistinguishable from the key being absent
+altogether, which instead falls back to real Vim's own default of
+`_`).
 
 ```ini
 [editor]
@@ -1436,6 +1450,7 @@ theme = TempleOS
 font_size = 16
 font_family = Fira Code
 indent_width = 4
+iskeyword_extra = _
 tab_width = 8
 animations = true
 
