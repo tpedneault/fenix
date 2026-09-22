@@ -20,6 +20,8 @@
 pub mod coords;
 pub mod framebuffer;
 pub mod keysym;
+#[doc(hidden)]
+pub mod test_server;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,6 +48,20 @@ pub const ACTIVE_REFRESH_MILLIS: u64 = 16;
 /// stale frame, but far cheaper for however long it stays unfocused.
 /// Set via `VncClient::set_active(false)`.
 pub const IDLE_REFRESH_MILLIS: u64 = 500;
+
+/// How long `connect` gives the whole handshake (TCP connect plus RFB
+/// negotiation) before failing it. Without a bound, a port that accepts
+/// the TCP connection but never speaks RFB -- a Docker port proxy whose
+/// container is still starting, a server mid-shutdown -- leaves the
+/// calling thread waiting forever, and a reconnect attempt that never
+/// reports back leaves its session stuck on "reconnecting" for good.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `VncFrame::Disconnected` reason for the ordinary way a session
+/// ends: the server closed its end (the VNC server process exited, the VM
+/// shut down). `vnc-rs` itself only ever reports that as "the VNC client
+/// isn't started", which reads like a bug in the client.
+pub const SERVER_CLOSED: &str = "the server closed the connection";
 
 /// One decoded update from the VM, handed to the caller's own background
 /// reader thread (mirroring `fenix_terminal::Terminal::process`'s "caller
@@ -154,10 +170,15 @@ impl VncClient {
             };
             let handle = runtime.handle().clone();
             runtime.block_on(async move {
-                let client = match do_handshake(&host, port).await {
-                    Ok(client) => client,
-                    Err(err) => {
+                let client = match tokio::time::timeout(HANDSHAKE_TIMEOUT, do_handshake(&host, port)).await {
+                    Ok(Ok(client)) => client,
+                    Ok(Err(err)) => {
                         let _ = setup_tx.send(Err(err));
+                        return;
+                    }
+                    Err(_) => {
+                        let message = format!("no VNC handshake from {host}:{port} within {}s", HANDSHAKE_TIMEOUT.as_secs());
+                        let _ = setup_tx.send(Err(io::Error::new(io::ErrorKind::TimedOut, message)));
                         return;
                     }
                 };
@@ -536,7 +557,7 @@ async fn pump_events(
             }
             Ok(None) => {}
             Err(err) => {
-                let _ = frame_tx.send(VncFrame::Disconnected(err.to_string()));
+                let _ = frame_tx.send(VncFrame::Disconnected(disconnect_reason(&err)));
                 return;
             }
         }
@@ -549,7 +570,13 @@ async fn pump_events(
             // path (`!awaiting_response` already gates both), just with
             // `FullRefresh` in place of `Refresh` this one time.
             let event = if pending_full_refresh { X11Event::FullRefresh } else { X11Event::Refresh };
-            if client.input(event).await.is_err() {
+            if let Err(err) = client.input(event).await {
+                // The socket task already stopped (the server went away
+                // between the last event and this request). Returning
+                // without saying so would close the frame channel with no
+                // `Disconnected` in it, and the caller would never know to
+                // reconnect -- a frozen pane on a live-looking session.
+                let _ = frame_tx.send(VncFrame::Disconnected(disconnect_reason(&err)));
                 return;
             }
             pending_full_refresh = false;
@@ -557,6 +584,20 @@ async fn pump_events(
         }
 
         tokio::time::sleep(Duration::from_millis(POLL_MILLIS)).await;
+    }
+}
+
+/// What to tell the user a session ended because of. The ordinary case --
+/// the server closed the socket -- surfaces from `vnc-rs` as its internal
+/// "client not running" state (its socket task stopped, closing the event
+/// channel) or a closed internal channel, neither of which says anything
+/// useful; everything else (a reset connection, a protocol error) is
+/// already specific and is kept as it is.
+fn disconnect_reason(err: &VncError) -> String {
+    match err {
+        VncError::ClientNotRunning => SERVER_CLOSED.to_string(),
+        VncError::General(msg) if msg == "Channel closed" => SERVER_CLOSED.to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -694,6 +735,30 @@ mod tests {
             map_event(VncEvent::SetCursor(vnc::Rect { x: 3, y: 4, width: 16, height: 16 }, vec![7; 16 * 16 * 4])),
             Some(VncFrame::Cursor { width: 16, height: 16, hotspot_x: 3, hotspot_y: 4, bgra: vec![7; 16 * 16 * 4] })
         );
+    }
+
+    #[test]
+    fn a_server_closing_the_socket_reads_as_the_server_closing_it() {
+        assert_eq!(disconnect_reason(&VncError::ClientNotRunning), SERVER_CLOSED);
+        assert_eq!(disconnect_reason(&VncError::General("Channel closed".to_string())), SERVER_CLOSED);
+        assert_eq!(disconnect_reason(&VncError::WrongServerMessage), "Unkonw server message");
+    }
+
+    #[test]
+    fn a_port_that_never_speaks_rfb_times_out_instead_of_hanging() {
+        // Accepts the TCP connection and then says nothing, like a port
+        // proxy with nothing behind it yet.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            thread::sleep(HANDSHAKE_TIMEOUT + Duration::from_secs(5));
+            drop(socket);
+        });
+        let started = Instant::now();
+        let err = VncClient::connect("127.0.0.1", port).err().expect("a silent server must fail the handshake");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < HANDSHAKE_TIMEOUT + Duration::from_secs(3));
     }
 
     #[test]

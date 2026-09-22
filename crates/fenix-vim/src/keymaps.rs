@@ -99,6 +99,8 @@ pub enum VimAction {
     /// host concern), just that one of these three keys asks the host
     /// to go find out. Resolved into `VimEvent::RequestLsp`.
     RequestLsp(crate::state::LspRequestKind),
+    /// `]t`/`[t` -- resolved into `VimEvent::BracketJump`.
+    BracketJump { target: crate::state::BracketTarget, forward: bool },
 }
 
 /// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
@@ -128,6 +130,13 @@ pub enum VisualAction {
     /// never restricts Visual indent to the selected columns.
     Indent,
     Dedent,
+    /// `p`/`P`: replace the selection with the register's text (the OS
+    /// clipboard, via the unnamed register the host mirrors it into).
+    /// `p` is real Vim's `v_p`: the replaced text takes the register's
+    /// place, so pasting again puts back what was just overwritten. `P`
+    /// (`keep_register`) is Vim 9's `v_P`: the register is left alone, for
+    /// pasting the same text over one selection after another.
+    Paste { keep_register: bool },
     /// `r`: waits for one more raw key (the replacement char), then
     /// overwrites every selected character with it -- same "next key is
     /// special" shape as Normal mode's own `r`, just resolved against
@@ -215,6 +224,10 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
     t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
     t.insert(&[KeyPress::char('K')], "hover", VimAction::RequestLsp(crate::state::LspRequestKind::Hover));
+    t.label_group(&[KeyPress::char(']')], "next...");
+    t.label_group(&[KeyPress::char('[')], "previous...");
+    t.insert(&[KeyPress::char(']'), KeyPress::char('t')], "next TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('t')], "previous TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: false });
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);
@@ -275,6 +288,8 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
     t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
+    t.insert(&[KeyPress::char('p')], "paste over selection", VisualAction::Paste { keep_register: false });
+    t.insert(&[KeyPress::char('P')], "paste over selection, keep register", VisualAction::Paste { keep_register: true });
     t.insert(&[KeyPress::char('S')], "surround selection", VisualAction::Surround);
     t.insert(&[KeyPress::char('~')], "toggle case", VisualAction::ChangeCase(CaseChange::Toggle));
     t.insert(&[KeyPress::char('u')], "lowercase", VisualAction::ChangeCase(CaseChange::Lower));
@@ -308,6 +323,8 @@ fn build_pending_trie() -> KeyTrie<PendingTarget> {
         "a paragraph",
         PendingTarget::TextObject(TextObject::AParagraph),
     );
+    t.insert(&[KeyPress::char('i'), KeyPress::char('t')], "inner tag", PendingTarget::TextObject(TextObject::InnerTag));
+    t.insert(&[KeyPress::char('a'), KeyPress::char('t')], "a tag", PendingTarget::TextObject(TextObject::ATag));
     t
 }
 

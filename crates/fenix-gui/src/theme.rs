@@ -169,7 +169,16 @@ impl Theme {
             "text.emphasis" => return self.syntax_type,   // *italic*: a secondary accent, less emphatic than strong
             "text.literal" => return self.syntax_string,  // `code spans`: read as a literal value, same as a real string
             "text.uri" | "text.reference" => return self.syntax_constant, // links
+            // XML: CDATA contents read as a literal, its `<![CDATA[`/`]]>`
+            // brackets as punctuation, a link (a DOCTYPE's system ID) as
+            // any other link; element text itself stays body text.
+            "markup.raw" => return self.syntax_string,
+            "markup.heading" => return self.syntax_punctuation,
+            "markup.link" => return self.syntax_constant,
             _ => {}
+        }
+        if let Some(kind) = fenix_syntax::TodoKind::from_capture_name(capture_name) {
+            return self.todo_color(kind);
         }
         let top = capture_name.split('.').next().unwrap_or(capture_name);
         match top {
@@ -191,7 +200,29 @@ impl Theme {
             "operator" => self.syntax_operator,
             "punctuation" => self.syntax_punctuation,
             "attribute" | "constructor" => self.syntax_attribute,
+            // XML element names read as the language's keywords do in
+            // every other grammar -- the structural words -- and a
+            // processing instruction as an annotation, like an attribute.
+            "tag" => self.syntax_keyword,
+            "embedded" => self.syntax_attribute,
             _ => self.fg,
+        }
+    }
+
+    /// The color a TODO-style comment keyword is drawn in (and, faded, the
+    /// tint behind it) -- mapped onto colors every theme already defines
+    /// with a fixed meaning, so each kind reads the same way across
+    /// themes: broken is the conflict red, a hack/warning the modified
+    /// amber, a note the staged green.
+    pub fn todo_color(&self, kind: fenix_syntax::TodoKind) -> glyphon::Color {
+        use fenix_syntax::TodoKind;
+        match kind {
+            TodoKind::Fix => self.git_conflicted,
+            TodoKind::Todo => self.syntax_function,
+            TodoKind::Hack | TodoKind::Warn => self.git_modified,
+            TodoKind::Perf => self.syntax_type,
+            TodoKind::Note => self.git_staged,
+            TodoKind::Test => self.syntax_constant,
         }
     }
 

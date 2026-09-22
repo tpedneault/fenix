@@ -37,6 +37,15 @@ pub enum LanguageId {
     Dockerfile,
     /// Windows Batch/CMD scripts (`.bat`/`.cmd`).
     Batch,
+    /// XML and the many formats that are XML under another extension
+    /// (`.svg`, `.xsd`, `.xslt`, MSBuild project files, `.plist`,
+    /// `.xaml`, ...) -- see `detect_language` for the full list.
+    Xml,
+    /// A standalone Document Type Definition (`.dtd`/`.ent`). A
+    /// separate grammar from `Xml` in the same crate: an internal
+    /// `<!DOCTYPE [...]>` subset is already covered by the XML grammar
+    /// itself.
+    Dtd,
 }
 
 /// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
@@ -65,6 +74,8 @@ impl LanguageId {
             LanguageId::Tcl => tree_sitter_tcl::LANGUAGE.into(),
             LanguageId::Dockerfile => tree_sitter_containerfile::LANGUAGE.into(),
             LanguageId::Batch => tree_sitter_batch::LANGUAGE.into(),
+            LanguageId::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
+            LanguageId::Dtd => tree_sitter_xml::LANGUAGE_DTD.into(),
         }
     }
 
@@ -84,6 +95,8 @@ impl LanguageId {
             LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
             LanguageId::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY,
             LanguageId::Batch => tree_sitter_batch::HIGHLIGHTS_QUERY,
+            LanguageId::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY,
+            LanguageId::Dtd => tree_sitter_xml::DTD_HIGHLIGHT_QUERY,
         }
     }
 }
@@ -109,6 +122,16 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "tcl" | "tm" => Some(LanguageId::Tcl),
         "dockerfile" => Some(LanguageId::Dockerfile),
         "bat" | "cmd" => Some(LanguageId::Batch),
+        // XML under its own name and under the extensions of the formats
+        // built on it: schemas and transforms, SVG, MSBuild/.NET project
+        // and resource files, Apple property lists, WiX, Qt Designer,
+        // feeds, GPS/map data, localization, Android/Maven configs.
+        "xml" | "xsd" | "xsl" | "xslt" | "xsl-fo" | "fo" | "rng" | "wsdl" | "svg" | "xhtml" | "xul" | "csproj" | "vbproj"
+        | "fsproj" | "vcxproj" | "filters" | "proj" | "props" | "targets" | "wixproj" | "wxs" | "wxi" | "nuspec" | "resx"
+        | "xaml" | "axaml" | "config" | "manifest" | "plist" | "ui" | "qrc" | "rss" | "atom" | "kml" | "gpx" | "tcx"
+        | "gml" | "graphml" | "xliff" | "xlf" | "tmx" | "dita" | "ditamap" | "xmi" | "bpmn" | "dae" | "fxml" | "mxml"
+        | "jrxml" | "urdf" | "launch" | "storyboard" | "xib" => Some(LanguageId::Xml),
+        "dtd" | "ent" => Some(LanguageId::Dtd),
         _ => None,
     }
 }
@@ -175,6 +198,11 @@ mod tests {
         assert_eq!(detect_language("dockerfile"), Some(LanguageId::Dockerfile));
         assert_eq!(detect_language("bat"), Some(LanguageId::Batch));
         assert_eq!(detect_language("cmd"), Some(LanguageId::Batch));
+        assert_eq!(detect_language("xml"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("svg"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("csproj"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("xsd"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("dtd"), Some(LanguageId::Dtd));
     }
 
     #[test]

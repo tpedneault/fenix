@@ -62,6 +62,10 @@ impl CommandRegistry {
             cmd_table_toggle,
         );
         registry.register("search.buffer", "Fuzzy-find a line in the current buffer", cmd_search_buffer);
+        registry.register("search.todos", "List the TODO comments in the current buffer", cmd_search_todos);
+        registry.register("search.todos_project", "List the TODO comments across the project", cmd_search_todos_project);
+        registry.register("code.xml_validate", "Check the current XML buffer is well-formed", cmd_code_xml_validate);
+        registry.register("code.xml_path", "Copy the XPath of the XML element under the cursor", cmd_code_xml_path);
         registry.register("search.replace_buffer", "Search and replace in the current buffer", cmd_search_replace_buffer);
         registry.register(
             "search.replace_project",
@@ -336,6 +340,22 @@ fn cmd_table_toggle(ctx: &mut CommandCtx) {
 
 fn cmd_search_buffer(ctx: &mut CommandCtx) {
     ctx.app.picker_search_buffer();
+}
+
+fn cmd_search_todos(ctx: &mut CommandCtx) {
+    ctx.app.picker_buffer_todos();
+}
+
+fn cmd_search_todos_project(ctx: &mut CommandCtx) {
+    ctx.app.picker_project_todos();
+}
+
+fn cmd_code_xml_validate(ctx: &mut CommandCtx) {
+    ctx.app.xml_validate();
+}
+
+fn cmd_code_xml_path(ctx: &mut CommandCtx) {
+    ctx.app.yank_xml_path();
 }
 
 fn cmd_search_replace_buffer(ctx: &mut CommandCtx) {

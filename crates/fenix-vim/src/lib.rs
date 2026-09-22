@@ -9,6 +9,7 @@ mod operator;
 mod search;
 mod state;
 mod substitute;
+mod tag;
 mod textobject;
 
 #[cfg(test)]
@@ -21,6 +22,6 @@ pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
 pub use motion::Motion;
 pub use operator::Operator;
-pub use state::{LspRequestKind, VimEvent, VimState};
+pub use state::{BracketTarget, LspRequestKind, VimEvent, VimState};
 pub use substitute::replace_in_text;
 pub use textobject::TextObject;

@@ -3,6 +3,8 @@ mod snippets;
 mod tool_sessions;
 mod session;
 mod editor_ui;
+mod todos;
+mod xml;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -1286,6 +1288,8 @@ struct VncSession {
     /// `MAX_VNC_RECONNECT_ATTEMPTS` caps it so a permanently-unreachable
     /// VM eventually stops retrying instead of retrying forever.
     reconnect_attempts: u32,
+    /// Whether `client` is a working connection -- see `VncLink`.
+    link: VncLink,
     /// This pane's on-screen pixel size as of the *last* redraw --
     /// compared against the current frame's size every redraw to detect
     /// a resize and, together with `pane_size_stable_since`, decide when
@@ -2471,6 +2475,14 @@ enum ReplaceWizardStage {
 enum ActivePicker {
     FindFile(fenix_picker::PickerState<PathBuf>),
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `SPC s t`: the TODO-style comments in the focused buffer, payload
+    /// the keyword's char offset -- confirming jumps there, the same as
+    /// `BufferSearch`.
+    BufferTodos(fenix_picker::PickerState<usize>),
+    /// `SPC s T`: the TODO-style comments across the project, as grep
+    /// matches -- confirming behaves exactly like `Grep`'s, and the same
+    /// list becomes the quickfix list for `SPC p n`/`SPC p N`.
+    ProjectTodos(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
     SwitchBuffer(fenix_picker::PickerState<BufferId>),
     /// `SPC f v`: unsaved work a previous session left behind, one row
@@ -2689,6 +2701,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
         ActivePicker::BufferSearch(s) => s.push_char(c),
+        ActivePicker::BufferTodos(s) => s.push_char(c),
+        ActivePicker::ProjectTodos(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
@@ -2735,6 +2749,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
         ActivePicker::BufferSearch(s) => s.backspace(),
+        ActivePicker::BufferTodos(s) => s.backspace(),
+        ActivePicker::ProjectTodos(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
@@ -2781,6 +2797,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
+        ActivePicker::BufferTodos(s) => s.move_selection(delta),
+        ActivePicker::ProjectTodos(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
@@ -2830,6 +2848,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
+        ActivePicker::BufferTodos(s) => s.toggle_mark(),
+        ActivePicker::ProjectTodos(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
@@ -2876,6 +2896,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
         ActivePicker::BufferSearch(s) => s.query(),
+        ActivePicker::BufferTodos(s) => s.query(),
+        ActivePicker::ProjectTodos(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
@@ -2922,6 +2944,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
         ActivePicker::BufferSearch(s) => s.len(),
+        ActivePicker::BufferTodos(s) => s.len(),
+        ActivePicker::ProjectTodos(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
@@ -2968,6 +2992,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
         ActivePicker::BufferSearch(s) => s.selected_row(),
+        ActivePicker::BufferTodos(s) => s.selected_row(),
+        ActivePicker::ProjectTodos(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
@@ -3030,6 +3056,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -4288,7 +4316,19 @@ fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str
     match language {
         LanguageId::Rust | LanguageId::C | LanguageId::Cpp | LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some("//"),
         LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
-        LanguageId::Json | LanguageId::Markdown | LanguageId::Batch => None,
+        LanguageId::Json | LanguageId::Markdown | LanguageId::Batch | LanguageId::Xml | LanguageId::Dtd => None,
+    }
+}
+
+/// The `(open, close)` pair `gcc` wraps each line in, for a language
+/// whose only comment syntax is a block comment -- XML, a DTD, and
+/// Markdown's HTML comments. Consulted only when `line_comment_token`
+/// has nothing.
+fn block_comment_tokens(language: fenix_syntax::LanguageId) -> Option<(&'static str, &'static str)> {
+    use fenix_syntax::LanguageId;
+    match language {
+        LanguageId::Xml | LanguageId::Dtd | LanguageId::Markdown => Some(("<!--", "-->")),
+        _ => None,
     }
 }
 
@@ -6166,6 +6206,12 @@ pub struct App {
     /// confirming a `Grep` picker entry last landed -- `None` before
     /// any match in the current list has been visited.
     quickfix_index: Option<usize>,
+    /// The TODO-style comment keywords `syntax_highlights_for_visible_
+    /// range` found in each buffer's visible window on its last run, for
+    /// the renderer to tint behind -- recorded there because that's the
+    /// one place the capture names are still known, before they're
+    /// turned into colors.
+    todo_spans: HashMap<BufferId, Vec<(std::ops::Range<usize>, fenix_syntax::TodoKind)>>,
     /// The grep search-term prompt, when in progress -- `Some` only
     /// between `SPC p s` and the term being submitted (or cancelled),
     /// not while an `ActivePicker::Grep` is already showing results.
@@ -6958,6 +7004,32 @@ fn wheel_delta_lines(delta: MouseScrollDelta, line_height: f32) -> isize {
     }
 }
 
+/// Where a VNC session's connection stands. The session itself -- pane,
+/// buffer, last frame -- outlives any one connection; this is what says
+/// whether the `client` it's holding is still worth talking to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VncLink {
+    Live,
+    /// The connection dropped and a reconnect attempt is scheduled or in
+    /// flight.
+    Reconnecting,
+    /// Automatic reconnecting gave up (`MAX_VNC_RECONNECT_ATTEMPTS`).
+    /// `SPC v v` on the session starts it again.
+    Down,
+}
+
+/// The pane title for a session in `link` state -- the one place a
+/// dropped connection shows on the pane itself rather than only in a
+/// modeline message that clears after a few seconds, which left a frozen
+/// last frame looking exactly like a live, idle desktop.
+fn vnc_pane_title(name: &str, link: VncLink) -> String {
+    match link {
+        VncLink::Live => format!("VNC: {name}"),
+        VncLink::Reconnecting => format!("VNC: {name} (disconnected, reconnecting...)"),
+        VncLink::Down => format!("VNC: {name} (disconnected -- SPC v v to reconnect)"),
+    }
+}
+
 /// How many consecutive automatic reconnect attempts a dropped VNC
 /// session gets before `apply_vnc_connected` gives up and leaves it for
 /// the user to reopen manually -- a permanently-unreachable VM (powered
@@ -7323,6 +7395,7 @@ impl App {
             marks: HashMap::new(),
             quickfix: Vec::new(),
             quickfix_index: None,
+            todo_spans: HashMap::new(),
             known_projects,
             recent_files,
             dashboard_lines,
@@ -9278,7 +9351,12 @@ impl App {
     /// no single-token line comment (`line_comment_token`), or the
     /// range is entirely blank.
     pub(crate) fn toggle_comment_lines(&mut self, start_line: usize, end_line: usize) {
-        let Some(token) = self.focused_language().and_then(line_comment_token) else {
+        let language = self.focused_language();
+        if let Some((open, close)) = language.filter(|l| line_comment_token(*l).is_none()).and_then(block_comment_tokens) {
+            self.toggle_block_comment_lines(start_line, end_line, open, close);
+            return;
+        }
+        let Some(token) = language.and_then(line_comment_token) else {
             self.set_error("no comment syntax known for this buffer's language");
             return;
         };
@@ -9347,6 +9425,59 @@ impl App {
         }
     }
 
+    /// `toggle_comment_lines` for a block-comment-only language: each
+    /// non-blank line is wrapped in its own `open ... close` pair
+    /// (`<!-- line -->`) rather than the range in one, so toggling any
+    /// sub-range of it later still lines up, and a line that already
+    /// contains a comment of its own doesn't end up nesting one inside
+    /// another (which XML doesn't allow). Same all-or-rest rule as the
+    /// line-comment path.
+    fn toggle_block_comment_lines(&mut self, start_line: usize, end_line: usize, open: &str, close: &str) {
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let end_line = end_line.min(buffer.line_count().saturating_sub(1));
+        let mut lines: Vec<(usize, String, String, bool)> = Vec::new();
+        let mut all_commented = true;
+        for line in start_line..=end_line {
+            let start = buffer.line_start_char(line);
+            let text = buffer.text_range(start, start + buffer.line_len(line));
+            let body = text.trim_start();
+            if body.is_empty() {
+                continue;
+            }
+            let indent = text[..text.len() - body.len()].to_string();
+            let body = body.trim_end().to_string();
+            let commented = body.starts_with(open) && body.ends_with(close) && body.len() >= open.len() + close.len();
+            if !commented {
+                all_commented = false;
+            }
+            lines.push((line, indent, body, commented));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        for (line, indent, body, commented) in lines.into_iter().rev() {
+            let replacement = if all_commented {
+                let inner = &body[open.len()..body.len() - close.len()];
+                let inner = inner.strip_prefix(' ').unwrap_or(inner);
+                let inner = inner.strip_suffix(' ').unwrap_or(inner);
+                format!("{indent}{inner}")
+            } else if !commented {
+                format!("{indent}{open} {body} {close}")
+            } else {
+                continue;
+            };
+            let start = buffer.line_start_char(line);
+            let end = start + buffer.line_len(line);
+            buffer.replace_range(cursor, start, end, &replacement);
+        }
+        cursor.char_idx = buffer.line_start_char(start_line).min(buffer.len_chars());
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        if !self.replaying_change {
+            self.change_capture_dirty = true;
+        }
+    }
+
     /// `SPC c F` -- reindents the whole focused buffer in place,
     /// structurally (`fenix_format::reindent`) rather than via a
     /// per-language external tool -- Emacs' `indent-region`, real
@@ -9358,9 +9489,15 @@ impl App {
         let indent_width = self.vim.indent_width();
         let language = self.focused_language();
         let source = self.open().buffer.text();
-        let skip = reindent_skip_ranges(language, &source);
         let last_line = self.open().buffer.line_count().saturating_sub(1);
-        let formatted = fenix_format::reindent(&source, 0, last_line, indent_width, &skip);
+        // Tags, not brackets, are what nest in XML -- a bracket-depth
+        // reindent would indent after every `(` in element text instead.
+        let formatted = if language == Some(fenix_syntax::LanguageId::Xml) {
+            fenix_format::reindent_xml(&source, 0, last_line, indent_width)
+        } else {
+            let skip = reindent_skip_ranges(language, &source);
+            fenix_format::reindent(&source, 0, last_line, indent_width, &skip)
+        };
         if formatted == source {
             return;
         }
@@ -9426,8 +9563,12 @@ impl App {
 
         let source = ob.buffer.text();
         let language = ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language);
-        let skip = reindent_skip_ranges(language, &source);
-        let replacement = fenix_format::reindent_lines(&source, first_line, last_line, indent_width, &skip);
+        let replacement = if language == Some(fenix_syntax::LanguageId::Xml) {
+            fenix_format::reindent_xml_lines(&source, first_line, last_line, indent_width)
+        } else {
+            let skip = reindent_skip_ranges(language, &source);
+            fenix_format::reindent_lines(&source, first_line, last_line, indent_width, &skip)
+        };
 
         let start = ob.buffer.line_start_char(first_line);
         let end = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
@@ -9544,7 +9685,10 @@ impl App {
                 // "recover" it on the next start.
                 self.discard_recovery_for(id);
                 self.refresh_gutter_hunks(id);
-                self.set_message(format!("saved {}", path.display()));
+                match self.xml_save_problem(&path) {
+                    Some(problem) => self.set_error(format!("saved {} -- {problem}", path.display())),
+                    None => self.set_message(format!("saved {}", path.display())),
+                }
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
         }
@@ -10678,7 +10822,7 @@ impl App {
     /// takes).
     pub(crate) fn open_vnc_session(&mut self, name: &str) {
         if let Some(session) = self.vnc_sessions.get(name) {
-            let (workspace_index, buffer) = (session.workspace_index, session.buffer);
+            let (workspace_index, buffer, link) = (session.workspace_index, session.buffer, session.link);
             self.workspaces.switch_to_index(workspace_index);
             // Focus whichever pane is already showing this session, if
             // any -- there can be several (splits), and after the switch
@@ -10701,8 +10845,16 @@ impl App {
                     // or this pane would be missing both the descriptive
                     // title and the tab-strip exemption every other VNC
                     // pane gets.
-                    self.pane_titles.insert(self.focused_pane_id(), format!("VNC: {name}"));
+                    self.pane_titles.insert(self.focused_pane_id(), vnc_pane_title(name, link));
                 }
+            }
+            // Asking for a session whose connection is gone is asking for
+            // it back: switching to a frozen frame alone -- all this used
+            // to do -- left no way to revive it short of closing it.
+            match link {
+                VncLink::Down => self.vnc_reconnect_now(name),
+                VncLink::Reconnecting => self.set_message(format!("VNC {name}: still reconnecting...")),
+                VncLink::Live => {}
             }
             self.sync_vnc_focus();
             self.wake_caret();
@@ -10817,8 +10969,15 @@ impl App {
     /// RECONNECT_ATTEMPTS` times before giving up and leaving the pane
     /// showing its last-known frame, reopenable manually.
     fn apply_vnc_connected(&mut self, name: String, host: String, port: u16, result: std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>) {
-        self.vnc_connecting.remove(&name);
-        if self.vnc_sessions.contains_key(&name) {
+        let first_connect = self.vnc_connecting.remove(&name);
+        if let Some(link) = self.vnc_sessions.get(&name).map(|s| s.link) {
+            if link != VncLink::Reconnecting {
+                // Nobody is waiting for this: a reconnect scheduled for an
+                // earlier session under the same name, since closed and
+                // opened afresh. Taking it would swap a working
+                // connection for a second one; the result is just dropped.
+                return;
+            }
             match result {
                 Ok((client, receiver)) => {
                     // Reuses the *existing* shared framebuffer (a cheap
@@ -10834,6 +10993,7 @@ impl App {
                         session.client = client;
                         session.reader = reader;
                         session.reconnect_attempts = 0;
+                        session.link = VncLink::Live;
                         // The fresh connection starts back at the
                         // server's own default resolution -- it has no
                         // memory of any resize this client previously
@@ -10843,6 +11003,10 @@ impl App {
                         // size never changed across the reconnect gap.
                         session.resize_requested_for = (0, 0);
                     }
+                    self.set_vnc_pane_titles(&name);
+                    // Takes input back if its pane is the focused one --
+                    // capture was released when the connection dropped.
+                    self.sync_vnc_focus();
                     self.set_message(format!("VNC {name} reconnected"));
                 }
                 Err(err) => {
@@ -10851,7 +11015,11 @@ impl App {
                         session.reconnect_attempts = attempts;
                     }
                     if attempts >= MAX_VNC_RECONNECT_ATTEMPTS {
-                        self.set_error(format!("VNC {name}: reconnect failed after {attempts} attempts ({err}) -- giving up; reopen manually with SPC v v"));
+                        if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                            session.link = VncLink::Down;
+                        }
+                        self.set_vnc_pane_titles(&name);
+                        self.set_error(format!("VNC {name}: reconnect failed after {attempts} attempts ({err}) -- giving up; SPC v v {name} to try again"));
                     } else {
                         self.set_error(format!("VNC {name}: reconnect failed ({err}); retrying..."));
                         self.schedule_vnc_reconnect(name, host, port, attempts);
@@ -10859,6 +11027,12 @@ impl App {
                 }
             }
             self.wake_caret();
+            return;
+        }
+        if !first_connect {
+            // A reconnect for a session closed while it was pending --
+            // opening a pane for it now would bring back something the
+            // user just closed.
             return;
         }
 
@@ -10884,7 +11058,7 @@ impl App {
                 // a tab whose × silently hides the session (`set_pane_
                 // content`, not a real disconnect) rather than being
                 // exempt like its siblings.
-                self.pane_titles.insert(self.focused_pane_id(), format!("VNC: {name}"));
+                self.pane_titles.insert(self.focused_pane_id(), vnc_pane_title(&name, VncLink::Live));
                 let workspace_index = self.workspaces.active_index();
                 let framebuffer = Arc::new(Mutex::new(fenix_vnc::framebuffer::VncFramebuffer::new()));
                 let reader = self.event_proxy.clone().map(|proxy| {
@@ -10906,6 +11080,7 @@ impl App {
                         pointer_pos: None,
                         pointer_buttons: 0,
                         reconnect_attempts: 0,
+                        link: VncLink::Live,
                         last_pane_size: (0, 0),
                         pane_size_stable_since: Instant::now(),
                         resize_requested_for: (0, 0),
@@ -10927,6 +11102,28 @@ impl App {
     /// connect `start_vnc_connect` does. A no-op without a real
     /// `event_proxy` (every test) -- there's nothing to retry against in
     /// a headless test anyway.
+    /// `SPC v v` on a session whose reconnecting gave up: starts over,
+    /// immediately and with a fresh attempt budget.
+    fn vnc_reconnect_now(&mut self, name: &str) {
+        let Some(session) = self.vnc_sessions.get_mut(name) else { return };
+        session.link = VncLink::Reconnecting;
+        session.reconnect_attempts = 0;
+        let (host, port) = (session.host.clone(), session.port);
+        self.set_vnc_pane_titles(name);
+        self.set_message(format!("Reconnecting to {name}..."));
+        self.start_vnc_connect(name.to_string(), host, port);
+    }
+
+    /// Re-titles every visible pane showing session `name` for its
+    /// current `link` state.
+    fn set_vnc_pane_titles(&mut self, name: &str) {
+        let Some((buffer, link)) = self.vnc_sessions.get(name).map(|s| (s.buffer, s.link)) else { return };
+        let panes: Vec<_> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
+        for pane in panes {
+            self.pane_titles.insert(pane, vnc_pane_title(name, link));
+        }
+    }
+
     fn schedule_vnc_reconnect(&mut self, name: String, host: String, port: u16, attempts: u32) {
         let Some(proxy) = self.event_proxy.clone() else { return };
         let delay = vnc_reconnect_delay(attempts);
@@ -10956,16 +11153,83 @@ impl App {
     /// mirrors `docker_session_close`/`jira_session_close` exactly,
     /// generalized to look the session up by name instead of assuming
     /// there's only one.
+    ///
+    /// What goes with it depends on where it was opened. A session with a
+    /// workspace to itself (a `[workspaces]` launcher entry) takes that
+    /// workspace along, like the Docker/Git/Jira panels do. But `SPC v v`
+    /// opens a session in whatever pane you're in, so its workspace is
+    /// usually *yours* -- and removing it wholesale took every other file
+    /// open there with it, or, when it was the only workspace (which can't
+    /// be removed), left its pane showing a buffer that no longer existed:
+    /// the next frame crashed. Those panes now just show another buffer,
+    /// the same as closing any other buffer.
     pub(crate) fn vnc_session_close(&mut self, name: &str) {
         let Some(session) = self.vnc_sessions.remove(name) else { return };
         if self.vnc_focused.as_deref() == Some(name) {
             self.set_vnc_focused(None);
         }
+        // Found by what it shows, not by `session.workspace_index`: that
+        // index goes stale as soon as an earlier workspace is removed.
+        let own_workspace = (self.workspaces.len() > 1)
+            .then(|| {
+                self.workspaces.workspaces.iter().position(|ws| {
+                    ws.windows.windows().iter().all(|&pane| ws.windows.content(pane) == Some(&session.buffer))
+                })
+            })
+            .flatten();
+        if let Some(index) = own_workspace {
+            let active = self.workspaces.active_index();
+            self.workspaces.switch_to_index(index);
+            self.workspaces.remove_active();
+            if active != index {
+                self.workspaces.switch_to_index(if active > index { active - 1 } else { active });
+            }
+        }
         self.buffers.close(session.buffer);
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+        for pane in self.repoint_panes_showing(session.buffer, fallback) {
+            self.pane_titles.remove(&pane);
+        }
         self.refresh_project_root();
         self.wake_caret();
+    }
+
+    /// Points every pane showing `id` at `fallback` -- in every workspace
+    /// of every frame, not only the visible one. A pane left showing a
+    /// closed buffer in a workspace you aren't looking at is a crash
+    /// waiting for the moment you switch to it. Returns the panes changed
+    /// in the active workspace, for callers with per-pane state of their
+    /// own (titles) to clear.
+    fn repoint_panes_showing(&mut self, id: BufferId, fallback: BufferId) -> Vec<fenix_window::WindowId> {
+        let cursor = self.buffers.get(fallback).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+        let active = self.workspaces.active_index();
+        let mut active_panes = Vec::new();
+        let parked = self.frames.iter_mut().flatten().map(|frame| &mut frame.workspaces);
+        for (list_index, list) in std::iter::once(&mut self.workspaces).chain(parked).enumerate() {
+            for (index, ws) in list.workspaces.iter_mut().enumerate() {
+                for pane in ws.windows.windows() {
+                    if ws.windows.content(pane) != Some(&id) {
+                        continue;
+                    }
+                    ws.windows.set_content(pane, fallback);
+                    ws.pane_states.insert(pane, PaneState::seeded_at(cursor));
+                    let tabs = ws.pane_tabs.entry(pane).or_default();
+                    tabs.retain(|&b| b != id);
+                    if !tabs.contains(&fallback) {
+                        tabs.push(fallback);
+                    }
+                    if list_index == 0 && index == active {
+                        active_panes.push(pane);
+                    }
+                }
+            }
+        }
+        if self.snippet.as_ref().is_some_and(|s| active_panes.contains(&s.pane)) {
+            self.snippet = None;
+        }
+        self.buffers.touch(fallback);
+        self.refresh_gutter_hunks(fallback);
+        active_panes
     }
 
     /// Finds whichever VNC session (if any) owns `id` as its pane's
@@ -11002,7 +11266,11 @@ impl App {
     /// set_active`'s own doc comment for why this is safe to do on every
     /// focus change rather than only on a real visibility transition.
     fn sync_vnc_focus(&mut self) {
-        let focused_key = self.vnc_session_key_for_buffer(self.focused_buffer_id());
+        // Only a live session takes input -- see `VncFrame::Disconnected`'s
+        // handling for why a dropped one lets go of it.
+        let focused_key = self
+            .vnc_session_key_for_buffer(self.focused_buffer_id())
+            .filter(|key| self.vnc_sessions.get(key).is_some_and(|s| s.link == VncLink::Live));
         let newly_focused = focused_key.is_some() && focused_key != self.vnc_focused;
         self.set_vnc_focused(focused_key.clone());
         for (key, session) in self.vnc_sessions.iter() {
@@ -11173,7 +11441,16 @@ impl App {
             fenix_vnc::VncFrame::Disconnected(reason) => {
                 let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
                 session.reader = None;
+                session.link = VncLink::Reconnecting;
                 let (host, port) = (session.host.clone(), session.port);
+                // Hand the keyboard and mouse back: with nothing on the
+                // other end, keys typed into the pane just vanish, and
+                // the pointer stays confined to a window showing a
+                // frozen frame.
+                if self.vnc_focused.as_deref() == Some(key.as_str()) {
+                    self.set_vnc_focused(None);
+                }
+                self.set_vnc_pane_titles(&key);
                 self.set_error(format!("VNC {key} disconnected: {reason} -- reconnecting..."));
                 self.schedule_vnc_reconnect(key, host, port, 0);
                 if let Some(window) = &self.window {
@@ -13498,8 +13775,12 @@ impl App {
     /// same as `SPC s s` -- "nothing to show" is a legitimate answer
     /// here, not an error worth a special-cased message.
     pub(crate) fn picker_outline(&mut self) {
+        if self.focused_language() == Some(fenix_syntax::LanguageId::Xml) {
+            self.picker_xml_outline();
+            return;
+        }
         if self.focused_language() != Some(fenix_syntax::LanguageId::Markdown) {
-            self.set_error("SPC c o needs a Markdown buffer");
+            self.set_error("SPC c o needs a Markdown or XML buffer");
             return;
         }
         let buffer = &self.open().buffer;
@@ -13636,12 +13917,7 @@ impl App {
             self.project_replace = None;
         }
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
-        for pane in self.windows().windows() {
-            if self.windows().content(pane) == Some(&id) {
-                self.set_pane_content(pane, fallback);
-            }
-        }
-        self.buffers.touch(fallback);
+        self.repoint_panes_showing(id, fallback);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -16274,31 +16550,60 @@ impl App {
 
     /// Swaps a buffer's text for what's on disk, keeping every pane that
     /// shows it on the same line.
+    ///
+    /// Every pane showing it, in every workspace and every frame -- not
+    /// only the visible ones: a pane parked in another workspace keeps
+    /// its cursor too, and would hand it back the moment that workspace
+    /// is switched to. Each pane's line is read *before* the text is
+    /// swapped: its cursor is a char offset into the old text, and asking
+    /// the new, possibly much shorter text where that offset falls is
+    /// exactly how a coding agent rewriting the focused file used to
+    /// crash the editor (char 20442 of a 37-char file).
     fn replace_buffer_from_disk(&mut self, id: BufferId, on_disk: &str) {
-        if let Some(ob) = self.buffers.get_mut(id) {
-            let end = ob.buffer.len_chars();
-            let mut scratch = Cursor::at_start();
-            ob.buffer.replace_range(&mut scratch, 0, end, on_disk);
-            // A reload isn't user work: leaving it dirty would make
-            // every touched file look unsaved and block `:qa`.
-            ob.buffer.mark_saved();
-        }
-        // Every pane showing it keeps its line, clamped to the new
-        // length -- the file changed, but where you were looking in it
-        // is still the best guess at where you want to be.
-        let line_count = self.buffers.get(id).map(|ob| ob.buffer.visual_line_count()).unwrap_or(1);
-        for pane in self.windows().windows() {
-            if self.windows().content(pane) != Some(&id) {
-                continue;
+        let Some(ob) = self.buffers.get_mut(id) else { return };
+
+        let mut states: Vec<&mut PaneState> = Vec::new();
+        let parked = self.frames.iter_mut().flatten().map(|frame| &mut frame.workspaces);
+        for list in std::iter::once(&mut self.workspaces).chain(parked) {
+            for Workspace { windows, pane_states, .. } in &mut list.workspaces {
+                states.extend(pane_states.iter_mut().filter(|(pane, _)| windows.content(**pane) == Some(&id)).map(|(_, state)| state));
             }
-            let line = self
-                .buffers
-                .get(id)
-                .map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0.min(line_count.saturating_sub(1)))
-                .unwrap_or(0);
-            let Some(ob) = self.buffers.get(id) else { continue };
-            let char_idx = ob.buffer.line_start_char(line);
-            self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
+        }
+        let old_len = ob.buffer.len_chars();
+        let old_lines: Vec<usize> = states
+            .iter()
+            .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
+            .collect();
+
+        let mut scratch = Cursor::at_start();
+        ob.buffer.replace_range(&mut scratch, 0, old_len, on_disk);
+        // A reload isn't user work: leaving it dirty would make every
+        // touched file look unsaved and block `:qa`.
+        ob.buffer.mark_saved();
+
+        // The file changed, but where you were looking in it is still the
+        // best guess at where you want to be -- clamped to the new length.
+        let last_line = ob.buffer.visual_line_count().saturating_sub(1);
+        for (state, old_line) in states.into_iter().zip(old_lines) {
+            let line = old_line.min(last_line);
+            state.cursor = Cursor { char_idx: ob.buffer.line_start_char(line), sticky_col: 0 };
+            // A scroll position below the new cursor would open on the
+            // last line alone with everything above it out of view; from
+            // the top, following the cursor scrolls only as far as needed.
+            // Snapped rather than eased, so no frame animates through
+            // lines the file no longer has.
+            if state.scroll_line > line {
+                state.scroll_line = 0;
+                state.rendered_scroll = 0.0;
+            }
+        }
+
+        // A Visual selection's anchor is another offset into the old
+        // text, with no line to carry over that would still mean the same
+        // selection -- dropping it is the honest answer.
+        if self.focused_buffer_id() == id && self.vim.mode() == Mode::Visual {
+            let cursor = self.cursor();
+            self.vim.exit_visual_mode(&cursor);
         }
     }
 
@@ -19889,7 +20194,7 @@ impl App {
                 self.active_picker = None;
                 self.switch_to_project(root);
             }
-            Some(ActivePicker::Grep(state)) => {
+            Some(ActivePicker::Grep(state) | ActivePicker::ProjectTodos(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
@@ -20136,7 +20441,7 @@ impl App {
                 cursor.char_idx = idx;
                 cursor.sticky_col = 0;
             }
-            Some(ActivePicker::BufferSearch(state)) => {
+            Some(ActivePicker::BufferSearch(state) | ActivePicker::BufferTodos(state)) => {
                 let Some(offset) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
@@ -20461,6 +20766,16 @@ impl App {
         }
         let name = self.open().buffer.path().map(|p| p.display().to_string()).unwrap_or_default();
         Some(format!("Delete {name}? (y/n)"))
+    }
+
+    /// What happens after a key has been through Vim, whatever it did:
+    /// today, finishing an XML tag the key just typed in Insert mode.
+    fn after_vim_key(&mut self, key: KeyPress) {
+        if let KeyCode::Char(c @ ('>' | '/')) = key.code {
+            if key.mods == Mods::default() && self.vim.mode() == Mode::Insert {
+                self.xml_autoclose(c);
+            }
+        }
     }
 
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
@@ -23628,6 +23943,15 @@ impl App {
             }
         }
 
+        // `%` on an XML tag goes to its partner tag -- claimed only when
+        // Vim has nothing pending (no count, operator or prefix) so `d%`
+        // and `3%` keep their own meaning, and only when the cursor is
+        // actually on a tag; otherwise it's bracket matching as usual.
+        if keypress == KeyPress::char('%') && self.vim.is_idle() && self.xml_jump_matching_tag() {
+            self.wake_caret();
+            return;
+        }
+
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
@@ -23672,6 +23996,7 @@ impl App {
             }
             event
         };
+        self.after_vim_key(keypress);
         self.push_clipboard_after_edit();
         self.sync_completion();
         // Ordinary movement in one of the three left panes re-syncs the
@@ -23803,6 +24128,7 @@ impl App {
                 fenix_vim::LspRequestKind::References => self.request_references(),
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
             },
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -23884,7 +24210,8 @@ impl App {
     /// matcher) while a `g`-prefixed or operator-pending sequence never
     /// misreads its own continuation key as a paste.
     fn pull_clipboard_before_paste(&mut self, keypress: KeyPress) {
-        if self.vim.mode() != Mode::Normal || self.vim.is_pending() || keypress.mods != Mods::default() {
+        // Visual too: `p`/`P` there replace the selection with it.
+        if !matches!(self.vim.mode(), Mode::Normal | Mode::Visual) || self.vim.is_pending() || keypress.mods != Mods::default() {
             return;
         }
         if !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
@@ -24184,6 +24511,7 @@ impl App {
             let (label, count) = match &self.active_picker {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ ActivePicker::Grep(_)) => ("GREP", picker_len(picker)),
+                Some(picker @ (ActivePicker::BufferTodos(_) | ActivePicker::ProjectTodos(_))) => ("TODOS", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
@@ -24822,6 +25150,7 @@ impl App {
             None
         };
 
+        self.todo_spans.remove(&id);
         let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
         let deltas = ob.buffer.drain_edits();
 
@@ -24883,7 +25212,7 @@ impl App {
         let end_char = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
         let byte_range = ob.buffer.char_to_byte(start_char)..ob.buffer.char_to_byte(end_char);
 
-        syntax
+        let highlights: Vec<(std::ops::Range<usize>, &str)> = syntax
             .highlights_in_range(&source, byte_range)
             .into_iter()
             .filter(|(range, name)| {
@@ -24900,8 +25229,16 @@ impl App {
                 let text = &source[range.clone()];
                 known.contains(text.strip_prefix("::").unwrap_or(text))
             })
-            .map(|(range, name)| (range, theme.syntax_color(name)))
-            .collect()
+            .collect();
+        let todos: Vec<_> = highlights
+            .iter()
+            .filter_map(|(range, name)| fenix_syntax::TodoKind::from_capture_name(name).map(|kind| (range.clone(), kind)))
+            .collect();
+        let colored = highlights.into_iter().map(|(range, name)| (range, theme.syntax_color(name))).collect();
+        if !todos.is_empty() {
+            self.todo_spans.insert(id, todos);
+        }
+        colored
     }
 
     /// Per-visible-line (view_row, col_start, col_end) segments of the
@@ -26996,6 +27333,25 @@ impl App {
                 (Segments::new(), None, Segments::new(), Segments::new(), None)
             };
 
+            // A soft tint behind each TODO-style keyword, in its own
+            // kind's color, so they stand out while scrolling past --
+            // the glyphs alone are easy to lose in a comment-colored
+            // line.
+            let todo_bg_segments: Vec<(usize, usize, usize, [f32; 4])> = match (self.todo_spans.get(&buffer_id), self.buffers.get(buffer_id)) {
+                (Some(spans), Some(ob)) => spans
+                    .iter()
+                    .filter_map(|(range, kind)| {
+                        let start = ob.buffer.byte_to_char(range.start);
+                        let len = ob.buffer.byte_to_char(range.end) - start;
+                        let (line, col) = ob.buffer.line_col(&Cursor { char_idx: start, sticky_col: 0 });
+                        let row = visible_document_lines.iter().position(|&l| l == line).filter(|&r| r <= pane_visible_lines)?;
+                        let [r, g, b, _] = glyphon_to_rgba(theme.todo_color(*kind));
+                        Some((row, remap_col(row, col), remap_col(row, col + len), [r, g, b, 0.18]))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+
             // A `show_tabs` theme's tab strip for this pane -- only for an
             // ordinary file-editing pane (no `pane_titles` override; a
             // fixed-purpose session panel always keeps its plain single
@@ -27156,7 +27512,7 @@ impl App {
                 hl_row,
                 hl_row_strong: is_dashboard,
                 marked_rows: Vec::new(),
-                colored_bg_segments: Vec::new(),
+                colored_bg_segments: todo_bg_segments,
                 selection_segments,
                 pulse_overlay,
                 bracket_match_segments,
@@ -28509,7 +28865,16 @@ impl App {
             VimEvent::RepeatLastChange => self.test_repeat_last_change(),
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             _ => {}
+        }
+        self.after_vim_key(kp);
+    }
+
+    /// Test-only mirror of `route_keypress`'s own `%`-on-an-XML-tag claim.
+    fn test_percent(&mut self) {
+        if !(self.vim.is_idle() && self.xml_jump_matching_tag()) {
+            self.test_route_key(KeyPress::char('%'));
         }
     }
 
@@ -44984,4 +45349,424 @@ configure_board stm32
         assert!(app.modeline_text().contains("Write the plan"));
     }
 
+
+    // -- TODO comments -----------------------------------------------------
+
+    fn app_on(dir: &TempDir, name: &str, contents: &str) -> App {
+        let file = dir.write(name, contents);
+        App::with_file(Some(file.to_string_lossy().into_owned()))
+    }
+
+    fn keys(app: &mut App, seq: &str) {
+        for c in seq.chars() {
+            app.test_dispatch_key(KeyPress::char(c));
+        }
+    }
+
+    #[test]
+    fn bracket_t_steps_through_todo_comments_and_skips_strings() {
+        let dir = TempDir::new("bracket_t");
+        let source = "fn a() {}\n// TODO: first\nlet s = \"TODO: not me\";\n/* FIXME second */\n";
+        let mut app = app_on(&dir, "a.rs", source);
+        keys(&mut app, "]t");
+        assert_eq!(app.test_cursor().char_idx, source.find("TODO: first").unwrap());
+        keys(&mut app, "]t");
+        assert_eq!(app.test_cursor().char_idx, source.find("FIXME").unwrap());
+        keys(&mut app, "]t"); // none left below -- stays put
+        assert_eq!(app.test_cursor().char_idx, source.find("FIXME").unwrap());
+        keys(&mut app, "[t");
+        assert_eq!(app.test_cursor().char_idx, source.find("TODO: first").unwrap());
+    }
+
+    #[test]
+    fn bracket_t_takes_a_count() {
+        let dir = TempDir::new("bracket_t_count");
+        let source = "# TODO one\n# TODO two\n# TODO three\n";
+        let mut app = app_on(&dir, "a.py", source);
+        keys(&mut app, "2]t");
+        assert_eq!(app.test_cursor().char_idx, source.find("TODO two").unwrap());
+    }
+
+    #[test]
+    fn buffer_todo_picker_lists_each_comment_keyword_and_jumps() {
+        let dir = TempDir::new("buffer_todos");
+        let source = "# TODO: alpha\nputs \"FIXME: nope\"\n# HACK: beta\n";
+        let mut app = app_on(&dir, "a.tcl", source);
+        app.picker_buffer_todos();
+        match &app.active_picker {
+            Some(ActivePicker::BufferTodos(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["TODO     1  alpha", "HACK     3  beta"]);
+            }
+            _ => panic!("expected the buffer TODO picker"),
+        }
+        picker_move_selection(app.active_picker.as_mut().unwrap(), 1);
+        app.picker_confirm();
+        assert_eq!(app.test_cursor().char_idx, source.find("HACK").unwrap());
+    }
+
+    #[test]
+    fn project_todo_picker_reads_comments_only_and_fills_the_quickfix_list() {
+        if !ripgrep_available() {
+            eprintln!("skipping project_todo_picker_reads_comments_only_and_fills_the_quickfix_list: ripgrep (rg) is not on PATH");
+            return;
+        }
+        let dir = TempDir::new("project_todos");
+        dir.write("src/a.rs", "// TODO: in rust\nconst S: &str = \"TODO: string\";\n");
+        dir.write("b.xml", "<a><!-- FIXME: in xml --></a>\n");
+        dir.write("notes.txt", "TODO plain text\nprose mentioning TODO midway\n");
+        let mut app = app_on(&dir, "c.py", "x = 1\n");
+        app.project_root = Some(dir.path().to_path_buf());
+        app.picker_project_todos();
+        let labels: Vec<String> = match &app.active_picker {
+            Some(ActivePicker::ProjectTodos(state)) => state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect(),
+            _ => panic!("expected the project TODO picker"),
+        };
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("FIX ") && l.ends_with("in xml")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.ends_with("in rust")), "{labels:?}");
+        assert!(labels.iter().any(|l| l.ends_with("plain text")), "{labels:?}");
+        assert_eq!(app.quickfix.len(), 3);
+    }
+
+    #[test]
+    fn todo_keywords_are_recorded_for_the_background_tint() {
+        let dir = TempDir::new("todo_tint");
+        let mut app = app_on(&dir, "a.rs", "// TODO: x\nfn a() {}\n");
+        let id = app.focused_buffer_id();
+        let highlights = app.syntax_highlights_for_visible_range(id, 0, 2);
+        assert!(highlights.iter().any(|(r, c)| r.start == 3 && *c == app.theme.todo_color(fenix_syntax::TodoKind::Todo)));
+        let spans = app.todo_spans.get(&id).expect("a TODO span was recorded");
+        assert_eq!(spans, &vec![(3..8, fenix_syntax::TodoKind::Todo)]);
+    }
+
+    // -- XML -----------------------------------------------------------------
+
+    #[test]
+    fn typing_a_start_tag_in_xml_closes_it_after_the_cursor() {
+        let dir = TempDir::new("xml_autoclose");
+        let mut app = app_on(&dir, "a.xml", "");
+        keys(&mut app, "i<item id=\"1\">");
+        assert_eq!(app.open().buffer.text(), "<item id=\"1\"></item>");
+        assert_eq!(app.test_cursor().char_idx, "<item id=\"1\">".chars().count());
+        // Self-closing and end tags are left alone.
+        keys(&mut app, "<br/>");
+        assert_eq!(app.open().buffer.text(), "<item id=\"1\"><br/></item>");
+    }
+
+    #[test]
+    fn typing_an_end_tag_opener_in_xml_completes_the_open_element() {
+        let dir = TempDir::new("xml_close_slash");
+        let mut app = app_on(&dir, "a.xml", "<a>\n<b>text\n");
+        app.test_set_cursor(Cursor { char_idx: "<a>\n<b>text".len(), sticky_col: 0 });
+        keys(&mut app, "i</");
+        assert_eq!(app.open().buffer.text(), "<a>\n<b>text</b>\n");
+    }
+
+    #[test]
+    fn autoclose_is_xml_only() {
+        let dir = TempDir::new("xml_autoclose_rust");
+        let mut app = app_on(&dir, "a.rs", "");
+        keys(&mut app, "iVec<u8>");
+        assert_eq!(app.open().buffer.text(), "Vec<u8>");
+    }
+
+    #[test]
+    fn percent_jumps_between_matching_xml_tags_and_falls_back_to_brackets() {
+        let dir = TempDir::new("xml_percent");
+        let source = "<root>\n  <item a=\"(x)\">v</item>\n</root>\n";
+        let mut app = app_on(&dir, "a.xml", source);
+        app.test_set_cursor(Cursor { char_idx: 2, sticky_col: 0 });
+        app.test_percent();
+        assert_eq!(app.test_cursor().char_idx, source.find("/root").unwrap() + 1);
+        app.test_percent();
+        assert_eq!(app.test_cursor().char_idx, 1);
+        // Inside the attribute, `%` is bracket matching as usual.
+        let paren = source.find('(').unwrap();
+        app.test_set_cursor(Cursor { char_idx: paren, sticky_col: 0 });
+        app.test_percent();
+        assert_eq!(app.test_cursor().char_idx, source.find(')').unwrap());
+    }
+
+    #[test]
+    fn gcc_wraps_and_unwraps_xml_lines_in_block_comments() {
+        let dir = TempDir::new("gcc_xml");
+        let mut app = app_on(&dir, "a.xml", "  <a/>\n");
+        keys(&mut app, "gcc");
+        assert_eq!(app.open().buffer.text(), "  <!-- <a/> -->\n");
+        keys(&mut app, "gcc");
+        assert_eq!(app.open().buffer.text(), "  <a/>\n");
+    }
+
+    #[test]
+    fn format_buffer_reindents_xml_by_element_depth() {
+        let dir = TempDir::new("xml_format");
+        let mut app = app_on(&dir, "a.xml", "<a>\n<b>f(x)</b>\n<c>\n<d/>\n</c>\n</a>");
+        app.vim.set_indent_width(2);
+        app.format_buffer();
+        assert_eq!(app.open().buffer.text(), "<a>\n  <b>f(x)</b>\n  <c>\n    <d/>\n  </c>\n</a>");
+    }
+
+    #[test]
+    fn xml_outline_lists_elements_as_a_tree() {
+        let dir = TempDir::new("xml_outline");
+        let mut app = app_on(&dir, "a.xml", "<project>\n  <dependency id=\"core\">\n    <version>1</version>\n  </dependency>\n</project>\n");
+        app.picker_outline();
+        match &app.active_picker {
+            Some(ActivePicker::Outline(state)) => {
+                let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+                assert_eq!(labels, vec!["project  ·  line 1", "  dependency  id=core  ·  line 2", "    version  ·  line 3"]);
+            }
+            _ => panic!("expected the outline picker"),
+        }
+    }
+
+    #[test]
+    fn xml_validate_moves_to_the_first_error() {
+        let dir = TempDir::new("xml_validate");
+        let mut app = app_on(&dir, "a.xml", "<a>\n  <b></c>\n</a>\n");
+        app.xml_validate();
+        assert_eq!(app.open().buffer.line_col(&app.test_cursor()).0, 1);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
+    }
+
+    #[test]
+    fn xml_multiline_elements_fold() {
+        let dir = TempDir::new("xml_fold");
+        let mut app = app_on(&dir, "a.xml", "<a>\n  <b>\n    <c/>\n  </b>\n</a>\n");
+        app.test_set_cursor(Cursor { char_idx: 8, sticky_col: 0 });
+        app.toggle_code_fold();
+        let id = app.focused_buffer_id();
+        assert_eq!(app.folded_display_lines(id), vec![0, 1, 4, 5]);
+    }
+
+    // -- A file rewritten underneath an open buffer ---------------------------
+
+    #[test]
+    fn a_focused_file_rewritten_shorter_on_disk_reloads_without_panicking() {
+        // The crash: the cursor sat near the end of a long file, a coding
+        // agent rewrote it to a few lines, and the reload asked the *new*
+        // text for the line of the *old* cursor offset.
+        let dir = TempDir::new("reload_shorter");
+        let long: String = (0..400).map(|i| format!("fn f{i}() {{ let x = {i}; }}
+")).collect();
+        let file = dir.write("big.rs", &long);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let end = app.open().buffer.len_chars().saturating_sub(2);
+        app.test_set_cursor(Cursor { char_idx: end, sticky_col: 0 });
+        let pane = app.focused_pane_id();
+        app.pane_state_mut(pane).scroll_line = 380;
+
+        std::fs::write(&file, "fn main() {
+    // TODO: short now
+}
+").unwrap();
+        let sweep = app.reload_buffers_changed_on_disk();
+
+        assert_eq!(sweep.reloaded.len(), 1);
+        assert_eq!(app.open().buffer.text(), "fn main() {
+    // TODO: short now
+}
+");
+        assert_eq!(app.open().buffer.line_col(&app.test_cursor()).0, 2, "clamped to the new last line");
+        assert_eq!(app.pane_state(pane).scroll_line, 0, "the whole three-line file is in view");
+        // And the frame after it -- highlighting the visible window --
+        // is just as safe.
+        let id = app.focused_buffer_id();
+        let _ = app.syntax_highlights_for_visible_range(id, app.render_base_line(), 40);
+    }
+
+    #[test]
+    fn a_reload_keeps_each_panes_line_when_the_file_is_long_enough() {
+        let dir = TempDir::new("reload_same_line");
+        let file = dir.write("a.txt", "one
+two
+three
+four
+");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_set_cursor(Cursor { char_idx: "one
+two
+th".len(), sticky_col: 0 });
+        std::fs::write(&file, "ONE
+TWO
+THREE, longer
+FOUR
+FIVE
+").unwrap();
+        app.reload_buffers_changed_on_disk();
+        assert_eq!(app.open().buffer.line_col(&app.test_cursor()), (2, 0));
+    }
+
+    #[test]
+    fn a_reload_during_visual_mode_drops_the_stale_selection() {
+        let dir = TempDir::new("reload_visual");
+        let long: String = (0..50).map(|i| format!("line {i}
+")).collect();
+        let file = dir.write("a.txt", &long);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('G'));
+        app.test_vim_key(KeyPress::char('v'));
+        std::fs::write(&file, "short
+").unwrap();
+        app.reload_buffers_changed_on_disk();
+        assert_eq!(app.vim.mode(), Mode::Normal);
+        assert!(app.visual_selection_segments(10).is_empty());
+    }
+
+    // -- A VNC server that goes away ------------------------------------------
+
+    /// An app with one live VNC session, `vm`, on a fake server. There's no
+    /// event loop in a test, so connects run synchronously and scheduled
+    /// retries don't run at all -- each test drives the outcomes itself.
+    fn app_with_vnc_session() -> (App, fenix_vnc::test_server::TestServer) {
+        let server = fenix_vnc::test_server::TestServer::start(fenix_vnc::test_server::Traffic::Idle);
+        let mut app = App::with_file(None);
+        app.config.vnc_hosts.push(("vm".to_string(), "127.0.0.1".to_string(), server.port()));
+        app.open_vnc_session("vm");
+        assert_eq!(app.vnc_sessions.get("vm").map(|s| s.link), Some(VncLink::Live));
+        assert_eq!(app.vnc_focused.as_deref(), Some("vm"), "a focused live session captures input");
+        (app, server)
+    }
+
+    fn vnc_title(app: &App) -> String {
+        app.pane_titles.get(&app.focused_pane_id()).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_dropped_vnc_connection_says_so_on_the_pane_and_lets_go_of_input() {
+        let (mut app, server) = app_with_vnc_session();
+        server.go_down();
+        app.apply_vnc_frame("vm".to_string(), fenix_vnc::VncFrame::Disconnected(fenix_vnc::SERVER_CLOSED.to_string()));
+
+        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Reconnecting);
+        assert_eq!(app.vnc_focused, None, "keys shouldn't vanish into a dead connection");
+        assert!(vnc_title(&app).contains("reconnecting"), "{}", vnc_title(&app));
+        // Refocusing the pane doesn't grab input back while it's down.
+        app.sync_vnc_focus();
+        assert_eq!(app.vnc_focused, None);
+    }
+
+    #[test]
+    fn spc_v_v_revives_a_vnc_session_whose_reconnecting_gave_up() {
+        let (mut app, server) = app_with_vnc_session();
+        server.go_down();
+        app.apply_vnc_frame("vm".to_string(), fenix_vnc::VncFrame::Disconnected(fenix_vnc::SERVER_CLOSED.to_string()));
+        let port = server.port();
+        for _ in 0..MAX_VNC_RECONNECT_ATTEMPTS {
+            let refused = fenix_vnc::VncClient::connect("127.0.0.1", port);
+            assert!(refused.is_err());
+            app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), port, refused);
+        }
+        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Down);
+        assert!(vnc_title(&app).contains("SPC v v"), "{}", vnc_title(&app));
+
+        // The server is back; asking for the session again reconnects it
+        // rather than only switching to its frozen last frame.
+        server.come_back();
+        app.open_vnc_session("vm");
+        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Live);
+        assert_eq!(app.vnc_sessions["vm"].reconnect_attempts, 0);
+        assert_eq!(vnc_title(&app), "VNC: vm");
+        assert_eq!(app.vnc_focused.as_deref(), Some("vm"), "input is captured again");
+    }
+
+    #[test]
+    fn a_late_reconnect_for_a_closed_vnc_session_does_not_reopen_it() {
+        let (mut app, server) = app_with_vnc_session();
+        app.apply_vnc_frame("vm".to_string(), fenix_vnc::VncFrame::Disconnected(fenix_vnc::SERVER_CLOSED.to_string()));
+        app.vnc_session_close("vm");
+        let late = fenix_vnc::VncClient::connect("127.0.0.1", server.port());
+        app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), server.port(), late);
+        assert!(app.vnc_sessions.is_empty(), "the closed session came back");
+    }
+
+    #[test]
+    fn a_stale_reconnect_result_does_not_replace_a_live_vnc_connection() {
+        let (mut app, server) = app_with_vnc_session();
+        app.set_message("before");
+        let stale = fenix_vnc::VncClient::connect("127.0.0.1", server.port());
+        app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), server.port(), stale);
+        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Live);
+        assert!(!app.modeline_pieces().1.contains("reconnected"));
+    }
+
+    #[test]
+    fn closing_a_vnc_session_in_the_only_workspace_leaves_a_working_pane() {
+        // Used to leave the pane pointing at the closed buffer (the only
+        // workspace can't be removed) -- the next frame crashed.
+        let (mut app, _server) = app_with_vnc_session();
+        let workspaces = app.workspaces.len();
+        app.vnc_close_focused_session();
+        assert!(app.vnc_sessions.is_empty());
+        assert_eq!(app.workspaces.len(), workspaces);
+        let id = app.focused_buffer_id();
+        assert!(app.buffers.get(id).is_some(), "the pane shows a buffer that exists");
+        let _ = app.open();
+        assert!(!vnc_title(&app).starts_with("VNC:"), "{}", vnc_title(&app));
+    }
+
+    #[test]
+    fn closing_a_vnc_session_opened_beside_a_file_keeps_the_file() {
+        let dir = TempDir::new("vnc_close_beside_file");
+        let file = dir.write("notes.txt", "keep me
+");
+        let server = fenix_vnc::test_server::TestServer::start(fenix_vnc::test_server::Traffic::Idle);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.vnc_hosts.push(("vm".to_string(), "127.0.0.1".to_string(), server.port()));
+        let file_buffer = app.focused_buffer_id();
+        app.split_vertical();
+        app.open_vnc_session("vm");
+        let workspaces = app.workspaces.len();
+
+        app.vnc_close_focused_session();
+
+        assert_eq!(app.workspaces.len(), workspaces, "the user's own workspace stays");
+        let shown: Vec<BufferId> = app.windows().windows().into_iter().filter_map(|p| app.windows().content(p).copied()).collect();
+        assert!(shown.contains(&file_buffer), "the file pane beside it is untouched");
+        assert!(shown.iter().all(|&id| app.buffers.get(id).is_some()));
+    }
+
+    #[test]
+    fn killing_a_buffer_also_shown_in_another_workspace_repoints_that_pane_too() {
+        let dir = TempDir::new("kill_buffer_other_workspace");
+        let a = dir.write("a.txt", "a
+");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let killed = app.focused_buffer_id();
+        app.new_workspace(); // seeded with a.txt too -- now shown in both
+        let second = app.workspaces.active_index();
+        app.workspaces.switch_to_index(second - 1);
+        app.kill_buffer();
+        assert!(app.buffers.get(killed).is_none());
+        app.workspaces.switch_to_index(second);
+        for pane in app.windows().windows() {
+            let id = *app.windows().content(pane).unwrap();
+            assert!(app.buffers.get(id).is_some(), "a pane in the other workspace still shows the killed buffer");
+        }
+    }
+
+    #[test]
+    fn visual_p_replaces_the_selection_with_the_os_clipboard() {
+        let _guard = CLIPBOARD_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut app = macro_app("say hello world");
+        let Some(clipboard) = app.clipboard.as_mut() else { return };
+        let saved = clipboard.get_text().ok();
+        clipboard.set_text("goodbye".to_string()).unwrap();
+
+        app.test_set_cursor(Cursor { char_idx: 4, sticky_col: 4 });
+        app.test_dispatch_key(KeyPress::char('v'));
+        app.test_dispatch_key(KeyPress::char('e'));
+        // `route_keypress`'s own order around a key reaching Vim.
+        app.pull_clipboard_before_paste(KeyPress::char('p'));
+        app.test_dispatch_key(KeyPress::char('p'));
+        app.push_clipboard_after_edit();
+
+        assert_eq!(app.open().buffer.text(), "say goodbye world");
+        let clipboard = app.clipboard.as_mut().unwrap();
+        assert_eq!(clipboard.get_text().unwrap(), "hello", "Vim's v_p: the replaced text is what's on the clipboard now");
+        if let Some(text) = saved {
+            let _ = clipboard.set_text(text);
+        }
+    }
 }

@@ -131,9 +131,168 @@ pub fn reindent_lines(source: &str, first_line: usize, last_line: usize, indent_
     full.split('\n').skip(first_line).take(count).collect::<Vec<_>>().join("\n")
 }
 
+/// Where a tag-aware scan is, between two characters of an XML document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmlContext {
+    Text,
+    Comment,
+    CData,
+    ProcessingInstruction,
+    /// `<!DOCTYPE ...>` and friends; the count is `[` nesting, since an
+    /// internal DTD subset holds `>`-terminated declarations of its own.
+    Declaration(usize),
+    /// Inside a start or end tag. `start_depth` is the element depth the
+    /// tag began at, what a continuation line of a multi-line tag (one
+    /// attribute per line) indents relative to.
+    Tag { closing: bool, quote: Option<u8>, start_depth: usize },
+}
+
+/// The XML counterpart of `reindent`: nesting depth comes from start and
+/// end tags rather than brackets, so `<a>` indents what follows and
+/// `</a>` dedents itself. A line that begins with one or more end tags
+/// dedents by that many levels; a continuation line of a start tag
+/// broken across lines (one attribute per line) indents one level past
+/// the tag's own line. The inside of a multi-line comment, CDATA
+/// section, processing instruction or DOCTYPE is left exactly as
+/// written -- it's either prose or someone else's syntax.
+///
+/// Same contract as `reindent` otherwise: only `first_line..=last_line`
+/// is rewritten, but depth is tracked across the whole document; blank
+/// lines are left alone; malformed input degrades rather than fails.
+pub fn reindent_xml(source: &str, first_line: usize, last_line: usize, indent_width: usize) -> String {
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut depth: usize = 0;
+    let mut ctx = XmlContext::Text;
+
+    for (line_no, line) in source.split('\n').enumerate() {
+        let content_start = line.len() - line.trim_start().len();
+        let trimmed = &line[content_start..];
+        let in_range = line_no >= first_line && line_no <= last_line;
+
+        let indent = match ctx {
+            _ if trimmed.is_empty() || !in_range => None,
+            XmlContext::Text => Some(depth.saturating_sub(leading_end_tags(trimmed))),
+            XmlContext::Tag { start_depth, .. } => Some(start_depth + 1),
+            _ => None,
+        };
+        out_lines.push(match indent {
+            Some(level) => format!("{}{}", " ".repeat(level * indent_width), trimmed),
+            None => line.to_string(),
+        });
+
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let rest = &bytes[i..];
+            let mut advance = 1;
+            match ctx {
+                XmlContext::Text => {
+                    if rest.starts_with(b"<!--") {
+                        ctx = XmlContext::Comment;
+                        advance = 4;
+                    } else if rest.starts_with(b"<![CDATA[") {
+                        ctx = XmlContext::CData;
+                        advance = 9;
+                    } else if rest.starts_with(b"<?") {
+                        ctx = XmlContext::ProcessingInstruction;
+                        advance = 2;
+                    } else if rest.starts_with(b"<!") {
+                        ctx = XmlContext::Declaration(0);
+                        advance = 2;
+                    } else if rest.starts_with(b"</") {
+                        ctx = XmlContext::Tag { closing: true, quote: None, start_depth: depth };
+                        advance = 2;
+                    } else if rest.first() == Some(&b'<') && rest.get(1).is_some_and(|&b| b.is_ascii_alphabetic() || b == b'_' || b == b':' || b >= 0x80) {
+                        ctx = XmlContext::Tag { closing: false, quote: None, start_depth: depth };
+                    }
+                }
+                XmlContext::Comment if rest.starts_with(b"-->") => {
+                    ctx = XmlContext::Text;
+                    advance = 3;
+                }
+                XmlContext::CData if rest.starts_with(b"]]>") => {
+                    ctx = XmlContext::Text;
+                    advance = 3;
+                }
+                XmlContext::ProcessingInstruction if rest.starts_with(b"?>") => {
+                    ctx = XmlContext::Text;
+                    advance = 2;
+                }
+                XmlContext::Declaration(n) => match bytes[i] {
+                    b'[' => ctx = XmlContext::Declaration(n + 1),
+                    b']' => ctx = XmlContext::Declaration(n.saturating_sub(1)),
+                    b'>' if n == 0 => ctx = XmlContext::Text,
+                    _ => {}
+                },
+                XmlContext::Tag { closing, quote, start_depth } => match (quote, bytes[i]) {
+                    (None, q @ (b'"' | b'\'')) => ctx = XmlContext::Tag { closing, quote: Some(q), start_depth },
+                    (Some(q), b) if b == q => ctx = XmlContext::Tag { closing, quote: None, start_depth },
+                    (None, b'>') => {
+                        if closing {
+                            depth = depth.saturating_sub(1);
+                        } else if i == 0 || bytes[i - 1] != b'/' {
+                            depth += 1;
+                        }
+                        ctx = XmlContext::Text;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            i += advance;
+        }
+    }
+    out_lines.join("\n")
+}
+
+/// How many end tags `trimmed` opens with (`</b></a>` is 2).
+fn leading_end_tags(trimmed: &str) -> usize {
+    let mut rest = trimmed;
+    let mut count = 0;
+    while let Some(after) = rest.strip_prefix("</") {
+        let Some(gt) = after.find('>') else { break };
+        count += 1;
+        rest = after[gt + 1..].trim_start();
+    }
+    count
+}
+
+/// `reindent_xml`, returning only `first_line..=last_line` -- the same
+/// relationship `reindent_lines` has to `reindent`.
+pub fn reindent_xml_lines(source: &str, first_line: usize, last_line: usize, indent_width: usize) -> String {
+    let full = reindent_xml(source, first_line, last_line, indent_width);
+    let count = (last_line + 1).saturating_sub(first_line);
+    full.split('\n').skip(first_line).take(count).collect::<Vec<_>>().join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_indents_by_element_nesting() {
+        let source = "<a>\n<b>\n<c>text</c>\n<d/>\n</b>\n</a>";
+        assert_eq!(reindent_xml(source, 0, 5, 2), "<a>\n  <b>\n    <c>text</c>\n    <d/>\n  </b>\n</a>");
+    }
+
+    #[test]
+    fn xml_ignores_brackets_and_skips_comments_and_declarations() {
+        let source = "<?xml version=\"1.0\"?>\n<!DOCTYPE r [\n<!ENTITY x \"y\">\n]>\n<r>\n<!-- a comment\n   spanning (lines) <x>\n-->\n<k attr=\"a>b\">f(x)</k>\n</r>";
+        let expected = "<?xml version=\"1.0\"?>\n<!DOCTYPE r [\n<!ENTITY x \"y\">\n]>\n<r>\n    <!-- a comment\n   spanning (lines) <x>\n-->\n    <k attr=\"a>b\">f(x)</k>\n</r>";
+        assert_eq!(reindent_xml(source, 0, 9, 4), expected);
+    }
+
+    #[test]
+    fn xml_multi_line_start_tags_indent_their_attributes() {
+        let source = "<a>\n<b\nx=\"1\"\ny=\"2\">\n<c/>\n</b>\n</a>";
+        assert_eq!(reindent_xml(source, 0, 6, 2), "<a>\n  <b\n    x=\"1\"\n    y=\"2\">\n    <c/>\n  </b>\n</a>");
+    }
+
+    #[test]
+    fn xml_lines_version_returns_only_the_range() {
+        let source = "<a>\n<b>\n</b>\n</a>";
+        assert_eq!(reindent_xml_lines(source, 1, 2, 2), "  <b>\n  </b>");
+    }
 
     #[test]
     fn reindents_simple_nested_blocks_from_scratch() {

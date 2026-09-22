@@ -146,6 +146,18 @@ pub enum VimEvent {
     /// one of the three keys that mean this," left entirely to the host
     /// to act on (or silently ignore, if no server is attached).
     RequestLsp(LspRequestKind),
+    /// `]t`/`[t` -- move to the `count`th next/previous `target` (a TODO
+    /// comment, say). What counts as one is a question about the
+    /// document's syntax, which only the host can answer; this crate
+    /// only knows which key asked, in which direction, how many times.
+    BracketJump { target: BracketTarget, forward: bool, count: u32 },
+}
+
+/// What a `]`/`[` pair jumps between -- see `VimEvent::BracketJump`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BracketTarget {
+    /// `]t`/`[t`: a TODO/FIXME/NOTE-style comment keyword.
+    Todo,
 }
 
 /// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::
@@ -355,6 +367,10 @@ pub struct VimState {
     /// it already reacts to `ToggleComment`/`JumpToMark`/etc: something
     /// outside this crate's own buffer/cursor model needs to happen.
     pending_lsp_request: Option<LspRequestKind>,
+    /// Set by `]t`/`[t`; consumed by `handle_key` and turned into
+    /// `VimEvent::BracketJump`, the same round trip `pending_lsp_
+    /// request` makes.
+    pending_bracket_jump: Option<(BracketTarget, bool, u32)>,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -424,6 +440,7 @@ impl VimState {
             pending_comment_count: 1,
             pending_comment_lines: None,
             pending_lsp_request: None,
+            pending_bracket_jump: None,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
@@ -746,6 +763,7 @@ impl VimState {
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
+        let bracket_jump = self.pending_bracket_jump.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
@@ -768,6 +786,7 @@ impl VimState {
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
+            .or_else(|| bracket_jump.map(|(target, forward, count)| VimEvent::BracketJump { target, forward, count }))
             .unwrap_or(event)
     }
 
@@ -1436,6 +1455,7 @@ impl VimState {
                 self.pending_comment_count = count;
             }
             VimAction::RequestLsp(kind) => self.pending_lsp_request = Some(kind),
+            VimAction::BracketJump { target, forward } => self.pending_bracket_jump = Some((target, forward, count)),
         }
     }
 
@@ -2117,6 +2137,103 @@ impl VimState {
         cursor.sticky_col = col;
     }
 
+    /// Visual `p`/`P`: replaces the selection with a register's text --
+    /// `"{name}` if one was selected, the unnamed register (which the host
+    /// keeps in sync with the OS clipboard) otherwise. One
+    /// `Buffer::replace_range` for every selection kind, so a single `u`
+    /// undoes the whole paste.
+    ///
+    /// Shapes combine the way real Vim's do: lines over lines replace
+    /// them; text from within a line over whole lines becomes a line of
+    /// its own; whole lines over part of a line go in on lines of their
+    /// own, splitting it; and in a Block selection a single line of text
+    /// replaces every row's slice (anything longer goes in once, at the
+    /// block's top-left).
+    ///
+    /// Unless `keep_register`, what was replaced then becomes the unnamed
+    /// register (and so the clipboard) -- Vim's `v_p`. With an empty
+    /// register there's nothing to paste and the selection is left as it
+    /// is, as Vim does (its E353).
+    fn visual_paste(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, keep_register: bool) {
+        let (text, text_linewise) = match self.active_register.take() {
+            Some((name, _append)) => self.registers.get(&name).map(|r| (r.text.clone(), r.linewise)).unwrap_or_default(),
+            None => (self.register.text.clone(), self.register.linewise),
+        };
+        if text.is_empty() {
+            self.pending_error = Some("nothing in the register to paste".to_string());
+            return;
+        }
+
+        if self.visual_kind == VisualKind::Block {
+            let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
+            let text = text.strip_suffix('\n').unwrap_or(&text);
+            let single_line = !text.contains('\n');
+            let mut rows = Vec::new();
+            let mut replaced = Vec::new();
+            for line in line_lo..=line_hi {
+                let line_start = buffer.line_start_char(line);
+                let row: Vec<char> = buffer.text_range(line_start, line_start + buffer.line_len(line)).chars().collect();
+                let (lo, hi) = (col_lo.min(row.len()), col_hi.min(row.len()));
+                replaced.push(row[lo..hi].iter().collect::<String>());
+                let middle = if single_line || line == line_lo { text } else { "" };
+                rows.push(format!("{}{middle}{}", row[..lo].iter().collect::<String>(), row[hi..].iter().collect::<String>()));
+            }
+            let start = buffer.line_start_char(line_lo);
+            let end = buffer.line_start_char(line_hi) + buffer.line_len(line_hi);
+            let land = start + col_lo.min(buffer.line_len(line_lo));
+            self.replace_and_land(buffer, cursor, start, end, &rows.join("\n"), land);
+            if !keep_register {
+                self.register = Register { text: replaced.join("\n"), linewise: false };
+            }
+            return;
+        }
+
+        let (range, selection_linewise) = self.visual_range(buffer, cursor);
+        let replaced = buffer.text_range(range.start, range.end);
+        let replacement = if selection_linewise {
+            // Whole lines out, whole lines in -- and the buffer's last line
+            // stays without a newline if it had none.
+            let mut lines = text.clone();
+            if !lines.ends_with('\n') {
+                lines.push('\n');
+            }
+            if !replaced.ends_with('\n') {
+                lines.pop();
+            }
+            lines
+        } else if text_linewise {
+            let mut lines = format!("\n{text}");
+            if !lines.ends_with('\n') {
+                lines.push('\n');
+            }
+            lines
+        } else {
+            text.clone()
+        };
+        let land = if selection_linewise || text_linewise {
+            // The first pasted line's first non-blank, as linewise `p` does.
+            let skip = usize::from(!selection_linewise);
+            range.start + skip + replacement.chars().skip(skip).take_while(|c| *c == ' ' || *c == '\t').count()
+        } else {
+            // The last pasted character, as charwise `p` does.
+            range.start + replacement.chars().count() - 1
+        };
+        self.replace_and_land(buffer, cursor, range.start, range.end, &replacement, land);
+        if !keep_register {
+            self.register = Register { text: replaced, linewise: selection_linewise };
+        }
+    }
+
+    /// `visual_paste`'s edit: swaps `start..end` for `replacement` in one
+    /// undo step, pulses what went in, and puts the cursor at `land`.
+    fn replace_and_land(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, start: usize, end: usize, replacement: &str, land: usize) {
+        buffer.replace_range(cursor, start, end, replacement);
+        self.pending_pulse = Some(start..start + replacement.chars().count());
+        cursor.char_idx = land.min(buffer.len_chars().saturating_sub(1));
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
     fn handle_visual_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         if self.pending_visual_replace {
             self.pending_visual_replace = false;
@@ -2268,6 +2385,11 @@ impl VimState {
                 }
                 VisualAction::ChangeCase(mode) => {
                     self.visual_change_case(buffer, cursor, mode);
+                }
+                VisualAction::Paste { keep_register } => {
+                    self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                    self.visual_paste(buffer, cursor, keep_register);
+                    self.mode = Mode::Normal;
                 }
             }
             // Same one-shot reset as `handle_normal_key`'s own
@@ -2560,6 +2682,130 @@ mod tests {
 
     fn named(s: &mut VimState, b: &mut Buffer, c: &mut Cursor, n: NamedKey) -> VimEvent {
         s.handle_key(b, c, KeyPress::named(n))
+    }
+
+    #[test]
+    fn bracket_t_asks_the_host_for_a_todo_jump_with_its_count() {
+        let mut b = buf("x");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "]");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('t'));
+        assert_eq!(event, VimEvent::BracketJump { target: BracketTarget::Todo, forward: true, count: 1 });
+        keys(&mut vim, &mut b, &mut c, "3[");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('t'));
+        assert_eq!(event, VimEvent::BracketJump { target: BracketTarget::Todo, forward: false, count: 3 });
+    }
+
+    #[test]
+    fn dit_and_dat_delete_tag_contents_and_whole_elements() {
+        let mut b = buf("<a><b>text</b></a>");
+        let mut c = Cursor { char_idx: 7, sticky_col: 0 };
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "dit");
+        assert_eq!(b.text(), "<a><b></b></a>");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 };
+        keys(&mut vim, &mut b, &mut c, "dat");
+        assert_eq!(b.text(), "<a></a>");
+    }
+
+    /// A buffer, cursor at `at`, with the unnamed register (what the host
+    /// fills from the clipboard) holding `register`.
+    fn paste_setup(text: &str, at: usize, register: &str, linewise: bool) -> (VimState, Buffer, Cursor) {
+        let mut vim = VimState::new();
+        vim.set_register(register.to_string(), linewise);
+        let b = buf(text);
+        let mut c = Cursor { char_idx: at, sticky_col: 0 };
+        c.sticky_col = b.line_col(&c).1;
+        (vim, b, c)
+    }
+
+    #[test]
+    fn visual_p_replaces_the_selection_with_the_register() {
+        let (mut vim, mut b, mut c) = paste_setup("say hello world", 4, "goodbye", false);
+        keys(&mut vim, &mut b, &mut c, "vep");
+        assert_eq!(b.text(), "say goodbye world");
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert_eq!(c.char_idx, "say goodby".len(), "on the last pasted char, like charwise p");
+        // Real Vim's v_p: what was replaced is now in the register.
+        assert_eq!(vim.register(), ("hello", false));
+    }
+
+    #[test]
+    fn visual_shift_p_keeps_the_register_for_the_next_selection() {
+        let (mut vim, mut b, mut c) = paste_setup("one two", 0, "X", false);
+        keys(&mut vim, &mut b, &mut c, "veP");
+        assert_eq!(b.text(), "X two");
+        assert_eq!(vim.register(), ("X", false));
+        keys(&mut vim, &mut b, &mut c, "wveP");
+        assert_eq!(b.text(), "X X");
+    }
+
+    #[test]
+    fn visual_line_p_replaces_whole_lines() {
+        let (mut vim, mut b, mut c) = paste_setup("a\nb\nc\n", 2, "new line\n", true);
+        keys(&mut vim, &mut b, &mut c, "Vp");
+        assert_eq!(b.text(), "a\nnew line\nc\n");
+        assert_eq!(vim.register(), ("b\n", true));
+    }
+
+    #[test]
+    fn visual_line_p_with_text_from_within_a_line_makes_it_a_line() {
+        let (mut vim, mut b, mut c) = paste_setup("a\nb\nc", 2, "word", false);
+        keys(&mut vim, &mut b, &mut c, "Vp");
+        assert_eq!(b.text(), "a\nword\nc");
+    }
+
+    #[test]
+    fn visual_line_p_on_the_last_line_adds_no_trailing_newline() {
+        let (mut vim, mut b, mut c) = paste_setup("a\nb", 2, "z\n", true);
+        keys(&mut vim, &mut b, &mut c, "Vp");
+        assert_eq!(b.text(), "a\nz");
+    }
+
+    #[test]
+    fn visual_p_of_whole_lines_over_part_of_a_line_splits_it() {
+        let (mut vim, mut b, mut c) = paste_setup("foo bar baz", 4, "line\n", true);
+        keys(&mut vim, &mut b, &mut c, "vep");
+        assert_eq!(b.text(), "foo \nline\n baz");
+        assert_eq!(b.line_col(&c), (1, 0));
+    }
+
+    #[test]
+    fn visual_block_p_replaces_every_rows_slice_with_a_single_line() {
+        let (mut vim, mut b, mut c) = paste_setup("abcd\nefgh\nijkl", 1, "XY", false);
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjlp");
+        assert_eq!(b.text(), "aXYd\neXYh\niXYl");
+        assert_eq!(vim.register(), ("bc\nfg\njk", false));
+    }
+
+    #[test]
+    fn a_visual_paste_undoes_in_one_step() {
+        let (mut vim, mut b, mut c) = paste_setup("abcd\nefgh", 1, "Z", false);
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jlp");
+        assert_eq!(b.text(), "aZd\neZh");
+        keys(&mut vim, &mut b, &mut c, "u");
+        assert_eq!(b.text(), "abcd\nefgh");
+    }
+
+    #[test]
+    fn visual_p_from_a_named_register() {
+        let (mut vim, mut b, mut c) = paste_setup("keep this", 0, "unnamed", false);
+        keys(&mut vim, &mut b, &mut c, "\"ayiw");
+        keys(&mut vim, &mut b, &mut c, "wve\"ap");
+        assert_eq!(b.text(), "keep keep");
+        assert_eq!(vim.register(), ("this", false));
+    }
+
+    #[test]
+    fn visual_p_with_nothing_to_paste_leaves_the_selection() {
+        let (mut vim, mut b, mut c) = paste_setup("text", 0, "", false);
+        keys(&mut vim, &mut b, &mut c, "ve");
+        let event = vim.handle_key(&mut b, &mut c, KeyPress::char('p'));
+        assert_eq!(b.text(), "text");
+        assert!(matches!(event, VimEvent::Error(_)), "{event:?}");
     }
 
     #[test]

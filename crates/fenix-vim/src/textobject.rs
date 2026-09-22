@@ -3,6 +3,7 @@ use std::ops::Range;
 use fenix_core::{Buffer, Cursor};
 
 use crate::bracket;
+use crate::tag;
 use crate::charclass::{classify, CharClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,11 @@ pub enum TextObject {
     ABracket(char),
     InnerParagraph,
     AParagraph,
+    /// `it`/`at` -- the content of the innermost `<tag>...</tag>` pair
+    /// around the cursor, without or with the tags themselves. Textual,
+    /// like real Vim's: see `tag.rs`.
+    InnerTag,
+    ATag,
 }
 
 /// Whether `obj` should be treated as a linewise range by the caller
@@ -52,6 +58,22 @@ pub fn span(buffer: &Buffer, cursor: &Cursor, obj: TextObject, iskeyword_extra: 
         TextObject::ABracket(open) => bracket_span(buffer, cursor, open, true),
         TextObject::InnerParagraph => paragraph_span(buffer, cursor, false),
         TextObject::AParagraph => paragraph_span(buffer, cursor, true),
+        TextObject::InnerTag => tag_span(buffer, cursor, false),
+        TextObject::ATag => tag_span(buffer, cursor, true),
+    }
+}
+
+/// No enclosing tag pair resolves to an empty no-op range at the cursor,
+/// the same posture every other object here has for "nothing to select".
+fn tag_span(buffer: &Buffer, cursor: &Cursor, around: bool) -> Range<usize> {
+    let text = buffer.text();
+    let at = cursor.char_idx.min(buffer.len_chars().saturating_sub(1));
+    match tag::enclosing(&text, buffer.char_to_byte(at)) {
+        Some(pair) => {
+            let (start, end) = if around { (pair.open_start, pair.close_end) } else { (pair.open_end, pair.close_start) };
+            buffer.byte_to_char(start)..buffer.byte_to_char(end)
+        }
+        None => at..at,
     }
 }
 
