@@ -18,7 +18,7 @@ pub fn load(path: &Path) -> Vec<CompletionItem> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|label| CompletionItem { label: label.to_string(), kind: CompletionKind::Tag, detail: String::new() })
+        .map(|label| CompletionItem { label: label.to_string(), kind: CompletionKind::Tag, detail: String::new(), documentation: String::new() })
         .collect()
 }
 

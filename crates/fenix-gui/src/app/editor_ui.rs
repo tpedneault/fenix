@@ -126,7 +126,7 @@ impl App {
         let candidates = rows.into_iter().filter(|&row| row < ob.buffer.line_count()).map(|row| {
             let start = ob.buffer.line_start_char(row);
             let name = ob.buffer.text_range(start, start + ob.buffer.line_len(row)).trim().to_string();
-            let tag = fenix_completion::ctags::TagEntry { name: name.clone(), file: file.clone(), line: row + 1 };
+            let tag = fenix_completion::ctags::TagEntry { name: name.clone(), file: file.clone(), line: row + 1, signature: None };
             fenix_picker::Candidate::new(format!("{}  ·  line {}", name, row + 1), tag)
         }).collect();
         self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));

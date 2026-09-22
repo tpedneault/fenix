@@ -6671,6 +6671,13 @@ pub struct App {
     /// conversion throws away. Same staleness rule and `SPC c r` reset as
     /// `tcl_candidates_cache`.
     tcl_tags_cache: Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>,
+    /// The project's Doxygen documentation (`doxygen::load` of the
+    /// `xml_dir` its `.fenix/project.ini` names), `None` inside when the
+    /// project has no `[doxygen]` section or the load failed. Same
+    /// per-root staleness rule and `SPC c r` reset as `tcl_tags_cache`;
+    /// `Rc` so a hover or a candidate build can hold it without
+    /// borrowing `self`.
+    doxygen_cache: Option<(Option<PathBuf>, Option<Rc<fenix_completion::doxygen::DoxygenIndex>>)>,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
     completion_scroll: usize,
@@ -7418,6 +7425,7 @@ impl App {
             snippet: None,
             tcl_candidates_cache: None,
             tcl_tags_cache: None,
+            doxygen_cache: None,
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
@@ -8563,7 +8571,7 @@ impl App {
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
         let Some((language, text_document, position)) = self.focused_lsp_context() else {
-            self.lsp_hover = self.tcl_builtin_hover();
+            self.lsp_hover = self.tcl_hover();
             return;
         };
         let buffer = self.focused_buffer_id();
@@ -8578,9 +8586,10 @@ impl App {
     /// usage line for the built-in the cursor is on (or is inside an
     /// argument of -- `K` on the `$s` in `string compare $s $t` still
     /// names `string compare`), plus the subcommand list for an
-    /// ensemble. `None` on a user proc, a variable, whitespace, or in a
-    /// non-Tcl buffer -- see `tcl::hover_text`.
-    fn tcl_builtin_hover(&self) -> Option<String> {
+    /// ensemble (`tcl::hover_text`); failing that, the signature of a
+    /// user proc by that name (`user_proc_signature`). `None` on a
+    /// variable, whitespace, an unknown word, or in a non-Tcl buffer.
+    fn tcl_hover(&mut self) -> Option<String> {
         if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
             return None;
         }
@@ -8592,8 +8601,75 @@ impl App {
         let chars: Vec<char> = text.chars().collect();
         let before: String = chars[..word_start].iter().collect();
         let word: String = chars[word_start..word_end].iter().collect();
-        let words = fenix_completion::tcl::command_words_before(&before)?;
-        fenix_completion::tcl::hover_text(&words, &word)
+        if let Some(words) = fenix_completion::tcl::command_words_before(&before) {
+            if let Some(text) = fenix_completion::tcl::hover_text(&words, &word) {
+                return Some(text);
+            }
+        }
+        self.user_proc_hover(&word)
+    }
+
+    /// `K` on a user proc: its signature (`user_proc_signature`), then
+    /// whatever Doxygen documented -- brief, running text, the `@param`
+    /// table and the `@return` note -- laid out for the hover popup:
+    ///
+    /// ```text
+    /// util::greet name ?greeting? ?arg ...?
+    /// Greets someone by name.
+    /// Prints the greeting to stdout.
+    ///   name      Who to greet.
+    ///   greeting  The word to lead with.
+    /// returns: Nothing.
+    /// ```
+    ///
+    /// A documented proc ctags has no signature for (no project root,
+    /// say) still gets one from Doxygen's own `argsstring`. `None` when
+    /// neither source knows the name.
+    fn user_proc_hover(&mut self, name: &str) -> Option<String> {
+        let root = self.project_root.clone();
+        let doc = self.doxygen_index(root.as_deref()).and_then(|docs| docs.resolve(name).cloned());
+        let signature = self
+            .user_proc_signature(name)
+            .or_else(|| doc.as_ref().map(|doc| fenix_completion::tcl::proc_signature(&doc.name, &doc.argsstring)))?;
+        let Some(doc) = doc else { return Some(signature) };
+        let mut lines = vec![signature];
+        if !doc.brief.is_empty() {
+            lines.push(doc.brief.clone());
+        }
+        lines.extend(doc.detail.lines().filter(|line| !line.trim().is_empty()).map(str::to_string));
+        let width = doc.params.iter().map(|(name, _)| name.chars().count()).max().unwrap_or(0);
+        for (param, description) in &doc.params {
+            lines.push(format!("  {param:width$}  {description}"));
+        }
+        if let Some(returns) = &doc.returns {
+            lines.push(format!("returns: {returns}"));
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// The usage line for a user-defined proc called `name` -- `util::
+    /// greet name ?greeting? ?arg ...?` -- from the focused buffer's own
+    /// definitions first (a proc typed a minute ago, before ctags has
+    /// been re-run) and the project's ctags index second. `name` is
+    /// matched as written (`::` stripped) against the qualified name,
+    /// then by its bare last segment, so `greet` inside `namespace eval
+    /// util` finds `util::greet` without the caller having to resolve
+    /// namespaces -- a `greet` in two namespaces gets whichever comes
+    /// first, a known imprecision. `None` when nothing defines it.
+    fn user_proc_signature(&mut self, name: &str) -> Option<String> {
+        let name = name.trim_start_matches("::");
+        let bare = name.rsplit("::").next().unwrap_or(name);
+        let mut known: Vec<(String, String)> = fenix_completion::tcl::proc_definitions_in(&self.open().buffer.text())
+            .into_iter()
+            .map(|def| (def.qualified_name(), def.args))
+            .collect();
+        let root = self.project_root.clone();
+        known.extend(self.tcl_tags(root.as_deref()).into_iter().filter_map(|tag| Some((tag.name, tag.signature?))));
+        let found = known
+            .iter()
+            .find(|(qualified, _)| qualified == name)
+            .or_else(|| known.iter().find(|(qualified, _)| qualified.rsplit("::").next() == Some(bare)))?;
+        Some(fenix_completion::tcl::proc_signature(&found.0, &found.1))
     }
 
     /// `gd` -- requests `textDocument/definition`.
@@ -8817,13 +8893,17 @@ impl App {
                         label: keyword.to_string(),
                         kind: fenix_completion::CompletionKind::Keyword,
                         detail: fenix_completion::tcl::signature(keyword).unwrap_or_default().to_string(),
+                        documentation: String::new(),
                     };
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
+            let docs = self.doxygen_index(root);
             for tag in self.tcl_tags(root) {
                 if seen.insert(tag.name.clone()) {
-                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail: String::new() };
+                    let detail = tag.signature.as_deref().map(|args| fenix_completion::tcl::proc_signature(&tag.name, args)).unwrap_or_default();
+                    let documentation = docs.as_ref().and_then(|docs| docs.get(&tag.name)).map(|doc| doc.brief.clone()).unwrap_or_default();
+                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail, documentation };
                     candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
                 }
             }
@@ -8859,6 +8939,30 @@ impl App {
         self.tcl_tags_cache.as_ref().expect("just populated above if it was missing").1.clone()
     }
 
+    /// The project's Doxygen docs, loaded once per root (see
+    /// `doxygen_cache`). A project without a `[doxygen]` section is the
+    /// ordinary case and stays silent; a section whose `xml_dir` can't
+    /// be read is reported once, at load, since the user asked for it.
+    fn doxygen_index(&mut self, root: Option<&Path>) -> Option<Rc<fenix_completion::doxygen::DoxygenIndex>> {
+        let stale = match &self.doxygen_cache {
+            Some((cached_root, _)) => cached_root.as_deref() != root,
+            None => true,
+        };
+        if stale {
+            let index = root.and_then(fenix_completion::doxygen::project_xml_dir).and_then(|xml_dir| {
+                match fenix_completion::doxygen::load(&xml_dir) {
+                    Ok(index) => Some(Rc::new(index)),
+                    Err(err) => {
+                        self.set_error(format!("doxygen docs not loaded: {err}"));
+                        None
+                    }
+                }
+            });
+            self.doxygen_cache = Some((root.map(PathBuf::from), index));
+        }
+        self.doxygen_cache.as_ref().and_then(|(_, index)| index.clone())
+    }
+
     /// `SPC c s` -- fuzzy-find any known Tcl definition (proc/namespace)
     /// by its fully-qualified name and jump straight to where it's
     /// defined. Sourced from `tcl_tags`, so it shares that cache (and
@@ -8867,8 +8971,21 @@ impl App {
     /// re-shells `ctags` on its own.
     pub(crate) fn picker_symbols(&mut self) {
         let root = self.project_root.clone();
-        let candidates =
-            self.tcl_tags(root.as_deref()).into_iter().map(|tag| fenix_picker::Candidate::new(tag.name.clone(), tag)).collect();
+        let docs = self.doxygen_index(root.as_deref());
+        // A documented proc's brief rides along in the label -- fuzzy-
+        // matched too, so the picker finds a proc by what it *does*,
+        // not only by what it's called.
+        let candidates = self
+            .tcl_tags(root.as_deref())
+            .into_iter()
+            .map(|tag| {
+                let label = match docs.as_ref().and_then(|docs| docs.get(&tag.name)).filter(|doc| !doc.brief.is_empty()) {
+                    Some(doc) => format!("{}  ·  {}", tag.name, completion::clipped_line(&doc.brief, 60)),
+                    None => tag.name.clone(),
+                };
+                fenix_picker::Candidate::new(label, tag)
+            })
+            .collect();
         self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -9222,10 +9339,15 @@ impl App {
     pub(crate) fn refresh_completion_tags(&mut self) {
         self.tcl_candidates_cache = None;
         self.tcl_tags_cache = None;
+        self.doxygen_cache = None;
         match self.project_root.clone() {
             Some(root) => {
                 let count = self.tcl_tags(Some(&root)).len();
-                self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
+                let documented = self.doxygen_index(Some(&root)).map(|docs| docs.len());
+                let docs_note = documented.map(|n| format!(", {n} documented by Doxygen")).unwrap_or_default();
+                if !self.status_message.as_ref().is_some_and(|m| m.is_error) {
+                    self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found{docs_note}", root.display()));
+                }
             }
             None => {
                 self.set_error(
@@ -30722,6 +30844,149 @@ configure_board stm32
     }
 
     #[test]
+    fn k_on_a_proc_defined_in_the_buffer_shows_its_argument_list_in_tcls_notation() {
+        let source = "namespace eval util {\n    proc greet {name {greeting hello} args} {\n        puts \"$greeting $name\"\n    }\n}\nutil::greet Tom\ngreet Tom\n";
+        let (_dir, mut app) = tcl_app_with_cursor_on("hover_user_proc", source, source.find("util::greet Tom").unwrap() + 2);
+
+        app.request_hover();
+        assert_eq!(app.lsp_hover.as_deref(), Some("util::greet name ?greeting? ?arg ...?"));
+
+        // The bare name resolves too -- how the proc is called from
+        // inside its own namespace.
+        let col = source.find("greet Tom\n").unwrap();
+        app.test_set_cursor(Cursor { char_idx: col, sticky_col: col });
+        app.request_hover();
+        assert_eq!(app.lsp_hover.as_deref(), Some("util::greet name ?greeting? ?arg ...?"));
+    }
+
+    #[test]
+    fn k_on_a_proc_from_the_ctags_index_shows_its_signature() {
+        let dir = TempDir::new("hover_ctags_proc");
+        dir.write("lib.tcl", "proc helper {path {mode r}} {\n    return [open $path $mode]\n}\n");
+        let file = dir.write("main.tcl", "set fh [helper /tmp/x]\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_set_cursor(Cursor { char_idx: 9, sticky_col: 9 }); // on `helper`
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("helper path ?mode?"));
+    }
+
+    /// A project whose `.fenix/project.ini` points at a hand-written
+    /// Doxygen 1.8.17-shaped XML directory documenting `util::greet`.
+    fn documented_project(name: &str) -> TempDir {
+        let dir = TempDir::new(name);
+        dir.write("lib/util.tcl", "namespace eval util {\n    proc greet {name {greeting hello} args} {\n        puts \"$greeting $name\"\n    }\n}\n");
+        dir.write(".fenix/project.ini", "[doxygen]\nxml_dir = docs/xml\n");
+        dir.write("docs/xml/index.xml", "<doxygenindex version=\"1.8.17\"><compound refid=\"namespaceutil\" kind=\"namespace\"><name>util</name></compound></doxygenindex>\n");
+        dir.write("docs/xml/namespaceutil.xml", concat!(
+            "<doxygen version=\"1.8.17\"><compounddef id=\"namespaceutil\" kind=\"namespace\"><compoundname>util</compoundname><sectiondef kind=\"func\">",
+            "<memberdef kind=\"function\" id=\"namespaceutil_1a1\"><type></type><definition>util::greet</definition><argsstring>{name {greeting hello} args}</argsstring><name>greet</name>",
+            "<briefdescription><para>Greets someone by name. </para></briefdescription>",
+            "<detaileddescription><para>Prints the greeting to stdout.</para><para><parameterlist kind=\"param\">",
+            "<parameteritem><parameternamelist><parametername>name</parametername></parameternamelist><parameterdescription><para>Who to greet. </para></parameterdescription></parameteritem>",
+            "<parameteritem><parameternamelist><parametername>greeting</parametername></parameternamelist><parameterdescription><para>The word to lead with. </para></parameterdescription></parameteritem>",
+            "</parameterlist><simplesect kind=\"return\"><para>Nothing. </para></simplesect></para></detaileddescription>",
+            "<location file=\"lib/util.tcl\" line=\"2\" column=\"1\"/></memberdef></sectiondef></compounddef></doxygen>\n"));
+        dir
+    }
+
+    #[test]
+    fn k_on_a_documented_proc_shows_its_doxygen_brief_params_and_return_under_the_signature() {
+        let dir = documented_project("hover_doxygen");
+        let file = dir.write("main.tcl", "util::greet Tom\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_set_cursor(Cursor { char_idx: 7, sticky_col: 7 });
+
+        app.request_hover();
+
+        assert_eq!(
+            app.lsp_hover.as_deref(),
+            Some("util::greet name ?greeting? ?arg ...?\nGreets someone by name.\nPrints the greeting to stdout.\n  name      Who to greet.\n  greeting  The word to lead with.\nreturns: Nothing.")
+        );
+    }
+
+    #[test]
+    fn a_documented_procs_completion_candidate_carries_its_brief() {
+        let dir = documented_project("completion_doxygen");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("util::gre");
+
+        app.sync_completion();
+
+        let selected = selected_completion(&app);
+        assert_eq!(selected.label, "util::greet");
+        assert_eq!(selected.detail, "util::greet name ?greeting? ?arg ...?");
+        assert_eq!(selected.documentation, "Greets someone by name.");
+    }
+
+    #[test]
+    fn the_symbol_picker_matches_a_documented_proc_by_its_brief() {
+        let dir = documented_project("picker_doxygen");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.picker_symbols();
+
+        let Some(ActivePicker::Symbol(state)) = &mut app.active_picker else { panic!("expected the symbol picker") };
+        state.set_query("someone by name");
+        let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+        assert_eq!(labels, ["util::greet  ·  Greets someone by name."]);
+        assert_eq!(state.selected().unwrap().payload.name, "util::greet", "the payload is still the plain tag");
+    }
+
+    #[test]
+    fn a_project_without_a_doxygen_section_hovers_the_signature_alone() {
+        let dir = TempDir::new("hover_no_doxygen");
+        dir.write("lib.tcl", "proc helper {path {mode r}} {}\n");
+        let file = dir.write("main.tcl", "helper x\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.request_hover();
+
+        assert_eq!(app.lsp_hover.as_deref(), Some("helper path ?mode?"));
+        assert!(!app.status_message.as_ref().is_some_and(|m| m.is_error), "no section is the ordinary case, not an error");
+    }
+
+    #[test]
+    fn a_doxygen_section_pointing_nowhere_is_reported_once() {
+        let dir = TempDir::new("hover_bad_doxygen");
+        dir.write(".fenix/project.ini", "[doxygen]\nxml_dir = docs/missing\n");
+        let file = dir.write("main.tcl", "helper x\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.request_hover();
+
+        let message = app.status_message.as_ref().expect("a configured but unreadable xml_dir should say so");
+        assert!(message.is_error && message.text.contains("index.xml"), "{}", message.text);
+    }
+
+    #[test]
+    fn a_ctags_candidate_shows_the_procs_signature_as_its_detail() {
+        let dir = TempDir::new("completion_ctags_detail");
+        dir.write("lib.tcl", "proc helper {path {mode r}} {}\n");
+        let file = dir.write("main.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(dir.path().to_path_buf());
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("helpe");
+
+        app.sync_completion();
+
+        let selected = selected_completion(&app);
+        assert_eq!(selected.label, "helper");
+        assert_eq!(selected.detail, "helper path ?mode?");
+    }
+
+    #[test]
     fn accepting_a_subcommand_inserts_it_after_the_space() {
         let dir = TempDir::new("completion_accept_subcommand");
         let file = dir.write("foo.tcl", "");
@@ -31478,7 +31743,7 @@ configure_board stm32
         let lib = dir.write("lib.tcl", "puts start\n\nproc my_target_proc {} {\n    return 1\n}\n");
         let mut app = App::with_file(None);
 
-        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3, signature: None };
         let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
         app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
         app.picker_confirm();
@@ -31498,7 +31763,7 @@ configure_board stm32
         let mut app = App::with_file(Some(origin.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('l')); // off column 0, so the return position is checkable
 
-        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3 };
+        let tag = fenix_completion::ctags::TagEntry { name: "my_target_proc".to_string(), file: lib.clone(), line: 3, signature: None };
         let candidates = vec![fenix_picker::Candidate::new(tag.name.clone(), tag)];
         app.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
         app.picker_confirm();
@@ -35479,7 +35744,7 @@ configure_board stm32
     }
 
     fn completion_item(label: &str, kind: fenix_completion::CompletionKind) -> fenix_picker::Candidate<completion::Item> {
-        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind, detail: String::new() }.into())
+        fenix_picker::Candidate::new(label, fenix_completion::CompletionItem { label: label.to_string(), kind, detail: String::new(), documentation: String::new() }.into())
     }
 
     #[test]

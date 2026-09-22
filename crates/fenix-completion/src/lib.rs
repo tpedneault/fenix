@@ -13,6 +13,7 @@
 
 pub mod ctags;
 pub mod custom;
+pub mod doxygen;
 pub mod tcl;
 mod tcl_signatures;
 
@@ -49,4 +50,7 @@ pub struct CompletionItem {
     /// ?value ...?`), empty when the source has nothing to say (a
     /// ctags proc, a symbols-file entry).
     pub detail: String,
+    /// Longer text shown under the detail -- a proc's Doxygen brief
+    /// (`doxygen::ProcDoc::brief`); empty when nothing documents it.
+    pub documentation: String,
 }
