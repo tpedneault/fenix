@@ -275,6 +275,109 @@ mod tests {
         assert!(captured_as("puts hello
 ", "hello").is_empty());
     }
+
+    /// `dict keys $d`, `string compare $a $b`: the word right after an
+    /// ensemble command's own name is now colored the same way a
+    /// builtin command's own name is -- see `highlights.scm`'s own
+    /// "Ensemble subcommands" section for why this can only be checked
+    /// by the ensemble's own name, not by whether the word is a real
+    /// subcommand (there's no such check a tree-sitter predicate can
+    /// express). One representative per ensemble that gets the
+    /// treatment; `namespace`/`dict` checked separately below since
+    /// they inherit a different capture for their own name.
+    #[test]
+    fn a_subcommand_word_is_colored_like_a_builtin_command() {
+        for (source, subcommand) in [
+            ("string compare $a $b\n", "compare"),
+            ("array set arr {}\n", "set"),
+            ("binary format c $n\n", "format"),
+            ("chan gets $c\n", "gets"),
+            ("clock format $t\n", "format"),
+            ("encoding convertto utf-8 $s\n", "convertto"),
+            ("file exists $p\n", "exists"),
+            ("info exists x\n", "exists"),
+            ("interp create foo\n", "create"),
+            ("package require Tcl\n", "require"),
+            ("trace add variable x write cb\n", "add"),
+        ] {
+            assert_eq!(
+                captured_as(source, subcommand),
+                vec!["function.builtin".to_string()],
+                "{subcommand:?} in {source:?} should read as a subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn dicts_own_name_stays_a_keyword_while_its_subcommand_reads_as_a_function() {
+        assert_eq!(captured_as("dict keys $d\n", "dict"), vec!["keyword"]);
+        assert_eq!(captured_as("dict keys $d\n", "keys"), vec!["function.builtin"]);
+    }
+
+    #[test]
+    fn namespace_is_its_own_grammar_rule_and_still_gets_a_colored_subcommand() {
+        assert_eq!(captured_as("namespace eval ::app {}\n", "namespace"), vec!["keyword"]);
+        assert_eq!(captured_as("namespace eval ::app {}\n", "eval"), vec!["function.builtin"]);
+    }
+
+    /// `after`'s the one ensemble with a second, non-subcommand calling
+    /// form (`after ms ?script ...?`) -- a plain delay must not read
+    /// as though it were one of its three real subcommands.
+    #[test]
+    fn afters_millisecond_delay_form_is_not_mistaken_for_a_subcommand() {
+        assert_eq!(captured_as("after cancel $id\n", "cancel"), vec!["function.builtin"]);
+        assert_eq!(captured_as("after idle {}\n", "idle"), vec!["function.builtin"]);
+        assert!(captured_as("after 500 {}\n", "500").iter().all(|n| n != "function.builtin"), "a delay in ms is not a subcommand");
+        assert_eq!(captured_as("after 500 {}\n", "500"), vec!["number"], "still colored as the number it is");
+    }
+
+    /// A command's ordinary, non-subcommand arguments must not pick up
+    /// the same color just for sitting in the same position -- `dict
+    /// set`'s own dictionary/key/value names are real data, not nested
+    /// ensemble words, the exact shape that would break if the
+    /// restriction were "any word after these command names" instead
+    /// of "the *real* subcommand set".
+    #[test]
+    fn an_ordinary_argument_after_a_real_subcommand_is_not_colored_as_one() {
+        assert!(captured_as("dict set d k v\n", "k").is_empty());
+        assert!(captured_as("dict set d k v\n", "v").is_empty());
+        assert!(captured_as("info exists x\n", "x").is_empty(), "`info exists` has no nested subcommand -- `x` is a plain variable name");
+        assert!(captured_as("array set arr {}\n", "arr").is_empty());
+    }
+
+    /// `string is alnum`, `binary encode hex`, `info class methods`,
+    /// `trace add variable` -- the four ensembles whose own subcommand
+    /// is itself another ensemble (confirmed against the generated
+    /// signature table's own depth-3 entries, not guessed). Both words
+    /// get colored; a plain, non-nesting subcommand of the same root
+    /// command (`info exists`) does not reach for a third word at all.
+    #[test]
+    fn a_second_level_of_nested_subcommands_is_colored_too() {
+        for (source, first, second) in [
+            ("string is alnum $x\n", "is", "alnum"),
+            ("binary encode hex $data\n", "encode", "hex"),
+            ("binary decode base64 $data\n", "decode", "base64"),
+            ("info class methods $obj\n", "class", "methods"),
+            ("info object methods $obj\n", "object", "methods"),
+            ("trace add variable x write cb\n", "add", "variable"),
+            ("trace remove command foo delete cb\n", "remove", "command"),
+        ] {
+            assert_eq!(captured_as(source, first), vec!["function.builtin".to_string()], "{source:?}");
+            let second_capture = captured_as(source, second);
+            assert_eq!(second_capture.len(), 1, "{source:?}: {second:?} captured as {second_capture:?}");
+            assert!(second_capture[0].starts_with("function"), "{source:?}: {second_capture:?}");
+        }
+    }
+
+    /// A nested-ensemble root used with a *non*-nesting subcommand
+    /// keeps its ordinary single-level treatment -- `info exists`
+    /// isn't `info class`/`info object`, so its second word is a plain
+    /// variable name, not a third-level subcommand.
+    #[test]
+    fn a_nested_ensemble_roots_other_subcommands_stay_single_level() {
+        assert_eq!(captured_as("info exists someVar\n", "exists"), vec!["function.builtin"]);
+        assert!(captured_as("info exists someVar\n", "someVar").is_empty());
+    }
     use crate::language::LanguageId;
 
     #[test]

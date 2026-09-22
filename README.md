@@ -66,7 +66,16 @@ for anyone curious to poke around or build on it.
   fully-qualified path with an optional leading `::` -- not just any
   word that happens to be first on a line, and including the procs
   defined in the file you're looking at (which is the whole of what's
-  known for a lone script with no project for `ctags` to scan). Markdown gets a real second
+  known for a lone script with no project for `ctags` to scan). The word
+  right after an ensemble command's own name -- `dict keys`, `string
+  compare`, `info class methods` -- is colored the same way, restricted
+  to the ensembles that are actually invoked as `command subcommand
+  ...` (`after`'s one real exception, `after ms ?script?`, is excluded
+  so a plain delay is never mistaken for one of its three real
+  subcommands), including the handful that nest a second ensemble one
+  level down (`string is alnum`, `binary encode hex`, `trace add
+  variable`). An ordinary argument in the same position -- `dict set
+  d k v`'s `k`/`v`, `info exists x`'s `x` -- is left alone. Markdown gets a real second
   pass beyond its own block structure (headings, lists, code fences):
   tree-sitter-md ships two grammars, and the block one only ever marks
   a span of prose with a bare `(inline)` node rather than parsing
