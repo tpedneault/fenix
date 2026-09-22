@@ -68,9 +68,22 @@ pub fn all_matches_in_range(buffer: &Buffer, pattern: &str, byte_range: Range<us
 /// `*`/`#` seed their search from. `None` if the cursor isn't on a word
 /// (e.g. sitting on whitespace or at the end of an empty buffer).
 /// Reuses `textobject::span`'s existing inner-word scan rather than
-/// re-implementing word-boundary detection.
+/// re-implementing word-boundary detection. Deliberately *not*
+/// parameterized by `'iskeyword'` the way `w`/`e`/`b`/`iw`/`aw` are:
+/// this wraps the extracted word in a `\b...\b` regex boundary, whose
+/// own notion of a word character is the regex engine's fixed one
+/// (always includes `_`) -- narrowing the extracted text to just
+/// `testing` under `:set iskeyword-=_` while still wrapping it in a
+/// `_`-inclusive `\b` would make the pattern unable to match its own
+/// source occurrence whenever an `_` immediately follows (`\btesting\b`
+/// never matches inside `testing_variables`, since `_` is `\w` to the
+/// regex engine regardless of `iskeyword`). Real Vim avoids this by
+/// building `*` on its own `iskeyword`-aware `\<`/`\>` boundary atoms
+/// instead of a fixed `\b` -- out of scope here, so `*`/`#` keep
+/// searching for the whole underscore-inclusive identifier regardless
+/// of `iskeyword`, same as before this option existed.
 pub fn word_under_cursor_pattern(buffer: &Buffer, cursor: &Cursor) -> Option<String> {
-    let range = textobject::span(buffer, cursor, TextObject::InnerWord);
+    let range = textobject::span(buffer, cursor, TextObject::InnerWord, crate::charclass::DEFAULT_ISKEYWORD_EXTRA);
     if range.is_empty() {
         return None;
     }

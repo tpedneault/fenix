@@ -7252,6 +7252,9 @@ impl App {
         let theme = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
         let mut vim = VimState::new();
         vim.set_indent_width(config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
+        vim.set_iskeyword_extra(
+            config.iskeyword_extra.as_deref().map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec()),
+        );
         let mib_roots = config
             .mib_roots
             .iter()
@@ -23755,6 +23758,12 @@ impl App {
                     eprintln!("fenix: couldn't save indent width ({err})");
                 }
             }
+            VimEvent::IsKeywordChanged(chars) => {
+                self.config.iskeyword_extra = Some(chars.into_iter().collect());
+                if let Err(err) = self.config.save() {
+                    eprintln!("fenix: couldn't save iskeyword ({err})");
+                }
+            }
             VimEvent::JumpRecorded(from) => {
                 let buffer = self.focused_buffer_id();
                 self.record_jump(JumpEntry { buffer, char_idx: from });
@@ -30230,6 +30239,69 @@ index 0000000..1111111 100644
         }
         let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
         assert_eq!(reloaded.indent_width, Some(3));
+    }
+
+    /// Mirrors `a_persisted_indent_width_applies_to_vim`: the default
+    /// (no `[editor]` key at all) still reproduces real Vim's actual
+    /// factory default (`_` is a keyword character), not an empty set.
+    #[test]
+    fn a_persisted_iskeyword_extra_applies_to_vim() {
+        let dir = TempDir::new("persisted_iskeyword_applies");
+        let mut config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        config.iskeyword_extra = Some(String::new());
+        config.save().unwrap();
+
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let mut vim = VimState::new();
+        vim.set_iskeyword_extra(
+            reloaded.iskeyword_extra.as_deref().map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec()),
+        );
+        assert_eq!(vim.iskeyword_extra(), &[] as &[char]);
+    }
+
+    #[test]
+    fn no_persisted_iskeyword_extra_falls_back_to_real_vims_own_default() {
+        let dir = TempDir::new("unset_iskeyword_falls_back");
+        let config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        assert!(config.iskeyword_extra.is_none());
+
+        let mut vim = VimState::new();
+        vim.set_iskeyword_extra(
+            config.iskeyword_extra.as_deref().map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec()),
+        );
+        assert_eq!(vim.iskeyword_extra(), &['_']);
+    }
+
+    #[test]
+    fn set_iskeyword_command_persists_the_new_setting() {
+        let dir = TempDir::new("set_iskeyword_persists");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        // `App::with_file` still seeds `app.vim` from *this machine's*
+        // real, already-on-disk config (deliberately not swapped out
+        // above, the same shape `set_shiftwidth_command_persists_the_
+        // new_width` already has) -- pinned to real Vim's own default
+        // explicitly, so the `-=_` below is guaranteed to be a real
+        // change regardless of what's actually persisted there.
+        app.vim.set_iskeyword_extra(vec!['_']);
+
+        let event = app.test_vim_key(KeyPress::char(':'));
+        assert_eq!(event, VimEvent::None);
+        for ch in "set iskeyword-=_".chars() {
+            app.test_vim_key(KeyPress::char(ch));
+        }
+        let event = app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(event, VimEvent::IsKeywordChanged(Vec::new()));
+
+        // Mirrors handle_key's own IsKeywordChanged arm -- handle_key
+        // itself needs a real winit KeyEvent, same posture
+        // `set_shiftwidth_command_persists_the_new_width` already has.
+        if let VimEvent::IsKeywordChanged(chars) = event {
+            app.config.iskeyword_extra = Some(chars.into_iter().collect());
+            app.config.save().unwrap();
+        }
+        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        assert_eq!(reloaded.iskeyword_extra, Some(String::new()));
     }
 
     #[test]

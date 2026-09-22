@@ -34,6 +34,15 @@ pub struct Config {
     /// `>>`/`<<` actually *inserts* (always spaces; Fenix never inserts
     /// a real tab character itself). Consulted by `fenix-gui`'s
     /// `tabstops` module.
+    /// The extra (beyond alphanumeric) word-class characters real Vim's
+    /// `'iskeyword'` option holds, exactly as `:set iskeyword=...` would
+    /// list them -- literal characters concatenated with no delimiter
+    /// (`"_"` is the default fenix-vim itself falls back to when this is
+    /// `None`, `""` is the user's *explicit* choice of no extras at
+    /// all). Runtime-changed via `:set iskeyword=...`/`+=`/`-=`
+    /// (`fenix_vim::VimEvent::IsKeywordChanged`) and persisted the same
+    /// way `indent_width` already is.
+    pub iskeyword_extra: Option<String>,
     pub tab_width: Option<usize>,
     /// Whether caret-fade, scroll-ease, and yank/paste-pulse animations
     /// play at all -- `None`/unset means "on" (the default look); `false`
@@ -253,6 +262,7 @@ impl Config {
             font_size: editor.and_then(|s| s.get("font_size")).and_then(|v| v.parse().ok()),
             font_family: editor.and_then(|s| s.get("font_family")).cloned(),
             indent_width: editor.and_then(|s| s.get("indent_width")).and_then(|v| v.parse().ok()),
+            iskeyword_extra: editor.and_then(|s| s.get("iskeyword_extra")).cloned(),
             tab_width: editor.and_then(|s| s.get("tab_width")).and_then(|v| v.parse().ok()),
             animations: editor.and_then(|s| s.get("animations")).and_then(|v| v.parse().ok()),
             completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
@@ -296,6 +306,7 @@ impl Config {
             font_size: None,
             font_family: None,
             indent_width: None,
+            iskeyword_extra: None,
             tab_width: None,
             animations: None,
             completion_symbols_file: None,
@@ -375,6 +386,9 @@ impl Config {
         }
         if let Some(indent_width) = self.indent_width {
             out.push_str(&format!("indent_width = {indent_width}\n"));
+        }
+        if let Some(iskeyword_extra) = &self.iskeyword_extra {
+            out.push_str(&format!("iskeyword_extra = {}\n", ini::quote_if_needed(iskeyword_extra)));
         }
         if let Some(tab_width) = self.tab_width {
             out.push_str(&format!("tab_width = {tab_width}\n"));
@@ -889,6 +903,7 @@ mod tests {
         assert!(config.font_size.is_none());
         assert!(config.font_family.is_none());
         assert!(config.indent_width.is_none());
+        assert!(config.iskeyword_extra.is_none());
         assert!(config.tab_width.is_none());
         assert!(config.animations.is_none());
         assert!(config.completion_symbols_file.is_none());
@@ -917,6 +932,7 @@ mod tests {
         config.font_size = Some(18.0);
         config.font_family = Some("Fira Code".to_string());
         config.indent_width = Some(2);
+        config.iskeyword_extra = Some(String::new());
         config.tab_width = Some(4);
         config.completion_symbols_file = Some(PathBuf::from("/home/thomas/tcl-symbols.txt"));
         config.save().unwrap();
@@ -926,8 +942,21 @@ mod tests {
         assert_eq!(reloaded.font_size, Some(18.0));
         assert_eq!(reloaded.font_family, Some("Fira Code".to_string()));
         assert_eq!(reloaded.indent_width, Some(2));
+        assert_eq!(reloaded.iskeyword_extra, Some(String::new()), "an explicit empty set round-trips distinctly from unset");
         assert_eq!(reloaded.tab_width, Some(4));
         assert_eq!(reloaded.completion_symbols_file, Some(PathBuf::from("/home/thomas/tcl-symbols.txt")));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn iskeyword_extra_round_trips_a_non_trivial_value() {
+        let path = temp_path("iskeyword_round_trip");
+        let mut config = Config::load_or_default(path.clone());
+        config.iskeyword_extra = Some("_-".to_string());
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.iskeyword_extra, Some("_-".to_string()));
         std::fs::remove_file(&path).ok();
     }
 
