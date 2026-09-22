@@ -14,6 +14,7 @@
 pub mod ctags;
 pub mod custom;
 pub mod tcl;
+mod tcl_signatures;
 
 /// Which source a `CompletionItem` came from -- drives both display
 /// (color-coded per kind in the popup) and, later, ranking tie-breaks.
@@ -43,4 +44,9 @@ pub enum CompletionKind {
 pub struct CompletionItem {
     pub label: String,
     pub kind: CompletionKind,
+    /// One line of context shown for the selected candidate -- a
+    /// built-in's usage line from `tcl::signature` (`lappend varName
+    /// ?value ...?`), empty when the source has nothing to say (a
+    /// ctags proc, a symbols-file entry).
+    pub detail: String,
 }

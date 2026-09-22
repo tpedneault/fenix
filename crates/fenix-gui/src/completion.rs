@@ -55,7 +55,7 @@ impl From<fenix_completion::CompletionItem> for Item {
             fenix_completion::CompletionKind::Tag => Source::Symbol,
             fenix_completion::CompletionKind::Lsp => Source::Lsp,
         };
-        Self::text(item.label, source)
+        Self { detail: item.detail, ..Self::text(item.label, source) }
     }
 }
 
