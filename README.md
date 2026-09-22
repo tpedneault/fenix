@@ -18,7 +18,9 @@ for anyone curious to poke around or build on it.
   (`3dw`, `2dd`, ...), yank/paste mirrored onto the OS clipboard (the
   unnamed register only -- `y`/`d`/`c` push to it, `p`/`P` pull from it
   first, so copying in Fenix and pasting elsewhere -- or vice versa --
-  just works), named registers (`"a`-`"z`/`"A`-`"Z` to select one for the
+  just works; in Visual mode `p` replaces the selection with it, leaving
+  the replaced text on the clipboard as Vim does, and `P` replaces it
+  while keeping the clipboard as it was), named registers (`"a`-`"z`/`"A`-`"Z` to select one for the
   next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends), undo/redo, search
   (`/`, `?`, `n`, `N`, `*`, `#`) with a live incsearch preview and
   persistent match highlighting while it's active, `:s` substitute with
@@ -63,9 +65,36 @@ for anyone curious to poke around or build on it.
   continuations as you type a sequence -- reachable from Visual mode as
   well as Normal, so e.g. `SPC c f` (indent the selection) can act on an
   active selection without leaving it first.
+- **TODO comments**: `TODO`, `FIXME`/`FIX`/`BUG`, `HACK`, `WARN`/`XXX`,
+  `PERF`/`OPTIMIZE`, `NOTE`/`INFO` and `TEST` are highlighted inside real
+  comments (tree-sitter decides what a comment is, so a `"TODO"` string
+  literal never counts), each family in its own color with a soft tint
+  behind it; an `(owner)` and trailing `:` are part of the marker
+  (`TODO(tom):`). `TODO`, `FIXME`, `FIXIT`, `HACK`, `XXX` and `NOTE` count
+  as the first word of a comment line; the rest need the colon, since
+  `// INFO is logged` is prose. `]t`/`[t` step to the next/previous one
+  (count-aware), `SPC s t` lists the buffer's, and `SPC s T` lists the
+  whole project's -- `rg` narrows the project to files that mention a
+  keyword, then each is parsed so only comments are listed (plain-text
+  and Markdown files are read line by line). The project list also
+  becomes the quickfix list, so `SPC p n`/`SPC p N` walk it.
+- **XML**: highlighting for `.xml` and the formats built on it (`.svg`,
+  `.xsd`, `.xsl`/`.xslt`, MSBuild `.csproj`/`.props`/`.targets`, `.resx`,
+  `.xaml`, `.plist`, `.wxs`, `.nuspec`, feeds, and more), plus `.dtd`.
+  Typing `>` to finish a start tag inserts its end tag after the cursor
+  and typing `</` completes the innermost open element; `%` on a tag
+  jumps to its partner (bracket matching as usual everywhere else);
+  `it`/`at` select a tag's contents or the whole element (real Vim's
+  text objects, textual, so they work in any file); `gcc` wraps lines in
+  `<!-- -->` (Markdown too); multi-line elements fold (`SPC c z`), appear
+  in `SPC c s` and the breadcrumbs; `SPC c o` is an element outline
+  labeled with each element's `id`/`name`/`key`; `SPC c F`/`SPC c f`
+  reindent by element depth; `SPC c v` checks well-formedness and jumps
+  to the first error (saving a malformed XML file also says so); `SPC c
+  y` copies the element's XPath (`/project/dependencies/dependency[2]`).
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, C++, Bash, Tcl, Dockerfile/
-  Containerfile, and Batch (`.bat`/`.cmd`). Docker Compose files already
+  Containerfile, Batch (`.bat`/`.cmd`), XML, and DTD. Docker Compose files already
   get full highlighting for free via the existing YAML support -- no
   separate grammar needed. `Dockerfile`/`Containerfile` are detected by
   filename (they conventionally have no extension), including per-stage
@@ -964,6 +993,8 @@ popup shows what keys continue it.
 | `SPC u q` | End the running debug session |
 | `SPC l m` | Show LSP/DAP tool status (found on PATH, running, install hints) |
 | `SPC s s` | Fuzzy-find a line in the current buffer |
+| `SPC s t` | List the TODO/FIXME/NOTE-style comments in the current buffer |
+| `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |
 | `SPC o d` | Open the startup dashboard |
@@ -1042,7 +1073,9 @@ popup shows what keys continue it.
 | `SPC c F` | Indent region -- reindent the whole focused buffer structurally, or (with an attached language server) reformat it (LSP) |
 | `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC c x` | Toggle the GFM task checkbox (`- [ ]`/`- [x]`) on the current line |
-| `SPC c o` | Fuzzy-find a Markdown heading and jump to it |
+| `SPC c o` | Fuzzy-find a Markdown heading, or an XML element, and jump to it |
+| `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
+| `SPC c y` | Copy the XPath of the XML element under the cursor |
 | `SPC m i` | Build and insert a telecommand from the MIB |
 | `SPC m t` | Fuzzy-find a MIB telecommand and view its details |
 | `SPC m k` | Fuzzy-find a MIB TM packet and view its details |

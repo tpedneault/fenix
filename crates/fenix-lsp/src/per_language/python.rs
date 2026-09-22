@@ -105,6 +105,9 @@ fn system_python() -> PathBuf {
 /// enough (once per project-root resolution) for the flash to be
 /// noticeable otherwise.
 fn no_console_command(program: &str) -> Command {
+    // `mut` is only needed by the Windows-only flag below; elsewhere it
+    // would be an unused-mut warning, which the CI clippy gate denies.
+    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {

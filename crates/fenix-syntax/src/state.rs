@@ -6,6 +6,8 @@ use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator,
 use crate::edit::{to_input_edit, RawEdit};
 use crate::highlight::{resolve_overlaps, RawCapture};
 use crate::language::LanguageId;
+use crate::todo::{self, TodoItem, TodoKind};
+use crate::xml;
 
 /// Markdown's own second grammar, for prose text a block-structure
 /// parse alone can't see inside of -- see `SyntaxState::inline`'s own
@@ -30,10 +32,16 @@ struct InlineGrammar {
     query: Query,
 }
 
-fn is_scope_node(node: Node<'_>) -> bool {
-    node.start_position().row < node.end_position().row && matches!(node.kind(),
-        "function_item" | "impl_item" | "mod_item" | "struct_item" | "enum_item" |
-        "function_definition" | "class_definition" | "method_definition" | "procedure")
+fn is_scope_node(lang: LanguageId, node: Node<'_>) -> bool {
+    node.start_position().row < node.end_position().row
+        && match lang {
+            // Every multi-line element is a scope: foldable, listed by
+            // `SPC c s`, and a step in the breadcrumbs.
+            LanguageId::Xml => node.kind() == "element",
+            _ => matches!(node.kind(),
+                "function_item" | "impl_item" | "mod_item" | "struct_item" | "enum_item" |
+                "function_definition" | "class_definition" | "method_definition" | "procedure"),
+        }
 }
 
 impl InlineGrammar {
@@ -51,8 +59,32 @@ impl InlineGrammar {
     }
 }
 
+/// Splits TODO-style keywords out of every comment capture already in
+/// `raw`, as narrower `comment.todo.*` captures `resolve_overlaps` then
+/// prefers over the comment they sit in. Deriving them from the
+/// grammar's own comment captures (rather than a per-language query) is
+/// what makes this work identically for every registered language.
+fn push_todo_captures<'a>(source: &str, raw: &mut Vec<RawCapture<'a>>) {
+    let comments: Vec<std::ops::Range<usize>> = raw
+        .iter()
+        .filter(|c| c.name == "comment" || c.name.starts_with("comment.") || c.name == "spell")
+        .map(|c| c.range.clone())
+        .collect();
+    for range in comments {
+        let Some(text) = source.get(range.clone()) else { continue };
+        for (keyword, kind) in todo::find_keywords(text) {
+            raw.push(RawCapture {
+                range: (range.start + keyword.start)..(range.start + keyword.end),
+                pattern_index: usize::MAX,
+                name: kind.capture_name(),
+            });
+        }
+    }
+}
+
 /// Per-buffer incremental parse + highlight state for one language.
 pub struct SyntaxState {
+    lang: LanguageId,
     parser: Parser,
     tree: Option<Tree>,
     query: Query,
@@ -80,7 +112,7 @@ impl SyntaxState {
         let mut ranges = Vec::new();
         loop {
             let node = cursor.node();
-            if is_scope_node(node) {
+            if is_scope_node(self.lang, node) {
                 ranges.push((node.start_position().row, node.end_position().row));
             }
             if cursor.goto_first_child() { continue }
@@ -103,7 +135,7 @@ impl SyntaxState {
         let Some(mut node) = root.descendant_for_byte_range(byte, byte) else { return Vec::new() };
         let mut result = Vec::new();
         loop {
-            if is_scope_node(node) {
+            if is_scope_node(self.lang, node) {
                 result.push((node.start_position().row, node.end_position().row));
             }
             match node.parent() { Some(parent) => node = parent, None => break }
@@ -123,7 +155,7 @@ impl SyntaxState {
         let query = Query::new(&language, lang.highlights_query())
             .expect("bundled highlights.scm for this language failed to compile");
         let inline = (lang == LanguageId::Markdown).then(|| InlineGrammar::new(&language));
-        Self { parser, tree, query, inline }
+        Self { lang, parser, tree, query, inline }
     }
 
     /// Applies queued low-level edits (in the order they happened) to the
@@ -166,7 +198,52 @@ impl SyntaxState {
             self.push_inline_captures(inline, tree, source, byte_range, &mut raw);
         }
 
+        push_todo_captures(source, &mut raw);
         resolve_overlaps(raw)
+    }
+
+    /// Every TODO-style keyword (`TODO`, `FIXME`, `NOTE`, ...) in the
+    /// document's comments, in document order -- see `todo::find_
+    /// keywords` for what counts. Only comments count: a keyword in a
+    /// string literal or an identifier is never reported.
+    pub fn todo_items(&self, source: &str) -> Vec<TodoItem> {
+        let ranges = self
+            .highlights_in_range(source, 0..source.len())
+            .into_iter()
+            .filter_map(|(range, name)| TodoKind::from_capture_name(name).map(|kind| (range, kind)))
+            .collect();
+        todo::items_from_ranges(source, ranges)
+    }
+
+    /// The language this state parses.
+    pub fn language(&self) -> LanguageId {
+        self.lang
+    }
+
+    /// XML only: every element in document order, for an outline. Empty
+    /// for any other language.
+    pub fn xml_elements(&self, source: &str) -> Vec<xml::XmlElement> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::elements(tree, source),
+            _ => Vec::new(),
+        }
+    }
+
+    /// XML only: with `byte` on a start or end tag, the byte offset of
+    /// the matching tag's name.
+    pub fn xml_matching_tag(&self, source: &str, byte: usize) -> Option<usize> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::matching_tag(tree, source, byte),
+            _ => None,
+        }
+    }
+
+    /// XML only: an XPath-style path to the element enclosing `byte`.
+    pub fn xml_element_path(&self, source: &str, byte: usize) -> Option<String> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::element_path(tree, source, byte),
+            _ => None,
+        }
     }
 
     /// Finds every `(inline)` span the block tree marks within
@@ -654,5 +731,78 @@ mod tests {
             .iter()
             .any(|(r, n)| r.start == while_start && (*n == "keyword" || *n == "repeat"));
         assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
+    }
+
+    #[test]
+    fn todo_keywords_in_comments_get_their_own_capture() {
+        let source = "fn a() {
+    // TODO(tom): wire up
+    let s = \"TODO: not a comment\";
+    /* FIXME broken */
+}
+";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let todo = source.find("TODO(tom):").unwrap();
+        assert!(highlights.iter().any(|(r, n)| r.start == todo && &source[r.clone()] == "TODO(tom):" && *n == "comment.todo.todo"), "{highlights:?}");
+        let in_string = source.find("TODO: not").unwrap();
+        assert!(!highlights.iter().any(|(r, n)| r.start == in_string && n.starts_with("comment.todo")), "{highlights:?}");
+
+        let items = state.todo_items(source);
+        let summary: Vec<(TodoKind, usize, &str)> = items.iter().map(|i| (i.kind, i.line, i.message.as_str())).collect();
+        assert_eq!(summary, vec![(TodoKind::Todo, 1, "wire up"), (TodoKind::Fix, 3, "broken")]);
+    }
+
+    #[test]
+    fn todo_keywords_work_in_every_comment_syntax() {
+        for (lang, source) in [
+            (LanguageId::Python, "# TODO: py
+"),
+            (LanguageId::Tcl, "# TODO: tcl
+puts hi
+"),
+            (LanguageId::Xml, "<a><!-- TODO: xml --></a>
+"),
+            (LanguageId::Bash, "echo hi # TODO: sh
+"),
+        ] {
+            let state = SyntaxState::new(lang, source);
+            let items = state.todo_items(source);
+            assert_eq!(items.len(), 1, "{lang:?}: {items:?}");
+            assert_eq!(items[0].kind, TodoKind::Todo);
+        }
+    }
+
+    #[test]
+    fn xml_highlights_tags_attributes_and_comments() {
+        let source = "<?xml version=\"1.0\"?>
+<root id=\"x\"><!-- c --><child/></root>
+";
+        let state = SyntaxState::new(LanguageId::Xml, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
+        assert_eq!(name_of("root"), Some("tag"));
+        assert_eq!(name_of("id"), Some("property"));
+        assert_eq!(name_of("<!-- c -->"), Some("comment"));
+    }
+
+    #[test]
+    fn xml_multiline_elements_are_scopes() {
+        let source = "<root>
+  <a>
+    <b/>
+  </a>
+  <c>one line</c>
+</root>
+";
+        let state = SyntaxState::new(LanguageId::Xml, source);
+        assert_eq!(state.scope_ranges(), vec![(0, 5), (1, 3)]);
+    }
+
+    #[test]
+    fn dtd_highlights_something() {
+        smoke_test(LanguageId::Dtd, "<!ELEMENT note (to,from)>
+<!ATTLIST note id CDATA #REQUIRED>
+");
     }
 }

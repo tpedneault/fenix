@@ -189,12 +189,20 @@ impl Buffer {
     /// Byte offset of the `char_idx`-th char -- needed by consumers that
     /// work in bytes (e.g. tree-sitter, via `fenix-syntax`), since `Buffer`
     /// itself is entirely char-indexed.
+    ///
+    /// Like every position accessor here, an offset past the end is
+    /// clamped to it rather than panicking: positions are held all over
+    /// the editor (pane cursors, marks, the jumplist, a Visual anchor, a
+    /// completion's start), and when the text changes underneath one --
+    /// a file rewritten on disk by another program, say -- a stale
+    /// position should land at the end of the buffer, not take down the
+    /// whole editor and whatever unsaved work is in it.
     pub fn char_to_byte(&self, char_idx: usize) -> usize {
-        self.rope.char_to_byte(char_idx)
+        self.rope.char_to_byte(char_idx.min(self.rope.len_chars()))
     }
 
     pub fn byte_to_char(&self, byte_idx: usize) -> usize {
-        self.rope.byte_to_char(byte_idx)
+        self.rope.byte_to_char(byte_idx.min(self.rope.len_bytes()))
     }
 
     /// Records a low-level mutation for any consumer tracking the buffer
@@ -243,10 +251,10 @@ impl Buffer {
     /// The text in `[start, end)`, without modifying the buffer. Used by
     /// Vim's yank, which reads a range without deleting it.
     pub fn text_range(&self, start: usize, end: usize) -> String {
+        let end = end.min(self.rope.len_chars());
         if start >= end {
             return String::new();
         }
-        let end = end.min(self.rope.len_chars());
         self.rope.slice(start..end).to_string()
     }
 
@@ -270,15 +278,18 @@ impl Buffer {
     }
 
     /// (line, column) for a cursor, both zero-based, in chars.
+    /// A cursor past the end reads as the end (see `char_to_byte`).
     pub fn line_col(&self, cursor: &Cursor) -> (usize, usize) {
-        let line = self.rope.char_to_line(cursor.char_idx);
-        let col = cursor.char_idx - self.rope.line_to_char(line);
+        let char_idx = cursor.char_idx.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(char_idx);
+        let col = char_idx - self.rope.line_to_char(line);
         (line, col)
     }
 
-    /// The char offset where `line` begins.
+    /// The char offset where `line` begins; a line past the end begins
+    /// at the end of the buffer.
     pub fn line_start_char(&self, line: usize) -> usize {
-        self.rope.line_to_char(line)
+        self.rope.line_to_char(line.min(self.rope.len_lines()))
     }
 
     /// The character at `idx`, or `None` past the end of the buffer.
@@ -292,6 +303,9 @@ impl Buffer {
 
     /// Length of a line's content in chars, excluding its line terminator.
     pub fn line_len(&self, line_idx: usize) -> usize {
+        if line_idx >= self.rope.len_lines() {
+            return 0;
+        }
         let line = self.rope.line(line_idx);
         let mut len = line.len_chars();
         if len > 0 && line.char(len - 1) == '\n' {
@@ -624,6 +638,21 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positions_past_the_end_clamp_instead_of_panicking() {
+        let mut b = Buffer::empty();
+        let mut c = Cursor::at_start();
+        b.insert_str(&mut c, "ab
+cd");
+        let stale = Cursor { char_idx: 20_442, sticky_col: 0 };
+        assert_eq!(b.line_col(&stale), (1, 2));
+        assert_eq!(b.line_start_char(99), b.len_chars());
+        assert_eq!(b.line_len(99), 0);
+        assert_eq!(b.char_to_byte(99), 5);
+        assert_eq!(b.byte_to_char(99), 5);
+        assert_eq!(b.text_range(50, 60), "");
+    }
 
     fn buffer_with(text: &str) -> Buffer {
         Buffer::from_text(text)

@@ -33,6 +33,25 @@ pub fn grep_project(root: &Path, query: &str) -> io::Result<Vec<GrepMatch>> {
     Ok(stdout.lines().filter_map(|line| parse_vimgrep_line(root, line)).collect())
 }
 
+/// Every file under `root` with at least one match for `pattern` (a
+/// regex, as with `grep_project`), honoring ignore files the same way.
+/// For callers that need to look at a matching file as a whole -- to
+/// parse it, say -- rather than at individual matched lines.
+pub fn files_matching(root: &Path, pattern: &str) -> io::Result<Vec<PathBuf>> {
+    let output = Command::new("rg")
+        .args(["--files-with-matches", "--", pattern])
+        .current_dir(root)
+        .output()
+        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "ripgrep (rg) not found on PATH"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).into_owned()));
+    }
+    let mut files: Vec<PathBuf> =
+        String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(|l| root.join(l)).collect();
+    files.sort();
+    Ok(files)
+}
+
 /// Parses one `path:line:col:text` line. Splits on at most the first
 /// three colons, since `text` (the matched line's own content) may
 /// itself contain colons.
@@ -100,6 +119,25 @@ mod tests {
 
         let matches = grep_project(dir.path(), "shared_term").unwrap();
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn files_matching_lists_each_matching_file_once() {
+        if !ripgrep_available() {
+            eprintln!("skipping files_matching_lists_each_matching_file_once: ripgrep (rg) is not on PATH");
+            return;
+        }
+        let dir = TempDir::new("grep_files_matching");
+        dir.write("a.txt", "needle
+needle again
+");
+        dir.write("sub/b.txt", "a needle
+");
+        dir.write("c.txt", "nothing
+");
+        let files = files_matching(dir.path(), "needle").unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f.ends_with("a.txt")));
     }
 
     #[test]

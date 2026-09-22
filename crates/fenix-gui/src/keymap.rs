@@ -182,6 +182,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "replace in project",
             "search.replace_project",
         );
+        // `t`/`T`, lowercase for this buffer and shifted for the whole
+        // project -- the same small/large split `SPC p n`/`N` and
+        // `SPC p t`/`T` already use one shift key apart.
+        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('t')], "TODOs in buffer", "search.todos");
+        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('T')], "TODOs in project", "search.todos_project");
 
         t.label_group(&[spc, KeyPress::char('o')], "open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
@@ -386,6 +391,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // (`code.format_selection`, above); `z` matches real Vim's own
         // `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('z')], "toggle fold", "code.toggle_fold");
+        // XML. `SPC c o` (outline), `SPC c s` (elements), `SPC c z`
+        // (fold) and `SPC c F` (reindent) already cover it through the
+        // grammar; these two only make sense for XML.
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('v')], "validate XML", "code.xml_validate");
+        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('y')], "yank XML path", "code.xml_path");
 
         // SCOS-2000 MIB lookup/insertion -- letters kept identical to
         // the reference elisp implementation's own scheme for muscle-
