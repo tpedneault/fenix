@@ -201,7 +201,7 @@ impl App {
         let Some(ob) = self.buffers.get(id) else { return Vec::new() };
         let mut parts = Vec::new();
         if let Some(path) = ob.buffer.path() {
-            let root = self.project_root.as_deref().filter(|root| path.starts_with(root));
+            let root = self.project_root().as_deref().filter(|root| path.starts_with(root));
             let relative = root.and_then(|root| path.strip_prefix(root).ok()).unwrap_or(path);
             let mut target = root.map(Path::to_path_buf).unwrap_or_default();
             for component in relative.components() {

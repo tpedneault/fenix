@@ -270,7 +270,7 @@ impl PaneState {
 /// key off *which pane is focused* (`DockerPaneRole`/`docker_focused_
 /// role`) instead.
 struct DockerSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     containers_pane: fenix_window::WindowId,
     images_pane: fenix_window::WindowId,
     volumes_pane: fenix_window::WindowId,
@@ -455,7 +455,7 @@ impl Drop for DockerLogFollower {
 /// time either fires.
 struct TaskSession {
     cwd: PathBuf,
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     pane: fenix_window::WindowId,
     buffer: BufferId,
     root: PathBuf,
@@ -476,7 +476,7 @@ struct TaskSession {
 /// and the history answer different questions and want different
 /// layouts. Both can be open at once, on their own workspaces.
 struct HistorySession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     graph_pane: fenix_window::WindowId,
     refs_pane: fenix_window::WindowId,
     detail_pane: fenix_window::WindowId,
@@ -498,7 +498,7 @@ struct HistorySession {
 /// The Compare view's session (`SPC g c`) -- two refs, the commits
 /// between them, and their diff.
 struct CompareSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     commits_pane: fenix_window::WindowId,
     diff_pane: fenix_window::WindowId,
     commits_buffer: BufferId,
@@ -690,7 +690,7 @@ pub(crate) struct ForgeDetail {
 /// else's VPN, and arriving out of order is normal rather than
 /// theoretical.
 struct ForgeSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     list_pane: fenix_window::WindowId,
     detail_pane: fenix_window::WindowId,
     review_pane: fenix_window::WindowId,
@@ -726,7 +726,7 @@ struct ForgeSession {
 /// mode of the working-tree view, and it wants the full width for two
 /// columns of file text.
 struct MergeSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     files_pane: fenix_window::WindowId,
     merge_pane: fenix_window::WindowId,
     files_buffer: BufferId,
@@ -789,7 +789,7 @@ enum DiffSource {
 /// workspace every time, the same "reuse if already open" posture
 /// `run_task` already established for `TaskSession`.
 struct ToolStatusSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     pane: fenix_window::WindowId,
     buffer: BufferId,
 }
@@ -807,7 +807,7 @@ struct DebugSession {
     language: fenix_syntax::LanguageId,
     generation: u64,
     launch_attributes: serde_json::Map<String, serde_json::Value>,
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     call_stack_pane: fenix_window::WindowId,
     variables_pane: fenix_window::WindowId,
     watches_pane: fenix_window::WindowId,
@@ -1230,7 +1230,7 @@ struct VncSession {
     /// poller`. Held only for its `Drop` side effect once set.
     #[allow(dead_code)]
     reader: Option<VncReader>,
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     /// The buffer this session renders into -- the *only* thing tying a
     /// session to what's on screen. Deliberately not a pane id: a buffer
     /// can be displayed by any number of panes (a `SPC w v` split of a
@@ -1409,7 +1409,7 @@ fn pdf_zoom_label(session: &PdfSession) -> String {
 /// it, mirroring `vnc_sessions`'s own by-name dedup.
 struct PdfSession {
     doc_key: fenix_pdf::PdfDocKey,
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     pane: fenix_window::WindowId,
     buffer: BufferId,
     page_count: u32,
@@ -1685,7 +1685,7 @@ enum DockerPaneRole {
 /// process`'s own doc comment for why every function there takes an
 /// explicit root path.
 struct GitSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     status_pane: fenix_window::WindowId,
     staged_pane: fenix_window::WindowId,
     unstaged_pane: fenix_window::WindowId,
@@ -1892,7 +1892,7 @@ struct GitPrompt {
 /// `DeleteJiraUser` arms) so this session never has to re-read the
 /// config file to reflect its own edits.
 struct JiraSession {
-    workspace_index: usize,
+    workspace_id: WorkspaceId,
     projects_pane: fenix_window::WindowId,
     users_pane: fenix_window::WindowId,
     issues_pane: fenix_window::WindowId,
@@ -2629,6 +2629,9 @@ enum ActivePicker {
     /// is marked so re-opening the picker shows at a glance which
     /// workspace you're already on.
     SwitchWorkspace(fenix_picker::PickerState<usize>),
+    /// `SPC TAB m`: where to move the focused buffer -- another open
+    /// workspace, or (`None`) a new one.
+    SendToWorkspace(fenix_picker::PickerState<Option<WorkspaceId>>),
     /// `SPC TAB f`: `config.workspaces`' configured launcher list, one
     /// candidate per `[workspaces]` entry -- same "hand-configured
     /// shelf, one candidate list" shape `Document`/`VncHost` already
@@ -2705,6 +2708,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferTodos(s) => s.push_char(c),
         ActivePicker::ProjectTodos(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
+        ActivePicker::SendToWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
         ActivePicker::Task(s) => s.push_char(c),
@@ -2753,6 +2757,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.backspace(),
         ActivePicker::ProjectTodos(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
+        ActivePicker::SendToWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
         ActivePicker::Task(s) => s.backspace(),
@@ -2801,6 +2806,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferTodos(s) => s.move_selection(delta),
         ActivePicker::ProjectTodos(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
+        ActivePicker::SendToWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
         ActivePicker::Task(s) => s.move_selection(delta),
@@ -2852,6 +2858,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.toggle_mark(),
         ActivePicker::ProjectTodos(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
+        ActivePicker::SendToWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
         ActivePicker::Task(s) => s.toggle_mark(),
@@ -2900,6 +2907,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferTodos(s) => s.query(),
         ActivePicker::ProjectTodos(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
+        ActivePicker::SendToWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
         ActivePicker::Task(s) => s.query(),
@@ -2948,6 +2956,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.len(),
         ActivePicker::ProjectTodos(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
+        ActivePicker::SendToWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
         ActivePicker::Task(s) => s.len(),
@@ -2996,6 +3005,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.selected_row(),
         ActivePicker::ProjectTodos(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
+        ActivePicker::SendToWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
         ActivePicker::Task(s) => s.selected_row(),
@@ -3060,6 +3070,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SendToWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Task(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5299,14 +5310,37 @@ fn format_age(modified: Option<std::time::SystemTime>) -> String {
     }
 }
 
+/// A workspace's identity for as long as it's open -- unlike its index,
+/// which shifts whenever an earlier workspace is removed or the list is
+/// reordered. Anything that has to find "its" workspace again later (a
+/// Docker/Git/PDF/... session, the last-visited workspace) holds one of
+/// these, never an index. Drawn from one process-wide counter, so ids
+/// stay distinct across frames too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WorkspaceId(u64);
+
+impl WorkspaceId {
+    fn fresh() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// One named task layout -- a Doom-Emacs-style workspace. Each remembers
-/// its own split layout; every workspace shares the one global
-/// `BufferList` (`App::buffers`), so a buffer open in two workspaces at
-/// once stays in sync for free (same `BufferId`, same underlying
-/// `OpenBuffer`) -- only the window *layout* is per-workspace, per
-/// design, not a full persp-mode-style buffer-list isolation.
+/// its own split layout, its own project and which buffers belong to it.
+/// Every workspace shares the one global `BufferList` (`App::buffers`),
+/// so a buffer open in two workspaces at once stays in sync for free
+/// (same `BufferId`, same underlying `OpenBuffer`); `buffers` only scopes
+/// what `SPC b b` offers, persp-mode style.
 struct Workspace {
+    id: WorkspaceId,
     name: String,
+    /// Still carrying a name nobody chose (`workspace-N`, or one taken
+    /// from its project) -- so switching this workspace to a project
+    /// may rename it after that project. A name typed with `SPC TAB r`
+    /// or given by a `[workspaces]` launcher entry clears this and
+    /// sticks.
+    auto_named: bool,
     windows: WindowTree<BufferId>,
     /// Keyed by `fenix_window::WindowId` -- see `PaneState`'s own doc
     /// comment for why this lives here, not on `App` directly.
@@ -5320,6 +5354,13 @@ struct Workspace {
     /// switching *to* a tabbed theme mid-session already has real tab
     /// history instead of a blank strip.
     pane_tabs: HashMap<fenix_window::WindowId, Vec<BufferId>>,
+    /// Every buffer shown in this workspace, in first-shown order --
+    /// unlike `pane_tabs` it outlives the pane that showed it, so
+    /// closing a split doesn't drop its buffers from `SPC b b`.
+    buffers: Vec<BufferId>,
+    /// The project `SPC p f`/`SPC p s`/Home's TODOs are scoped to while
+    /// this workspace is active (`App::project_root`).
+    project_root: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -5327,9 +5368,42 @@ impl Workspace {
         let mut pane_states = HashMap::new();
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
-        pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs }
+        let content = *windows.content(windows.focused_id()).expect("freshly created window has content");
+        pane_tabs.insert(windows.focused_id(), vec![content]);
+        Self {
+            id: WorkspaceId::fresh(),
+            name,
+            auto_named: true,
+            windows,
+            pane_states,
+            scroll_anims: HashMap::new(),
+            pane_tabs,
+            buffers: vec![content],
+            project_root: None,
+        }
     }
+
+    /// Notes that `id` was shown here -- `SPC b b` offers it from now on.
+    fn record_buffer(&mut self, id: BufferId) {
+        if !self.buffers.contains(&id) {
+            self.buffers.push(id);
+        }
+    }
+
+    /// Whether any pane here currently shows `id`.
+    fn shows(&self, id: BufferId) -> bool {
+        self.windows.windows().into_iter().any(|pane| self.windows.content(pane) == Some(&id))
+    }
+}
+
+/// The default names are `workspace-N`, N the smallest number not
+/// already taken -- so removing `workspace-2` and making a new one
+/// reuses the name instead of producing a second `workspace-3`.
+fn default_workspace_name(workspaces: &[Workspace]) -> String {
+    (1..)
+        .map(|n| format!("workspace-{n}"))
+        .find(|name| workspaces.iter().all(|w| &w.name != name))
+        .expect("an unbounded range always has a free name")
 }
 
 /// A non-empty, ordered list of workspaces with one active at a time.
@@ -5340,11 +5414,18 @@ impl Workspace {
 struct WorkspaceList {
     workspaces: Vec<Workspace>,
     active: usize,
+    /// The workspace that was active before this one -- `` SPC TAB ` ``
+    /// goes back to it, and removing the active workspace lands there.
+    previous: Option<WorkspaceId>,
 }
 
 impl WorkspaceList {
     fn new(initial_windows: WindowTree<BufferId>, initial_cursor: Cursor) -> Self {
-        Self { workspaces: vec![Workspace::new("workspace-1".to_string(), initial_windows, initial_cursor)], active: 0 }
+        Self { workspaces: vec![Workspace::new("workspace-1".to_string(), initial_windows, initial_cursor)], active: 0, previous: None }
+    }
+
+    fn from_workspaces(workspaces: Vec<Workspace>, active: usize) -> Self {
+        Self { workspaces, active, previous: None }
     }
 
     fn active(&self) -> &WindowTree<BufferId> {
@@ -5353,6 +5434,14 @@ impl WorkspaceList {
 
     fn active_mut(&mut self) -> &mut WindowTree<BufferId> {
         &mut self.workspaces[self.active].windows
+    }
+
+    fn active_workspace(&self) -> &Workspace {
+        &self.workspaces[self.active]
+    }
+
+    fn active_workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspaces[self.active]
     }
 
     fn active_pane_states(&self) -> &HashMap<fenix_window::WindowId, PaneState> {
@@ -5383,6 +5472,10 @@ impl WorkspaceList {
         &self.workspaces[self.active].name
     }
 
+    fn active_id(&self) -> WorkspaceId {
+        self.workspaces[self.active].id
+    }
+
     /// Every workspace's index and name, in order -- what `SPC TAB TAB`
     /// lists. The index is what `switch_to_index` takes, so a picker
     /// built from this needs no separate name-to-index lookup on
@@ -5399,13 +5492,39 @@ impl WorkspaceList {
         self.workspaces.iter().position(|w| w.name == name)
     }
 
+    fn index_of_id(&self, id: WorkspaceId) -> Option<usize> {
+        self.workspaces.iter().position(|w| w.id == id)
+    }
+
     /// `SPC TAB r`: renames the active workspace. The default
     /// `workspace-N` name and a `[workspaces]` launcher entry's own
     /// name are otherwise indistinguishable in `SPC TAB TAB`'s list and
-    /// the modeline's workspace indicator.
+    /// the modeline's workspace indicator. A chosen name sticks: the
+    /// workspace is no longer renamed after its project.
     fn rename_active(&mut self, name: String) {
-        self.workspaces[self.active].name = name;
+        let workspace = &mut self.workspaces[self.active];
+        workspace.name = name;
+        workspace.auto_named = false;
     }
+
+    /// Scopes the active workspace to `root`. A workspace nobody has
+    /// named yet takes the project's directory name the first time it
+    /// switches to a *different* project -- unless another workspace
+    /// already goes by that name, when it keeps the one it has.
+    fn set_active_project(&mut self, root: Option<PathBuf>) {
+        let active = self.active;
+        if self.workspaces[active].project_root == root {
+            return;
+        }
+        let project_name = root.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned());
+        if let Some(name) = project_name.filter(|_| self.workspaces[active].auto_named) {
+            if self.workspaces.iter().enumerate().all(|(i, w)| i == active || w.name != name) {
+                self.workspaces[active].name = name;
+            }
+        }
+        self.workspaces[active].project_root = root;
+    }
+
     /// Every pane in *every* workspace here, not just the active one --
     /// what tearing down a whole frame needs (`App::close_sessions_in_
     /// active_frame`). A PDF or VNC session opens in a workspace of its
@@ -5423,49 +5542,109 @@ impl WorkspaceList {
         self.active
     }
 
-    /// `SPC TAB n`: a new, auto-named workspace (`workspace-2`, etc. --
-    /// no name-entry prompt in v1) seeded with a single pane showing
-    /// `content`, so it starts on the buffer you were already looking
-    /// at rather than nothing (`cursor` seeds that pane's own live
-    /// position, from the buffer's remembered one). Becomes active.
+    /// Makes workspace `idx` active, remembering the one being left for
+    /// `` SPC TAB ` ``.
+    fn set_active(&mut self, idx: usize) {
+        if idx != self.active {
+            self.previous = Some(self.workspaces[self.active].id);
+            self.active = idx;
+        }
+    }
+
+    /// A new, auto-named workspace (`workspace-2`, etc.) seeded with a
+    /// single pane showing `content` (`cursor` seeds that pane's own
+    /// live position). It starts in the same project as the workspace
+    /// it was made from, and becomes active.
     fn new_workspace(&mut self, content: BufferId, cursor: Cursor) {
-        let name = format!("workspace-{}", self.workspaces.len() + 1);
-        self.workspaces.push(Workspace::new(name, WindowTree::new(content), cursor));
-        self.active = self.workspaces.len() - 1;
+        let name = default_workspace_name(&self.workspaces);
+        let mut workspace = Workspace::new(name, WindowTree::new(content), cursor);
+        workspace.project_root = self.workspaces[self.active].project_root.clone();
+        self.workspaces.push(workspace);
+        self.set_active(self.workspaces.len() - 1);
+    }
+
+    /// Adds an already-built workspace at the end and makes it active.
+    fn push_and_activate(&mut self, workspace: Workspace) {
+        self.workspaces.push(workspace);
+        self.set_active(self.workspaces.len() - 1);
     }
 
     /// Jumps directly to workspace `idx` (clamped to a valid index) --
     /// unlike `next`/`prev` (relative cycling), used when the caller
     /// already knows exactly which workspace it wants regardless of
-    /// whatever's currently active (`open_docker_panel` refocusing an
-    /// already-open session, `docker_session_close` making sure it
-    /// removes the *session's* workspace and not whichever one happens
-    /// to be active when it's called).
+    /// whatever's currently active.
     fn switch_to_index(&mut self, idx: usize) {
-        self.active = idx.min(self.workspaces.len() - 1);
+        self.set_active(idx.min(self.workspaces.len() - 1));
+    }
+
+    /// Jumps to the workspace `id`, wherever it now sits in the list --
+    /// how a session gets back to its own workspace. `false` (and no
+    /// change) when it isn't in this list: already removed, or living in
+    /// another frame.
+    fn switch_to_id(&mut self, id: WorkspaceId) -> bool {
+        match self.index_of_id(id) {
+            Some(idx) => {
+                self.set_active(idx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `` SPC TAB ` ``: back to the previously active workspace, if it's
+    /// still open.
+    fn switch_to_previous(&mut self) -> bool {
+        self.previous.is_some_and(|id| self.switch_to_id(id))
     }
 
     /// `SPC TAB ]`/`SPC TAB [`: cycles the active workspace, wrapping.
     fn next(&mut self) {
-        self.active = (self.active + 1) % self.workspaces.len();
+        self.set_active((self.active + 1) % self.workspaces.len());
     }
 
     fn prev(&mut self) {
-        self.active = (self.active + self.workspaces.len() - 1) % self.workspaces.len();
+        self.set_active((self.active + self.workspaces.len() - 1) % self.workspaces.len());
     }
 
-    /// `SPC TAB d`: removes the active workspace. Refuses (returns
-    /// `false`, no-op) if it's the last one -- same safety posture as
-    /// `WindowTree::close_focused` refusing to close the last window.
-    fn remove_active(&mut self) -> bool {
+    /// `SPC TAB >`/`SPC TAB <`: moves the active workspace one place
+    /// right (`delta` 1) or left (-1), wrapping at the ends. It stays
+    /// active. Ids, not indices, are what everything else holds, so
+    /// nothing needs telling.
+    fn move_active(&mut self, delta: isize) {
+        let len = self.workspaces.len();
+        if len < 2 {
+            return;
+        }
+        let target = (self.active as isize + delta).rem_euclid(len as isize) as usize;
+        let workspace = self.workspaces.remove(self.active);
+        self.workspaces.insert(target, workspace);
+        self.active = target;
+    }
+
+    /// Removes workspace `id`. Refuses (returns `false`, no-op) if it's
+    /// the last one -- same safety posture as `WindowTree::close_focused`
+    /// refusing to close the last window -- or isn't in this list.
+    /// Removing the active workspace lands on the previously active one
+    /// when it's still open, else on its neighbour; removing any other
+    /// leaves the active workspace active.
+    fn remove_by_id(&mut self, id: WorkspaceId) -> bool {
+        let Some(idx) = self.index_of_id(id) else { return false };
         if self.workspaces.len() <= 1 {
             return false;
         }
-        self.workspaces.remove(self.active);
-        if self.active >= self.workspaces.len() {
-            self.active = self.workspaces.len() - 1;
+        let active_id = self.active_id();
+        self.workspaces.remove(idx);
+        if self.previous == Some(id) {
+            self.previous = None;
         }
+        let landing = if active_id == id { self.previous.take().and_then(|p| self.index_of_id(p)) } else { self.index_of_id(active_id) };
+        self.active = landing.unwrap_or(idx.min(self.workspaces.len() - 1));
         true
+    }
+
+    /// `SPC TAB d`: removes the active workspace -- see `remove_by_id`.
+    fn remove_active(&mut self) -> bool {
+        self.remove_by_id(self.active_id())
     }
 }
 
@@ -6042,11 +6221,6 @@ pub struct App {
     /// Reset to 0 whenever a new picker is entered.
     picker_scroll: usize,
 
-    /// The current buffer's project root (re-derived whenever a file is
-    /// opened -- same "always fresh, never stale" posture as everything
-    /// else computed from buffer state). `None` outside any recognized
-    /// project.
-    project_root: Option<PathBuf>,
     active_picker: Option<ActivePicker>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
@@ -6128,6 +6302,9 @@ pub struct App {
     /// typing at a time, and it always acts on `self.workspaces`, which
     /// is always whichever frame is currently active.
     workspace_rename_prompt: Option<String>,
+    /// The rename prompt still holds the name it opened with, untouched
+    /// -- the first key typed replaces it rather than appending.
+    workspace_rename_pristine: bool,
     /// `SPC f D`'s y/n gate, armed until the next keypress confirms
     /// (`y`) or cancels (anything else) -- same shape as `docker_
     /// confirm_remove`.
@@ -7181,7 +7358,7 @@ impl App {
             disk_state.insert(initial_id, fingerprint);
         }
         let initial_cursor = buffers.get(initial_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
-        let workspaces = WorkspaceList::new(WindowTree::new(initial_id), initial_cursor);
+        let mut workspaces = WorkspaceList::new(WindowTree::new(initial_id), initial_cursor);
 
         // `project_root` (used to scope `SPC p f`/`SPC p s`) is still
         // auto-detected from whatever file is open -- only the *known-
@@ -7195,6 +7372,7 @@ impl App {
         // path, so this correctly comes out `None`.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
+        workspaces.set_active_project(project_root);
         let config_path = fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"));
         let config_existed = config_path.exists();
         let config = fenix_config::Config::load_or_default(config_path);
@@ -7276,7 +7454,6 @@ impl App {
             explorer_scroll: 0,
             sidebar_scroll: 0,
             picker_scroll: 0,
-            project_root,
             active_picker: None,
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
@@ -7395,6 +7572,7 @@ impl App {
             refactor_preview: None,
             refactor_undo: None,
             workspace_rename_prompt: None,
+            workspace_rename_pristine: false,
             delete_file_confirm: false,
             vim,
             clipboard: arboard::Clipboard::new().ok(),
@@ -7936,6 +8114,7 @@ impl App {
         if !tabs.contains(&buffer_id) {
             tabs.push(buffer_id);
         }
+        self.workspaces.active_workspace_mut().record_buffer(buffer_id);
         self.refresh_gutter_hunks(buffer_id);
     }
 
@@ -7966,7 +8145,7 @@ impl App {
 
     fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<Vec<GutterMark>> {
         let path = self.buffers.get(buffer_id)?.buffer.path()?.to_path_buf();
-        // Resolved from `path` itself, not `self.project_root` -- that
+        // Resolved from `path` itself, not `self.project_root()` -- that
         // field tracks a single global "current project" derived from
         // whichever buffer happens to be *focused* (see `refresh_project_
         // root`), which isn't necessarily this buffer, or any real
@@ -8074,9 +8253,31 @@ impl App {
     /// that list is explicitly curated via `SPC p a`/`SPC p d` now, not
     /// auto-populated from wherever you happen to open a file -- see
     /// `picker_add_project_prompt`'s own doc comment for why.
+    ///
+    /// Only a buffer with a path says anything about the project: Home,
+    /// a panel or a scratch buffer leaves the workspace's project as it
+    /// was, so opening one doesn't strand `SPC p f` without a root.
     fn refresh_project_root(&mut self) {
-        self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        if let Some(path) = self.open().buffer.path() {
+            let root = fenix_project::find_project_root(path);
+            self.set_project_root(root);
+        }
         self.sync_lsp_for_focused_buffer();
+    }
+
+    /// The active workspace's project root -- what `SPC p f`/`SPC p s`
+    /// and the rest of the project commands are scoped to. Each
+    /// workspace keeps its own (`Workspace::project_root`), so switching
+    /// workspaces switches project too. `None` outside any recognized
+    /// project.
+    fn project_root(&self) -> &Option<PathBuf> {
+        &self.workspaces.active_workspace().project_root
+    }
+
+    /// Scopes the active workspace to `root` -- see `WorkspaceList::
+    /// set_active_project` for how that can name the workspace.
+    fn set_project_root(&mut self, root: Option<PathBuf>) {
+        self.workspaces.set_active_project(root);
     }
 
     /// Makes sure the focused buffer's language server (if any is
@@ -8833,7 +9034,7 @@ impl App {
     /// popup's own `Tag`-kind entries -- opening this picker never
     /// re-shells `ctags` on its own.
     pub(crate) fn picker_symbols(&mut self) {
-        let root = self.project_root.clone();
+        let root = self.project_root().clone();
         let candidates =
             self.tcl_tags(root.as_deref()).into_iter().map(|tag| fenix_picker::Candidate::new(tag.name.clone(), tag)).collect();
         self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
@@ -9152,7 +9353,7 @@ impl App {
     /// third kind isn't worth a new calibrated popup color.
     fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<completion::Item>> {
         let mut candidates = if self.focused_language() == Some(fenix_syntax::LanguageId::Tcl) {
-            let root = self.project_root.clone();
+            let root = self.project_root().clone();
             self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -9189,7 +9390,7 @@ impl App {
     pub(crate) fn refresh_completion_tags(&mut self) {
         self.tcl_candidates_cache = None;
         self.tcl_tags_cache = None;
-        match self.project_root.clone() {
+        match self.project_root().clone() {
             Some(root) => {
                 let count = self.tcl_tags(Some(&root)).len();
                 self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
@@ -9515,7 +9716,7 @@ impl App {
         }
         let path = PathBuf::from(input);
         let path = if path.is_absolute() { path } else {
-            self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join(path)
+            self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join(path)
         };
         // Naming a scratch document must never overwrite another document.
         if path.exists() || self.buffers.id_for_path(&path).is_some() {
@@ -10713,8 +10914,8 @@ impl App {
     /// takes).
     pub(crate) fn open_vnc_session(&mut self, name: &str) {
         if let Some(session) = self.vnc_sessions.get(name) {
-            let (workspace_index, buffer, link) = (session.workspace_index, session.buffer, session.link);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, buffer, link) = (session.workspace_id, session.buffer, session.link);
+            self.workspaces.switch_to_id(workspace_id);
             // Focus whichever pane is already showing this session, if
             // any -- there can be several (splits), and after the switch
             // above there may be none at all, if the pane that used to
@@ -10950,7 +11151,7 @@ impl App {
                 // content`, not a real disconnect) rather than being
                 // exempt like its siblings.
                 self.pane_titles.insert(self.focused_pane_id(), vnc_pane_title(&name, VncLink::Live));
-                let workspace_index = self.workspaces.active_index();
+                let workspace_id = self.workspaces.active_id();
                 let framebuffer = Arc::new(Mutex::new(fenix_vnc::framebuffer::VncFramebuffer::new()));
                 let reader = self.event_proxy.clone().map(|proxy| {
                     VncReader::spawn(receiver, name.clone(), framebuffer.clone(), move |event| proxy.send_event(event).is_ok())
@@ -10960,7 +11161,7 @@ impl App {
                     VncSession {
                         client,
                         reader,
-                        workspace_index,
+                        workspace_id,
                         buffer,
                         host,
                         port,
@@ -11059,7 +11260,7 @@ impl App {
         if self.vnc_focused.as_deref() == Some(name) {
             self.set_vnc_focused(None);
         }
-        // Found by what it shows, not by `session.workspace_index`: that
+        // Found by what it shows, not by `session.workspace_id`: that
         // index goes stale as soon as an earlier workspace is removed.
         let own_workspace = (self.workspaces.len() > 1)
             .then(|| {
@@ -11098,6 +11299,10 @@ impl App {
         let parked = self.frames.iter_mut().flatten().map(|frame| &mut frame.workspaces);
         for (list_index, list) in std::iter::once(&mut self.workspaces).chain(parked).enumerate() {
             for (index, ws) in list.workspaces.iter_mut().enumerate() {
+                if ws.buffers.contains(&id) {
+                    ws.buffers.retain(|&b| b != id);
+                    ws.record_buffer(fallback);
+                }
                 for pane in ws.windows.windows() {
                     if ws.windows.content(pane) != Some(&id) {
                         continue;
@@ -11423,8 +11628,8 @@ impl App {
     fn open_pdf_path_with(&mut self, path: &Path, placement: PdfPlacement) {
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(session) = self.pdf_sessions.get(&canonical) {
-            let (workspace_index, pane) = (session.workspace_index, session.pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, pane) = (session.workspace_id, session.pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(pane);
             self.main_view = MainView::Editor;
             self.wake_caret();
@@ -11479,7 +11684,7 @@ impl App {
             PdfPlacement::NewWorkspace => self.workspaces.new_workspace(buffer, cursor),
             PdfPlacement::FocusedPane => self.open_buffer_in_focused_pane(buffer),
         }
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let pane = self.focused_pane_id();
         let name = canonical.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| canonical.display().to_string());
         self.pane_titles.insert(pane, format!("PDF: {name}"));
@@ -11493,7 +11698,7 @@ impl App {
             canonical.clone(),
             PdfSession {
                 doc_key,
-                workspace_index,
+                workspace_id,
                 pane,
                 buffer,
                 page_count: 0,
@@ -11550,10 +11755,9 @@ impl App {
     /// panes` would still claim an outline pane exists for it when it
     /// doesn't.
     fn pdf_session_close(&mut self, key: &Path) {
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
+        let Some(workspace_id) = self.pdf_sessions.get(key).map(|session| session.workspace_id) else { return };
         self.pdf_session_forget(key);
-        self.workspaces.switch_to_index(workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -12032,8 +12236,8 @@ impl App {
     /// `apply_pdf_response`'s `Outline` arm (the first-fetch path).
     fn pdf_open_outline_pane(&mut self, key: &Path, entries: &[fenix_pdf::outline::OutlineEntry]) {
         let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
-        self.workspaces.switch_to_index(workspace_index);
+        let Some(workspace_id) = self.pdf_sessions.get(key).map(|session| session.workspace_id) else { return };
+        self.workspaces.switch_to_id(workspace_id);
         self.windows_mut().focus(session_pane);
 
         let (text, lines) = pdf_outline::render(entries);
@@ -12226,8 +12430,8 @@ impl App {
         }
 
         let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
-        self.workspaces.switch_to_index(workspace_index);
+        let Some(workspace_id) = self.pdf_sessions.get(key).map(|session| session.workspace_id) else { return };
+        self.workspaces.switch_to_id(workspace_id);
         self.windows_mut().focus(session_pane);
 
         let buffer = self.buffers.open_pdf_search_results(&text);
@@ -12303,7 +12507,7 @@ impl App {
     /// the process's cwd, if no project was detected -- still useful,
     /// just not project-scoped).
     pub(crate) fn picker_find_file(&mut self) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let candidates = Self::find_file_candidates(&root);
         self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
@@ -12327,7 +12531,7 @@ impl App {
     /// cares that the payload is a path, not how the candidate list was
     /// built.
     pub(crate) fn picker_find_file_all(&mut self) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let candidates = Self::find_file_candidates_all(&root);
         self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
     }
@@ -12389,7 +12593,7 @@ impl App {
     /// being browsed. `q`/`Escape` cancels without registering anything,
     /// same as leaving the explorer any other time.
     pub(crate) fn picker_add_project_prompt(&mut self) {
-        let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let start = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let explorer = match ExplorerState::opened(&start) {
             Ok(e) => e,
             Err(err) => {
@@ -12503,7 +12707,7 @@ impl App {
         let root = self
             .grep_root
             .take()
-            .or_else(|| self.project_root.clone())
+            .or_else(|| self.project_root().clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         match fenix_project::grep_project(&root, query) {
             Ok(matches) => {
@@ -12633,7 +12837,7 @@ impl App {
     /// `start_mib_root_label_prompt` instead of registering directly
     /// (a MIB root needs a label, a project root doesn't).
     pub(crate) fn picker_add_mib_root_prompt(&mut self) {
-        let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let start = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let explorer = match ExplorerState::opened(&start) {
             Ok(e) => e,
             Err(err) => {
@@ -13451,7 +13655,7 @@ impl App {
     /// no-op -- same graceful posture `run_grep` already has, and there
     /// being no review to show either way.
     fn start_project_search_replace(&mut self, pattern: String, replacement: String) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let matches = fenix_project::grep_project(&root, &pattern).unwrap_or_else(|err| {
             self.set_error(format!("project search failed: {err}"));
             Vec::new()
@@ -13608,23 +13812,46 @@ impl App {
         self.kill_buffer_now();
     }
 
-    /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
-    /// (most-recently-touched first, matching Doom's own buffer switcher),
-    /// each labeled with its path (or `*scratch*` for an unnamed buffer)
-    /// and a leading `+` marker for unsaved changes.
+    /// `SPC b b`: a fuzzy picker over the buffers that belong to the
+    /// active workspace (everything shown in it -- `Workspace::buffers`),
+    /// MRU-ordered (most-recently-touched first, matching Doom's own
+    /// buffer switcher), each labeled with its path (`*scratch*` for an
+    /// unnamed buffer, `*home*` for Home) and a leading `+` marker for
+    /// unsaved changes. `SPC b B` lists every open buffer instead.
     pub(crate) fn picker_switch_buffer(&mut self) {
+        self.open_switch_buffer_picker(true);
+    }
+
+    /// `SPC b B`: `SPC b b` across every workspace.
+    pub(crate) fn picker_switch_buffer_all(&mut self) {
+        self.open_switch_buffer_picker(false);
+    }
+
+    fn open_switch_buffer_picker(&mut self, this_workspace: bool) {
         let candidates = self
             .buffers
             .mru()
             .iter()
+            .filter(|&&id| !this_workspace || self.workspace_has_buffer(id))
             .map(|&id| {
                 let ob = self.buffers.get(id).expect("mru only lists open buffers");
-                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
+                let name = match ob.buffer.path() {
+                    Some(path) => path.display().to_string(),
+                    None if ob.kind == BufferKind::Dashboard => "*home*".to_string(),
+                    None if ob.kind.tracks_unsaved_changes() => "*scratch*".to_string(),
+                    None => self.buffer_display_name(id),
+                };
                 let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
                 fenix_picker::Candidate::new(format!("{marker}{name}"), id)
             })
             .collect();
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Whether `id` belongs to the active workspace -- it's been shown
+    /// there (see `Workspace::buffers`).
+    fn workspace_has_buffer(&self, id: BufferId) -> bool {
+        self.workspaces.active_workspace().buffers.contains(&id)
     }
 
     /// `SPC s s`: a fuzzy picker over every line in the focused buffer --
@@ -13703,7 +13930,8 @@ impl App {
     /// buffer in a stable, path-sorted order (not MRU -- repeated `n`/`p`
     /// should walk a fixed list, not bounce between the two most recent).
     fn cycle_buffer(&mut self, delta: isize) {
-        let ids = self.buffers.ids_sorted_by_path();
+        let ids: Vec<BufferId> =
+            self.buffers.ids_sorted_by_path().into_iter().filter(|id| self.workspace_has_buffer(*id)).collect();
         if ids.len() <= 1 {
             return;
         }
@@ -13904,8 +14132,8 @@ impl App {
     /// splits/buffers were already open.
     pub(crate) fn open_docker_panel(&mut self) {
         if let Some(session) = &self.docker_session {
-            let (workspace_index, containers_pane) = (session.workspace_index, session.containers_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, containers_pane) = (session.workspace_id, session.containers_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(containers_pane);
             self.docker_refresh_session();
             self.wake_caret();
@@ -13937,7 +14165,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(containers_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let containers_pane = self.focused_pane_id();
 
         // Right column first, at the outer split -- default 0.5 ratio,
@@ -13988,7 +14216,7 @@ impl App {
             .map(|proxy| DockerStatsPoller::spawn(move |event| proxy.send_event(event).is_ok()));
 
         self.docker_session = Some(DockerSession {
-            workspace_index,
+            workspace_id,
             containers_pane,
             images_pane,
             volumes_pane,
@@ -14100,7 +14328,7 @@ impl App {
     /// different, unrelated workspace.
     fn docker_focused_role(&self) -> Option<DockerPaneRole> {
         let session = self.docker_session.as_ref()?;
-        if self.workspaces.active_index() != session.workspace_index {
+        if self.workspaces.active_id() != session.workspace_id {
             return None;
         }
         let focused = self.focused_pane_id();
@@ -14340,7 +14568,7 @@ impl App {
     /// `.fenix/project.ini` `[tasks]` overrides) -- there's genuinely
     /// nothing to offer the picker in either case.
     pub(crate) fn picker_tasks(&mut self) {
-        let Some(root) = self.project_root.clone() else {
+        let Some(root) = self.project_root().clone() else {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
@@ -14414,9 +14642,9 @@ impl App {
         let header = format!("$ {} {}\n", task.command, task.args.join(" "));
 
         let buffer = if let Some(session) = &self.task_session {
-            let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
+            let (workspace_id, pane, buffer) = (session.workspace_id, session.pane, session.buffer);
             self.task_session.as_mut().expect("just matched Some above").runner = None; // tear down any previous runner first
-            self.workspaces.switch_to_index(workspace_index);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(pane);
             self.reset_task_output_buffer(buffer, &header);
             buffer
@@ -14424,10 +14652,10 @@ impl App {
             let buffer = self.buffers.open_task_output(&header);
             let cursor = Cursor::at_start();
             self.workspaces.new_workspace(buffer, cursor);
-            let workspace_index = self.workspaces.active_index();
+            let workspace_id = self.workspaces.active_id();
             let pane = self.focused_pane_id();
             self.pane_titles.insert(pane, "Task Output".to_string());
-            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None });
+            self.task_session = Some(TaskSession { workspace_id, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None });
             buffer
         };
 
@@ -14623,8 +14851,8 @@ impl App {
                 // navigated away from it (the same "reopen refocuses
                 // the existing session" courtesy `open_docker_panel`
                 // already gives Docker's own panel).
-                let (workspace_index, pane) = (session.workspace_index, session.call_stack_pane);
-                self.workspaces.switch_to_index(workspace_index);
+                let (workspace_id, pane) = (session.workspace_id, session.call_stack_pane);
+                self.workspaces.switch_to_id(workspace_id);
                 self.windows_mut().focus(pane);
                 self.set_error("debug session is already running".to_string());
                 return;
@@ -14671,7 +14899,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(call_stack_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let call_stack_pane = self.focused_pane_id();
 
         let variables_pane = self.windows_mut().split(SplitKind::Vertical, variables_buffer);
@@ -14695,7 +14923,7 @@ impl App {
             language,
             generation,
             launch_attributes,
-            workspace_index,
+            workspace_id,
             call_stack_pane,
             variables_pane,
             watches_pane,
@@ -15154,18 +15382,18 @@ impl App {
         let text = crate::tool_status::render(&entries);
 
         if let Some(session) = &self.tool_status_session {
-            let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, pane, buffer) = (session.workspace_id, session.pane, session.buffer);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(pane);
             self.set_tool_status_buffer(buffer, &text);
         } else {
             let buffer = self.buffers.open_tool_status(&text);
             let cursor = Cursor::at_start();
             self.workspaces.new_workspace(buffer, cursor);
-            let workspace_index = self.workspaces.active_index();
+            let workspace_id = self.workspaces.active_id();
             let pane = self.focused_pane_id();
             self.pane_titles.insert(pane, "Tool Status".to_string());
-            self.tool_status_session = Some(ToolStatusSession { workspace_index, pane, buffer });
+            self.tool_status_session = Some(ToolStatusSession { workspace_id, pane, buffer });
         }
         self.wake_caret();
     }
@@ -15192,7 +15420,7 @@ impl App {
     /// selected container/image. Refreshes an already-open session so a
     /// freshly built image shows up without a separate manual `u`.
     pub(crate) fn docker_build(&mut self) {
-        let context_dir = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let context_dir = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let tag = context_dir.file_name().map(|n| format!("{}:latest", n.to_string_lossy()));
         match fenix_docker::build_image(&context_dir, tag.as_deref()) {
             Ok(_) => self.set_message(format!("docker build succeeded for {}", context_dir.display())),
@@ -15236,8 +15464,7 @@ impl App {
         ] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -15303,7 +15530,7 @@ impl App {
     /// last had it.
     fn apply_git_accordion(&mut self) {
         let Some(session) = &self.git_session else { return };
-        if self.workspaces.active_index() != session.workspace_index {
+        if self.workspaces.active_id() != session.workspace_id {
             return;
         }
         let stack = [
@@ -15356,15 +15583,15 @@ impl App {
     /// repo root, not a daemon reachable regardless of cwd).
     pub(crate) fn open_git_panel(&mut self) {
         if let Some(session) = &self.git_session {
-            let (workspace_index, staged_pane) = (session.workspace_index, session.staged_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, staged_pane) = (session.workspace_id, session.staged_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(staged_pane);
             self.git_refresh_session();
             self.wake_caret();
             return;
         }
 
-        let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let repo_root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let (status, files) = fenix_git::status_and_files(&repo_root);
         let in_progress = fenix_git::in_progress(&repo_root);
@@ -15405,7 +15632,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(status_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let status_pane = self.focused_pane_id();
 
         // Right column first, at the outer split -- same ~35/65 left/
@@ -15454,7 +15681,7 @@ impl App {
             .map(|proxy| GitStatusPoller::spawn(repo_root.clone(), move |event| proxy.send_event(event).is_ok()));
 
         self.git_session = Some(GitSession {
-            workspace_index,
+            workspace_id,
             status_pane,
             staged_pane,
             unstaged_pane,
@@ -15980,7 +16207,7 @@ impl App {
     /// that's needed: `WindowId`s are only unique within one workspace).
     fn git_focused_role(&self) -> Option<GitPaneRole> {
         let session = self.git_session.as_ref()?;
-        if self.workspaces.active_index() != session.workspace_index {
+        if self.workspaces.active_id() != session.workspace_id {
             return None;
         }
         let focused = self.focused_pane_id();
@@ -16306,7 +16533,7 @@ impl App {
             .map(|s| s.repo_root.clone())
             .or_else(|| self.history_session.as_ref().map(|s| s.repo_root.clone()))
             .or_else(|| self.compare_session.as_ref().map(|s| s.repo_root.clone()))
-            .or_else(|| self.project_root.clone())
+            .or_else(|| self.project_root().clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
@@ -16780,8 +17007,8 @@ impl App {
     /// view.
     pub(crate) fn open_forge_view(&mut self) {
         if let Some(session) = &self.forge_session {
-            let (workspace_index, list_pane) = (session.workspace_index, session.list_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, list_pane) = (session.workspace_id, session.list_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(list_pane);
             self.forge_refresh_list();
             self.wake_caret();
@@ -16806,7 +17033,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(list_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let list_pane = self.focused_pane_id();
         let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
         self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
@@ -16829,7 +17056,7 @@ impl App {
         self.pane_titles.insert(review_pane, "3. Review".to_string());
 
         self.forge_session = Some(ForgeSession {
-            workspace_index,
+            workspace_id,
             list_pane,
             detail_pane,
             review_pane,
@@ -17311,8 +17538,7 @@ impl App {
         for pane in [session.list_pane, session.detail_pane, session.review_pane] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -17442,8 +17668,8 @@ impl App {
     /// aligned columns on the right.
     pub(crate) fn open_merge_view(&mut self) {
         if let Some(session) = &self.merge_session {
-            let (workspace_index, files_pane) = (session.workspace_index, session.files_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, files_pane) = (session.workspace_id, session.files_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(files_pane);
             self.merge_refresh();
             self.wake_caret();
@@ -17460,7 +17686,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(files_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let files_pane = self.focused_pane_id();
         let merge_pane = self.windows_mut().split(SplitKind::Vertical, merge_buffer);
         self.workspaces.active_pane_states_mut().insert(merge_pane, PaneState::seeded_at(cursor));
@@ -17474,7 +17700,7 @@ impl App {
         self.pane_titles.insert(merge_pane, "2. Merge".to_string());
 
         self.merge_session = Some(MergeSession {
-            workspace_index,
+            workspace_id,
             files_pane,
             merge_pane,
             files_buffer,
@@ -17733,8 +17959,7 @@ impl App {
         for pane in [session.files_pane, session.merge_pane] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -17964,15 +18189,15 @@ impl App {
     /// commit's diff in the shared diff viewer.
     pub(crate) fn open_history_view(&mut self) {
         if let Some(session) = &self.history_session {
-            let (workspace_index, graph_pane) = (session.workspace_index, session.graph_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, graph_pane) = (session.workspace_id, session.graph_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(graph_pane);
             self.history_refresh();
             self.wake_caret();
             return;
         }
 
-        let repo_root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let repo_root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let graph_buffer = self.buffers.open_graph("");
         let refs_buffer = self.buffers.open_git("");
         let detail_view = diff_view::render(&[], &HashSet::new());
@@ -17981,7 +18206,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(graph_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let graph_pane = self.focused_pane_id();
 
         // Graph on the left, refs above the commit's diff on the right --
@@ -18007,7 +18232,7 @@ impl App {
         self.pane_titles.insert(detail_pane, "3. Commit".to_string());
 
         self.history_session = Some(HistorySession {
-            workspace_index,
+            workspace_id,
             graph_pane,
             refs_pane,
             detail_pane,
@@ -18169,7 +18394,7 @@ impl App {
             .as_ref()
             .map(|s| s.repo_root.clone())
             .or_else(|| self.git_session.as_ref().map(|s| s.repo_root.clone()))
-            .or_else(|| self.project_root.clone())
+            .or_else(|| self.project_root().clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         match self.event_proxy.clone() {
@@ -18218,7 +18443,7 @@ impl App {
             .as_ref()
             .map(|s| s.repo_root.clone())
             .or_else(|| self.git_session.as_ref().map(|s| s.repo_root.clone()))
-            .or_else(|| self.project_root.clone())
+            .or_else(|| self.project_root().clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
@@ -18270,8 +18495,8 @@ impl App {
         if let Some(session) = self.compare_session.as_mut() {
             session.base = base;
             session.head = head;
-            let (workspace_index, commits_pane) = (session.workspace_index, session.commits_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, commits_pane) = (session.workspace_id, session.commits_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(commits_pane);
             self.compare_refresh();
             self.wake_caret();
@@ -18285,7 +18510,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(commits_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let commits_pane = self.focused_pane_id();
         let diff_pane = self.windows_mut().split(SplitKind::Vertical, diff_buffer);
         self.workspaces.active_pane_states_mut().insert(diff_pane, PaneState::seeded_at(cursor));
@@ -18299,7 +18524,7 @@ impl App {
         self.pane_titles.insert(diff_pane, "2. Changes".to_string());
 
         self.compare_session =
-            Some(CompareSession { workspace_index, commits_pane, diff_pane, commits_buffer, diff_buffer, repo_root, base, head, three_dot: true });
+            Some(CompareSession { workspace_id, commits_pane, diff_pane, commits_buffer, diff_buffer, repo_root, base, head, three_dot: true });
         self.compare_refresh();
         self.wake_caret();
     }
@@ -18357,8 +18582,7 @@ impl App {
         for pane in [session.commits_pane, session.diff_pane] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -18376,8 +18600,7 @@ impl App {
         for pane in [session.graph_pane, session.refs_pane, session.detail_pane] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -18429,8 +18652,7 @@ impl App {
         ] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -18546,8 +18768,8 @@ impl App {
     /// made to `config.ini` by hand between sessions shows up too.
     pub(crate) fn open_jira_panel(&mut self) {
         if let Some(session) = &self.jira_session {
-            let (workspace_index, projects_pane) = (session.workspace_index, session.projects_pane);
-            self.workspaces.switch_to_index(workspace_index);
+            let (workspace_id, projects_pane) = (session.workspace_id, session.projects_pane);
+            self.workspaces.switch_to_id(workspace_id);
             self.windows_mut().focus(projects_pane);
             self.wake_caret();
             return;
@@ -18572,7 +18794,7 @@ impl App {
 
         let cursor = Cursor::at_start();
         self.workspaces.new_workspace(projects_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
+        let workspace_id = self.workspaces.active_id();
         let projects_pane = self.focused_pane_id();
 
         // Right column first, at the outer split -- Detail gets the
@@ -18603,7 +18825,7 @@ impl App {
         self.pane_titles.insert(detail_pane, "4. Detail".to_string());
 
         self.jira_session = Some(JiraSession {
-            workspace_index,
+            workspace_id,
             projects_pane,
             users_pane,
             issues_pane,
@@ -18651,8 +18873,7 @@ impl App {
         for pane in [session.projects_pane, session.users_pane, session.issues_pane, session.detail_pane] {
             self.pane_titles.remove(&pane);
         }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        self.workspaces.remove_by_id(session.workspace_id);
         self.wake_caret();
     }
 
@@ -18676,7 +18897,7 @@ impl App {
 
     fn jira_focused_role(&self) -> Option<JiraPaneRole> {
         let session = self.jira_session.as_ref()?;
-        if self.workspaces.active_index() != session.workspace_index {
+        if self.workspaces.active_id() != session.workspace_id {
             return None;
         }
         let focused = self.focused_pane_id();
@@ -20258,7 +20479,7 @@ impl App {
                 let Some(task) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                let root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
             }
             Some(ActivePicker::CompareBase(state)) => {
@@ -20355,6 +20576,13 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.workspaces.switch_to_index(idx);
+                self.after_workspace_switch();
+            }
+            Some(ActivePicker::SendToWorkspace(state)) => {
+                let Some(target) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.send_focused_buffer_to_workspace(target);
             }
             Some(ActivePicker::WorkspaceLauncher(state)) => {
                 let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -20524,7 +20752,7 @@ impl App {
         let resolved = if expanded.is_absolute() {
             expanded
         } else {
-            let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let root = self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             root.join(expanded)
         };
         self.open_file_from_picker(&resolved);
@@ -20820,7 +21048,7 @@ impl App {
     /// call site (`dashboard_activate_selected`), which isn't already
     /// mid-picker when it calls this.
     fn switch_to_project(&mut self, root: PathBuf) {
-        self.project_root = Some(root.clone());
+        self.set_project_root(Some(root.clone()));
         self.known_projects.add(root.clone());
         if let Err(err) = self.known_projects.save() {
             eprintln!("fenix: couldn't save project history: {err}");
@@ -21849,13 +22077,8 @@ impl App {
             // nothing.
             self.git_session_close();
         }
-        self.project_root = Some(root.clone());
+        self.set_project_root(Some(root.clone()));
         self.open_git_panel();
-        // Set again afterwards: opening the panel focuses a pathless
-        // buffer, and `refresh_project_root` derives the root from
-        // whatever the focused buffer's path is -- which for a panel is
-        // nothing, so it would clear what was just chosen.
-        self.project_root = Some(root.clone());
         self.set_message(format!("project is now {}", readable_path(&root)));
     }
 
@@ -22133,41 +22356,367 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC TAB n`: a new workspace, seeded with the focused pane's
-    /// current buffer (so it starts on something, not a blank scratch
-    /// buffer) -- becomes active immediately.
+    /// `SPC TAB n`: a new workspace opening on its own Home -- a fresh
+    /// start with recent files, projects and tasks one key away, rather
+    /// than a second view of whatever the last workspace had focused.
+    /// It keeps the current project, and becomes active immediately.
     pub(crate) fn new_workspace(&mut self) {
-        let id = self.focused_buffer_id();
-        let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
-        self.workspaces.new_workspace(id, cursor);
+        let id = self.new_home_buffer();
+        self.workspaces.new_workspace(id, Cursor::at_start());
+        self.display_workspaces();
         self.wake_caret();
+    }
+
+    /// `SPC TAB N`: `SPC TAB n`, then straight into naming it. The
+    /// default name is there to keep (Enter or Escape) or type over.
+    pub(crate) fn new_named_workspace(&mut self) {
+        self.new_workspace();
+        self.start_rename_workspace_prompt();
     }
 
     /// `SPC TAB ]`/`SPC TAB [`: cycles the active workspace, wrapping.
     pub(crate) fn next_workspace(&mut self) {
         self.workspaces.next();
-        self.wake_caret();
+        self.after_workspace_switch();
     }
 
     pub(crate) fn prev_workspace(&mut self) {
         self.workspaces.prev();
+        self.after_workspace_switch();
+    }
+
+    /// `SPC TAB 1`..`SPC TAB 9`: straight to the workspace in that
+    /// position (1-based, as `display_workspaces` numbers them).
+    pub(crate) fn switch_to_workspace_number(&mut self, number: usize) {
+        if number == 0 || number > self.workspaces.len() {
+            self.set_error(format!("no workspace {number} -- there are {}", self.workspaces.len()));
+            return;
+        }
+        self.workspaces.switch_to_index(number - 1);
+        self.after_workspace_switch();
+    }
+
+    /// `SPC TAB 0`: the last workspace, however many there are.
+    pub(crate) fn switch_to_last_workspace(&mut self) {
+        self.workspaces.switch_to_index(self.workspaces.len() - 1);
+        self.after_workspace_switch();
+    }
+
+    /// `` SPC TAB ` ``: back to the workspace you were on before this
+    /// one -- pressed again, it flips back.
+    pub(crate) fn switch_to_previous_workspace(&mut self) {
+        if !self.workspaces.switch_to_previous() {
+            self.set_error("no previous workspace".to_string());
+            return;
+        }
+        self.after_workspace_switch();
+    }
+
+    /// `SPC TAB <`/`SPC TAB >`: moves the active workspace one place
+    /// left or right in the list (and so in `SPC TAB 1`..`9`'s numbering).
+    pub(crate) fn move_workspace_left(&mut self) {
+        self.workspaces.move_active(-1);
+        self.display_workspaces();
+    }
+
+    pub(crate) fn move_workspace_right(&mut self) {
+        self.workspaces.move_active(1);
+        self.display_workspaces();
+    }
+
+    /// Everything a change of active workspace has to be followed by:
+    /// the focused buffer's language server is caught up, and the list
+    /// is shown so you can see where you landed.
+    fn after_workspace_switch(&mut self) {
+        self.sync_lsp_for_focused_buffer();
+        self.display_workspaces();
         self.wake_caret();
     }
 
-    /// `SPC TAB d`: removes the active workspace. Refuses (no-op) on the
-    /// last one -- same safety posture as `close_window` refusing the
-    /// last window.
+    /// `SPC TAB .`, and after every switch: the open workspaces, numbered
+    /// for `SPC TAB 1`..`9`, the active one in brackets -- Doom's own
+    /// echo-area workspace display.
+    pub(crate) fn display_workspaces(&mut self) {
+        self.set_message(self.workspace_tab_line());
+    }
+
+    fn workspace_tab_line(&self) -> String {
+        let active = self.workspaces.active_index();
+        self.workspaces
+            .summaries()
+            .into_iter()
+            .map(|(idx, name)| if idx == active { format!("[{} {name}]", idx + 1) } else { format!(" {} {name} ", idx + 1) })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// `SPC TAB d`: removes the active workspace. Refuses on the last
+    /// one -- same safety posture as `close_window` refusing the last
+    /// window.
+    ///
+    /// What lived only here goes with it: a panel session (Docker, Git,
+    /// a PDF, ...) is shut down through its own teardown, and Home and
+    /// every *saved* file no other workspace has are closed. A file with
+    /// unsaved changes is never closed this way -- it moves to the
+    /// workspace you land on instead, so it can't vanish from `SPC b b`.
     pub(crate) fn remove_workspace(&mut self) {
-        self.workspaces.remove_active();
+        if self.workspaces.len() <= 1 {
+            self.set_error("can't remove the only workspace".to_string());
+            return;
+        }
+        let id = self.workspaces.active_id();
+        let workspace = self.workspaces.active_workspace();
+        let mut candidates = workspace.buffers.clone();
+        for pane in workspace.windows.windows() {
+            if let Some(&buffer) = workspace.windows.content(pane) {
+                if !candidates.contains(&buffer) {
+                    candidates.push(buffer);
+                }
+            }
+        }
+        self.close_sessions_in_workspace(id);
+        // A panel's own teardown removes its workspace itself.
+        if self.workspaces.index_of_id(id).is_some() {
+            self.workspaces.remove_by_id(id);
+        }
+        self.release_orphaned_buffers(&candidates);
+        self.sync_lsp_for_focused_buffer();
+        self.display_workspaces();
+        self.wake_caret();
+    }
+
+    /// Shuts down every panel session whose home is workspace `id`.
+    fn close_sessions_in_workspace(&mut self, id: WorkspaceId) {
+        let pdf_keys: Vec<PathBuf> =
+            self.pdf_sessions.iter().filter(|(_, session)| session.workspace_id == id).map(|(key, _)| key.clone()).collect();
+        for key in pdf_keys {
+            self.pdf_session_close(&key);
+        }
+        let vnc_keys: Vec<String> =
+            self.vnc_sessions.iter().filter(|(_, session)| session.workspace_id == id).map(|(key, _)| key.clone()).collect();
+        for key in vnc_keys {
+            self.vnc_session_close(&key);
+        }
+        if self.docker_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.docker_session_close();
+        }
+        if self.git_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.git_session_close();
+        }
+        if self.jira_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.jira_session_close();
+        }
+        if self.history_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.history_close();
+        }
+        if self.compare_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.compare_close();
+        }
+        if self.merge_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.merge_close();
+        }
+        if self.forge_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.forge_close();
+        }
+        // These three have no teardown that removes a workspace; ending
+        // the session is all there is to it (dropping a task's runner is
+        // what stops it), and their buffers are released with the rest.
+        if self.task_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.task_session = None;
+        }
+        if self.tool_status_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.tool_status_session = None;
+        }
+        if self.debug_session.as_ref().is_some_and(|s| s.workspace_id == id) {
+            self.debug_session = None;
+        }
+    }
+
+    /// Whether any workspace, in any frame, still shows `id` or counts
+    /// it among its buffers.
+    fn buffer_claimed_by_a_workspace(&self, id: BufferId) -> bool {
+        let parked = self.frames.iter().flatten().map(|frame| &frame.workspaces);
+        std::iter::once(&self.workspaces)
+            .chain(parked)
+            .flat_map(|list| list.workspaces.iter())
+            .any(|workspace| workspace.buffers.contains(&id) || workspace.shows(id))
+    }
+
+    /// Closes each of `candidates` that no workspace claims any more and
+    /// that can go without losing anything: Home, a saved file or an
+    /// empty scratch buffer, or what a just-ended task/tool/debug/
+    /// terminal session left behind. A file with unsaved changes is
+    /// adopted by the active workspace instead.
+    fn release_orphaned_buffers(&mut self, candidates: &[BufferId]) {
+        for &id in candidates {
+            let Some(ob) = self.buffers.get(id) else { continue };
+            if self.buffer_claimed_by_a_workspace(id) {
+                continue;
+            }
+            let kind = ob.kind;
+            if kind.tracks_unsaved_changes() && ob.buffer.is_dirty() {
+                self.workspaces.active_workspace_mut().record_buffer(id);
+                continue;
+            }
+            match kind {
+                BufferKind::Dashboard => {
+                    self.home_views.remove(&id);
+                }
+                BufferKind::Text | BufferKind::Table => {
+                    self.table_views.remove(&id);
+                    self.gutter_hunks.remove(&id);
+                }
+                BufferKind::Terminal => self.close_terminal_buffer(id),
+                BufferKind::TaskOutput | BufferKind::ToolStatus | BufferKind::Debug => {}
+                _ => continue,
+            }
+            self.buffers.close(id);
+        }
+    }
+
+    /// `SPC TAB c`: a copy of the active workspace -- the same splits,
+    /// each pane on the same buffer at the same place -- to take in a
+    /// different direction without losing this one. A panel pane
+    /// (Docker, Git, a PDF, ...) belongs to its live session and can't
+    /// be shown twice, so the copy has Home there instead.
+    pub(crate) fn clone_workspace(&mut self) {
+        let source = self.workspaces.active_workspace();
+        let focused_leaf = source.windows.windows().iter().position(|&pane| pane == source.windows.focused_id()).unwrap_or(0);
+        let panes = source.windows.windows();
+        let states: Vec<Option<PaneState>> = panes.iter().map(|pane| source.pane_states.get(pane).copied()).collect();
+        let tabs: Vec<Vec<BufferId>> = panes.iter().map(|pane| source.pane_tabs.get(pane).cloned().unwrap_or_default()).collect();
+        let layout = source.windows.snapshot(|_, &buffer| buffer);
+        let (name, auto_named, project_root, buffers) =
+            (format!("{} copy", source.name), source.auto_named, source.project_root.clone(), source.buffers.clone());
+
+        let mut homes = Vec::new();
+        let layout = self.map_layout_leaves(layout, &mut |app: &mut App, buffer| {
+            if app.buffers.get(buffer).is_some_and(|ob| ob.kind.is_session_owned()) {
+                let home = app.new_home_buffer();
+                homes.push(home);
+                home
+            } else {
+                buffer
+            }
+        });
+        let windows = WindowTree::from_layout(layout, focused_leaf).expect("a live layout is always a valid one");
+        let mut pane_states = HashMap::new();
+        let mut pane_tabs = HashMap::new();
+        for ((pane, state), tabs) in windows.windows().into_iter().zip(states).zip(tabs) {
+            let content = *windows.content(pane).expect("every leaf has content");
+            let seeded = PaneState::seeded_at(self.buffers.get(content).map(|ob| ob.cursor).unwrap_or(Cursor::at_start()));
+            pane_states.insert(pane, if homes.contains(&content) { seeded } else { state.unwrap_or(seeded) });
+            let mut tabs: Vec<BufferId> =
+                tabs.into_iter().filter(|&b| self.buffers.get(b).is_some_and(|ob| !ob.kind.is_session_owned())).collect();
+            if !tabs.contains(&content) {
+                tabs.push(content);
+            }
+            pane_tabs.insert(pane, tabs);
+        }
+        let mut buffers: Vec<BufferId> =
+            buffers.into_iter().filter(|&b| self.buffers.get(b).is_some_and(|ob| !ob.kind.is_session_owned())).collect();
+        buffers.extend(homes);
+        let name = if self.workspaces.index_of_name(&name).is_some() { default_workspace_name(&self.workspaces.workspaces) } else { name };
+        self.workspaces.push_and_activate(Workspace {
+            id: WorkspaceId::fresh(),
+            name,
+            auto_named,
+            windows,
+            pane_states,
+            scroll_anims: HashMap::new(),
+            pane_tabs,
+            buffers,
+            project_root,
+        });
+        self.display_workspaces();
+        self.wake_caret();
+    }
+
+    /// Rebuilds `layout` with each leaf passed through `map`, which gets
+    /// `self` too -- `clone_workspace` makes a fresh Home in some leaves.
+    fn map_layout_leaves(
+        &mut self,
+        layout: fenix_window::Layout<BufferId>,
+        map: &mut impl FnMut(&mut App, BufferId) -> BufferId,
+    ) -> fenix_window::Layout<BufferId> {
+        match layout {
+            fenix_window::Layout::Leaf(buffer) => fenix_window::Layout::Leaf(map(self, buffer)),
+            fenix_window::Layout::Split { kind, ratio, first, second } => fenix_window::Layout::Split {
+                kind,
+                ratio,
+                first: Box::new(self.map_layout_leaves(*first, map)),
+                second: Box::new(self.map_layout_leaves(*second, map)),
+            },
+        }
+    }
+
+    /// `SPC TAB m`: picks another workspace (or a new one) to move the
+    /// focused buffer to.
+    pub(crate) fn picker_send_buffer_to_workspace(&mut self) {
+        if self.focused_pane_holds_a_tracked_session() {
+            self.set_error("a panel stays in its own workspace -- only a file can be moved".to_string());
+            return;
+        }
+        let active = self.workspaces.active_index();
+        let mut candidates: Vec<fenix_picker::Candidate<Option<WorkspaceId>>> = self
+            .workspaces
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|&(idx, _)| idx != active)
+            .map(|(idx, w)| fenix_picker::Candidate::new(format!("{} {}", idx + 1, w.name), Some(w.id)))
+            .collect();
+        candidates.push(fenix_picker::Candidate::new("+ new workspace".to_string(), None));
+        self.enter_picker(ActivePicker::SendToWorkspace(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Moves the focused buffer to workspace `target` (`None`: a new
+    /// one) and follows it there. The pane it leaves goes back to what
+    /// it showed before, or Home; and unless another pane here still
+    /// shows it, it no longer counts as this workspace's buffer.
+    fn send_focused_buffer_to_workspace(&mut self, target: Option<WorkspaceId>) {
+        let buffer = self.focused_buffer_id();
+        let pane = self.focused_pane_id();
+        let earlier = self
+            .workspaces
+            .active_pane_tabs()
+            .get(&pane)
+            .and_then(|tabs| tabs.iter().rev().copied().find(|&b| b != buffer && self.buffers.get(b).is_some()));
+        let replacement = match earlier {
+            Some(earlier) => earlier,
+            None => self.new_home_buffer(),
+        };
+        self.set_pane_content(pane, replacement);
+        let workspace = self.workspaces.active_workspace_mut();
+        if !workspace.shows(buffer) {
+            workspace.buffers.retain(|&b| b != buffer);
+            for tabs in workspace.pane_tabs.values_mut() {
+                tabs.retain(|&b| b != buffer);
+            }
+        }
+        match target {
+            Some(id) if self.workspaces.switch_to_id(id) => self.open_buffer_in_focused_pane(buffer),
+            Some(_) => {
+                self.set_error("that workspace is gone".to_string());
+                self.open_buffer_in_focused_pane(buffer);
+                return;
+            }
+            None => {
+                let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+                self.workspaces.new_workspace(buffer, cursor);
+            }
+        }
+        self.refresh_project_root();
+        self.display_workspaces();
         self.wake_caret();
     }
 
     /// `SPC TAB TAB`: a fuzzy picker over every currently open
     /// workspace, by name -- picking one directly rather than the
     /// relative `]`/`[` cycling `next_workspace`/`prev_workspace`
-    /// already cover. The active workspace is marked with a leading
-    /// `*` so re-opening the picker shows at a glance which one you're
-    /// already on.
+    /// already cover. Each is numbered as `SPC TAB 1`..`9` reaches it,
+    /// and the active one is marked with a leading `*` so re-opening
+    /// the picker shows at a glance which one you're already on.
     pub(crate) fn picker_switch_workspace(&mut self) {
         let active = self.workspaces.active_index();
         let candidates = self
@@ -22175,26 +22724,34 @@ impl App {
             .summaries()
             .into_iter()
             .map(|(idx, name)| {
-                let marker = if idx == active { "* " } else { "  " };
-                fenix_picker::Candidate::new(format!("{marker}{name}"), idx)
+                let marker = if idx == active { "*" } else { " " };
+                fenix_picker::Candidate::new(format!("{marker} {} {name}", idx + 1), idx)
             })
             .collect();
         self.enter_picker(ActivePicker::SwitchWorkspace(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC TAB r`: starts the rename prompt, pre-seeded with the
-    /// active workspace's current name.
+    /// active workspace's current name -- selected, the way a rename
+    /// field is anywhere else: typing replaces it, Backspace clears it,
+    /// Enter or Escape keeps it.
     pub(crate) fn start_rename_workspace_prompt(&mut self) {
         self.workspace_rename_prompt = Some(self.workspaces.active_name().to_string());
+        self.workspace_rename_pristine = true;
         self.wake_caret();
     }
 
     /// Routes one keypress to the in-progress `workspace_rename_prompt`
-    /// -- same shape as `rename_file_prompt_key`.
+    /// -- same shape as `rename_file_prompt_key`, plus the pre-seeded
+    /// name being replaced rather than appended to.
     fn workspace_rename_prompt_key(&mut self, key: KeyPress) {
+        let pristine = std::mem::replace(&mut self.workspace_rename_pristine, false);
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(input), Some(text)) = (&mut self.workspace_rename_prompt, pasted) {
+                if pristine {
+                    input.clear();
+                }
                 input.push_str(&text);
             }
             self.wake_caret();
@@ -22206,15 +22763,27 @@ impl App {
             KeyCode::Named(FenixNamedKey::Enter) => {
                 let input = self.workspace_rename_prompt.take().unwrap_or_default();
                 let trimmed = input.trim();
-                if !trimmed.is_empty() {
+                // Untouched, the name is kept as it is -- still
+                // automatic, so it can follow the project.
+                if !pristine && !trimmed.is_empty() {
                     self.workspaces.rename_active(trimmed.to_string());
+                    self.display_workspaces();
                 }
             }
             KeyCode::Named(FenixNamedKey::Backspace) => {
-                input.pop();
+                if pristine {
+                    input.clear();
+                } else {
+                    input.pop();
+                }
             }
-            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
-            _ => {}
+            KeyCode::Char(c) if key.mods == Mods::default() => {
+                if pristine {
+                    input.clear();
+                }
+                input.push(c);
+            }
+            _ => self.workspace_rename_pristine = pristine,
         }
         self.wake_caret();
     }
@@ -24412,6 +24981,7 @@ impl App {
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchWorkspace(_)) => ("SWWS", picker_len(picker)),
+                Some(picker @ ActivePicker::SendToWorkspace(_)) => ("MOVE TO", picker_len(picker)),
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
@@ -25006,7 +25576,7 @@ impl App {
                 == Some(fenix_syntax::LanguageId::Tcl)
         });
         let known_tcl_commands: Option<std::collections::HashSet<String>> = if is_tcl {
-            let root = self.project_root.clone();
+            let root = self.project_root().clone();
             let mut known: std::collections::HashSet<String> =
                 self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>().into_iter().map(|c| c.payload.label).collect();
             // Plus whatever this file itself defines. Without it, a call
@@ -29314,7 +29884,7 @@ index 0000000..1111111 100644
         std::fs::write(&file, "one\nTWO\nthree\n").unwrap();
 
         let mut app = App::with_file(None);
-        app.project_root = Some(repo.to_path_buf());
+        app.set_project_root(Some(repo.to_path_buf()));
         app.test_open_path(&file);
         // `set_pane_content` (via `test_open_path`) already refreshes the
         // buffer it just opened -- clear that out so this test actually
@@ -30743,7 +31313,7 @@ index 0000000..1111111 100644
 configure_board stm32
 ");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        assert_eq!(app.project_root, None, "no project root, so nothing is indexed");
+        assert_eq!(*app.project_root(), None, "no project root, so nothing is indexed");
         let id = app.focused_buffer_id();
 
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 5);
@@ -30764,7 +31334,7 @@ configure_board stm32
         dir.write("lib.tcl", "namespace eval myns {\n    proc greet {} {\n        return 1\n    }\n}\n");
         let file = dir.write("main.tcl", "myns::greet\n::myns::greet\ngreet\n");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         let id = app.focused_buffer_id();
 
         let highlights = app.syntax_highlights_for_visible_range(id, 0, 3);
@@ -31719,7 +32289,7 @@ configure_board stm32
         dir.write("lib.tcl", "proc my_custom_proc {} {\n    return 1\n}\n");
         let file = dir.write("main.tcl", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.test_vim_key(KeyPress::char('i'));
         app.test_insert_str("my_cus");
 
@@ -31739,7 +32309,7 @@ configure_board stm32
         );
         let file = dir.write("main.tcl", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.test_vim_key(KeyPress::char('i'));
         app.test_insert_str("gre");
 
@@ -31815,7 +32385,7 @@ configure_board stm32
         );
         let file = dir.write("main.tcl", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.picker_symbols();
 
@@ -32775,7 +33345,7 @@ configure_board stm32
         // the project.
         let dir = TempDir::new("last_mile_grep");
         let mut app = app_with_places("last_mile_grep", dir.path());
-        app.project_root = Some(PathBuf::from(r"C:\somewhere\else"));
+        app.set_project_root(Some(PathBuf::from(r"C:\somewhere\else")));
 
         app.explorer_grep_here();
 
@@ -32796,7 +33366,7 @@ configure_board stm32
         app.explorer_git_here();
 
         // The repository root, not the directory that happened to be open.
-        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()));
+        assert_eq!(app.project_root().as_deref(), Some(repo.as_path()));
         assert!(app.modeline_pieces().1.contains("project is now") || app.git_session.is_some());
     }
 
@@ -32807,7 +33377,7 @@ configure_board stm32
 
         app.explorer_git_here();
 
-        assert_eq!(app.project_root.as_deref(), Some(dir.path()));
+        assert_eq!(app.project_root().as_deref(), Some(dir.path()));
     }
 
     // -- Links --------------------------------------------------------------
@@ -35410,7 +35980,7 @@ configure_board stm32
     }
 
     #[test]
-    fn new_workspace_becomes_active_and_is_seeded_with_the_current_buffer() {
+    fn new_workspace_becomes_active_and_opens_on_home() {
         let mut app = App::with_file(None);
         let buffer_id = app.focused_buffer_id();
 
@@ -35419,7 +35989,8 @@ configure_board stm32
         assert_eq!(app.workspaces.len(), 2);
         assert_eq!(app.workspaces.active_index(), 1);
         assert_eq!(app.workspaces.active_name(), "workspace-2");
-        assert_eq!(app.focused_buffer_id(), buffer_id); // seeded, not a blank scratch
+        assert_ne!(app.focused_buffer_id(), buffer_id, "a Home of its own, not the last workspace's buffer");
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
         assert_eq!(app.windows().window_count(), 1); // new workspace starts unsplit
     }
 
@@ -35465,7 +36036,7 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchWorkspace(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels, vec!["  workspace-1", "* workspace-2"]);
+                assert_eq!(labels, vec!["  1 workspace-1", "* 2 workspace-2"]);
             }
             other => panic!("expected an open SwitchWorkspace picker, got is_some={}", other.is_some()),
         }
@@ -35500,16 +36071,27 @@ configure_board stm32
         for c in "Editor".chars() {
             app.workspace_rename_prompt_key(KeyPress::char(c));
         }
-        // start_rename_workspace_prompt pre-seeds the prompt with the
-        // existing name rather than clearing it -- typing appends,
-        // matching start_rename_file_prompt's own seeded-not-blank
-        // behaviour.
-        assert_eq!(app.workspace_rename_prompt.as_deref(), Some("workspace-1Editor"));
+        // The seeded name is selected: the first key typed replaces it.
+        assert_eq!(app.workspace_rename_prompt.as_deref(), Some("Editor"));
 
         app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Enter));
 
         assert!(app.workspace_rename_prompt.is_none());
-        assert_eq!(app.workspaces.active_name(), "workspace-1Editor");
+        assert_eq!(app.workspaces.active_name(), "Editor");
+    }
+
+    #[test]
+    fn rename_workspace_prompt_edits_the_name_once_the_selection_is_gone() {
+        let mut app = App::with_file(None);
+        app.start_rename_workspace_prompt();
+        app.workspace_rename_prompt_key(KeyPress::char('a'));
+        app.workspace_rename_prompt_key(KeyPress::char('b'));
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
+        assert_eq!(app.workspace_rename_prompt.as_deref(), Some("a"), "past the first key it's ordinary editing");
+
+        app.start_rename_workspace_prompt();
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
+        assert_eq!(app.workspace_rename_prompt.as_deref(), Some(""), "Backspace on the selected name clears all of it");
     }
 
     #[test]
@@ -35528,9 +36110,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.start_rename_workspace_prompt();
         // Clear the pre-seeded name entirely.
-        for _ in 0.."workspace-1".len() {
-            app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
-        }
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Backspace));
 
         app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Enter));
 
@@ -35562,7 +36142,7 @@ configure_board stm32
         app.open_configured_workspace("My Project");
 
         assert_eq!(app.workspaces.active_name(), "My Project");
-        assert_eq!(app.project_root.as_deref(), Some(project_dir.path()));
+        assert_eq!(app.project_root().as_deref(), Some(project_dir.path()));
         assert!(app.active_picker.is_some(), "should chain into a find-file picker, same as SPC p p");
     }
 
@@ -35689,12 +36269,334 @@ configure_board stm32
         assert_eq!(app.windows().window_count(), 3); // layout untouched
     }
 
+    /// A dirty edit to `id`, so it counts as having unsaved changes.
+    fn make_dirty(app: &mut App, id: BufferId) {
+        let ob = app.buffers.get_mut(id).unwrap();
+        let mut cursor = Cursor::at_start();
+        ob.buffer.replace_range(&mut cursor, 0, 0, "x");
+        assert!(ob.buffer.is_dirty());
+    }
+
+    #[test]
+    fn each_workspace_keeps_its_own_project() {
+        let first = TempDir::new("ws_project_first");
+        let second = TempDir::new("ws_project_second");
+        let mut app = App::with_file(None);
+        app.set_project_root(Some(first.path().to_path_buf()));
+
+        app.new_workspace();
+        assert_eq!(*app.project_root(), Some(first.path().to_path_buf()), "a new workspace starts in the current project");
+        app.set_project_root(Some(second.path().to_path_buf()));
+
+        app.prev_workspace();
+        assert_eq!(*app.project_root(), Some(first.path().to_path_buf()));
+        app.next_workspace();
+        assert_eq!(*app.project_root(), Some(second.path().to_path_buf()));
+    }
+
+    #[test]
+    fn home_leaves_the_workspace_project_alone() {
+        let project = TempDir::new("ws_project_home");
+        let mut app = App::with_file(None);
+        app.set_project_root(Some(project.path().to_path_buf()));
+        app.open_dashboard();
+        assert_eq!(*app.project_root(), Some(project.path().to_path_buf()));
+    }
+
+    #[test]
+    fn an_unnamed_workspace_takes_its_projects_name_but_a_chosen_name_sticks() {
+        let project = TempDir::new("ws_autoname");
+        let other = TempDir::new("ws_autoname_other");
+        let project_name = project.path().file_name().unwrap().to_string_lossy().into_owned();
+        let mut app = App::with_file(None);
+        app.new_workspace();
+
+        app.set_project_root(Some(project.path().to_path_buf()));
+        assert_eq!(app.workspaces.active_name(), project_name);
+
+        app.workspaces.rename_active("mine".to_string());
+        app.set_project_root(Some(other.path().to_path_buf()));
+        assert_eq!(app.workspaces.active_name(), "mine");
+    }
+
+    #[test]
+    fn a_projects_name_is_not_taken_twice() {
+        let project = TempDir::new("ws_autoname_twice");
+        let mut app = App::with_file(None);
+        app.set_project_root(Some(project.path().to_path_buf()));
+        let taken = app.workspaces.active_name().to_string();
+        app.set_project_root(None);
+        app.new_workspace();
+        let own = app.workspaces.active_name().to_string();
+
+        app.set_project_root(Some(project.path().to_path_buf()));
+        assert_eq!(app.workspaces.workspaces[0].name, taken);
+        assert_eq!(app.workspaces.active_name(), own, "already in use, so it keeps its own");
+    }
+
+    #[test]
+    fn default_workspace_names_reuse_a_freed_number() {
+        let mut app = App::with_file(None);
+        app.new_workspace(); // workspace-2
+        app.new_workspace(); // workspace-3
+        app.switch_to_workspace_number(2);
+        app.remove_workspace();
+
+        app.new_workspace();
+        assert_eq!(app.workspaces.active_name(), "workspace-2");
+    }
+
+    #[test]
+    fn numbered_workspace_keys_jump_by_position() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.new_workspace();
+
+        app.switch_to_workspace_number(1);
+        assert_eq!(app.workspaces.active_index(), 0);
+        app.switch_to_last_workspace();
+        assert_eq!(app.workspaces.active_index(), 2);
+
+        app.switch_to_workspace_number(7);
+        assert_eq!(app.workspaces.active_index(), 2, "a number past the end goes nowhere");
+        assert!(app.modeline_pieces().1.contains("no workspace 7"));
+    }
+
+    #[test]
+    fn previous_workspace_flips_between_the_last_two() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.new_workspace();
+        app.switch_to_workspace_number(1);
+
+        app.switch_to_previous_workspace();
+        assert_eq!(app.workspaces.active_index(), 2);
+        app.switch_to_previous_workspace();
+        assert_eq!(app.workspaces.active_index(), 0);
+    }
+
+    #[test]
+    fn previous_workspace_reports_when_there_is_none() {
+        let mut app = App::with_file(None);
+        app.switch_to_previous_workspace();
+        assert!(app.modeline_pieces().1.contains("no previous workspace"));
+    }
+
+    #[test]
+    fn removing_the_active_workspace_lands_on_the_one_you_came_from() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.new_workspace();
+        app.switch_to_workspace_number(1);
+        app.switch_to_workspace_number(2);
+
+        app.remove_workspace();
+        assert_eq!(app.workspaces.active_name(), "workspace-1");
+    }
+
+    #[test]
+    fn switching_shows_the_numbered_workspace_list() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.workspaces.rename_active("notes".to_string());
+        app.prev_workspace();
+        assert!(app.modeline_pieces().1.contains("[1 workspace-1]  2 notes"), "got {:?}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn moving_a_workspace_reorders_it_and_keeps_it_active() {
+        let mut app = App::with_file(None);
+        app.new_workspace();
+        app.workspaces.rename_active("b".to_string());
+
+        app.move_workspace_left();
+        let names: Vec<&str> = app.workspaces.summaries().into_iter().map(|(_, n)| n).collect();
+        assert_eq!(names, vec!["b", "workspace-1"]);
+        assert_eq!(app.workspaces.active_name(), "b");
+        app.move_workspace_left(); // wraps back round to the end
+        assert_eq!(app.workspaces.active_index(), 1);
+    }
+
+    #[test]
+    fn a_panel_finds_its_workspace_after_an_earlier_one_is_removed() {
+        let mut app = App::with_file(None);
+        app.new_workspace(); // an ordinary workspace ahead of the panel's
+        app.open_docker_panel();
+        let panel = app.docker_session.as_ref().unwrap().workspace_id;
+        app.switch_to_workspace_number(2);
+        app.remove_workspace();
+
+        app.switch_to_workspace_number(1);
+        app.open_docker_panel();
+        assert_eq!(app.workspaces.active_id(), panel);
+        assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
+    }
+
+    #[test]
+    fn removing_a_panels_workspace_ends_the_panel() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        let before = app.workspaces.len();
+
+        app.remove_workspace();
+        assert!(app.docker_session.is_none());
+        assert_eq!(app.workspaces.len(), before - 1);
+    }
+
+    #[test]
+    fn switch_buffer_offers_only_this_workspaces_buffers_unless_asked_for_all() {
+        let dir = TempDir::new("ws_scoped_buffers");
+        let a = dir.write("a.txt", "a\n");
+        let b = dir.write("b.txt", "b\n");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        app.new_workspace();
+        app.test_open_path(&b);
+
+        let labels = |app: &App| -> Vec<String> {
+            match &app.active_picker {
+                Some(ActivePicker::SwitchBuffer(state)) => state.visible_rows(0, 20).map(|(_, c)| c.label.clone()).collect(),
+                _ => panic!("expected a buffer picker"),
+            }
+        };
+        app.picker_switch_buffer();
+        let scoped = labels(&app);
+        assert!(scoped.iter().any(|l| l.ends_with("b.txt")));
+        assert!(scoped.iter().any(|l| l == "*home*"), "Home is named as Home, got {scoped:?}");
+        assert!(!scoped.iter().any(|l| l.ends_with("a.txt")), "a.txt belongs to the other workspace");
+        app.picker_cancel();
+
+        app.picker_switch_buffer_all();
+        assert!(labels(&app).iter().any(|l| l.ends_with("a.txt")));
+    }
+
+    #[test]
+    fn a_buffer_stays_in_its_workspace_after_the_split_showing_it_closes() {
+        let dir = TempDir::new("ws_buffer_after_split");
+        let a = dir.write("a.txt", "a\n");
+        let mut app = App::with_file(None);
+        app.split_vertical();
+        app.test_open_path(&a);
+        let a_id = app.focused_buffer_id();
+        app.close_window();
+        assert!(app.workspace_has_buffer(a_id));
+    }
+
+    #[test]
+    fn removing_a_workspace_closes_what_only_it_had_but_keeps_unsaved_work() {
+        let dir = TempDir::new("ws_remove_releases");
+        let clean = dir.write("clean.txt", "c\n");
+        let dirty = dir.write("dirty.txt", "d\n");
+        let shared = dir.write("shared.txt", "s\n");
+        let mut app = App::with_file(Some(shared.to_string_lossy().into_owned()));
+        let shared_id = app.focused_buffer_id();
+        app.new_workspace();
+        let home = app.focused_buffer_id();
+        app.test_open_path(&clean);
+        let clean_id = app.focused_buffer_id();
+        app.test_open_path(&dirty);
+        let dirty_id = app.focused_buffer_id();
+        make_dirty(&mut app, dirty_id);
+        app.open_buffer_in_focused_pane(shared_id);
+
+        app.remove_workspace();
+
+        assert!(app.buffers.get(home).is_none(), "its Home goes with it");
+        assert!(app.buffers.get(clean_id).is_none(), "a saved file only it had goes with it");
+        assert!(app.buffers.get(shared_id).is_some(), "still shown in workspace-1");
+        assert!(app.buffers.get(dirty_id).is_some(), "unsaved work is never closed this way");
+        assert!(app.workspace_has_buffer(dirty_id), "and it moves to the workspace you land on");
+    }
+
+    #[test]
+    fn sending_a_buffer_moves_it_and_follows_it() {
+        let dir = TempDir::new("ws_send_buffer");
+        let a = dir.write("a.txt", "a\n");
+        let b = dir.write("b.txt", "b\n");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let a_id = app.focused_buffer_id();
+        app.test_open_path(&b);
+        let b_id = app.focused_buffer_id();
+        app.new_workspace();
+        let target = app.workspaces.active_id();
+        app.switch_to_workspace_number(1);
+
+        app.send_focused_buffer_to_workspace(Some(target));
+
+        assert_eq!(app.workspaces.active_id(), target);
+        assert_eq!(app.focused_buffer_id(), b_id);
+        app.switch_to_workspace_number(1);
+        assert_eq!(app.focused_buffer_id(), a_id, "the pane it left goes back to what it showed before");
+        assert!(!app.workspace_has_buffer(b_id));
+    }
+
+    #[test]
+    fn sending_a_buffer_to_a_new_workspace_starts_one_on_it() {
+        let dir = TempDir::new("ws_send_buffer_new");
+        let a = dir.write("a.txt", "a\n");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let a_id = app.focused_buffer_id();
+
+        app.picker_send_buffer_to_workspace();
+        match &app.active_picker {
+            Some(ActivePicker::SendToWorkspace(state)) => assert_eq!(state.len(), 1, "no other workspace yet, just a new one"),
+            _ => panic!("expected the move-to picker"),
+        }
+        app.picker_confirm();
+
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!(app.focused_buffer_id(), a_id);
+        app.switch_to_workspace_number(1);
+        assert_eq!(app.open().kind, BufferKind::Dashboard, "the pane it left had nothing before, so it shows Home");
+    }
+
+    #[test]
+    fn cloning_a_workspace_copies_its_layout_into_fresh_panes() {
+        let dir = TempDir::new("ws_clone");
+        let a = dir.write("a.txt", "a\n");
+        let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
+        let a_id = app.focused_buffer_id();
+        app.split_vertical();
+        let original_panes = app.windows().windows();
+
+        app.clone_workspace();
+
+        assert_eq!(app.workspaces.len(), 2);
+        assert_eq!(app.workspaces.active_name(), "workspace-1 copy");
+        let panes = app.windows().windows();
+        assert_eq!(panes.len(), 2);
+        assert!(panes.iter().all(|p| !original_panes.contains(p)), "pane ids are never shared between workspaces");
+        assert!(panes.iter().all(|p| app.windows().content(*p) == Some(&a_id)));
+        assert!(panes.iter().all(|p| app.workspaces.active_pane_states().contains_key(p)));
+    }
+
+    #[test]
+    fn cloning_a_panel_workspace_puts_home_where_the_panel_was() {
+        let mut app = App::with_file(None);
+        app.open_docker_panel();
+        app.clone_workspace();
+        let kinds: Vec<BufferKind> =
+            app.windows().windows().iter().map(|p| app.buffers.get(*app.windows().content(*p).unwrap()).unwrap().kind).collect();
+        assert!(kinds.iter().all(|k| *k == BufferKind::Dashboard), "got {kinds:?}");
+    }
+
+    #[test]
+    fn new_named_workspace_opens_the_rename_prompt_over_its_default_name() {
+        let mut app = App::with_file(None);
+        app.new_named_workspace();
+        for c in "api".chars() {
+            app.workspace_rename_prompt_key(KeyPress::char(c));
+        }
+        app.workspace_rename_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.workspaces.active_name(), "api");
+    }
+
     #[test]
     fn modeline_shows_the_workspace_indicator_only_once_there_are_several() {
         let mut app = App::with_file(None);
         assert!(!app.modeline_text().contains("workspace"));
 
         app.new_workspace();
+        app.status_message = None; // the workspace list shown on switching
         assert!(app.modeline_text().contains("[2/2 workspace-2]"));
     }
 
@@ -36335,7 +37237,7 @@ configure_board stm32
         let dir = TempDir::new("run_grep");
         dir.write("a.txt", "line one\nneedle here\nline three\n");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.run_grep("needle");
 
@@ -36363,7 +37265,7 @@ configure_board stm32
         let dir = TempDir::new("run_grep_no_matches");
         dir.write("a.txt", "nothing interesting\n");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.run_grep("needle");
         assert_eq!(app.main_view, MainView::Picker);
@@ -36496,7 +37398,7 @@ configure_board stm32
         let dir = TempDir::new("grep_query_key");
         dir.write("a.txt", "target line\n");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.pending_grep_query = Some(String::new());
 
         for c in "targetx".chars() {
@@ -36536,7 +37438,7 @@ configure_board stm32
 
         app.switch_to_project(project_dir.path().to_path_buf());
 
-        assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
+        assert_eq!(*app.project_root(), Some(project_dir.path().to_path_buf()));
         assert_eq!(app.known_projects.roots(), &[project_dir.path().to_path_buf()]);
         assert_eq!(app.main_view, MainView::Picker);
         assert_eq!(app.focused_buffer_id(), focused_before);
@@ -36565,7 +37467,7 @@ configure_board stm32
         app.test_open_path(&file);
         app.refresh_project_root(); // what the real open-file paths call after test_open_path's equivalent
 
-        assert!(app.project_root.is_some(), "project_root itself should still auto-detect");
+        assert!(app.project_root().is_some(), "project_root itself should still auto-detect");
         assert!(app.known_projects.roots().is_empty(), "known_projects should stay empty until SPC p a");
     }
 
@@ -36573,7 +37475,7 @@ configure_board stm32
     fn picker_add_project_prompt_opens_the_explorer_at_the_current_project_root() {
         let root_dir = TempDir::new("add_project_prompt_root");
         let mut app = App::with_file(None);
-        app.project_root = Some(root_dir.path().to_path_buf());
+        app.set_project_root(Some(root_dir.path().to_path_buf()));
 
         app.picker_add_project_prompt();
 
@@ -36588,7 +37490,7 @@ configure_board stm32
         let project_dir = TempDir::new("select_cwd_target");
         let mut app = App::with_file(None);
         app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
-        app.project_root = Some(project_dir.path().to_path_buf());
+        app.set_project_root(Some(project_dir.path().to_path_buf()));
 
         app.picker_add_project_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -36623,7 +37525,7 @@ configure_board stm32
     fn picker_add_mib_root_prompt_opens_the_explorer_at_the_current_project_root() {
         let root_dir = TempDir::new("add_mib_root_prompt_root");
         let mut app = App::with_file(None);
-        app.project_root = Some(root_dir.path().to_path_buf());
+        app.set_project_root(Some(root_dir.path().to_path_buf()));
 
         app.picker_add_mib_root_prompt();
 
@@ -36638,7 +37540,7 @@ configure_board stm32
         let config_dir = TempDir::new("select_cwd_mib_config");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.set_project_root(Some(mib_dir.path().to_path_buf()));
 
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -36657,7 +37559,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         // Something other than the home dir, so a bug that reuses
         // `project_root` instead of `dirs::home_dir()` would be caught.
-        app.project_root = Some(PathBuf::from("."));
+        app.set_project_root(Some(PathBuf::from(".")));
 
         app.start_explore_from_home();
 
@@ -36713,7 +37615,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         let config_path = config_dir.path().join("config.ini");
         app.config = fenix_config::Config::load_or_default(config_path.clone());
-        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.set_project_root(Some(mib_dir.path().to_path_buf()));
 
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -36742,7 +37644,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_path.clone());
 
-        app.project_root = Some(mib_dir_a.path().to_path_buf());
+        app.set_project_root(Some(mib_dir_a.path().to_path_buf()));
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
         for ch in "MIB-A".chars() {
@@ -36750,7 +37652,7 @@ configure_board stm32
         }
         app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
 
-        app.project_root = Some(mib_dir_b.path().to_path_buf());
+        app.set_project_root(Some(mib_dir_b.path().to_path_buf()));
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
         for ch in "MIB-B".chars() {
@@ -36795,7 +37697,7 @@ configure_board stm32
             .collect();
         assert_eq!(app.config.mib_roots.len(), 1, "sanity check: the pre-existing root loaded correctly");
 
-        app.project_root = Some(mib_dir_b.path().to_path_buf());
+        app.set_project_root(Some(mib_dir_b.path().to_path_buf()));
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
         for ch in "MIB-B".chars() {
@@ -36817,7 +37719,7 @@ configure_board stm32
         let config_dir = TempDir::new("mib_root_prompt_empty_config");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.set_project_root(Some(mib_dir.path().to_path_buf()));
 
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -36833,7 +37735,7 @@ configure_board stm32
         let config_dir = TempDir::new("mib_root_prompt_escape_config");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.set_project_root(Some(mib_dir.path().to_path_buf()));
 
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -36850,7 +37752,7 @@ configure_board stm32
         let config_dir = TempDir::new("mib_root_prompt_paste_config");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
+        app.set_project_root(Some(mib_dir.path().to_path_buf()));
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
 
@@ -36910,7 +37812,7 @@ configure_board stm32
         let dir = TempDir::new("pick_project_dir_ignores_files");
         dir.write("main.rs", "fn main() {}");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.picker_add_project_prompt();
         app.explorer_open_selected();
@@ -37312,7 +38214,7 @@ configure_board stm32
         assert!(!app.home_key(KeyPress::char('x')), "other keys reach Vim");
 
         assert!(app.home_key(KeyPress::char('1')));
-        assert_eq!(app.project_root, Some(project.path().to_path_buf()));
+        assert_eq!(*app.project_root(), Some(project.path().to_path_buf()));
         assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(_))));
     }
 
@@ -37574,7 +38476,7 @@ configure_board stm32
     fn picker_tasks_errors_when_the_project_root_has_no_discoverable_tasks() {
         let dir = TempDir::new("no_tasks");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.picker_tasks();
         assert!(app.modeline_pieces().1.contains("no known tasks"));
     }
@@ -37584,7 +38486,7 @@ configure_board stm32
         let dir = TempDir::new("cargo_project");
         dir.write("Cargo.toml", "[package]\nname=\"x\"");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.picker_tasks();
 
@@ -37794,13 +38696,13 @@ configure_board stm32
         let breakpoints_buffer = app.buffers.open_debug("");
         let cursor = Cursor::at_start();
         app.workspaces.new_workspace(call_stack_buffer, cursor);
-        let workspace_index = app.workspaces.active_index();
+        let workspace_id = app.workspaces.active_id();
         let call_stack_pane = app.focused_pane_id();
         app.debug_session = Some(DebugSession {
             language: fenix_syntax::LanguageId::Python,
             generation: tool_sessions::generation(),
             launch_attributes: serde_json::Map::new(),
-            workspace_index,
+            workspace_id,
             call_stack_pane,
             variables_pane: call_stack_pane,
             watches_pane: call_stack_pane,
@@ -37839,15 +38741,15 @@ configure_board stm32
         let target = dir.write("main.py", "x = 1\n");
         let mut app = App::with_file(None);
         debug_test_session(&mut app);
-        let session_workspace_index = app.debug_session.as_ref().unwrap().workspace_index;
+        let session_workspace_index = app.debug_session.as_ref().unwrap().workspace_id;
         let session_pane = app.debug_session.as_ref().unwrap().call_stack_pane;
         let workspace_count_before = app.workspaces.len();
 
         app.goto_debug_location(&target, 1);
 
         assert_eq!(app.workspaces.len(), workspace_count_before + 1, "the source file should land in a new workspace");
-        assert_ne!(app.workspaces.active_index(), session_workspace_index);
-        app.workspaces.switch_to_index(session_workspace_index);
+        assert_ne!(app.workspaces.active_id(), session_workspace_index);
+        app.workspaces.switch_to_id(session_workspace_index);
         app.windows_mut().focus(session_pane);
         assert_eq!(app.open().kind, BufferKind::Debug, "the debug panel's own pane must still show debug output, not the jumped-to file");
     }
@@ -38212,16 +39114,16 @@ configure_board stm32
         // workspaces, which could false-positive-match by coincidence.
         let mut app = App::with_file(None);
         app.open_docker_panel();
-        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_index;
+        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_id;
         let workspace_count_after_first = app.workspaces.len();
 
         // Switch away, then re-open -- should refocus, not duplicate.
         app.new_workspace();
-        assert_ne!(app.workspaces.active_index(), session_workspace_index);
+        assert_ne!(app.workspaces.active_id(), session_workspace_index);
         assert_eq!(app.docker_focused_role(), None);
 
         app.open_docker_panel();
-        assert_eq!(app.workspaces.active_index(), session_workspace_index);
+        assert_eq!(app.workspaces.active_id(), session_workspace_index);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
         // One more workspace than after the first open (the one created
         // by `new_workspace` above), not two more (no second session).
@@ -38244,7 +39146,7 @@ configure_board stm32
 
         let mut app = App::with_file(None);
         app.open_docker_panel();
-        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_index;
+        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_id;
         let session_pane = app.docker_session.as_ref().unwrap().containers_pane;
         let workspace_count_before = app.workspaces.len();
 
@@ -38254,7 +39156,7 @@ configure_board stm32
         // Docker panel's own pane -- before the fix, this unconditionally
         // called `set_pane_content` on the focused (Docker) pane instead.
         assert_eq!(app.workspaces.len(), workspace_count_before + 1);
-        assert_ne!(app.workspaces.active_index(), session_workspace_index);
+        assert_ne!(app.workspaces.active_id(), session_workspace_index);
         assert!(app.docker_session.is_some());
 
         // Switching back to the session's own workspace/pane still
@@ -38262,7 +39164,7 @@ configure_board stm32
         // the exact "SPC v v does nothing" symptom: before the fix, the
         // session's pane would already be showing the hijacked buffer,
         // so reopening it looked like it silently did nothing.
-        app.workspaces.switch_to_index(session_workspace_index);
+        app.workspaces.switch_to_id(session_workspace_index);
         app.windows_mut().focus(session_pane);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
     }
@@ -38272,15 +39174,15 @@ configure_board stm32
         let mut app = App::with_file(None);
         let scratch = app.buffers.open_scratch();
         app.open_docker_panel();
-        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_index;
+        let session_workspace_index = app.docker_session.as_ref().unwrap().workspace_id;
         let session_pane = app.docker_session.as_ref().unwrap().containers_pane;
         let workspace_count_before = app.workspaces.len();
 
         app.switch_focused_to_buffer(scratch);
 
         assert_eq!(app.workspaces.len(), workspace_count_before + 1);
-        assert_ne!(app.workspaces.active_index(), session_workspace_index);
-        app.workspaces.switch_to_index(session_workspace_index);
+        assert_ne!(app.workspaces.active_id(), session_workspace_index);
+        app.workspaces.switch_to_id(session_workspace_index);
         app.windows_mut().focus(session_pane);
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
     }
@@ -38302,7 +39204,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         let (program, args) = echo_command("noop");
         app.run_task(fenix_tasks::TaskDef { name: "t".to_string(), command: program, args }, dir.path().to_path_buf());
-        let task_workspace_index = app.task_session.as_ref().unwrap().workspace_index;
+        let task_workspace_index = app.task_session.as_ref().unwrap().workspace_id;
         let task_pane = app.task_session.as_ref().unwrap().pane;
         let workspace_count_before = app.workspaces.len();
         app.quickfix = vec![QuickfixEntry::Task(fenix_project::GrepMatch { path: target, line: 1, col: 1, text: "x".to_string() })];
@@ -38311,8 +39213,8 @@ configure_board stm32
         app.quickfix_step(1);
 
         assert_eq!(app.workspaces.len(), workspace_count_before + 1, "the jumped-to file should land in a new workspace");
-        assert_ne!(app.workspaces.active_index(), task_workspace_index);
-        app.workspaces.switch_to_index(task_workspace_index);
+        assert_ne!(app.workspaces.active_id(), task_workspace_index);
+        app.workspaces.switch_to_id(task_workspace_index);
         app.windows_mut().focus(task_pane);
         assert_eq!(app.open().kind, BufferKind::TaskOutput, "the Task Output pane must still show task output, not the jumped-to file");
     }
@@ -38516,7 +39418,7 @@ configure_board stm32
         dir.write("sub/b.txt", "new\n");
 
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         let session = app.git_session.as_ref().unwrap();
         let (unstaged_buffer, unstaged_pane, repo_root) = (session.unstaged_buffer, session.unstaged_pane, session.repo_root.clone());
@@ -38565,7 +39467,7 @@ configure_board stm32
     fn a_conflicted_rebase_reports_itself_in_the_status_banner() {
         let dir = conflicting_repo("rebase_banner");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_rebase_onto("side");
@@ -38583,7 +39485,7 @@ configure_board stm32
     fn aborting_puts_the_tree_back_and_clears_the_banner() {
         let dir = conflicting_repo("rebase_abort");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("side");
         assert!(fenix_git::in_progress(dir.path()).is_some());
@@ -38603,7 +39505,7 @@ configure_board stm32
     fn continuing_with_conflicts_still_unresolved_says_what_is_missing() {
         let dir = conflicting_repo("rebase_continue_blocked");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("side");
 
@@ -38617,7 +39519,7 @@ configure_board stm32
     fn continuing_and_aborting_with_nothing_running_say_so() {
         let dir = conflicting_repo("nothing_running");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.git_operation_continue();
         assert!(app.modeline_pieces().1.contains("nothing in progress"));
@@ -38634,7 +39536,7 @@ configure_board stm32
             std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
         };
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_rebase_onto("side");
@@ -38666,7 +39568,7 @@ configure_board stm32
         let dir = conflicting_repo("rebase_open_buffer");
         let conflicted = dir.path().join("a.txt");
         let mut app = App::with_file(Some(conflicted.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         assert!(!app.open().buffer.text().contains("<<<<<<<"), "no markers before the rebase");
 
@@ -38683,7 +39585,7 @@ configure_board stm32
         let dir = conflicting_repo("rebase_dirty_buffer");
         let conflicted = dir.path().join("a.txt");
         let mut app = App::with_file(Some(conflicted.to_string_lossy().into_owned()));
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.test_insert('!');
         let edited = app.open().buffer.text();
         app.open_git_panel();
@@ -38727,7 +39629,7 @@ configure_board stm32
         // worth opening -- say what's missing and stay put.
         let dir = gitlab_repo("forge_no_config");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_forge_view();
 
@@ -38739,7 +39641,7 @@ configure_board stm32
     fn a_missing_token_is_named_separately_from_a_missing_url() {
         let dir = gitlab_repo("forge_no_token");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
 
         app.open_forge_view();
@@ -38752,7 +39654,7 @@ configure_board stm32
         let dir = TempDir::new("forge_no_origin");
         std::process::Command::new("git").current_dir(dir.path()).args(["init", "-q"]).output().unwrap();
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
         app.config.gitlab_token = Some("tok".to_string());
 
@@ -38770,7 +39672,7 @@ configure_board stm32
         git(&["init", "-q"]);
         git(&["remote", "add", "origin", "https://example.com/lonely.git"]);
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("https://gitlab.example.com".to_string());
         app.config.gitlab_token = Some("tok".to_string());
 
@@ -38787,7 +39689,7 @@ configure_board stm32
         // different problems with different fixes.
         let dir = gitlab_repo("forge_unreachable");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
         app.config.gitlab_token = Some("tok".to_string());
 
@@ -38804,7 +39706,7 @@ configure_board stm32
     fn closing_the_view_takes_its_workspace_and_buffers_with_it() {
         let dir = gitlab_repo("forge_close");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
         app.config.gitlab_token = Some("tok".to_string());
         app.open_forge_view();
@@ -38843,7 +39745,7 @@ configure_board stm32
     fn opened_forge_view(name: &str) -> (TempDir, App) {
         let dir = gitlab_repo(name);
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
         app.config.gitlab_token = Some("tok".to_string());
         app.open_forge_view();
@@ -38989,7 +39891,7 @@ configure_board stm32
         git_at(dir.path(), &["remote", "add", "origin", &origin]);
 
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
         app.config.gitlab_token = Some("tok".to_string());
         app.open_forge_view();
@@ -39058,7 +39960,7 @@ configure_board stm32
         // columns need the width.
         let dir = rebase_conflict_repo("ratio_merge");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_merge_view();
         let session = app.merge_session.as_ref().unwrap();
         assert!(width_of(&app, session.files_pane) < width_of(&app, session.merge_pane), "the columns need the room");
@@ -39066,7 +39968,7 @@ configure_board stm32
 
         // Compare: the commit list is narrow, the diff is what's read.
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_compare_view("main".to_string(), "develop".to_string());
         let session = app.compare_session.as_ref().unwrap();
         assert!(width_of(&app, session.commits_pane) < width_of(&app, session.diff_pane), "the diff needs the room");
@@ -39422,7 +40324,7 @@ configure_board stm32
 ");
         git(&["add", "."]);
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_commit_prompt();
@@ -39459,7 +40361,7 @@ configure_board stm32
         dir.write("a.txt", "two
 ");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_commit_prompt();
@@ -39974,7 +40876,7 @@ configure_board stm32
         // constantly and none of them has a file behind it.
         let dir = TempDir::new("watch_panels");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         std::process::Command::new("git").current_dir(dir.path()).args(["init", "-q"]).output().unwrap();
         app.open_git_panel();
 
@@ -40077,7 +40979,7 @@ configure_board stm32
     fn live_app(name: &str) -> (TempDir, App) {
         let dir = live_clone(name).expect("a clone of the seeded project");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.gitlab_base_url = Some(std::env::var("GITLAB_URL").unwrap_or_else(|_| "http://localhost:8929".to_string()));
         app.config.gitlab_token =
             Some(std::env::var("GITLAB_TOKEN").unwrap_or_else(|_| "fenix-dev-token-0123456789".to_string()));
@@ -40244,7 +41146,7 @@ configure_board stm32
     fn the_merge_view_names_the_branches_rather_than_ours_and_theirs() {
         let dir = rebase_conflict_repo("merge_view_names");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
 
@@ -40266,7 +41168,7 @@ configure_board stm32
     fn the_conflicts_pane_lists_the_files_and_what_each_key_would_keep() {
         let dir = rebase_conflict_repo("merge_view_list");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
 
@@ -40284,7 +41186,7 @@ configure_board stm32
     fn resolving_in_the_merge_view_writes_the_file_and_says_which_branch_won() {
         let dir = rebase_conflict_repo("merge_view_resolve");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
         app.open_merge_view();
@@ -40307,7 +41209,7 @@ configure_board stm32
     fn taking_a_whole_file_stages_it_and_names_the_branch_that_won() {
         let dir = rebase_conflict_repo("merge_view_whole_file");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
         app.open_merge_view();
@@ -40332,7 +41234,7 @@ configure_board stm32
     fn a_resolution_can_be_put_back_before_it_is_staged() {
         let dir = rebase_conflict_repo("merge_view_restore");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
         app.open_merge_view();
@@ -40355,7 +41257,7 @@ configure_board stm32
         // Committing conflict markers is the failure this prevents.
         let dir = rebase_conflict_repo("merge_view_stage_guard");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
         app.open_merge_view();
@@ -40369,7 +41271,7 @@ configure_board stm32
     fn the_status_banner_says_which_branch_each_side_of_a_conflict_is() {
         let dir = rebase_conflict_repo("merge_banner_sides");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_rebase_onto("develop");
@@ -40387,7 +41289,7 @@ configure_board stm32
         // one that rendered as "(no changes)".
         let dir = rebase_conflict_repo("merge_combined_diff");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
         app.git_rebase_onto("develop");
 
@@ -40464,7 +41366,7 @@ configure_board stm32
     fn a_force_push_is_confirmed_before_it_rewrites_anything() {
         let dir = conflicting_repo("force_push_confirm");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         app.git_force_push();
@@ -40477,7 +41379,7 @@ configure_board stm32
     fn the_rebase_and_merge_pickers_offer_every_ref_but_head() {
         let dir = conflicting_repo("rebase_picker");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.start_rebase_picker();
         match &app.active_picker {
@@ -40527,7 +41429,7 @@ configure_board stm32
     fn the_history_view_opens_a_three_pane_workspace_with_graph_refs_and_detail() {
         let dir = diverged_repo("history_open");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_history_view();
 
@@ -40543,7 +41445,7 @@ configure_board stm32
     fn the_graph_shows_commits_from_every_branch_not_just_the_checked_out_one() {
         let dir = diverged_repo("history_graph_all");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
 
         let graph = app.buffers.get(app.history_session.as_ref().unwrap().graph_buffer).unwrap().buffer.text();
@@ -40559,7 +41461,7 @@ configure_board stm32
     fn the_refs_pane_shows_local_branches_with_their_sync_state() {
         let dir = diverged_repo("history_refs");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
 
         let refs = app.buffers.get(app.history_session.as_ref().unwrap().refs_buffer).unwrap().buffer.text();
@@ -40575,7 +41477,7 @@ configure_board stm32
     fn moving_down_the_graph_shows_that_commits_diff() {
         let dir = diverged_repo("history_detail");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let session = app.history_session.as_ref().unwrap();
         let (graph_pane, graph_buffer, detail_buffer) = (session.graph_pane, session.graph_buffer, session.detail_buffer);
@@ -40602,7 +41504,7 @@ configure_board stm32
         // date or message at all.
         let dir = diverged_repo("history_commit_header");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
 
         let detail = app.buffers.get(app.history_session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
@@ -40618,7 +41520,7 @@ configure_board stm32
         // must not yank the detail pane back to the newest commit.
         let dir = diverged_repo("history_connector_row");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         // A merge makes the graph emit connector rows at all.
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
@@ -40648,7 +41550,7 @@ configure_board stm32
     fn digit_keys_jump_between_the_history_views_panes() {
         let dir = diverged_repo("history_digits");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let (graph, refs, detail) = {
             let s = app.history_session.as_ref().unwrap();
@@ -40670,7 +41572,7 @@ configure_board stm32
     fn digit_keys_jump_between_the_compare_views_panes() {
         let dir = diverged_repo("compare_digits");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_compare_view("main".to_string(), "side".to_string());
         let (commits, diff) = {
             let s = app.compare_session.as_ref().unwrap();
@@ -40690,7 +41592,7 @@ configure_board stm32
     fn the_commit_pane_gets_a_larger_share_than_the_refs_tree() {
         let dir = diverged_repo("history_proportions");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let (detail, refs) = {
             let s = app.history_session.as_ref().unwrap();
@@ -40706,7 +41608,7 @@ configure_board stm32
     fn a_multi_file_commit_opens_with_its_files_folded_and_tab_unfolds_one() {
         let dir = diverged_repo("history_fold");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         // A commit touching two files is where a folded list earns its
         // keep.
         let git = |args: &[&str]| {
@@ -40749,7 +41651,7 @@ configure_board stm32
     fn a_single_file_commit_is_not_folded_since_there_is_no_list_to_scan() {
         let dir = diverged_repo("history_single_file");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
 
         // The newest commit on `main` touches exactly one file.
@@ -40761,7 +41663,7 @@ configure_board stm32
     fn a_read_only_diff_refuses_a_discard_rather_than_arming_a_confirmation() {
         let dir = diverged_repo("history_no_discard");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let detail_pane = app.history_session.as_ref().unwrap().detail_pane;
         app.windows_mut().focus(detail_pane);
@@ -40776,7 +41678,7 @@ configure_board stm32
     fn closing_the_history_view_removes_its_buffers_and_workspace() {
         let dir = diverged_repo("history_close");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let workspaces_before = app.workspaces.len();
         let session_buffers = {
@@ -40797,7 +41699,7 @@ configure_board stm32
     fn reopening_the_history_view_refocuses_the_existing_session() {
         let dir = diverged_repo("history_reopen");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let first = app.history_session.as_ref().unwrap().graph_buffer;
         let workspaces = app.workspaces.len();
@@ -40812,7 +41714,7 @@ configure_board stm32
     fn comparing_two_branches_lists_the_commits_and_diff_the_head_branch_adds() {
         let dir = diverged_repo("compare_open");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_compare_view("main".to_string(), "side".to_string());
 
@@ -40831,7 +41733,7 @@ configure_board stm32
     fn toggling_to_two_dot_brings_in_what_the_base_gained_since_diverging() {
         let dir = diverged_repo("compare_two_dot");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_compare_view("main".to_string(), "side".to_string());
 
         app.compare_toggle_dots();
@@ -40847,7 +41749,7 @@ configure_board stm32
     fn comparing_a_ref_against_itself_shows_no_changes_rather_than_an_error() {
         let dir = diverged_repo("compare_same");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_compare_view("main".to_string(), "main".to_string());
 
@@ -40859,7 +41761,7 @@ configure_board stm32
     fn the_compare_picker_offers_head_and_every_ref_with_the_base_branch_first() {
         let dir = diverged_repo("compare_picker");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.config.git_base_branch = Some("side".to_string());
 
         app.start_compare_picker();
@@ -40888,7 +41790,7 @@ configure_board stm32
         };
         git(&["branch", "-m", "main", "master"]);
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.start_compare_picker();
 
@@ -40905,7 +41807,7 @@ configure_board stm32
     fn the_compare_pickers_say_which_side_is_being_chosen() {
         let dir = diverged_repo("compare_prompts");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.start_compare_picker();
         let (_, suffix) = app.modeline_pieces();
@@ -40924,7 +41826,7 @@ configure_board stm32
         // completely different answer from "that isn't a ref".
         let dir = diverged_repo("compare_bad_ref");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_compare_view("main".to_string(), "no-such-branch".to_string());
 
@@ -40937,7 +41839,7 @@ configure_board stm32
     fn the_compare_header_carries_the_commit_count() {
         let dir = diverged_repo("compare_count");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
 
         app.open_compare_view("main".to_string(), "side".to_string());
 
@@ -40949,7 +41851,7 @@ configure_board stm32
     fn confirming_the_base_chains_into_picking_the_head() {
         let dir = diverged_repo("compare_chain");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.start_compare_picker();
 
         app.picker_key(KeyPress::named(FenixNamedKey::Enter));
@@ -40964,7 +41866,7 @@ configure_board stm32
     fn a_history_pane_is_a_tracked_session_so_a_jump_never_hijacks_it() {
         let dir = diverged_repo("history_guard");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_history_view();
         let pane = app.history_session.as_ref().unwrap().graph_pane;
         app.windows_mut().focus(pane);
@@ -40976,7 +41878,7 @@ configure_board stm32
     fn a_compare_pane_is_a_tracked_session_too() {
         let dir = diverged_repo("compare_guard");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_compare_view("main".to_string(), "side".to_string());
         let pane = app.compare_session.as_ref().unwrap().diff_pane;
         app.windows_mut().focus(pane);
@@ -41002,7 +41904,7 @@ configure_board stm32
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "baseline"]);
         dir.write("sub/a.txt", "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\nELEVEN\ntwelve\n");
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.open_git_panel();
 
         let session = app.git_session.as_ref().unwrap();
@@ -41488,7 +42390,7 @@ configure_board stm32
         assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
 
         assert_eq!(app.main_view, MainView::Picker);
-        assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
+        assert_eq!(*app.project_root(), Some(project_dir.path().to_path_buf()));
         assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(_))));
     }
 
@@ -42596,7 +43498,7 @@ configure_board stm32
         let dir = TempDir::new("find_file_prompt_relative");
         let path = dir.write("sub/target.txt", "hi");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.start_find_file_prompt();
         for ch in "sub/target.txt".chars() {
             app.find_file_prompt_key(KeyPress::char(ch));
@@ -42726,7 +43628,7 @@ configure_board stm32
     fn find_file_prompt_opens_a_path_that_does_not_exist_yet_as_an_empty_buffer() {
         let dir = TempDir::new("find_file_prompt_missing");
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.start_find_file_prompt();
         for ch in "brand-new.txt".chars() {
             app.find_file_prompt_key(KeyPress::char(ch));
@@ -42765,7 +43667,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         // A different project root than `dir`, to prove the absolute
         // path isn't (wrongly) joined onto it.
-        app.project_root = Some(std::env::temp_dir());
+        app.set_project_root(Some(std::env::temp_dir()));
         app.start_find_file_prompt();
         for ch in path.display().to_string().chars() {
             app.find_file_prompt_key(KeyPress::char(ch));
@@ -42787,7 +43689,7 @@ configure_board stm32
         dir.write(".env", "SECRET=1");
 
         let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.picker_find_file_all();
         match &app.active_picker {
             Some(ActivePicker::FindFile(state)) => {
@@ -44970,7 +45872,7 @@ configure_board stm32
         let a_key = install_test_lsp(&mut app,&a);
         let b_key = install_test_lsp(&mut app,&b);
         // A dashboard with an explicit project root avoids spawning a real language server.
-        app.project_root = Some(a_key.root.clone());
+        app.set_project_root(Some(a_key.root.clone()));
         app.restart_project_lsp();
         assert!(!app.lsp_sessions.contains_key(&a_key));
         assert!(app.lsp_sessions.contains_key(&b_key));
@@ -45324,7 +46226,7 @@ configure_board stm32
         dir.write("b.xml", "<a><!-- FIXME: in xml --></a>\n");
         dir.write("notes.txt", "TODO plain text\nprose mentioning TODO midway\n");
         let mut app = app_on(&dir, "c.py", "x = 1\n");
-        app.project_root = Some(dir.path().to_path_buf());
+        app.set_project_root(Some(dir.path().to_path_buf()));
         app.picker_project_todos();
         let labels: Vec<String> = match &app.active_picker {
             Some(ActivePicker::ProjectTodos(state)) => state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect(),
@@ -45642,7 +46544,8 @@ FIVE
 ");
         let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
         let killed = app.focused_buffer_id();
-        app.new_workspace(); // seeded with a.txt too -- now shown in both
+        app.new_workspace();
+        app.open_buffer_in_focused_pane(killed); // a.txt is now shown in both
         let second = app.workspaces.active_index();
         app.workspaces.switch_to_index(second - 1);
         app.kill_buffer();

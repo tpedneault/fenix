@@ -455,6 +455,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         t.label_group(&[spc, KeyPress::char('b')], "buffer");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('b')], "switch buffer", "buffer.switch");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('B')], "switch buffer (all workspaces)", "buffer.switch_all");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('n')], "next buffer", "buffer.next");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('p')], "prev buffer", "buffer.prev");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('k')], "kill buffer", "buffer.kill");
@@ -469,6 +470,23 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, tab, tab], "switch workspace", "workspace.switch");
         t.insert(&[spc, tab, KeyPress::char('f')], "find workspace", "workspace.find");
         t.insert(&[spc, tab, KeyPress::char('r')], "rename workspace", "workspace.rename");
+        t.insert(&[spc, tab, KeyPress::char('N')], "new named workspace", "workspace.new_named");
+        t.insert(&[spc, tab, KeyPress::char('`')], "previous workspace", "workspace.previous");
+        t.insert(&[spc, tab, KeyPress::char('.')], "show workspaces", "workspace.display");
+        t.insert(&[spc, tab, KeyPress::char('<')], "move workspace left", "workspace.move_left");
+        t.insert(&[spc, tab, KeyPress::char('>')], "move workspace right", "workspace.move_right");
+        t.insert(&[spc, tab, KeyPress::char('m')], "move buffer to workspace", "workspace.send_buffer");
+        t.insert(&[spc, tab, KeyPress::char('c')], "clone workspace", "workspace.clone");
+        t.insert(&[spc, tab, KeyPress::char('1')], "workspace 1", "workspace.switch_1");
+        t.insert(&[spc, tab, KeyPress::char('2')], "workspace 2", "workspace.switch_2");
+        t.insert(&[spc, tab, KeyPress::char('3')], "workspace 3", "workspace.switch_3");
+        t.insert(&[spc, tab, KeyPress::char('4')], "workspace 4", "workspace.switch_4");
+        t.insert(&[spc, tab, KeyPress::char('5')], "workspace 5", "workspace.switch_5");
+        t.insert(&[spc, tab, KeyPress::char('6')], "workspace 6", "workspace.switch_6");
+        t.insert(&[spc, tab, KeyPress::char('7')], "workspace 7", "workspace.switch_7");
+        t.insert(&[spc, tab, KeyPress::char('8')], "workspace 8", "workspace.switch_8");
+        t.insert(&[spc, tab, KeyPress::char('9')], "workspace 9", "workspace.switch_9");
+        t.insert(&[spc, tab, KeyPress::char('0')], "last workspace", "workspace.switch_last");
 
         t
     })

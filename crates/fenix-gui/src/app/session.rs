@@ -43,6 +43,20 @@ struct SavedWorkspace {
     name: String,
     layout: Layout<Pane>,
     focused: usize,
+    /// The project it was scoped to. Absent in sessions written before
+    /// workspaces had one.
+    #[serde(default)]
+    project: Option<PathBuf>,
+    /// Whether it still had a name nobody chose (see `Workspace::
+    /// auto_named`). Absent in older sessions, where only a
+    /// `workspace-N` name counts as automatic.
+    #[serde(default)]
+    auto_named: Option<bool>,
+    /// Nothing in it but Home -- a workspace you made and named but
+    /// haven't opened a file in yet. It has no document to restore, so
+    /// without this it would be pruned away on the next start.
+    #[serde(default)]
+    home: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,6 +204,11 @@ impl App {
                 .filter(|&(i, _)| keep_all || !ephemeral[i])
                 .map(|(_, workspace)| SavedWorkspace {
                     name: workspace.name.clone(),
+                    project: workspace.project_root.clone(),
+                    auto_named: Some(workspace.auto_named),
+                    home: workspace.windows.windows().iter().all(|pane| {
+                        workspace.windows.content(*pane).and_then(|id| self.buffers.get(*id)).is_some_and(|ob| ob.kind == BufferKind::Dashboard)
+                    }),
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
@@ -352,7 +371,17 @@ impl App {
                 .map(|w| {
                     let focused = remap_focus(&w.layout, w.focused);
                     let kept = prune_unrestorable(w.layout.clone())
-                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused });
+                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone(), auto_named: w.auto_named, home: false })
+                        .or_else(|| {
+                            w.home.then(|| SavedWorkspace {
+                                name: w.name.clone(),
+                                layout: Layout::Leaf(Pane { document: None, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 }),
+                                focused: 0,
+                                project: w.project.clone(),
+                                auto_named: w.auto_named,
+                                home: true,
+                            })
+                        });
                     (w, kept)
                 })
                 .collect();
@@ -381,7 +410,10 @@ impl App {
                         Layout::Split { kind, ratio, first, second } => Layout::Split { kind, ratio, first: Box::new(map(*first, docs, fallback, states)), second: Box::new(map(*second, docs, fallback, states)) },
                     }
                 }
-                let layout = map(workspace.layout, &documents, placeholder, &mut states);
+                // A Home-only workspace gets a Home of its own rather than
+                // sharing the placeholder: Home is laid out per buffer.
+                let fallback = if workspace.home { self.new_home_buffer() } else { placeholder };
+                let layout = map(workspace.layout, &documents, fallback, &mut states);
                 let tree = WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
                 let mut pane_states = HashMap::new();
                 let mut pane_tabs = HashMap::new();
@@ -398,9 +430,17 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs });
+                let buffers = tree.windows().into_iter().filter_map(|pane| tree.content(pane).copied()).fold(Vec::new(), |mut all, id| {
+                    if !all.contains(&id) { all.push(id); }
+                    all
+                });
+                let auto_named = workspace.auto_named.unwrap_or_else(|| workspace.name.starts_with("workspace-"));
+                workspaces.push(Workspace {
+                    id: WorkspaceId::fresh(), name: workspace.name, auto_named, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs,
+                    buffers, project_root: workspace.project.filter(|root| root.is_dir()),
+                });
             }
-            frames.push(WorkspaceList { workspaces, active: frame.active });
+            frames.push(WorkspaceList::from_workspaces(workspaces, frame.active));
         }
         let placeholder_used = frames.iter().any(|frame| frame.workspaces.iter().any(|workspace| workspace.windows.windows().iter().any(|pane| workspace.windows.content(*pane) == Some(&placeholder))));
         if !placeholder_used {
@@ -535,6 +575,31 @@ mod tests {
         assert!(!restored.test_home().slots.is_empty());
     }
 
+    /// A workspace you made and named but haven't opened a file in yet
+    /// holds nothing but Home -- no document at all. It still comes back,
+    /// on Home, with its name and its project.
+    #[test]
+    fn a_named_workspace_with_only_home_in_it_survives_a_restore() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        let file = temp.0.join("real.txt");
+        std::fs::write(&file, "keep me\n").unwrap();
+        app.open_startup_file(&file);
+        app.new_workspace();
+        app.workspaces.rename_active("later".to_string());
+        app.set_project_root(Some(temp.0.clone()));
+
+        assert!(app.checkpoint_session());
+        let restored = temp.restore();
+
+        let later = restored.workspaces.index_of_name("later").expect("the Home-only workspace came back");
+        let workspace = &restored.workspaces.workspaces[later];
+        assert_eq!(workspace.project_root.as_deref(), Some(temp.0.as_path()));
+        assert!(!workspace.auto_named, "a chosen name stays chosen");
+        let home = *workspace.windows.focused_content();
+        assert_eq!(restored.buffers.get(home).unwrap().kind, BufferKind::Dashboard);
+    }
+
     /// A multi-pane panel workspace must not be written to the session
     /// at all. Its panes hold session-owned buffers that restore can't
     /// rebuild, so saving the layout brings back the right *shape* with
@@ -611,11 +676,14 @@ mod tests {
             frames: vec![SavedFrame {
                 active: 1,
                 workspaces: vec![
-                    SavedWorkspace { name: "workspace-1".into(), focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace { name: "workspace-1".into(), focused: 0, layout: Layout::Leaf(pane(Some(0))), project: None, auto_named: None, home: false },
                     SavedWorkspace {
                         name: "workspace-2".into(),
                         focused: 0,
                         layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
+                        project: None,
+                        auto_named: None,
+                        home: false,
                     },
                 ],
             }],
@@ -660,7 +728,7 @@ mod tests {
             }],
             frames: vec![SavedFrame {
                 active: 0,
-                workspaces: vec![SavedWorkspace { name: "panel".into(), focused: 2, layout: panel }],
+                workspaces: vec![SavedWorkspace { name: "panel".into(), focused: 2, layout: panel, project: None, auto_named: None, home: false }],
             }],
             focused_frame: 0,
         };

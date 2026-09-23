@@ -120,7 +120,7 @@ impl App {
     /// list, so `SPC p n`/`SPC p N` walk it without reopening anything.
     pub(crate) fn picker_project_todos(&mut self) {
         let root = self
-            .project_root
+            .project_root()
             .clone()
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let (matches, files_with_todos) = match self.collect_project_todos(&root) {
