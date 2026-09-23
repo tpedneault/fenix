@@ -150,7 +150,7 @@ impl App {
             .collect();
 
         let todos = if with_todos {
-            let root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
+            let root = self.project_root().clone().or_else(|| self.known_projects.roots().first().cloned());
             root.and_then(|root| self.collect_project_todos(&root).ok())
                 .map(|(found, _)| {
                     let mut items: Vec<dashboard::TodoItem> = found

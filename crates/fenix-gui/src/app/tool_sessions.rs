@@ -34,7 +34,7 @@ impl App {
         if let Some(path) = self.open().buffer.path() {
             return root_for_path(path);
         }
-        fenix_lsp::normalize(refactor::identity(&self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))))
+        fenix_lsp::normalize(refactor::identity(&self.project_root().clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))))
     }
 
     pub(super) fn lsp_key(&self, language: fenix_syntax::LanguageId) -> LspKey {

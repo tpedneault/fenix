@@ -198,7 +198,8 @@ impl CommandRegistry {
         registry.register("frame.cycle", "Cycle focus to the next OS window", cmd_cycle_frame);
         registry.register("frame.only", "Close every OS window except the focused one", cmd_only_frame);
         registry.register("window.balance", "Reset every split ratio to 0.5", cmd_balance_windows);
-        registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
+        registry.register("buffer.switch", "Fuzzy-switch to another buffer in this workspace", cmd_switch_buffer);
+        registry.register("buffer.switch_all", "Fuzzy-switch to any open buffer, in any workspace", |ctx| ctx.app.picker_switch_buffer_all());
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
@@ -216,6 +217,27 @@ impl CommandRegistry {
             cmd_find_workspace,
         );
         registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
+        registry.register("workspace.new_named", "Create a new workspace and name it", |ctx| ctx.app.new_named_workspace());
+        registry.register("workspace.previous", "Switch back to the previously active workspace", |ctx| {
+            ctx.app.switch_to_previous_workspace()
+        });
+        registry.register("workspace.display", "Show the open workspaces", |ctx| ctx.app.display_workspaces());
+        registry.register("workspace.move_left", "Move the active workspace one place left", |ctx| ctx.app.move_workspace_left());
+        registry.register("workspace.move_right", "Move the active workspace one place right", |ctx| ctx.app.move_workspace_right());
+        registry.register("workspace.send_buffer", "Move the focused buffer to another workspace", |ctx| {
+            ctx.app.picker_send_buffer_to_workspace()
+        });
+        registry.register("workspace.clone", "Copy the active workspace's layout into a new workspace", |ctx| ctx.app.clone_workspace());
+        registry.register("workspace.switch_1", "Switch to workspace 1", |ctx| ctx.app.switch_to_workspace_number(1));
+        registry.register("workspace.switch_2", "Switch to workspace 2", |ctx| ctx.app.switch_to_workspace_number(2));
+        registry.register("workspace.switch_3", "Switch to workspace 3", |ctx| ctx.app.switch_to_workspace_number(3));
+        registry.register("workspace.switch_4", "Switch to workspace 4", |ctx| ctx.app.switch_to_workspace_number(4));
+        registry.register("workspace.switch_5", "Switch to workspace 5", |ctx| ctx.app.switch_to_workspace_number(5));
+        registry.register("workspace.switch_6", "Switch to workspace 6", |ctx| ctx.app.switch_to_workspace_number(6));
+        registry.register("workspace.switch_7", "Switch to workspace 7", |ctx| ctx.app.switch_to_workspace_number(7));
+        registry.register("workspace.switch_8", "Switch to workspace 8", |ctx| ctx.app.switch_to_workspace_number(8));
+        registry.register("workspace.switch_9", "Switch to workspace 9", |ctx| ctx.app.switch_to_workspace_number(9));
+        registry.register("workspace.switch_last", "Switch to the last workspace", |ctx| ctx.app.switch_to_last_workspace());
         registry.register(
             "completion.refresh_tags",
             "Refresh Tcl completion tags (re-scans the project with ctags)",
