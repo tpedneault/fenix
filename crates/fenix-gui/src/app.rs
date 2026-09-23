@@ -4,6 +4,7 @@ mod tool_sessions;
 mod session;
 mod editor_ui;
 mod todos;
+mod home;
 mod xml;
 use tool_sessions::LspKey;
 
@@ -3707,125 +3708,6 @@ fn modeline_clock_fits(existing_chars: usize, window_width: f32, char_width: f32
     available - clock_px - char_width >= existing_px
 }
 
-fn dashboard_line_is_banner(style: dashboard::DashboardLineStyle) -> bool {
-    matches!(style, dashboard::DashboardLineStyle::Banner | dashboard::DashboardLineStyle::Tagline)
-}
-
-/// Per-line horizontal padding (in characters) plus a single vertical
-/// pixel offset that together center a dashboard buffer's content within
-/// `rect` -- Doom Emacs/LazyVim-style, rather than left/top-anchored.
-///
-/// Horizontal padding is computed *per line*, not once for the whole
-/// buffer (see `dashboard_line_is_banner`): the banner block and the
-/// content block below it are centered independently, each against only
-/// its own widest line, since they're rarely the same width. The result
-/// is baked by the caller into `content_spans`'s `BufferKind::Dashboard`
-/// branch as literal leading blank-space characters in the rendered
-/// spans -- `TextArea.left` has no independent geometric offset to hook
-/// into (only a real gutter's digits shift rendered text, by being part
-/// of the text itself), so per-row padding has to live in the text too.
-///
-/// Vertical centering stays a single pixel value for the whole buffer
-/// (`TextArea.top` genuinely does read a per-pane pixel bias via
-/// `content_frac`, unlike `TextArea.left`).
-///
-/// Both axes clamp to never go negative (a pane smaller than the
-/// content just left/top-anchors, same as today) and are computed fresh
-/// every frame from the pane's *current* size, so the layout re-centers
-/// on window resize for free without touching the buffer's actual
-/// text/cursor/undo state at all.
-fn dashboard_center_offset(
-    ob: &OpenBuffer,
-    lines: &[Option<dashboard::DashboardLine>],
-    rect: fenix_window::Rect,
-    char_width: f32,
-    line_height: f32,
-) -> (Vec<usize>, f32) {
-    let visual_lines = ob.buffer.visual_line_count();
-    let pane_chars = (rect.w / char_width).floor().max(0.0) as usize;
-
-    let mut banner_max = 0usize;
-    let mut content_max = 0usize;
-    for line in 0..visual_lines {
-        let len = ob.buffer.line_len(line);
-        match lines.get(line).and_then(|l| l.as_ref()) {
-            Some(meta) if dashboard_line_is_banner(meta.style) => banner_max = banner_max.max(len),
-            _ => content_max = content_max.max(len),
-        }
-    }
-    let banner_pad = pane_chars.saturating_sub(banner_max) / 2;
-    let content_pad = pane_chars.saturating_sub(content_max) / 2;
-
-    let pad_by_line: Vec<usize> = (0..visual_lines)
-        .map(|line| match lines.get(line).and_then(|l| l.as_ref()) {
-            Some(meta) if dashboard_line_is_banner(meta.style) => banner_pad,
-            _ => content_pad,
-        })
-        .collect();
-
-    let content_h = visual_lines as f32 * line_height;
-    let extra_top_px = ((rect.h - content_h) / 2.0).max(0.0);
-    (pad_by_line, extra_top_px)
-}
-
-/// The dashboard's equivalent of `fenix-syntax`'s highlight output --
-/// built from `dashboard::render`'s own per-line metadata instead of a
-/// real parser, then fed through the exact same `split_line_by_
-/// highlights` mechanism as ordinary syntax coloring. `Banner`/
-/// `Tagline`/`Header` lines get a full-line accent color; `Footer` gets
-/// a full-line dim color; `Project`/`RecentFile` lines only push a
-/// range for their dim path/parent-dir portion (from `dim_from`
-/// onward) -- the name portion before it is left uncovered, so it falls
-/// back to `content_spans`'s own `theme.fg` default naturally. A plain
-/// text buffer never reaches this (see `syntax_highlights_for_visible_
-/// range`'s `BufferKind::Dashboard` branch), so it isn't a method on
-/// `App` -- everything it needs is passed in directly.
-fn dashboard_highlights_for_visible_range(
-    ob: &OpenBuffer,
-    lines: Option<&[Option<dashboard::DashboardLine>]>,
-    render_base_line: usize,
-    rows: usize,
-    theme: &Theme,
-) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
-    let Some(lines) = lines else { return Vec::new() };
-    let visual_lines = ob.buffer.visual_line_count();
-    let mut ranges = Vec::new();
-    for line in render_base_line..(render_base_line + rows).min(visual_lines) {
-        let Some(Some(meta)) = lines.get(line) else { continue };
-        let start = ob.buffer.line_start_char(line);
-        let len = ob.buffer.line_len(line);
-        let line_start_byte = ob.buffer.char_to_byte(start);
-        let line_end_byte = ob.buffer.char_to_byte(start + len);
-        match meta.style {
-            dashboard::DashboardLineStyle::Banner
-            | dashboard::DashboardLineStyle::Tagline
-            | dashboard::DashboardLineStyle::Header => {
-                // `syntax_keyword`, not `caret_text`: `caret_text` is
-                // calibrated to read against `bg_modeline` (see its own
-                // doc comment), not against `bg` -- the dashboard
-                // renders as ordinary pane content, against `bg`, where
-                // a color chosen for the modeline's background isn't
-                // guaranteed to hold up (TempleOS's own `bg` is white,
-                // a case where several accent colors read poorly).
-                // `syntax_*` colors are the ones actually chosen per-
-                // theme for legibility against `bg`, which is exactly
-                // what this needs.
-                ranges.push((line_start_byte..line_end_byte, theme.syntax_keyword));
-            }
-            dashboard::DashboardLineStyle::Footer => {
-                ranges.push((line_start_byte..line_end_byte, theme.gutter_fg));
-            }
-            dashboard::DashboardLineStyle::Project | dashboard::DashboardLineStyle::RecentFile => {
-                if let Some(dim_from) = meta.dim_from {
-                    let dim_start_byte = ob.buffer.char_to_byte(start + dim_from);
-                    ranges.push((dim_start_byte..line_end_byte, theme.gutter_fg));
-                }
-            }
-        }
-    }
-    ranges
-}
-
 /// The Docker panel's equivalent of `dashboard_highlights_for_visible_
 /// range` -- same shape, built from `docker_panel::render`'s own per-line
 /// metadata instead of a real parser. `Empty` lines get a full-line dim
@@ -6271,7 +6153,16 @@ pub struct App {
     /// per-buffer-keyed-state precedent as `scroll_anims`. Consulted by
     /// `dashboard_activate_selected` and the dashboard's own syntax-
     /// highlight coloring.
-    dashboard_lines: HashMap<BufferId, Vec<Option<dashboard::DashboardLine>>>,
+    /// Every open Home buffer's current layout (see `app/home.rs`),
+    /// rebuilt whenever its pane's size in cells changes.
+    home_views: HashMap<BufferId, dashboard::HomeView>,
+    /// What Home shows, shared by every Home buffer.
+    home_data: dashboard::HomeData,
+    /// The logo lockup image and its GPU copy.
+    home_logo: Option<home::HomeLogo>,
+    /// An alpha-blended textured-quad pipeline for the logo -- the PDF
+    /// pane's own draws opaque pages.
+    logo_pipeline: Option<PdfPipeline>,
 
     /// The live, mutable directory-listing state for every real
     /// `BufferKind::Explorer` buffer currently open (`SPC f j`), keyed by
@@ -7265,7 +7156,6 @@ impl App {
         let agenda_store = fenix_agenda::load(&agenda_path);
 
         let mut buffers = BufferList::new();
-        let mut dashboard_lines = HashMap::new();
         let initial_id = match &file_arg {
             // Recording this path into `recent_files` happens in `new`,
             // not here -- see `new`'s own doc comment for why. A PDF arg
@@ -7277,10 +7167,8 @@ impl App {
             // construction and swaps it for the real PDF pane.
             Some(path) if !Self::looks_like_pdf(Path::new(path)) => buffers.open_path(Path::new(path)),
             _ => {
-                let dashboard = dashboard::render(known_projects.roots(), recent_files.paths());
-                let id = buffers.open_dashboard(&dashboard.text);
-                dashboard_lines.insert(id, dashboard.lines);
-                id
+                // Laid out on its first frame, at its pane's real size.
+                buffers.open_dashboard("")
             }
         };
         // The file named on the command line is the most common buffer
@@ -7398,7 +7286,10 @@ impl App {
             todo_spans: HashMap::new(),
             known_projects,
             recent_files,
-            dashboard_lines,
+            home_views: HashMap::new(),
+            home_data: dashboard::HomeData::default(),
+            home_logo: None,
+            logo_pipeline: None,
             dired_states: HashMap::new(),
             dired_lines: HashMap::new(),
             explorer_requests: HashMap::new(),
@@ -13995,9 +13886,7 @@ impl App {
     /// feature's own plan for why that's an intentional, not a new,
     /// simplification).
     pub(crate) fn open_dashboard(&mut self) {
-        let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
-        let id = self.buffers.open_dashboard(&dashboard.text);
-        self.dashboard_lines.insert(id, dashboard.lines);
+        let id = self.new_home_buffer();
         self.open_buffer_in_focused_pane(id);
         self.refresh_project_root();
         self.wake_caret();
@@ -16640,6 +16529,7 @@ impl App {
         // away a snapshot that had never been written.
         self.snapshot_dirty_buffers();
         self.checkpoint_session();
+        self.tick_home();
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -16727,17 +16617,27 @@ impl App {
     fn announce_recoverable_work(&mut self) {
         let Some(dir) = self.recovery_dir.clone() else { return };
         fenix_recovery::prune(&dir, RECOVERY_MAX_AGE);
-        let snapshots = fenix_recovery::list(&dir);
-        let names: Vec<String> = snapshots.iter().filter(|snapshot| {
-            let owned = snapshot.original.as_ref().and_then(|path| self.buffer_id_for_lsp_path(path))
-                .or_else(|| self.unnamed_snapshots.iter().find_map(|(id, path)| (*path == snapshot.snapshot).then_some(*id)));
-            !owned.and_then(|id| self.buffers.get(id)).is_some_and(|ob| ob.buffer.is_dirty() && ob.buffer.text() == snapshot.contents)
-        }).map(|snapshot| snapshot.label()).collect();
+        let names = self.unclaimed_snapshot_names();
         if names.is_empty() { return; }
         let message = format!("unsaved work from a previous session: {} -- SPC f v recovers it", join_names(&names));
         if let Some(previous) = self.status_message.as_ref().filter(|message| message.is_error) {
             self.set_error(format!("{}; {message}", previous.text));
         } else { self.set_message(message); }
+    }
+
+    /// Snapshots a previous session left that no open buffer already
+    /// holds unchanged -- the work `SPC f v` would actually give back.
+    pub(super) fn unclaimed_snapshot_names(&self) -> Vec<String> {
+        let Some(dir) = self.recovery_dir.as_deref() else { return Vec::new() };
+        fenix_recovery::list(dir)
+            .iter()
+            .filter(|snapshot| {
+                let owned = snapshot.original.as_ref().and_then(|path| self.buffer_id_for_lsp_path(path))
+                    .or_else(|| self.unnamed_snapshots.iter().find_map(|(id, path)| (*path == snapshot.snapshot).then_some(*id)));
+                !owned.and_then(|id| self.buffers.get(id)).is_some_and(|ob| ob.buffer.is_dirty() && ob.buffer.text() == snapshot.contents)
+            })
+            .map(|snapshot| snapshot.label())
+            .collect()
     }
 
     /// `SPC f v`: what a previous session left unsaved.
@@ -20931,32 +20831,6 @@ impl App {
         self.main_view = MainView::Picker;
     }
 
-    /// `Enter` on a dashboard buffer (see `handle_key`'s `BufferKind::
-    /// Dashboard` check, right before the Vim fallthrough): looks up
-    /// what the cursor's current line means via `dashboard_lines`, a
-    /// no-op for any line that isn't a `Project`/`RecentFile` entry
-    /// (banner/header/blank/footer). A project entry reuses `switch_to_
-    /// project` (registers, then chains into a find-file picker, exactly
-    /// what confirming it from the `SPC p p` picker already does); a
-    /// recent-file entry reuses `open_file_from_picker` (opens it,
-    /// records it, and focuses the editor) -- opening a file is opening
-    /// a file, however the path was found.
-    fn dashboard_activate_selected(&mut self) {
-        let cursor = self.cursor();
-        let line = self.open().buffer.line_col(&cursor).0;
-        let entry = self
-            .dashboard_lines
-            .get(&self.focused_buffer_id())
-            .and_then(|lines| lines.get(line))
-            .and_then(|meta| meta.as_ref())
-            .and_then(|meta| meta.entry.clone());
-        let Some(entry) = entry else { return };
-        match entry {
-            dashboard::DashboardEntry::Project(root) => self.switch_to_project(root),
-            dashboard::DashboardEntry::RecentFile(path) => self.open_file_from_picker(&path),
-        }
-    }
-
     /// Routes one keypress to the active picker: plain characters edit
     /// the query and re-filter, Up/Down or Ctrl-N/Ctrl-P move the
     /// selection, Enter confirms, Escape cancels -- everything else is
@@ -23132,8 +23006,7 @@ impl App {
         // own doc comment) -- every other key still reaches Vim below
         // unchanged (movement, `/` search, `gg`/`G`...); only `Enter`
         // means something special on it.
-        if self.open().kind == BufferKind::Dashboard && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
-            self.dashboard_activate_selected();
+        if self.home_key(keypress) {
             self.wake_caret();
             return;
         }
@@ -24377,7 +24250,7 @@ impl App {
             if ob.kind == BufferKind::WorkspaceEdit {
                 "*refactor*".to_string()
             } else if ob.kind == BufferKind::Dashboard {
-                "*dashboard*".to_string()
+                "home".to_string()
             } else if ob.kind == BufferKind::Explorer {
                 self.dired_states.get(&buffer_id).map(|s| s.cwd.display().to_string()).unwrap_or_else(|| "*dired*".to_string())
             } else if ob.kind == BufferKind::Docker {
@@ -25111,7 +24984,6 @@ impl App {
         // still borrowed would look like a whole-`self` borrow to the
         // compiler. The cloned `Vec` is small (a few dozen entries at
         // most), so this is cheap.
-        let dashboard_lines = self.dashboard_lines.get(&id).cloned();
         let docker_lines = self.docker_lines.get(&id).cloned();
         let git_lines = self.git_lines.get(&id).cloned();
         let jira_lines = self.jira_lines.get(&id).cloned();
@@ -25155,7 +25027,7 @@ impl App {
         let deltas = ob.buffer.drain_edits();
 
         if ob.kind == BufferKind::Dashboard {
-            return dashboard_highlights_for_visible_range(ob, dashboard_lines.as_deref(), render_base_line, rows, theme);
+            return self.home_highlights(id, render_base_line, rows);
         }
         if ob.kind == BufferKind::Docker {
             return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
@@ -26788,6 +26660,8 @@ impl App {
             /// color is enough rather than reusing `GutterMarkKind`.
             /// Empty for every other pane kind.
             row_accents: Vec<(usize, [f32; 4])>,
+            /// Home only: its focus rail and logo.
+            home: home::HomeOverlay,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -26925,6 +26799,7 @@ impl App {
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
+                    home: home::HomeOverlay::default(),
                 });
                 continue;
             }
@@ -27011,6 +26886,7 @@ impl App {
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
+                        home: home::HomeOverlay::default(),
                     });
                     continue;
                 }
@@ -27085,6 +26961,7 @@ impl App {
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
+                        home: home::HomeOverlay::default(),
                     });
                     continue;
                 }
@@ -27124,6 +27001,7 @@ impl App {
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
+                    home: home::HomeOverlay::default(),
                 });
                 continue;
             }
@@ -27161,6 +27039,7 @@ impl App {
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
+                    home: home::HomeOverlay::default(),
                 });
                 continue;
             }
@@ -27168,6 +27047,13 @@ impl App {
             // Plain buffer content -- every pane not currently showing an
             // overlay, focused or not. `buffer_id` was already looked up
             // above, alongside `pane_title`.
+            let is_dashboard = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
+            if is_dashboard {
+                if self.home_data.date.is_empty() {
+                    self.refresh_home_data(true);
+                }
+                self.ensure_home_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width), pane_visible_lines);
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -27193,7 +27079,7 @@ impl App {
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
-            let mut render_frac = rendered_scroll - rendered_scroll.floor();
+            let render_frac = rendered_scroll - rendered_scroll.floor();
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
             // the cursor's own row in the per-line pad table.
@@ -27201,37 +27087,10 @@ impl App {
                 self.buffers.get(buffer_id).map(|ob| ob.buffer.line_col(&pane_state.cursor)).unwrap_or((0, 0));
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
-            let mut gutter_px = gutter_chars as f32 * char_width;
-            let mut dashboard_pad: Option<Vec<usize>> = None;
-            // The dashboard centers itself in its pane. Vertical centering
-            // is a real pixel offset (`text.rs`'s `TextArea.top` actually
-            // reads `content_frac`, so biasing it here works). Horizontal
-            // centering can't work the same way: `TextArea.left` is fixed
-            // at `rect.x + PAD_LEFT` and never reads `gutter_px` -- that
-            // field only feeds caret/selection *position math*, matching
-            // where a real line-number gutter's *baked-in leading
-            // characters* happen to end, not an independent geometric
-            // shift. So horizontal centering reuses that same mechanism:
-            // per-line padding baked as blank characters into the
-            // rendered spans (see `content_spans`'s `dashboard_pad`
-            // parameter), exactly how a real gutter's digits shift real
-            // content today. `gutter_px` (used only for caret/selection
-            // position math, never for the real gutter case a dashboard
-            // never has) takes specifically the *cursor's own row's* pad
-            // -- selection/pulse/bracket-match are never meaningfully
-            // used on a dashboard buffer, so sharing this one value with
-            // them too isn't a real compromise.
-            let is_dashboard = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
-            if let Some(ob) = self.buffers.get(buffer_id) {
-                if ob.kind == BufferKind::Dashboard {
-                    let empty = Vec::new();
-                    let dash_lines = self.dashboard_lines.get(&buffer_id).unwrap_or(&empty);
-                    let (pad_by_line, extra_top_px) = dashboard_center_offset(ob, dash_lines, rect, char_width, line_height);
-                    gutter_px = pad_by_line.get(line).copied().unwrap_or(0) as f32 * char_width;
-                    render_frac -= extra_top_px / line_height;
-                    dashboard_pad = Some(pad_by_line);
-                }
-            }
+            let gutter_px = gutter_chars as f32 * char_width;
+            // Home's layout is already centred; an empty pad list just
+            // keeps `~` off the rows past its last line.
+            let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
             let syntax_start = visible_document_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(visible_document_lines, pane_visible_lines);
             let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
@@ -27272,7 +27131,10 @@ impl App {
                     } else {
                         line_text.chars().take_while(|&c| c == ' ').count()
                     };
-                    indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
+                    // Home's leading spaces are layout, not indentation.
+                    if !is_dashboard {
+                        indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
+                    }
                 }
             }
             let content_spans = match self.buffers.get(buffer_id) {
@@ -27504,20 +27366,24 @@ impl App {
                 _ => Vec::new(),
             };
 
+            let (home_segments, home_overlay) =
+                if is_dashboard { self.home_backgrounds(buffer_id, pane, render_base_line, pane_visible_lines) } else { Default::default() };
             panes_render.push(PaneRender {
                 pane,
                 rect,
                 title: pane_title,
                 spans,
-                hl_row,
-                hl_row_strong: is_dashboard,
+                // Home draws its own selection (the slot's tint and focus
+                // rail) and no caret; a full-row highlight would fight it.
+                hl_row: if is_dashboard { None } else { hl_row },
+                hl_row_strong: false,
                 marked_rows: Vec::new(),
-                colored_bg_segments: todo_bg_segments,
+                colored_bg_segments: if is_dashboard { home_segments } else { todo_bg_segments },
                 selection_segments,
                 pulse_overlay,
                 bracket_match_segments,
                 hlsearch_segments,
-                caret,
+                caret: if is_dashboard { None } else { caret },
                 content_frac: render_frac,
                 gutter_px,
                 tabs_layout,
@@ -27529,6 +27395,7 @@ impl App {
                 gutter_marks,
                 indent_guides,
                 row_accents,
+                home: home_overlay,
             });
         }
 
@@ -27821,6 +27688,13 @@ impl App {
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, color);
+            }
+            for &(row, start, end) in &pane.home.rules {
+                let y = (row_y(row) + line_height / 2.0).round();
+                bg_rect.push_rect(gpu, content_x + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, pane.home.rule_color);
+            }
+            if let Some((row, col, rows)) = pane.home.rail {
+                bg_rect.push_rect(gpu, content_x + col as f32 * char_width, row_y(row), home::RAIL_PX, rows as f32 * line_height, theme.caret);
             }
             for &(row, col_start, col_end) in &pane.selection_segments {
                 let x = content_x + col_start as f32 * char_width;
@@ -28306,6 +28180,24 @@ impl App {
         }
         self.pdf_crop_scratch = crop_scratch;
 
+        // Home's logo: drawn (by fenix-brand) at exactly the pixel height
+        // its rows give it, so it's crisp at any font size, and uploaded
+        // only when that height or the theme's text colour changes.
+        if let Some(lines) = panes_render.iter().find_map(|p| p.home.logo.map(|(_, _, lines)| lines)) {
+            let height = (lines as f32 * line_height * 0.8).round().max(8.0) as u32;
+            let key = (height, [theme.fg.r(), theme.fg.g(), theme.fg.b()]);
+            if self.home_logo.as_ref().is_none_or(|logo| logo.key != key) {
+                self.home_logo = Some(home::HomeLogo { key, image: fenix_brand::lockup(height, key.1), texture: None });
+            }
+            if let (Some(logo), Some(pipeline)) = (self.home_logo.as_mut(), self.logo_pipeline.as_ref()) {
+                if logo.texture.is_none() {
+                    let texture = pipeline.create_texture(gpu, logo.image.width, logo.image.height);
+                    pipeline.upload_rect(gpu, &texture, 0, 0, logo.image.width, logo.image.height, &logo.image.to_bgra());
+                    logo.texture = Some(texture);
+                }
+            }
+        }
+
         _profile.mark("text and geometry preparation complete");
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -28385,6 +28277,20 @@ impl App {
                 let dest_x = rect.x + (rect.w - dest_w) / 2.0;
                 let dest_y = rect.y + (rect.h - dest_h) / 2.0;
                 pdf_pipeline.draw(gpu, &mut pass, texture, dest_x, dest_y, dest_w, dest_h);
+            }
+            if let (Some(logo), Some(pipeline)) = (self.home_logo.as_ref(), self.logo_pipeline.as_ref()) {
+                if let Some(texture) = &logo.texture {
+                    // One logo per frame: the logo pipeline's single quad
+                    // buffer holds one draw.
+                    if let Some(pane) = panes_render.iter().find(|p| p.home.logo.is_some()) {
+                        let (row, col, lines) = pane.home.logo.expect("found by it");
+                        let (w, h) = (logo.image.width as f32, logo.image.height as f32);
+                        let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
+                        let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+                        let y = top + (lines as f32 * line_height - h) / 2.0;
+                        pipeline.draw(gpu, &mut pass, texture, x.round(), y.round(), w, h);
+                    }
+                }
             }
             text.render(&mut pass);
         }
@@ -28472,15 +28378,13 @@ impl App {
     }
 }
 
-/// Decodes the bundled `fenix.ico` into a `winit::window::Icon` for the
-/// title bar/taskbar -- separate from the `.exe`'s own embedded
-/// resource icon (`build.rs`), which Explorer/the taskbar pin read
-/// before the process is even running.
+/// The app icon as a `winit::window::Icon` for the title bar/taskbar,
+/// drawn from `fenix-brand` -- the same geometry `build.rs` embeds into
+/// the `.exe` as its resource icon (what Explorer and a taskbar pin read
+/// before the process is even running), so the two can't disagree.
 fn fenix_icon() -> Option<Icon> {
-    let bytes = include_bytes!("../../../fenix.ico");
-    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
-    let (width, height) = image.dimensions();
-    Icon::from_rgba(image.into_raw(), width, height).ok()
+    let icon = fenix_brand::app_icon(256);
+    Icon::from_rgba(icon.rgba, icon.width, icon.height).ok()
 }
 
 impl ApplicationHandler<FenixUserEvent> for App {
@@ -28515,6 +28419,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let caret_rect = RectRenderer::new(&gpu);
         let vnc_pipeline = VncPipeline::new(&gpu);
         let pdf_pipeline = PdfPipeline::new(&gpu);
+        let logo_pipeline = PdfPipeline::new_blended(&gpu);
 
         self.window = Some(window);
         self.gpu_context = Some(gpu_context);
@@ -28526,6 +28431,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.caret_rect = Some(caret_rect);
         self.vnc_pipeline = Some(vnc_pipeline);
         self.pdf_pipeline = Some(pdf_pipeline);
+        self.logo_pipeline = Some(logo_pipeline);
         // A fully transparent (alpha 0) 1x1 image -- `from_rgba` fails
         // only for a malformed buffer/dimension mismatch, never for a
         // legitimately empty-looking one, so this is as safe as the
@@ -28776,6 +28682,25 @@ impl App {
         for ch in s.chars() {
             self.test_insert(ch);
         }
+    }
+
+    /// Lays the focused Home buffer out as if its pane were 140 x 45
+    /// cells -- what a frame does -- and returns the layout.
+    fn test_home(&mut self) -> dashboard::HomeView {
+        let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        self.refresh_home_data(true);
+        self.home_views.remove(&id);
+        self.ensure_home_layout(id, pane, 140, 45);
+        self.home_views[&id].clone()
+    }
+
+    /// Puts the cursor on the slot showing `entry` in the focused Home.
+    fn test_select_home(&mut self, entry: &dashboard::HomeEntry) {
+        let view = self.test_home();
+        let slot = &view.slots[view.find(entry).unwrap_or_else(|| panic!("no {entry:?} on Home:\n{}", view.text))];
+        let (line, col) = slot.cursor();
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        cursor.char_idx = buffer.line_start_char(line) + col;
     }
 
     fn test_vim_key(&mut self, key: KeyPress) -> VimEvent {
@@ -37324,11 +37249,12 @@ configure_board stm32
     }
 
     #[test]
-    fn with_file_none_opens_the_dashboard_instead_of_a_plain_scratch_buffer() {
-        let app = App::with_file(None);
+    fn with_file_none_opens_home_instead_of_a_plain_scratch_buffer() {
+        let mut app = App::with_file(None);
         assert_eq!(app.open().kind, BufferKind::Dashboard);
-        assert!(app.open().buffer.text().contains("a keyboard-first editor"));
-        assert!(app.dashboard_lines.contains_key(&app.focused_buffer_id()));
+        let view = app.test_home();
+        assert!(view.text.contains("Find a file"), "{}", view.text);
+        assert_eq!(app.open().buffer.text(), view.text, "the buffer holds the laid-out text");
     }
 
     #[test]
@@ -37338,70 +37264,63 @@ configure_board stm32
     }
 
     #[test]
-    fn dashboard_center_offset_centers_the_banner_and_content_blocks_independently() {
-        // The regression this guards: the banner block (~30 chars) and
-        // the content block below it are rarely the same width -- here
-        // the content block is made deliberately much wider (a long
-        // project path) than the banner. If both shared one pad (the
-        // whole document's widest line), the banner would visibly sit
-        // left of the pane's true center, exactly the bug reported.
-        let known_dir = TempDir::new("dashboard_center_offset_sections");
+    fn home_relays_itself_out_when_its_pane_changes_size() {
         let mut app = App::with_file(None);
-        app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
-        app.known_projects.add(PathBuf::from("/a/very/long/project/path/that/is/wider/than/the/banner/block"));
-        app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
-        app.open_dashboard();
-
-        let ob = app.open();
-        let id = app.focused_buffer_id();
-        let lines = app.dashboard_lines.get(&id).unwrap();
-        let char_width = 8.0;
-        let line_height = 20.0;
-        // Wide enough that neither block's padding clamps to zero.
-        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 2000.0, h: 2000.0 };
-
-        let (pad_by_line, _) = dashboard_center_offset(ob, lines, rect, char_width, line_height);
-
-        let banner_line = lines
-            .iter()
-            .position(|l| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Banner))
-            .unwrap();
-        let project_line = lines
-            .iter()
-            .position(|l| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Project))
-            .unwrap();
-        assert_ne!(pad_by_line[banner_line], pad_by_line[project_line]);
-
-        // Every banner row shares the same pad as every other banner
-        // row -- centered as one coherent block, not row-by-row.
-        let all_banner_pads: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.as_ref().map(|m| m.style) == Some(dashboard::DashboardLineStyle::Banner))
-            .map(|(i, _)| pad_by_line[i])
-            .collect();
-        assert!(all_banner_pads.windows(2).all(|w| w[0] == w[1]));
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.refresh_home_data(true);
+        app.ensure_home_layout(id, pane, 140, 45);
+        let wide = app.open().buffer.text();
+        app.ensure_home_layout(id, pane, 50, 45);
+        let narrow = app.open().buffer.text();
+        assert_ne!(wide, narrow);
+        assert!(narrow.lines().all(|l| l.chars().count() <= 50));
+        assert_eq!(app.home_views[&id].size, (50, 45));
     }
 
     #[test]
-    fn dashboard_center_offset_never_goes_negative_in_a_too_small_pane() {
-        let app = App::with_file(None);
-        let ob = app.open();
-        let id = app.focused_buffer_id();
-        let lines = app.dashboard_lines.get(&id).unwrap();
-        // Smaller than the content on both axes.
-        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
-
-        let (pad_by_line, extra_top_px) = dashboard_center_offset(ob, lines, rect, 8.0, 20.0);
-
-        assert!(pad_by_line.iter().all(|&p| p == 0));
-        assert_eq!(extra_top_px, 0.0);
+    fn home_keeps_the_selection_across_a_relayout() {
+        let dir = TempDir::new("home_keeps_selection");
+        let project = TempDir::new("home_keeps_selection_project");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.known_projects.add(project.path().to_path_buf());
+        app.recent_files = fenix_project::RecentFiles::load_or_default(dir.path().join("recent_files.txt"));
+        let entry = dashboard::HomeEntry::Project(project.path().to_path_buf());
+        app.test_select_home(&entry);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_home_layout(id, pane, 60, 50);
+        let selected = app.home_selected_slot(id, pane).unwrap();
+        assert_eq!(app.home_views[&id].slots[selected].entry, entry);
     }
 
     #[test]
-    fn modeline_shows_a_placeholder_filename_for_the_dashboard() {
+    fn home_keys_move_between_slots_and_numbers_activate() {
+        let dir = TempDir::new("home_keys");
+        let project = TempDir::new("home_keys_project");
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.known_projects.add(project.path().to_path_buf());
+        app.recent_files = fenix_project::RecentFiles::load_or_default(dir.path().join("recent_files.txt"));
+        app.test_home();
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        let at = |app: &App| app.home_views[&id].slots[app.home_selected_slot(id, pane).unwrap()].entry.clone();
+        assert_eq!(at(&app), dashboard::HomeEntry::Find, "Home opens on the find field");
+        assert!(app.home_key(KeyPress::char('j')));
+        assert_eq!(at(&app), dashboard::HomeEntry::Project(project.path().to_path_buf()), "no resume or recent: j lands in projects");
+        assert!(app.home_key(KeyPress::char('k')));
+        assert_eq!(at(&app), dashboard::HomeEntry::Find);
+        assert!(!app.home_key(KeyPress::char('x')), "other keys reach Vim");
+
+        assert!(app.home_key(KeyPress::char('1')));
+        assert_eq!(app.project_root, Some(project.path().to_path_buf()));
+        assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(_))));
+    }
+
+    #[test]
+        #[test]
+    fn home_is_called_home() {
         let app = App::with_file(None);
-        assert!(app.modeline_text().contains("*dashboard*"));
+        assert!(app.modeline_text().contains("home"));
     }
 
     #[test]
@@ -37416,7 +37335,7 @@ configure_board stm32
 
         assert_ne!(app.focused_buffer_id(), a_id);
         assert_eq!(app.open().kind, BufferKind::Dashboard);
-        assert!(app.dashboard_lines.contains_key(&app.focused_buffer_id()));
+        assert!(!app.test_home().slots.is_empty());
     }
 
     #[test]
@@ -37604,7 +37523,7 @@ configure_board stm32
     #[test]
     fn buffer_display_name_matches_each_special_kinds_modeline_placeholder() {
         let mut app = App::with_file(None);
-        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*dashboard*");
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "home");
         app.open_docker_panel();
         assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*docker*");
     }
@@ -41555,23 +41474,8 @@ configure_board stm32
         assert_eq!(reloaded.paths(), &[canonical]);
     }
 
-    /// Moves the focused buffer's cursor to the first line whose
-    /// `dashboard_lines` entry has the given style -- shared by the
-    /// activation tests below to find the row to put the cursor on
-    /// without hand-counting generated line numbers.
-    fn move_cursor_to_dashboard_line(app: &mut App, style: dashboard::DashboardLineStyle) -> usize {
-        let lines = app.dashboard_lines.get(&app.focused_buffer_id()).cloned().unwrap();
-        let line = lines
-            .iter()
-            .position(|l| l.as_ref().map(|m| m.style) == Some(style))
-            .unwrap_or_else(|| panic!("no dashboard line with style {style:?}"));
-        let start = app.open().buffer.line_start_char(line);
-        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
-        line
-    }
-
     #[test]
-    fn dashboard_activate_selected_on_a_project_line_switches_to_that_project() {
+    fn enter_on_a_home_project_switches_to_that_project() {
         let known_dir = TempDir::new("dashboard_activate_project");
         let project_dir = TempDir::new("dashboard_activate_project_target");
         let mut app = App::with_file(None);
@@ -41579,9 +41483,9 @@ configure_board stm32
         app.known_projects.add(project_dir.path().to_path_buf());
         app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
         app.open_dashboard();
-        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::Project);
+        app.test_select_home(&dashboard::HomeEntry::Project(project_dir.path().to_path_buf()));
 
-        app.dashboard_activate_selected();
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
 
         assert_eq!(app.main_view, MainView::Picker);
         assert_eq!(app.project_root, Some(project_dir.path().to_path_buf()));
@@ -41589,7 +41493,7 @@ configure_board stm32
     }
 
     #[test]
-    fn dashboard_activate_selected_on_a_recent_file_line_opens_it() {
+    fn enter_on_a_home_file_opens_it() {
         let known_dir = TempDir::new("dashboard_activate_recent");
         let file_dir = TempDir::new("dashboard_activate_recent_target");
         let file = file_dir.write("notes.txt", "hello");
@@ -41597,10 +41501,20 @@ configure_board stm32
         app.known_projects = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
         app.recent_files = fenix_project::RecentFiles::load_or_default(known_dir.path().join("recent_files.txt"));
         app.recent_files.add(file.clone());
+        app.recent_files.add(file_dir.write("older.txt", "older"));
+        app.recent_files.add(file.clone());
         app.open_dashboard();
-        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::RecentFile);
+        // The newest file is the "resume" slot; open the other one.
+        let older = file_dir.path().join("older.txt");
+        app.test_select_home(&dashboard::HomeEntry::RecentFile(older.clone()));
 
-        app.dashboard_activate_selected();
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.open().buffer.text(), "older");
+        app.open_dashboard();
+        // Opening older.txt made it the newest, so notes.txt is a recent
+        // row now.
+        app.test_select_home(&dashboard::HomeEntry::RecentFile(file.clone()));
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
 
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.open().buffer.text(), "hello");
@@ -41640,17 +41554,11 @@ configure_board stm32
     }
 
     #[test]
-    fn dashboard_activate_selected_on_a_non_entry_line_does_nothing() {
+    fn enter_on_the_find_field_opens_the_file_finder() {
         let mut app = App::with_file(None);
-        let dashboard_id = app.focused_buffer_id();
-        move_cursor_to_dashboard_line(&mut app, dashboard::DashboardLineStyle::Banner);
-
-        app.dashboard_activate_selected();
-
-        // Still the same dashboard buffer, nothing opened or switched to.
-        assert_eq!(app.focused_buffer_id(), dashboard_id);
-        assert_eq!(app.open().kind, BufferKind::Dashboard);
-        assert_eq!(app.main_view, MainView::Editor);
+        app.test_select_home(&dashboard::HomeEntry::Find);
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(_))));
     }
 
     #[test]

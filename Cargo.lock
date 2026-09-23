@@ -653,6 +653,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-brand"
+version = "0.0.1"
+dependencies = [
+ "image",
+]
+
+[[package]]
 name = "fenix-buffers"
 version = "0.0.1"
 dependencies = [
@@ -751,6 +758,7 @@ dependencies = [
  "chrono",
  "dirs",
  "fenix-agenda",
+ "fenix-brand",
  "fenix-buffers",
  "fenix-completion",
  "fenix-config",

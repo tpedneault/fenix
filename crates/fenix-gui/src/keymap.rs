@@ -189,7 +189,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('s'), KeyPress::char('T')], "TODOs in project", "search.todos_project");
 
         t.label_group(&[spc, KeyPress::char('o')], "open");
-        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open dashboard", "dashboard.open");
+        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open home", "dashboard.open");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('t')], "toggle terminal", "terminal.toggle");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('T')], "terminal in this pane", "terminal.open_buffer");
 

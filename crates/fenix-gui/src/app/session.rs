@@ -333,9 +333,7 @@ impl App {
         }
         // Version 1 records no document for dashboards and transient panels.
         // Restore those leaves to a usable dashboard, including its actions.
-        let dashboard = dashboard::render(self.known_projects.roots(), self.recent_files.paths());
-        let placeholder = self.buffers.open_dashboard(&dashboard.text);
-        self.dashboard_lines.insert(placeholder, dashboard.lines);
+        let placeholder = self.new_home_buffer();
         let mut frames = Vec::new();
         for frame in saved.frames {
             // `capture_session` no longer writes a panel workspace at all
@@ -407,7 +405,7 @@ impl App {
         let placeholder_used = frames.iter().any(|frame| frame.workspaces.iter().any(|workspace| workspace.windows.windows().iter().any(|pane| workspace.windows.content(*pane) == Some(&placeholder))));
         if !placeholder_used {
             self.buffers.close(placeholder);
-            self.dashboard_lines.remove(&placeholder);
+            self.home_views.remove(&placeholder);
         }
         self.workspaces = frames.remove(0);
         self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
@@ -515,11 +513,12 @@ mod tests {
         assert!(app.checkpoint_session());
 
         let restored = temp.restore();
-        let expected = dashboard::render(restored.known_projects.roots(), restored.recent_files.paths());
+        let mut restored = restored;
         assert_eq!(restored.open().kind, BufferKind::Dashboard);
-        assert_eq!(restored.open().buffer.text(), expected.text);
-        assert!(restored.dashboard_lines.contains_key(&restored.focused_buffer_id()));
-        assert_eq!(restored.cursor().char_idx, 0);
+        let view = restored.test_home();
+        let (id, pane) = (restored.focused_buffer_id(), restored.focused_pane_id());
+        let selected = restored.home_selected_slot(id, pane).expect("the cursor is on a slot");
+        assert_eq!(view.slots[selected].entry, dashboard::HomeEntry::Find, "a restored Home starts on the find field");
         assert_eq!(restored.pane_state(restored.focused_pane_id()).scroll_col, 0);
     }
 
@@ -531,9 +530,9 @@ mod tests {
         app.buffers.get_mut(id).unwrap().kind = BufferKind::TaskOutput;
         assert!(app.checkpoint_session());
         let restored = temp.restore();
+        let mut restored = restored;
         assert_eq!(restored.open().kind, BufferKind::Dashboard);
-        assert_eq!(restored.open().buffer.text(), dashboard::render(restored.known_projects.roots(), restored.recent_files.paths()).text);
-        assert!(restored.dashboard_lines.contains_key(&restored.focused_buffer_id()));
+        assert!(!restored.test_home().slots.is_empty());
     }
 
     /// A multi-pane panel workspace must not be written to the session
@@ -687,14 +686,8 @@ mod tests {
         let mut restored = temp.app();
         restored.recent_files.add(file.clone());
         restored.restore_session(false);
-        let id = restored.focused_buffer_id();
-        let line = restored.dashboard_lines[&id].iter().position(|line| {
-            matches!(line.as_ref().and_then(|line| line.entry.as_ref()),
-                Some(dashboard::DashboardEntry::RecentFile(path)) if path == &file)
-        }).expect("restored dashboard should expose recent-file actions");
-        let (buffer, cursor) = restored.focused_buffer_and_cursor_mut();
-        cursor.char_idx = buffer.line_start_char(line);
-        restored.dashboard_activate_selected();
+        restored.test_select_home(&dashboard::HomeEntry::Resume(file.clone()));
+        assert!(restored.home_key(KeyPress::named(FenixNamedKey::Enter)));
         assert_eq!(restored.open().buffer.text(), "recent document");
     }
 

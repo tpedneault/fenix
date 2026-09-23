@@ -57,7 +57,18 @@ pub struct PdfPipeline {
 }
 
 impl PdfPipeline {
+    /// For opaque images: a rendered PDF page.
     pub fn new(gpu: &GpuState) -> Self {
+        Self::with_blend(gpu, None)
+    }
+
+    /// For images with transparency -- Home's logo -- blended over what's
+    /// already drawn (straight, not premultiplied, alpha).
+    pub fn new_blended(gpu: &GpuState) -> Self {
+        Self::with_blend(gpu, Some(wgpu::BlendState::ALPHA_BLENDING))
+    }
+
+    fn with_blend(gpu: &GpuState, blend: Option<wgpu::BlendState>) -> Self {
         let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pdf-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("pdf_texture.wgsl").into()),
@@ -112,8 +123,7 @@ impl PdfPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: gpu.config.format,
-                    // An opaque rendered page -- no alpha blending needed.
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),

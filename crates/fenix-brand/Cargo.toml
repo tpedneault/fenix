@@ -1,0 +1,18 @@
+[package]
+name = "fenix-brand"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Encoding the multi-size .ico -- what the build script and the icon
+# regeneration tool need. On by default so a plain `cargo test` also
+# checks the committed fenix.ico against the geometry.
+default = ["ico"]
+ico = ["dep:image"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["ico", "png"], optional = true }
+
+[[example]]
+name = "write-icon"
+required-features = ["ico"]
