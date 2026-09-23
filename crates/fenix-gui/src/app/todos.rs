@@ -123,13 +123,38 @@ impl App {
             .project_root
             .clone()
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let files = match fenix_project::files_matching(&root, fenix_syntax::todo::TODO_SEARCH_PATTERN) {
-            Ok(files) => files,
+        let (matches, files_with_todos) = match self.collect_project_todos(&root) {
+            Ok(found) => found,
             Err(err) => {
                 self.set_error(format!("TODO search failed: {err}"));
                 return;
             }
         };
+        if matches.is_empty() {
+            self.set_message("no TODO comments in this project");
+            return;
+        }
+        let kinds: Vec<TodoKind> = matches.iter().map(|(kind, _)| *kind).collect();
+        self.quickfix = matches.iter().map(|(_, m)| QuickfixEntry::Grep(m.clone())).collect();
+        self.quickfix_index = None;
+        let candidates = matches
+            .into_iter()
+            .map(|(kind, m)| {
+                let location = format!("{}:{}", Self::relative_label(&root, &m.path), m.line);
+                let message = m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string();
+                fenix_picker::Candidate::new(todo_label(kind, &location, &message), m)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::ProjectTodos(fenix_picker::PickerState::new(candidates)));
+        self.set_message(todo_summary(&kinds, files_with_todos));
+    }
+
+    /// Every TODO comment under `root`, as grep matches (their text is
+    /// "KIND message"), and how many files they're in -- what `SPC s T`
+    /// lists and Home counts. `rg` narrows the tree to candidate files;
+    /// each is then read properly (see `picker_project_todos`).
+    pub(super) fn collect_project_todos(&self, root: &Path) -> std::io::Result<(Vec<(TodoKind, fenix_project::GrepMatch)>, usize)> {
+        let files = fenix_project::files_matching(root, fenix_syntax::todo::TODO_SEARCH_PATTERN)?;
         let mut matches: Vec<(TodoKind, fenix_project::GrepMatch)> = Vec::new();
         let mut files_with_todos = 0;
         for path in files {
@@ -151,23 +176,7 @@ impl App {
                 matches.push((item.kind, fenix_project::GrepMatch { path: path.clone(), line: item.line + 1, col: item.col + 1, text }));
             }
         }
-        if matches.is_empty() {
-            self.set_message("no TODO comments in this project");
-            return;
-        }
-        let kinds: Vec<TodoKind> = matches.iter().map(|(kind, _)| *kind).collect();
-        self.quickfix = matches.iter().map(|(_, m)| QuickfixEntry::Grep(m.clone())).collect();
-        self.quickfix_index = None;
-        let candidates = matches
-            .into_iter()
-            .map(|(kind, m)| {
-                let location = format!("{}:{}", Self::relative_label(&root, &m.path), m.line);
-                let message = m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string();
-                fenix_picker::Candidate::new(todo_label(kind, &location, &message), m)
-            })
-            .collect();
-        self.enter_picker(ActivePicker::ProjectTodos(fenix_picker::PickerState::new(candidates)));
-        self.set_message(todo_summary(&kinds, files_with_todos));
+        Ok((matches, files_with_todos))
     }
 }
 

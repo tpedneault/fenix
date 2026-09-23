@@ -1,316 +1,652 @@
+//! Home -- the Forged dashboard (the identity's "Home" board): the logo
+//! lockup and the date, a find field, then three columns -- resume and
+//! recent files; projects; today's tasks and TODOs -- over a notice and
+//! key strip at the bottom.
+//!
+//! Everything here is text cells: `layout` turns `HomeData` and a pane
+//! size (in cells) into the buffer text, which cells get which colour
+//! role, which get a flat background panel, where the logo image goes,
+//! and the activatable slots. No `winit`/`wgpu`, so the whole layout and
+//! its navigation are testable as plain data. `App` draws it (see
+//! `app/home.rs`) and lays it out again whenever the pane's size in
+//! cells changes, so the columns reflow -- three, then two, then one --
+//! as the window narrows.
+
+use std::ops::Range;
 use std::path::PathBuf;
 
-/// What activating (`Enter`) a dashboard line does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DashboardEntry {
-    Project(PathBuf),
+use fenix_syntax::TodoKind;
+
+/// What Home shows -- gathered by `App` (see `app/home.rs`), kept here as
+/// plain data so layout never touches the filesystem.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeData {
+    /// "Tuesday 22 September · 18:42".
+    pub date: String,
+    pub resume: Option<FileItem>,
+    pub recent: Vec<FileItem>,
+    pub projects: Vec<ProjectItem>,
+    pub today: Vec<TaskItem>,
+    pub todos: Vec<TodoItem>,
+    /// Unsaved buffers a previous session left recoverable (`SPC f v`).
+    pub recovery: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileItem {
+    pub path: PathBuf,
+    pub name: String,
+    /// Under the name for `resume` ("fenix · main"), unused for recent rows.
+    pub detail: String,
+    /// "2 h" -- since the file last changed.
+    pub age: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectItem {
+    pub root: PathBuf,
+    pub name: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskItem {
+    pub title: String,
+    /// `Some("0:18")` while its clock runs -- the screen's one live thing.
+    pub live: Option<String>,
+    /// High or urgent priority.
+    pub pressing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TodoItem {
+    pub kind: TodoKind,
+    pub message: String,
+    pub file: String,
+    pub path: PathBuf,
+    /// 1-indexed, like a grep match.
+    pub line: usize,
+    pub col: usize,
+}
+
+/// What activating a slot does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HomeEntry {
+    Find,
+    Resume(PathBuf),
     RecentFile(PathBuf),
+    Project(PathBuf),
+    Agenda,
+    Todo { path: PathBuf, line: usize, col: usize },
+    Recover,
 }
 
-/// How one generated line should be colored -- consulted by `App` to
-/// build the same kind of `(Range<usize>, glyphon::Color)` list
-/// `fenix-syntax` highlighting already produces, without a real parser.
+/// A colour role, resolved against the active theme by `App`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DashboardLineStyle {
-    Banner,
-    Tagline,
-    Header,
-    Project,
-    RecentFile,
-    Footer,
+pub enum Role {
+    /// Names: section titles, file and project names.
+    Title,
+    Text,
+    Muted,
+    Focus,
+    /// Brand Ember: the live timer only.
+    Ember,
+    Warn,
+    Todo(TodoKind),
 }
 
-/// Per-line metadata for one line of `Dashboard::text`, at the matching
-/// index in `Dashboard::lines`.
-#[derive(Debug, Clone)]
-pub struct DashboardLine {
-    pub style: DashboardLineStyle,
-    /// `Some` only for a `Project`/`RecentFile` line -- what `Enter` on
-    /// this line does.
-    pub entry: Option<DashboardEntry>,
-    /// For a `Project`/`RecentFile` line, the char column (within the
-    /// line) where the dim path/parent-dir portion begins -- the name
-    /// portion before it stays the default `theme.fg`. `None` for every
-    /// other style (the whole line is one color).
-    pub dim_from: Option<usize>,
+/// A flat background behind cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fill {
+    /// The find field and the live task.
+    Panel,
+    /// A keycap.
+    Key,
 }
 
-/// The generated dashboard: `text` is real content for a real
-/// `fenix_core::Buffer` (via `BufferList::open_dashboard`); `lines[i]`
-/// describes `text`'s line `i` (`None` for a blank/unstyled line) --
-/// `App` looks up "what is the line the cursor is on" by index, without
-/// re-parsing the generated text.
-pub struct Dashboard {
+#[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub line: usize,
+    pub cols: Range<usize>,
+    pub role: Role,
+}
+
+/// A horizontal rule across `cols` of `line`: drawn as a 1 px line
+/// through the middle of the row, not as box-drawing glyphs (which come
+/// from a fallback font and render too thin and dark).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rule {
+    pub line: usize,
+    pub cols: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Panel {
+    pub line: usize,
+    pub cols: Range<usize>,
+    pub fill: Fill,
+}
+
+/// Something `Enter` (or its number) activates, and the cells it
+/// occupies -- the selection tint and focus rail are drawn over these.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Slot {
+    pub line: usize,
+    pub height: usize,
+    pub cols: Range<usize>,
+    /// 0 for the full-width rows (find, the recovery notice); 1.. for the
+    /// content columns, left to right.
+    pub column: usize,
+    pub number: Option<u8>,
+    pub entry: HomeEntry,
+}
+
+impl Slot {
+    /// Where the cursor sits while this slot is selected.
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.line, self.cols.start + 2)
+    }
+}
+
+/// Where the logo lockup image goes: its top-left cell and how many text
+/// lines tall its box is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Logo {
+    pub line: usize,
+    pub col: usize,
+    pub lines: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeView {
+    /// The pane size in cells this was laid out for.
+    pub size: (usize, usize),
     pub text: String,
-    pub lines: Vec<Option<DashboardLine>>,
+    pub spans: Vec<Span>,
+    pub panels: Vec<Panel>,
+    pub rules: Vec<Rule>,
+    pub slots: Vec<Slot>,
+    pub logo: Option<Logo>,
 }
 
+/// The widest the content gets; wider panes centre it.
+const MAX_WIDTH: usize = 112;
+/// Cells between columns.
+const GAP: usize = 4;
 const MAX_PROJECTS: usize = 5;
-const MAX_RECENT_FILES: usize = 8;
+const MAX_RECENT: usize = 5;
+const MAX_TASKS: usize = 4;
+const MAX_TODOS: usize = 5;
 
-struct Builder {
-    text: String,
-    lines: Vec<Option<DashboardLine>>,
+/// Cuts `s` to `max` chars, ending in "…" when it had to.
+fn fit(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
-impl Builder {
-    fn new() -> Self {
-        Self { text: String::new(), lines: Vec::new() }
+struct Grid {
+    lines: Vec<Vec<char>>,
+    spans: Vec<Span>,
+    panels: Vec<Panel>,
+    rules: Vec<Rule>,
+}
+
+impl Grid {
+    fn put(&mut self, line: usize, col: usize, text: &str, role: Role) {
+        if text.is_empty() {
+            return;
+        }
+        if self.lines.len() <= line {
+            self.lines.resize(line + 1, Vec::new());
+        }
+        let row = &mut self.lines[line];
+        let len = text.chars().count();
+        if row.len() < col + len {
+            row.resize(col + len, ' ');
+        }
+        for (i, c) in text.chars().enumerate() {
+            row[col + i] = c;
+        }
+        self.spans.push(Span { line, cols: col..col + len, role });
     }
 
-    fn push(&mut self, text: &str, meta: Option<DashboardLine>) {
-        self.text.push_str(text);
-        self.text.push('\n');
-        self.lines.push(meta);
+    fn panel(&mut self, line: usize, cols: Range<usize>, fill: Fill) {
+        self.panels.push(Panel { line, cols, fill });
     }
 
-    fn blank(&mut self) {
-        self.push("", None);
+    fn rule(&mut self, line: usize, cols: Range<usize>) {
+        if self.lines.len() <= line {
+            self.lines.resize(line + 1, Vec::new());
+        }
+        self.rules.push(Rule { line, cols });
     }
 
-    fn finish(self) -> Dashboard {
-        Dashboard { text: self.text, lines: self.lines }
+    /// "name  3 ──────────── SPC p p" across `width` cells.
+    fn header(&mut self, line: usize, x: usize, width: usize, name: &str, count: Option<usize>, key: &str) {
+        self.put(line, x, name, Role::Title);
+        let mut at = x + name.chars().count() + 1;
+        if let Some(count) = count {
+            let count = count.to_string();
+            self.put(line, at, &count, Role::Muted);
+            at += count.len() + 1;
+        }
+        let key_at = (x + width).saturating_sub(key.chars().count());
+        if key_at > at + 1 {
+            self.rule(line, at..key_at - 1);
+            self.put(line, key_at, key, Role::Muted);
+        }
+    }
+
+    /// `left` at `x`, `right` right-aligned so it ends at `x + width`,
+    /// `left` cut short so the two never touch.
+    #[allow(clippy::too_many_arguments)]
+    fn row(&mut self, line: usize, x: usize, width: usize, left: &str, left_role: Role, right: &str, right_role: Role) {
+        let right_len = right.chars().count();
+        let room = width.saturating_sub(right_len + if right_len > 0 { 2 } else { 0 });
+        self.put(line, x, &fit(left, room), left_role);
+        if right_len > 0 && right_len <= width {
+            self.put(line, x + width - right_len, right, right_role);
+        }
     }
 }
 
-/// Builds the dashboard shown when Fenix starts with no file argument
-/// (and whenever `SPC d d` re-opens it): a generated ASCII wordmark
-/// (built via string repeat/pad, not hand-typed art, so its box-border
-/// alignment is correct by construction), up to `MAX_PROJECTS` known
-/// projects (the section is omitted entirely if `projects` is empty),
-/// up to `MAX_RECENT_FILES` *existing* recent files (dead paths are
-/// filtered out before truncating, so a few stale entries don't shrink
-/// the visible list below the cap), and a footer hint line.
-pub fn render(projects: &[PathBuf], recent_files: &[PathBuf]) -> Dashboard {
-    let mut b = Builder::new();
-    push_banner(&mut b);
-    push_projects(&mut b, projects);
-    push_recent_files(&mut b, recent_files);
-    push_footer(&mut b);
-    b.finish()
+#[derive(Clone, Copy)]
+enum Section {
+    Resume,
+    Recent,
+    Projects,
+    Today,
+    Todos,
 }
 
-/// Rows in the block-letter font `render_word` draws with -- tall enough
-/// to read as a real logo (Doom Emacs/LazyVim-style), not just a label.
-const GLYPH_ROWS: usize = 6;
-type Glyph = [&'static str; GLYPH_ROWS];
+/// Lays Home out for a pane `cols` × `rows` cells in size.
+pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
+    let size = (cols, rows);
+    // Below 24 cells there's no sensible layout; lay out for 24 and let
+    // the pane clip it, rather than have every width sum underflow.
+    let cols = cols.max(24);
+    let width = cols.saturating_sub(4).clamp(24, MAX_WIDTH);
+    let left = cols.saturating_sub(width) / 2;
+    let mut g = Grid { lines: Vec::new(), spans: Vec::new(), panels: Vec::new(), rules: Vec::new() };
+    let mut slots = Vec::new();
 
-/// A tiny hand-built 5-column bitmap font, `#` = lit pixel -- only the
-/// letters `render_word` is ever actually called with need entries.
-/// Alignment isn't trusted by eye: `banner_rows_are_all_the_same_width`
-/// asserts every generated row of the word comes out the same length.
-fn glyph_for(c: char) -> Glyph {
-    match c {
-        'F' => ["#####", "#....", "#....", "####.", "#....", "#...."],
-        'E' => ["#####", "#....", "####.", "#....", "#....", "#####"],
-        'N' => ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#"],
-        'I' => ["#####", "..#..", "..#..", "..#..", "..#..", "#####"],
-        'X' => ["#...#", ".#.#.", "..#..", "..#..", ".#.#.", "#...#"],
-        _ => ["     ", "     ", "     ", "     ", "     ", "     "],
+    // Lockup and date.
+    let top = if rows >= 30 { 3 } else { 1 };
+    let logo = Logo { line: top, col: left, lines: 3 };
+    let date_len = data.date.chars().count();
+    if width > date_len + 30 {
+        g.put(top + 1, left + width - date_len, &data.date, Role::Muted);
     }
+
+    // Find field: a three-line panel; the whole of it is one slot.
+    let find = top + 4;
+    for line in find..find + 3 {
+        g.panel(line, left..left + width, Fill::Panel);
+    }
+    g.put(find + 1, left + 2, "›", Role::Focus);
+    let key = " SPC SPC ";
+    let key_at = left + width - 2 - key.len();
+    g.row(find + 1, left + 5, key_at.saturating_sub(left + 6), "Find a file, a symbol, a command", Role::Muted, "", Role::Muted);
+    g.put(find + 1, key_at, key, Role::Text);
+    g.panel(find + 1, key_at..key_at + key.len(), Fill::Key);
+    slots.push(Slot { line: find, height: 3, cols: left..left + width, column: 0, number: None, entry: HomeEntry::Find });
+
+    // Numbers go to projects first, then recent files, in reading order
+    // within each -- assigned up front because the columns are drawn
+    // recent-first.
+    let project_count = data.projects.len().min(MAX_PROJECTS);
+    let project_number = |i: usize| u8::try_from(i + 1).ok().filter(|n| *n <= 9);
+    let recent_number = |i: usize| u8::try_from(project_count + i + 1).ok().filter(|n| *n <= 9);
+
+    let columns = if width >= 96 { 3 } else if width >= 60 { 2 } else { 1 };
+    let col_width = (width - GAP * (columns - 1)) / columns;
+    let groups: Vec<Vec<Section>> = match columns {
+        3 => vec![vec![Section::Resume, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
+        2 => vec![vec![Section::Resume, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
+        _ => vec![vec![Section::Resume, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
+    };
+    let body = find + 5;
+    let mut content_end = body;
+    for (i, sections) in groups.iter().enumerate() {
+        let x = left + i * (col_width + GAP);
+        let column = i + 1;
+        let mut y = body;
+        for section in sections {
+            let start = y;
+            match section {
+                Section::Resume => {
+                    let Some(item) = &data.resume else { continue };
+                    g.header(y, x, col_width, "resume", None, "Enter");
+                    y += 1;
+                    g.put(y, x + 2, &fit(&item.name, col_width - 2), Role::Title);
+                    g.put(y + 1, x + 2, &fit(&item.detail, col_width - 2), Role::Muted);
+                    slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number: None, entry: HomeEntry::Resume(item.path.clone()) });
+                    y += 2;
+                }
+                Section::Recent => {
+                    if data.recent.is_empty() {
+                        continue;
+                    }
+                    let shown = &data.recent[..data.recent.len().min(MAX_RECENT)];
+                    g.header(y, x, col_width, "recent", Some(shown.len()), "SPC f r");
+                    y += 1;
+                    for (i, item) in shown.iter().enumerate() {
+                        let number = recent_number(i);
+                        if let Some(n) = number {
+                            g.put(y, x + 2, &n.to_string(), Role::Muted);
+                        }
+                        g.row(y, x + 5, col_width - 5, &item.name, Role::Text, &item.age, Role::Muted);
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number, entry: HomeEntry::RecentFile(item.path.clone()) });
+                        y += 1;
+                    }
+                }
+                Section::Projects => {
+                    let shown = &data.projects[..project_count];
+                    g.header(y, x, col_width, "projects", Some(shown.len()), "SPC p p");
+                    y += 1;
+                    if shown.is_empty() {
+                        g.row(y, x + 2, col_width - 2, "none yet", Role::Muted, "SPC p a", Role::Muted);
+                        y += 1;
+                    }
+                    for (i, item) in shown.iter().enumerate() {
+                        let number = project_number(i);
+                        if let Some(n) = number {
+                            g.put(y, x + 2, &n.to_string(), Role::Muted);
+                        }
+                        g.put(y, x + 5, &fit(&item.name, col_width - 5), Role::Title);
+                        let under = item.branch.clone().unwrap_or_else(|| item.root.display().to_string());
+                        g.put(y + 1, x + 5, &fit(&under, col_width - 5), Role::Muted);
+                        slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number, entry: HomeEntry::Project(item.root.clone()) });
+                        y += 2;
+                    }
+                }
+                Section::Today => {
+                    if data.today.is_empty() {
+                        continue;
+                    }
+                    let shown = &data.today[..data.today.len().min(MAX_TASKS)];
+                    g.header(y, x, col_width, "today", Some(data.today.len()), "SPC a a");
+                    y += 1;
+                    for task in shown {
+                        match &task.live {
+                            Some(elapsed) => {
+                                g.panel(y, x..x + col_width, Fill::Panel);
+                                g.put(y, x + 2, "▶", Role::Ember);
+                                g.row(y, x + 4, col_width - 6, &task.title, Role::Title, elapsed, Role::Ember);
+                            }
+                            None => {
+                                g.put(y, x + 2, "○", if task.pressing { Role::Warn } else { Role::Muted });
+                                g.put(y, x + 4, &fit(&task.title, col_width - 4), Role::Text);
+                            }
+                        }
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::Agenda });
+                        y += 1;
+                    }
+                }
+                Section::Todos => {
+                    if data.todos.is_empty() {
+                        continue;
+                    }
+                    let shown = &data.todos[..data.todos.len().min(MAX_TODOS)];
+                    g.header(y, x, col_width, "todos", Some(data.todos.len()), "SPC s T");
+                    y += 1;
+                    for todo in shown {
+                        g.put(y, x + 2, todo.kind.label(), Role::Todo(todo.kind));
+                        g.row(y, x + 8, col_width - 8, &todo.message, Role::Text, &fit(&todo.file, col_width / 3), Role::Muted);
+                        let entry = HomeEntry::Todo { path: todo.path.clone(), line: todo.line, col: todo.col };
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry });
+                        y += 1;
+                    }
+                }
+            }
+            if y > start {
+                y += 1; // a blank line between sections
+            }
+        }
+        content_end = content_end.max(y);
+    }
+
+    // Notice and key strip, at the foot of the pane when there's room.
+    let foot = content_end.max(rows.saturating_sub(2));
+    g.rule(foot, left..left + width);
+    let strip = foot + 1;
+    let hints: [(&str, &str); 3] = [("1–9", "open"), ("j k", "move"), ("SPC", "everything")];
+    let hints_len: usize = hints.iter().map(|(k, l)| k.chars().count() + 1 + l.len()).sum::<usize>() + 3 * (hints.len() - 1);
+    let mut at = (left + width).saturating_sub(hints_len);
+    let hints_start = at;
+    for (key, label) in hints {
+        g.put(strip, at, key, Role::Text);
+        at += key.chars().count() + 1;
+        g.put(strip, at, label, Role::Muted);
+        at += label.len() + 3;
+    }
+    if data.recovery > 0 {
+        let noun = if data.recovery == 1 { "buffer" } else { "buffers" };
+        let text = format!("{} unsaved {noun} can be recovered", data.recovery);
+        let key = " SPC f v ";
+        let room = hints_start.saturating_sub(left + 2 + key.len() + 4);
+        let text = fit(&text, room);
+        g.put(strip, left, "●", Role::Warn);
+        g.put(strip, left + 2, &text, Role::Text);
+        let key_at = left + 2 + text.chars().count() + 2;
+        g.put(strip, key_at, key, Role::Text);
+        g.panel(strip, key_at..key_at + key.len(), Fill::Key);
+        slots.push(Slot { line: strip, height: 1, cols: left..key_at + key.len(), column: 0, number: None, entry: HomeEntry::Recover });
+    }
+
+    let text = g.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
+    HomeView { size, text, spans: g.spans, panels: g.panels, rules: g.rules, slots, logo: Some(logo) }
 }
 
-/// Renders `word` as `GLYPH_ROWS` lines of big block-letter ASCII art,
-/// one glyph per character with a blank column between letters.
-fn render_word(word: &str) -> [String; GLYPH_ROWS] {
-    let glyphs: Vec<Glyph> = word.chars().map(glyph_for).collect();
-    std::array::from_fn(|row| {
-        glyphs
+impl HomeView {
+    /// The slot covering cell (`line`, `col`), else the nearest on that
+    /// line -- what the cursor has selected.
+    pub fn slot_at(&self, line: usize, col: usize) -> Option<usize> {
+        let on_line = |s: &Slot| line >= s.line && line < s.line + s.height;
+        self.slots
             .iter()
-            .map(|g| g[row].chars().map(|c| if c == '#' { '#' } else { ' ' }).collect::<String>())
-            .collect::<Vec<_>>()
-            .join(" ")
-    })
-}
-
-fn push_banner(b: &mut Builder) {
-    let tagline = "a keyboard-first editor";
-    let banner_rows = render_word("FENIX");
-    let banner_width = banner_rows[0].chars().count();
-    let banner_meta = || Some(DashboardLine { style: DashboardLineStyle::Banner, entry: None, dim_from: None });
-
-    b.blank();
-    for row in &banner_rows {
-        b.push(row, banner_meta());
+            .position(|s| on_line(s) && s.cols.contains(&col))
+            .or_else(|| {
+                self.slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| on_line(s))
+                    .min_by_key(|(_, s)| if col < s.cols.start { s.cols.start - col } else { col.saturating_sub(s.cols.end) })
+                    .map(|(i, _)| i)
+            })
     }
-    b.blank();
-    b.push(
-        &format!("{tagline:^banner_width$}"),
-        Some(DashboardLine { style: DashboardLineStyle::Tagline, entry: None, dim_from: None }),
-    );
-    b.blank();
-    b.blank();
-}
 
-fn push_projects(b: &mut Builder, projects: &[PathBuf]) {
-    if projects.is_empty() {
-        return;
+    /// The slot numbered `n` (the `1`–`9` keys).
+    pub fn numbered(&self, n: u8) -> Option<usize> {
+        self.slots.iter().position(|s| s.number == Some(n))
     }
-    b.push("  Projects", Some(DashboardLine { style: DashboardLineStyle::Header, entry: None, dim_from: None }));
-    for root in projects.iter().take(MAX_PROJECTS) {
-        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-        let prefix = format!("    {name}  ");
-        let dim_from = prefix.chars().count();
-        let line = format!("{prefix}{}", root.display());
-        b.push(
-            &line,
-            Some(DashboardLine {
-                style: DashboardLineStyle::Project,
-                entry: Some(DashboardEntry::Project(root.clone())),
-                dim_from: Some(dim_from),
-            }),
-        );
-    }
-    b.blank();
-}
 
-fn push_recent_files(b: &mut Builder, recent_files: &[PathBuf]) {
-    let existing: Vec<&PathBuf> = recent_files.iter().filter(|p| p.exists()).take(MAX_RECENT_FILES).collect();
-    if existing.is_empty() {
-        return;
+    /// `j`/`k`: the next slot down (or up) the same column. From the top
+    /// of a column `k` goes to the find field; from its foot `j` goes to
+    /// the recovery notice, if there is one. From those full-width rows,
+    /// `j`/`k` go to the first column.
+    pub fn step(&self, from: usize, down: bool) -> Option<usize> {
+        let current = &self.slots[from];
+        // From a full-width row, the first column that has anything in it.
+        let column = if current.column == 0 {
+            self.slots.iter().map(|s| s.column).filter(|c| *c > 0).min().unwrap_or_default()
+        } else {
+            current.column
+        };
+        let mut candidates: Vec<(usize, &Slot)> = self.slots.iter().enumerate().filter(|(_, s)| s.column == column).collect();
+        candidates.sort_by_key(|(_, s)| s.line);
+        let found = if down {
+            candidates.iter().find(|(_, s)| s.line > current.line).map(|(i, _)| *i)
+        } else {
+            candidates.iter().rev().find(|(_, s)| s.line < current.line).map(|(i, _)| *i)
+        };
+        found.or_else(|| {
+            let full_width = self.slots.iter().enumerate().filter(|(_, s)| s.column == 0);
+            if down {
+                full_width.filter(|(_, s)| s.line > current.line).min_by_key(|(_, s)| s.line).map(|(i, _)| i)
+            } else {
+                full_width.filter(|(_, s)| s.line < current.line).max_by_key(|(_, s)| s.line).map(|(i, _)| i)
+            }
+        })
     }
-    b.push("  Recent Files", Some(DashboardLine { style: DashboardLineStyle::Header, entry: None, dim_from: None }));
-    for path in existing {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
-        let parent = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
-        let prefix = format!("    {name}  ");
-        let dim_from = prefix.chars().count();
-        let line = format!("{prefix}{parent}");
-        b.push(
-            &line,
-            Some(DashboardLine {
-                style: DashboardLineStyle::RecentFile,
-                entry: Some(DashboardEntry::RecentFile(path.clone())),
-                dim_from: Some(dim_from),
-            }),
-        );
-    }
-    b.blank();
-}
 
-fn push_footer(b: &mut Builder) {
-    b.push(
-        "  SPC p a  add project    SPC f j  browse files    SPC p f  find file",
-        Some(DashboardLine { style: DashboardLineStyle::Footer, entry: None, dim_from: None }),
-    );
+    /// `h`/`l`: the slot in the neighbouring column nearest this one's
+    /// line.
+    pub fn across(&self, from: usize, right: bool) -> Option<usize> {
+        let current = &self.slots[from];
+        if current.column == 0 {
+            return None;
+        }
+        let target = if right { current.column + 1 } else { current.column.checked_sub(1).filter(|c| *c > 0)? };
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.column == target)
+            .min_by_key(|(_, s)| s.line.abs_diff(current.line))
+            .map(|(i, _)| i)
+    }
+
+    /// The slot index showing `entry`, to keep the selection across a
+    /// re-layout.
+    pub fn find(&self, entry: &HomeEntry) -> Option<usize> {
+        self.slots.iter().position(|s| &s.entry == entry)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn renders_the_banner_even_with_nothing_else_to_show() {
-        let dashboard = render(&[], &[]);
-        let banner_rows =
-            dashboard.lines.iter().flatten().filter(|l| l.style == DashboardLineStyle::Banner).count();
-        assert_eq!(banner_rows, GLYPH_ROWS);
-        assert!(dashboard.text.contains("a keyboard-first editor"));
-        assert_eq!(dashboard.text.lines().count(), dashboard.lines.len());
-    }
-
-    #[test]
-    fn text_and_lines_always_stay_the_same_length() {
-        let projects = vec![PathBuf::from("/repo/one"), PathBuf::from("/repo/two")];
-        let dashboard = render(&projects, &[]);
-        assert_eq!(dashboard.text.lines().count(), dashboard.lines.len());
-    }
-
-    #[test]
-    fn empty_projects_list_omits_the_projects_section_entirely() {
-        let dashboard = render(&[], &[]);
-        assert!(!dashboard.text.contains("Projects"));
-    }
-
-    #[test]
-    fn projects_are_listed_with_the_right_entry_at_the_right_line() {
-        let projects = vec![PathBuf::from("/repo/fenix"), PathBuf::from("/repo/other")];
-        let dashboard = render(&projects, &[]);
-
-        let header_line = dashboard.text.lines().position(|l| l.trim() == "Projects").unwrap();
-        let first_entry = dashboard.lines[header_line + 1].as_ref().unwrap();
-        assert_eq!(first_entry.style, DashboardLineStyle::Project);
-        assert_eq!(first_entry.entry, Some(DashboardEntry::Project(PathBuf::from("/repo/fenix"))));
-        let second_entry = dashboard.lines[header_line + 2].as_ref().unwrap();
-        assert_eq!(second_entry.entry, Some(DashboardEntry::Project(PathBuf::from("/repo/other"))));
-    }
-
-    #[test]
-    fn only_the_first_five_projects_are_shown() {
-        let projects: Vec<PathBuf> = (0..8).map(|i| PathBuf::from(format!("/repo/p{i}"))).collect();
-        let dashboard = render(&projects, &[]);
-        let shown =
-            dashboard.lines.iter().flatten().filter(|l| l.style == DashboardLineStyle::Project).count();
-        assert_eq!(shown, MAX_PROJECTS);
-    }
-
-    #[test]
-    fn recent_files_section_is_omitted_when_none_of_the_paths_exist() {
-        // None of these paths are real files on disk.
-        let recent = vec![PathBuf::from("/definitely/does/not/exist/a.rs")];
-        let dashboard = render(&[], &recent);
-        assert!(!dashboard.text.contains("Recent Files"));
-    }
-
-    #[test]
-    fn recent_files_filters_dead_paths_before_truncating_to_the_cap() {
-        let dir = std::env::temp_dir().join(format!("fenix-dashboard-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // 10 dead paths, then MAX_RECENT_FILES real ones -- if filtering
-        // happened *after* truncating to the cap, the dead entries at the
-        // front would crowd out real files and the section would show
-        // fewer than the cap despite enough real files existing.
-        let mut recent: Vec<PathBuf> = (0..10).map(|i| PathBuf::from(format!("/dead/path{i}.rs"))).collect();
-        let mut real_paths = Vec::new();
-        for i in 0..MAX_RECENT_FILES {
-            let path = dir.join(format!("real{i}.rs"));
-            std::fs::write(&path, "").unwrap();
-            real_paths.push(path.clone());
-            recent.push(path);
+    fn sample() -> HomeData {
+        HomeData {
+            date: "Tuesday 22 September · 18:42".to_string(),
+            resume: Some(FileItem { path: "/p/app.rs".into(), name: "app.rs".into(), detail: "fenix · main".into(), age: "now".into() }),
+            recent: vec![
+                FileItem { path: "/p/a.rs".into(), name: "a.rs".into(), detail: String::new(), age: "2 h".into() },
+                FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
+            ],
+            projects: vec![
+                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()) },
+                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None },
+            ],
+            today: vec![
+                TaskItem { title: "Pick a dashboard".into(), live: Some("0:18".into()), pressing: false },
+                TaskItem { title: "Review PR".into(), live: None, pressing: true },
+            ],
+            todos: vec![TodoItem { kind: TodoKind::Fix, message: "group id is wrong".into(), file: "pom.xml".into(), path: "/p/pom.xml".into(), line: 5, col: 8 }],
+            recovery: 1,
         }
+    }
 
-        let dashboard = render(&[], &recent);
-        let shown: Vec<PathBuf> = dashboard
-            .lines
-            .iter()
-            .flatten()
-            .filter_map(|l| match &l.entry {
-                Some(DashboardEntry::RecentFile(p)) => Some(p.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(shown.len(), MAX_RECENT_FILES);
-        assert_eq!(shown, real_paths);
-
-        let _ = std::fs::remove_dir_all(&dir);
+    fn line_of(view: &HomeView, needle: &str) -> usize {
+        view.text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle:?} not in:\n{}", view.text))
     }
 
     #[test]
-    fn footer_hint_line_is_always_present() {
-        let dashboard = render(&[], &[]);
-        let has_footer = dashboard.lines.iter().flatten().any(|l| l.style == DashboardLineStyle::Footer);
-        assert!(has_footer);
+    fn a_wide_pane_gets_three_columns_side_by_side() {
+        let view = layout(&sample(), 140, 45);
+        let resume = line_of(&view, "resume");
+        assert_eq!(line_of(&view, "projects"), resume, "projects sits beside resume");
+        assert_eq!(line_of(&view, "today"), resume, "and today beside both");
+        assert_eq!(view.slots.iter().map(|s| s.column).max(), Some(3));
     }
 
     #[test]
-    fn banner_rows_are_all_the_same_width() {
-        // The block-letter font is hand-built (see `glyph_for`), not
-        // trusted by eye -- every row of the rendered word must line up
-        // to actually read as a block letter grid instead of jagged text.
-        let rows = render_word("FENIX");
-        let width = rows[0].chars().count();
-        for row in &rows {
-            assert_eq!(row.chars().count(), width);
-        }
-        assert!(width > 0);
+    fn a_narrow_pane_stacks_into_one_column() {
+        let view = layout(&sample(), 50, 60);
+        assert!(line_of(&view, "projects") > line_of(&view, "resume"));
+        assert!(line_of(&view, "today") > line_of(&view, "projects"));
+        assert_eq!(view.slots.iter().map(|s| s.column).max(), Some(1));
+        assert!(view.text.lines().all(|l| l.chars().count() <= 50), "nothing runs past the pane:\n{}", view.text);
     }
 
     #[test]
-    fn unrecognized_characters_render_as_a_blank_glyph_not_a_panic() {
-        let rows = render_word("F!X");
-        let width = rows[0].chars().count();
-        for row in &rows {
-            assert_eq!(row.chars().count(), width);
+    fn content_is_centred_and_capped_in_width() {
+        let view = layout(&sample(), 200, 45);
+        let foot = view.rules.iter().max_by_key(|r| r.line).unwrap();
+        assert_eq!(foot.cols.len(), MAX_WIDTH);
+        assert_eq!(foot.cols.start, (200 - MAX_WIDTH) / 2);
+        assert!(!view.text.contains('─'), "rules are drawn, not typed");
+    }
+
+    #[test]
+    fn projects_are_numbered_before_recent_files() {
+        let view = layout(&sample(), 140, 45);
+        assert_eq!(view.slots[view.numbered(1).unwrap()].entry, HomeEntry::Project("/p".into()));
+        assert_eq!(view.slots[view.numbered(2).unwrap()].entry, HomeEntry::Project("/q".into()));
+        assert_eq!(view.slots[view.numbered(3).unwrap()].entry, HomeEntry::RecentFile("/p/a.rs".into()));
+        assert!(view.numbered(9).is_none());
+    }
+
+    #[test]
+    fn the_key_strip_sits_at_the_foot_of_a_tall_pane() {
+        let view = layout(&sample(), 140, 45);
+        let strip = line_of(&view, "everything");
+        assert_eq!(strip, 44);
+        assert!(view.text.lines().nth(strip).unwrap().contains("1 unsaved buffer can be recovered"));
+    }
+
+    #[test]
+    fn only_the_live_task_is_ember() {
+        let view = layout(&sample(), 140, 45);
+        let ember: Vec<&Span> = view.spans.iter().filter(|s| s.role == Role::Ember).collect();
+        assert_eq!(ember.len(), 2, "the ▶ and the elapsed time");
+        assert!(ember.iter().all(|s| s.line == ember[0].line));
+    }
+
+    #[test]
+    fn empty_sections_are_left_out_and_projects_says_how_to_add_one() {
+        let data = HomeData { date: "d".into(), ..HomeData::default() };
+        let view = layout(&data, 140, 45);
+        assert!(!view.text.contains("recent") && !view.text.contains("today") && !view.text.contains("resume"));
+        assert!(view.text.contains("none yet"));
+        assert!(!view.text.contains("recovered"));
+    }
+
+    #[test]
+    fn navigation_moves_within_and_across_columns() {
+        let view = layout(&sample(), 140, 45);
+        let find = view.find(&HomeEntry::Find).unwrap();
+        let resume = view.step(find, true).unwrap();
+        assert_eq!(view.slots[resume].entry, HomeEntry::Resume("/p/app.rs".into()));
+        let first_recent = view.step(resume, true).unwrap();
+        assert_eq!(view.slots[first_recent].entry, HomeEntry::RecentFile("/p/a.rs".into()));
+        assert_eq!(view.step(resume, false), Some(find), "k from the top goes to find");
+        let project = view.across(resume, true).unwrap();
+        assert_eq!(view.slots[project].entry, HomeEntry::Project("/p".into()));
+        let today = view.across(project, true).unwrap();
+        assert_eq!(view.slots[today].entry, HomeEntry::Agenda);
+        assert_eq!(view.across(today, true), None, "no fourth column");
+        let last_recent = view.find(&HomeEntry::RecentFile("/p/b.rs".into())).unwrap();
+        assert_eq!(view.slots[view.step(last_recent, true).unwrap()].entry, HomeEntry::Recover);
+    }
+
+    #[test]
+    fn slot_at_finds_what_the_cursor_is_on() {
+        let view = layout(&sample(), 140, 45);
+        let project = &view.slots[view.numbered(1).unwrap()];
+        let (line, col) = project.cursor();
+        assert_eq!(view.slot_at(line, col), view.numbered(1));
+        assert_eq!(view.slot_at(line + 1, col), view.numbered(1), "a two-line row covers both lines");
+    }
+
+    #[test]
+    fn spans_and_panels_stay_inside_the_text() {
+        for (cols, rows) in [(140, 45), (80, 40), (40, 30), (24, 12), (6, 3)] {
+            let view = layout(&sample(), cols, rows);
+            let lines: Vec<&str> = view.text.lines().collect();
+            for span in &view.spans {
+                let len = lines.get(span.line).map_or(0, |l| l.chars().count());
+                assert!(span.cols.end <= len.max(span.cols.end), "span past its line");
+                assert!(span.line < lines.len(), "span on a missing line at {cols}x{rows}");
+            }
         }
     }
 }

@@ -1,10 +1,12 @@
 # Fenix
 
+<img src="docs/brand/fenix-lockup-dark-bg.png" alt="fenix" height="64">
+
 A from-scratch, keyboard-first text editor written in Rust, built on
 [`wgpu`](https://github.com/gfx-rs/wgpu) and [`winit`](https://github.com/rust-windowing/winit).
 Fenix is modal (Vim-grammar editing) with a `SPC`-leader mnemonic layer
 (Doom Emacs/Spacemacs-style) on top, a real file explorer, project-aware
-fuzzy pickers, tree-sitter syntax highlighting, and a startup dashboard.
+fuzzy pickers, tree-sitter syntax highlighting, and a Home dashboard.
 
 This is an early, personal project — expect rough edges. It's shared as-is
 for anyone curious to poke around or build on it.
@@ -383,9 +385,23 @@ for anyone curious to poke around or build on it.
   a live local date/time clock flush against the right edge, ticking in
   place as you work (omitted rather than overlapping anything if the
   window's too narrow to fit it).
-- **Startup dashboard**: a real, Vim-navigable buffer listing known
-  projects and recent files, shown when Fenix is launched with no file
-  argument (`SPC o d` to reopen it later).
+- **Home** (the start-up dashboard, `SPC o d` to reopen it): the Fenix
+  logo and the date, a find field (`SPC SPC`), then three columns --
+  the file to resume and recent files; known projects with their git
+  branch; today's agenda tasks (the one on the clock first, with its
+  running time) and the project's TODO comments -- over a recovery
+  notice and a key strip. `j`/`k` move within a column, `h`/`l` across,
+  `Enter` opens, `1`-`9` open a numbered project or file directly. The
+  columns reflow to two, then one, as the window narrows, and every
+  colour comes from the active theme (the brand orange only marks a
+  running timer).
+- **Icon and logo**: drawn from one vector definition in `fenix-brand`
+  (the "Forged F" mark and the Martian Mono wordmark, kept as outlines
+  so no font ships). The build script generates the `.ico` embedded in
+  every Windows `fenix.exe`, the window/taskbar icon is rendered from
+  the same geometry at runtime, and the committed `fenix.ico` and
+  `docs/brand/*.png` are regenerated with `cargo run -p fenix-brand
+  --example write-icon` -- a test fails if they drift.
 - **Docker panel** (Lazydocker-style): `SPC d d` opens a real, six-pane
   workspace -- Containers/Images/Volumes/Networks on the left (each its
   own real, Vim-navigable buffer with a title bar), Status and Logs
@@ -887,7 +903,7 @@ The binary is `target/release/fenix`. To run without building a
 release binary first:
 
 ```bash
-cargo run -p fenix-gui              # opens the startup dashboard
+cargo run -p fenix-gui              # opens Home
 cargo run -p fenix-gui -- path/to/file
 ```
 
@@ -997,7 +1013,7 @@ popup shows what keys continue it.
 | `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |
-| `SPC o d` | Open the startup dashboard |
+| `SPC o d` | Open Home, the start-up dashboard |
 | `SPC o t` | Toggle the terminal panel |
 | `SPC o T` | Open a shell in the focused pane |
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |

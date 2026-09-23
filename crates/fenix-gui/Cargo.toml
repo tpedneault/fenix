@@ -36,6 +36,7 @@ fenix-picker = { path = "../fenix-picker" }
 fenix-project = { path = "../fenix-project" }
 fenix-recovery = { path = "../fenix-recovery" }
 fenix-syntax = { path = "../fenix-syntax" }
+fenix-brand = { path = "../fenix-brand" }
 fenix-snippets = { path = "../fenix-snippets" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
@@ -56,6 +57,7 @@ winit = "0.30.13"
 
 [build-dependencies]
 winresource = "0.1"
+fenix-brand = { path = "../fenix-brand", features = ["ico"] }
 
 [dev-dependencies]
 tempfile = "3"

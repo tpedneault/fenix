@@ -98,7 +98,7 @@ impl CommandRegistry {
         registry.register("task.run", "Fuzzy-pick and run a discovered project task", cmd_task_run);
         registry.register("task.rerun_last", "Rerun the most recently run task", cmd_task_rerun_last);
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
-        registry.register("dashboard.open", "Show the startup dashboard", cmd_dashboard_open);
+        registry.register("dashboard.open", "Show Home, the start-up dashboard", cmd_dashboard_open);
         registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
         registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
         registry.register("explorer.dual_pane", "Two listings side by side", cmd_explorer_dual_pane);
