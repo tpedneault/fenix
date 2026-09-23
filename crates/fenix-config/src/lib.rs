@@ -22,6 +22,32 @@ mod ini;
 use std::io;
 use std::path::PathBuf;
 
+/// What "Blocked" means for one Jira project -- see `Config::jira_blocked`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JiraBlocked {
+    /// Transition to this status (matched by id; `name` is for display).
+    Status { id: String, name: String },
+    /// Set the issue's Flagged (impediment) field; leave the status alone.
+    Flag,
+    /// Don't touch Jira at all.
+    Local,
+}
+
+impl Config {
+    /// The configured Blocked meaning for `project`, if one was chosen.
+    pub fn jira_blocked_for(&self, project: &str) -> Option<&JiraBlocked> {
+        self.jira_blocked.iter().find(|(p, _)| p == project).map(|(_, b)| b)
+    }
+
+    /// Records (or replaces) `project`'s Blocked meaning.
+    pub fn set_jira_blocked(&mut self, project: &str, blocked: JiraBlocked) {
+        match self.jira_blocked.iter_mut().find(|(p, _)| p == project) {
+            Some(entry) => entry.1 = blocked,
+            None => self.jira_blocked.push((project.to_string(), blocked)),
+        }
+    }
+}
+
 pub struct Config {
     path: PathBuf,
     pub theme: Option<String>,
@@ -103,6 +129,21 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// What moving a linked agenda task to Blocked means in each Jira
+    /// project, keyed by project key -- `blockedN = PROJ|10103|On Hold`
+    /// (a real status, matched by its id so a rename can't break it),
+    /// `PROJ|flag` (set the board's Flagged field instead) or
+    /// `PROJ|local` (Blocked stays an agenda-only state). Learned the
+    /// first time a task in that project is blocked, since every
+    /// project's workflow names its blocked status differently.
+    pub jira_blocked: Vec<(String, JiraBlocked)>,
+    /// Overrides for how a Jira priority name maps onto the agenda's
+    /// four levels -- `priorityN = Major|High`. Anything not listed
+    /// falls back to a name heuristic (`fenix_agenda::guess_priority`).
+    pub jira_priority_map: Vec<(String, String)>,
+    /// How often linked agenda tasks are refreshed from Jira while Fenix
+    /// runs, in minutes -- unset means 10, `0` turns it off.
+    pub jira_sync_minutes: Option<u32>,
     /// The GitLab instance's own root URL (e.g.
     /// `https://gitlab.mycompany.com` -- the instance, *not* `/api/v4`,
     /// which `fenix-gitlab` appends itself) and a personal access token
@@ -149,6 +190,10 @@ pub struct Config {
     /// `vnc_hosts`), same reasoning as `explorer_bookmarks`: there's a
     /// real in-app add flow for this list, not just hand-editing.
     pub agenda_categories: Vec<String>,
+    /// What worklogs are rounded to before they're sent to Jira, in
+    /// minutes (`[agenda] worklog_round = 15`) -- unset means 15, `0`
+    /// or `1` sends exact minutes.
+    pub agenda_worklog_round: Option<u32>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -273,6 +318,7 @@ impl Config {
                 .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
                 .unwrap_or_default(),
             agenda_categories: sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default(),
+            agenda_worklog_round: sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v)),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
@@ -281,6 +327,9 @@ impl Config {
             jira_token: jira.and_then(|s| s.get("token")).cloned(),
             jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
             jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
+            jira_blocked: jira.map(parse_jira_blocked).unwrap_or_default(),
+            jira_priority_map: jira.map(|s| parse_pair_list(s, "priority")).unwrap_or_default(),
+            jira_sync_minutes: jira.and_then(|s| s.get("sync_minutes")).and_then(|v| v.trim().parse().ok()),
             git_graph_limit: git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok()),
             git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
             gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
@@ -314,6 +363,7 @@ impl Config {
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),
             agenda_categories: Vec::new(),
+            agenda_worklog_round: None,
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -322,6 +372,9 @@ impl Config {
             jira_token: None,
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
+            jira_blocked: Vec::new(),
+            jira_priority_map: Vec::new(),
+            jira_sync_minutes: None,
             git_graph_limit: None,
             git_base_branch: None,
             gitlab_base_url: None,
@@ -420,6 +473,9 @@ impl Config {
         for (i, category) in self.agenda_categories.iter().enumerate() {
             out.push_str(&format!("category{} = {}\n", i + 1, ini::quote_if_needed(category)));
         }
+        if let Some(round) = self.agenda_worklog_round {
+            out.push_str(&format!("worklog_round = {round}\n"));
+        }
         out.push('\n');
         out.push_str("[mib]\n");
         for (i, (label, root_path)) in self.mib_roots.iter().enumerate() {
@@ -447,6 +503,20 @@ impl Config {
         }
         for (i, (id, name)) in self.jira_users.iter().enumerate() {
             out.push_str(&format!("user{} = {id}|{name}\n", i + 1));
+        }
+        for (i, (project, blocked)) in self.jira_blocked.iter().enumerate() {
+            let value = match blocked {
+                JiraBlocked::Status { id, name } => format!("{project}|{id}|{name}"),
+                JiraBlocked::Flag => format!("{project}|flag"),
+                JiraBlocked::Local => format!("{project}|local"),
+            };
+            out.push_str(&format!("blocked{} = {value}\n", i + 1));
+        }
+        for (i, (jira_name, level)) in self.jira_priority_map.iter().enumerate() {
+            out.push_str(&format!("priority{} = {jira_name}|{level}\n", i + 1));
+        }
+        if let Some(minutes) = self.jira_sync_minutes {
+            out.push_str(&format!("sync_minutes = {minutes}\n"));
         }
         out.push('\n');
         out.push_str("[git]\n");
@@ -588,6 +658,37 @@ fn parse_windows(section: &std::collections::BTreeMap<String, String>) -> Vec<Wi
         .collect();
     windows.sort_by_key(|(n, _)| *n);
     windows.into_iter().map(|(_, window)| window).collect()
+}
+
+/// `[jira]`'s `blockedN = PROJ|ID|NAME`, `PROJ|flag` or `PROJ|local`,
+/// ordinal-ordered. Anything else is skipped.
+fn parse_jira_blocked(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, JiraBlocked)> {
+    let mut entries: Vec<(usize, String, JiraBlocked)> = section
+        .iter()
+        .filter_map(|(key, value)| {
+            let n = key.strip_prefix("blocked")?.parse::<usize>().ok()?;
+            let mut parts = value.splitn(3, '|').map(str::trim);
+            let project = parts.next()?.to_string();
+            let blocked = match (parts.next()?, parts.next()) {
+                ("flag", None) => JiraBlocked::Flag,
+                ("local", None) => JiraBlocked::Local,
+                (id, Some(name)) if !id.is_empty() => JiraBlocked::Status { id: id.to_string(), name: name.to_string() },
+                _ => return None,
+            };
+            Some((n, project, blocked))
+        })
+        .collect();
+    entries.sort_by_key(|(n, ..)| *n);
+    entries.into_iter().map(|(_, project, blocked)| (project, blocked)).collect()
+}
+
+/// `15`, `15m`, `1h` -> minutes.
+fn parse_minutes(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if let Some(hours) = value.strip_suffix('h') {
+        return hours.trim().parse::<u32>().ok().map(|h| h * 60);
+    }
+    value.strip_suffix('m').unwrap_or(value).trim().parse().ok()
 }
 
 fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<(String, String)> {
@@ -1281,5 +1382,51 @@ mod tests {
         if let Some(path) = Config::default_path() {
             assert!(path.ends_with("fenix/config.ini") || path.ends_with("fenix\\config.ini"));
         }
+    }
+
+    #[test]
+    fn jira_blocked_mappings_round_trip_through_save_and_load() {
+        let path = temp_path("jira_blocked");
+        let mut config = Config::load_or_default(path.clone());
+        config.set_jira_blocked("PROJ", JiraBlocked::Status { id: "10103".to_string(), name: "On Hold".to_string() });
+        config.set_jira_blocked("OPS", JiraBlocked::Flag);
+        config.set_jira_blocked("INFRA", JiraBlocked::Local);
+        config.set_jira_blocked("OPS", JiraBlocked::Local);
+        config.jira_priority_map = vec![("Major".to_string(), "High".to_string())];
+        config.agenda_worklog_round = Some(30);
+        config.save().unwrap();
+
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(
+            reloaded.jira_blocked_for("PROJ"),
+            Some(&JiraBlocked::Status { id: "10103".to_string(), name: "On Hold".to_string() })
+        );
+        assert_eq!(reloaded.jira_blocked_for("OPS"), Some(&JiraBlocked::Local), "setting a project twice replaces its entry");
+        assert_eq!(reloaded.jira_blocked_for("INFRA"), Some(&JiraBlocked::Local));
+        assert_eq!(reloaded.jira_blocked_for("NOPE"), None);
+        assert_eq!(reloaded.jira_priority_map, config.jira_priority_map);
+        assert_eq!(reloaded.agenda_worklog_round, Some(30));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_malformed_blocked_entry_is_skipped() {
+        let path = temp_path("jira_blocked_bad");
+        std::fs::write(&path, "[jira]
+blocked1 = PROJ
+blocked2 = OPS|flag
+blocked3 = X|weird
+").unwrap();
+        let config = Config::load(path.clone()).unwrap();
+        assert_eq!(config.jira_blocked, vec![("OPS".to_string(), JiraBlocked::Flag)]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn worklog_round_accepts_minutes_and_hours() {
+        assert_eq!(parse_minutes("15"), Some(15));
+        assert_eq!(parse_minutes("30m"), Some(30));
+        assert_eq!(parse_minutes("1h"), Some(60));
+        assert_eq!(parse_minutes("soon"), None);
     }
 }

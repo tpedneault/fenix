@@ -299,13 +299,6 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // "delete an issue" analog to `p d`/`u d`).
         t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('i')], "jira issue");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('i'), KeyPress::char('a')], "create issue", "jira.create_issue");
-        // Submit/cancel a pending comment/description edit (`c`/`e` on
-        // Issues/Detail) -- leader bindings, not pane-scoped bare keys,
-        // since the edit buffer is genuinely free-typed prose (see
-        // `App::jira_edit`'s own doc comment for why that's load-
-        // bearing, not stylistic).
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('s')], "submit jira edit", "jira.submit_edit");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('x')], "cancel jira edit", "jira.cancel_edit");
 
         // The personal task/time-tracking agenda -- one shared buffer for
         // all four views (list/board/report/detail), re-rendered in place
@@ -323,6 +316,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('n')], "agenda: new task", "agenda.new_task");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('c')], "agenda: add category", "agenda.add_category");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: start/stop clock", "agenda.toggle_clock");
+        // The Jira side: pick which of your issues to track, refresh the
+        // ones you track, and review/send time as worklogs.
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('i')], "agenda: import Jira issues", "agenda.import");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('s')], "agenda: sync with Jira", "agenda.sync");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('w')], "agenda: review worklogs", "agenda.worklogs");
 
         // VNC console panes (`fenix-vnc`) -- one connection per
         // configured `Config.vnc_hosts` entry, each staying live in the
@@ -793,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_trie_resolves_jira_create_issue_and_edit_submit_cancel() {
+    fn leader_trie_resolves_jira_create_issue() {
         let trie = leader_trie();
 
         let mut m = trie.matcher();
@@ -804,21 +802,19 @@ mod tests {
             fenix_keymap::Step::Matched(&"jira.create_issue") => {}
             _ => panic!("expected SPC j i a to resolve to jira.create_issue"),
         }
+    }
 
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('s')) {
-            fenix_keymap::Step::Matched(&"jira.submit_edit") => {}
-            _ => panic!("expected SPC j s to resolve to jira.submit_edit"),
-        }
-
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('x')) {
-            fenix_keymap::Step::Matched(&"jira.cancel_edit") => {}
-            _ => panic!("expected SPC j x to resolve to jira.cancel_edit"),
+    #[test]
+    fn leader_trie_resolves_the_agendas_jira_commands() {
+        let trie = leader_trie();
+        for (key, command) in [('i', "agenda.import"), ('s', "agenda.sync"), ('w', "agenda.worklogs")] {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('a'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&c) if c == command => {}
+                _ => panic!("expected SPC a {key} to resolve to {command}"),
+            }
         }
     }
 

@@ -12,10 +12,25 @@ use crate::client::JiraClient;
 /// name, e.g. "In Progress"). Entirely workflow-defined per project/
 /// issue type, not a fixed enum -- there's no way to know the real set
 /// without asking the issue itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Transition {
     pub id: String,
     pub name: String,
+    /// The status this transition lands on -- id, name and category
+    /// (`"new"`/`"indeterminate"`/`"done"`), from the response's own
+    /// `to` object. Empty when a server leaves `to` out.
+    pub to_id: String,
+    pub to_name: String,
+    pub to_category: String,
+}
+
+/// One status a project's workflows use (`GET .../project/{key}/
+/// statuses`), deduplicated across issue types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusInfo {
+    pub id: String,
+    pub name: String,
+    pub category: String,
 }
 
 /// One of the instance's real configured priorities (`GET .../priority`)
@@ -24,7 +39,7 @@ pub struct Transition {
 /// convention `update_assignee`'s `name` field and `apply_transition`'s
 /// workflow names already use). Fetched live rather than hardcoded --
 /// see `list_priorities`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Priority {
     pub id: String,
     pub name: String,
@@ -132,10 +147,77 @@ impl JiraClient {
     pub fn update_priority(&self, key: &str, priority_name: &str) -> Result<(), String> {
         self.update_fields(key, serde_json::json!({"priority": {"name": priority_name}}))
     }
+
+    /// `POST .../worklog` with the real start time and an exact length in
+    /// seconds -- so a worklog sent on Friday for Tuesday's work lands on
+    /// Tuesday. `started` is Jira's own `yyyy-MM-ddTHH:mm:ss.SSS+hhmm`.
+    pub fn add_worklog_at(&self, key: &str, seconds: i64, started: &str) -> Result<(), String> {
+        let path = format!("/rest/api/2/issue/{key}/worklog");
+        self.send("POST", &path, &serde_json::json!({"timeSpentSeconds": seconds, "started": started}))?;
+        Ok(())
+    }
+
+    /// `GET /rest/api/2/myself` -- the token owner's username.
+    pub fn myself(&self) -> Result<String, String> {
+        let body = self.request("/rest/api/2/myself", &[])?;
+        body.get("name").and_then(|n| n.as_str()).map(str::to_string).ok_or_else(|| "unexpected myself response shape".to_string())
+    }
+
+    /// `GET /rest/api/2/project/{key}/statuses` -- every status any of the
+    /// project's issue types can be in, each once.
+    pub fn list_project_statuses(&self, project_key: &str) -> Result<Vec<StatusInfo>, String> {
+        let path = format!("/rest/api/2/project/{project_key}/statuses");
+        let body = self.request(&path, &[])?;
+        let types = body.as_array().ok_or_else(|| "unexpected project statuses response shape".to_string())?;
+        let mut statuses: Vec<StatusInfo> = Vec::new();
+        for status in types.iter().filter_map(|t| t.get("statuses").and_then(|s| s.as_array())).flatten().filter_map(parse_status) {
+            if !statuses.iter().any(|s| s.id == status.id) {
+                statuses.push(status);
+            }
+        }
+        Ok(statuses)
+    }
+
+    /// The id of the instance's Flagged custom field (Jira Software's
+    /// impediment marker), from `GET /rest/api/2/field`. `Ok(None)` when
+    /// the instance has no such field.
+    pub fn find_flagged_field(&self) -> Result<Option<String>, String> {
+        let body = self.request("/rest/api/2/field", &[])?;
+        let fields = body.as_array().ok_or_else(|| "unexpected field response shape".to_string())?;
+        Ok(fields
+            .iter()
+            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("Flagged"))
+            .and_then(|f| f.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::to_string))
+    }
+
+    /// Sets or clears the Flagged field (`field_id` from
+    /// `find_flagged_field`).
+    pub fn set_flagged(&self, key: &str, field_id: &str, flagged: bool) -> Result<(), String> {
+        let value = if flagged { serde_json::json!([{"value": "Impediment"}]) } else { serde_json::Value::Null };
+        self.update_fields(key, serde_json::json!({ field_id: value }))
+    }
 }
 
 fn parse_transition(v: &serde_json::Value) -> Option<Transition> {
-    Some(Transition { id: v.get("id")?.as_str()?.to_string(), name: v.get("name")?.as_str()?.to_string() })
+    let to = v.get("to");
+    let text = |value: Option<&serde_json::Value>| value.and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    Some(Transition {
+        id: v.get("id")?.as_str()?.to_string(),
+        name: v.get("name")?.as_str()?.to_string(),
+        to_id: text(to.and_then(|t| t.get("id"))),
+        to_name: text(to.and_then(|t| t.get("name"))),
+        to_category: text(to.and_then(|t| t.get("statusCategory")).and_then(|c| c.get("key"))),
+    })
+}
+
+fn parse_status(v: &serde_json::Value) -> Option<StatusInfo> {
+    Some(StatusInfo {
+        id: v.get("id")?.as_str()?.to_string(),
+        name: v.get("name")?.as_str()?.to_string(),
+        category: v.get("statusCategory").and_then(|c| c.get("key")).and_then(|k| k.as_str()).unwrap_or("new").to_string(),
+    })
 }
 
 fn parse_priority(v: &serde_json::Value) -> Option<Priority> {
@@ -152,6 +234,24 @@ mod tests {
         let transition = parse_transition(&v).unwrap();
         assert_eq!(transition.id, "31");
         assert_eq!(transition.name, "In Progress");
+    }
+
+    #[test]
+    fn parse_transition_reads_its_target_status() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"id": "41", "name": "Put on hold", "to": {"id": "10103", "name": "On Hold", "statusCategory": {"key": "indeterminate"}}}"#,
+        )
+        .unwrap();
+        let transition = parse_transition(&v).unwrap();
+        assert_eq!(transition.to_id, "10103");
+        assert_eq!(transition.to_name, "On Hold");
+        assert_eq!(transition.to_category, "indeterminate");
+    }
+
+    #[test]
+    fn parse_status_defaults_a_missing_category_to_new() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"id": "1", "name": "Open"}"#).unwrap();
+        assert_eq!(parse_status(&v).unwrap().category, "new");
     }
 
     #[test]

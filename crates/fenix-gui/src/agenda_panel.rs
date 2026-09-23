@@ -6,17 +6,25 @@
 //! buffer, re-rendered in place by whichever `AgendaView` is current --
 //! exactly how `BufferKind::Dashboard` and `BufferKind::Explorer` already
 //! work.
+//!
+//! A task linked to a Jira issue renders like any other task, plus its
+//! key, Jira's own status name where it differs from the column, and a
+//! sync marker: `↑` while a change is on its way to Jira, `⚠` when one
+//! failed or both sides changed the same field.
 
-use fenix_agenda::{AgendaStore, Priority, Status, Subtask, Task, TaskId, TimeSource};
+use fenix_agenda::{AgendaStore, OpKind, Priority, Status, Subtask, SyncField, Task, TaskId, TimeSource, WorklogRow};
 
-/// Which of the four views is currently rendered into the one agenda
-/// buffer -- `App` keeps this alongside the buffer id and re-renders on
-/// every mutation and on `SPC a k`/`l`/`r`/`Enter`/`Esc`.
+/// Which view is currently rendered into the one agenda buffer -- `App`
+/// keeps this alongside the buffer id and re-renders on every mutation and
+/// on `SPC a k`/`l`/`r`/`w`/`Enter`/`Esc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgendaView {
     List,
     Board,
     Report,
+    /// The worklog review: unsent time on linked tasks, one row per issue
+    /// per day, about to be sent to Jira.
+    Worklogs,
     Detail(TaskId),
 }
 
@@ -24,10 +32,12 @@ pub enum AgendaView {
 /// a row represents a whole task (list rows, board cards, report rows,
 /// the "Blocks" section of the detail view); `Dependency` only in the
 /// detail view's own "Blocked by" section, where it additionally supports
-/// removal (`B`); `Subtask`/`Note`/`TimeEntry` only in the detail view's
-/// own checklist/notes-log/time-entry-list sections, each carrying that
-/// list's index rather than a `TaskId` (they aren't tasks -- `App::agenda_
-/// task_id_at_cursor` explicitly excludes all three).
+/// removal (`B`); `Subtask`/`Note`/`TimeEntry`/`Comment` only in the
+/// detail view's own checklist/activity/time-entry sections, each carrying
+/// that list's index rather than a `TaskId` (they aren't tasks -- `App::
+/// agenda_task_id_at_cursor` explicitly excludes them). `Conflict` is a
+/// field Jira and you both changed; `Worklog` indexes the worklog review's
+/// rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgendaEntry {
     Task(TaskId),
@@ -35,6 +45,9 @@ pub enum AgendaEntry {
     Subtask(usize),
     Note(usize),
     TimeEntry(usize),
+    Comment(usize),
+    Conflict(SyncField),
+    Worklog(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,8 +138,18 @@ impl Builder {
         self.push(text, Some(AgendaLine::row(style, entry)));
     }
 
+    /// A plain line with one colored span.
+    fn push_badged(&mut self, text: &str, style: AgendaLineStyle, badge: (usize, usize, AgendaBadgeColor)) {
+        self.push(text, Some(AgendaLine { style, entries: Vec::new(), badges: vec![badge], dim_from: None }));
+    }
+
     fn push_blank(&mut self) {
         self.push("", None);
+    }
+
+    fn push_section(&mut self, title: &str) {
+        self.push_plain(title, AgendaLineStyle::SectionHeader);
+        self.push_plain(&"-".repeat(title.chars().count()), AgendaLineStyle::Detail);
     }
 
     fn finish(self) -> AgendaPanel {
@@ -145,14 +168,20 @@ fn empty_line(message: &str) -> (String, Option<AgendaLine>) {
 /// `which-key` never surfaces them the way it does `SPC a`'s own
 /// children -- this is the only place a first-time user sees them at
 /// all.
-const ROW_ACTION_HINTS: &str = "Enter detail  ·  s status  ·  p priority  ·  c category  ·  t clock  ·  T log time  ·  N note  ·  e edit  ·  x archive  ·  D delete";
+const ROW_ACTION_HINTS: &str =
+    "Enter detail  ·  s status  ·  p priority  ·  c category  ·  t clock  ·  T log time  ·  N note  ·  e title  ·  E description  ·  I Jira  ·  x archive  ·  D delete";
 
 /// `render_detail`'s own footer -- `b`/`a` (add dependency/subtask) are
 /// deliberately left out, since their own sections already hint them
 /// inline right where they apply ("(none) -- press b to add one"); this
 /// covers only the actions detail has no other hint for.
 const DETAIL_ACTION_HINTS: &str =
-    "Esc back  ·  s status  ·  p priority  ·  c category  ·  t clock  ·  T log time  ·  N note  ·  e edit  ·  D delete";
+    "Esc back  ·  s status  ·  p priority  ·  c category  ·  t clock  ·  T log time  ·  N note  ·  e title  ·  E description  ·  I Jira  ·  D delete";
+
+/// The extra keys a linked task's detail page has.
+const LINKED_ACTION_HINTS: &str = "C comment  ·  A assign  ·  y copy link  ·  o open in browser  ·  r retry";
+
+const WORKLOG_HINTS: &str = "e edit minutes  ·  D drop from this batch  ·  x dismiss (never send)  ·  W send all  ·  Esc back";
 
 fn push_footer(b: &mut Builder, hints: &str, extra: Option<&str>) {
     b.push_blank();
@@ -167,6 +196,11 @@ fn push_footer(b: &mut Builder, hints: &str, extra: Option<&str>) {
 /// "must stay legible even without a Nerd Font installed" reasoning
 /// `editor_ui.rs`'s own `ƒ` scope marker documents.
 const STATUS_LED: char = '■';
+
+/// A change on its way to Jira.
+const PENDING_MARK: &str = "↑";
+/// A push that failed, or a conflict waiting on you.
+const PROBLEM_MARK: &str = "⚠";
 
 fn priority_color(p: Priority) -> AgendaBadgeColor {
     match p {
@@ -189,7 +223,11 @@ fn status_color(s: Status) -> AgendaBadgeColor {
 /// timesheet; seconds would just be noise once a task has been worked on
 /// across more than one sitting.
 pub fn format_duration(d: chrono::Duration) -> String {
-    let total_minutes = d.num_minutes().max(0);
+    format_minutes(d.num_minutes())
+}
+
+fn format_minutes(total_minutes: i64) -> String {
+    let total_minutes = total_minutes.max(0);
     let hours = total_minutes / 60;
     let minutes = total_minutes % 60;
     if hours > 0 {
@@ -229,13 +267,44 @@ fn category_tag(task: &Task) -> String {
     }
 }
 
-/// One line per task: `[Priority] Title (Category)  · time  · waiting`.
+/// Jira's own status name, when it says more than the column does --
+/// "In Review" under In Progress, "On Hold" under Blocked.
+fn jira_status_name(task: &Task) -> Option<&str> {
+    let name = task.jira.as_ref()?.base.status_name.as_str();
+    (!name.is_empty() && !name.eq_ignore_ascii_case(task.status.label())).then_some(name)
+}
+
+/// The sync marker for a linked task, if it has one: a conflict or a
+/// failed push first (they need you), then pending changes.
+fn sync_mark(store: &AgendaStore, task: &Task) -> Option<(String, AgendaBadgeColor)> {
+    let link = task.jira.as_ref()?;
+    if !link.conflicts.is_empty() {
+        return Some((format!("{PROBLEM_MARK} conflict"), AgendaBadgeColor::Bad));
+    }
+    if link.error.is_some() {
+        return Some((format!("{PROBLEM_MARK} not synced"), AgendaBadgeColor::Bad));
+    }
+    if link.resolving || store.pending_for(task.id).next().is_some() {
+        return Some((PENDING_MARK.to_string(), AgendaBadgeColor::Warn));
+    }
+    None
+}
+
+/// "title" or "KEY title".
+fn keyed_title(task: &Task) -> String {
+    match task.jira_key() {
+        Some(key) => format!("{key} {}", task.title),
+        None => task.title.clone(),
+    }
+}
+
+/// One line per task: `■ KEY Title (Category)  · Priority · time · ...`.
 /// Sections group by status (`Status::ALL` order), each with its own
 /// header, mirroring `jira_panel`'s Projects/Users grouping shape.
 pub fn render_list(store: &AgendaStore) -> AgendaPanel {
     let mut b = Builder::new();
     if !store.tasks.iter().any(|t| !t.archived) {
-        let (text, meta) = empty_line("No tasks yet -- SPC a n to add one");
+        let (text, meta) = empty_line("No tasks yet -- SPC a n to add one, SPC a i to import from Jira");
         b.push(&text, meta);
         return b.finish();
     }
@@ -244,9 +313,7 @@ pub fn render_list(store: &AgendaStore) -> AgendaPanel {
         if tasks.is_empty() {
             continue;
         }
-        let header = format!("{} ({})", status.label(), tasks.len());
-        b.push_plain(&header, AgendaLineStyle::SectionHeader);
-        b.push_plain(&"-".repeat(header.chars().count()), AgendaLineStyle::Detail);
+        b.push_section(&format!("{} ({})", status.label(), tasks.len()));
         for task in tasks {
             push_task_row(&mut b, store, task);
         }
@@ -259,7 +326,11 @@ pub fn render_list(store: &AgendaStore) -> AgendaPanel {
 fn push_task_row(b: &mut Builder, store: &AgendaStore, task: &Task) {
     let prefix = format!("  {STATUS_LED} ");
     let badge_len = prefix.chars().count();
-    let middle = format!("{}{}", task.title, category_tag(task));
+    let mut badges = vec![(0, badge_len, priority_color(task.priority))];
+    if let Some(key) = task.jira_key() {
+        badges.push((badge_len, key.chars().count(), AgendaBadgeColor::Neutral));
+    }
+    let middle = format!("{}{}", keyed_title(task), category_tag(task));
     let dim_from = prefix.chars().count() + middle.chars().count();
     let mut line = format!("{prefix}{middle}  · {}", task.priority.label());
     let elapsed = store.elapsed_on(task.id);
@@ -269,15 +340,18 @@ fn push_task_row(b: &mut Builder, store: &AgendaStore, task: &Task) {
     if !store.is_ready(task.id) && task.status != Status::Done {
         line.push_str("  · waiting on a dependency");
     }
-    b.push(
-        &line,
-        Some(AgendaLine {
-            style: AgendaLineStyle::TaskRow,
-            entries: vec![(0, AgendaEntry::Task(task.id))],
-            badges: vec![(0, badge_len, priority_color(task.priority))],
-            dim_from: Some(dim_from),
-        }),
-    );
+    if let Some(name) = jira_status_name(task) {
+        line.push_str(&format!("  · {name}"));
+    }
+    if task.jira.as_ref().is_some_and(|l| l.not_mine) {
+        line.push_str("  · reassigned");
+    }
+    if let Some((mark, color)) = sync_mark(store, task) {
+        line.push_str("  ");
+        badges.push((line.chars().count(), mark.chars().count(), color));
+        line.push_str(&mark);
+    }
+    b.push(&line, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: vec![(0, AgendaEntry::Task(task.id))], badges, dim_from: Some(dim_from) }));
 }
 
 const CARD_WIDTH: usize = 26;
@@ -287,9 +361,10 @@ const COLUMN_GAP: &str = "  |  ";
 /// box-drawing glyphs -- same reasoning `git_graph_style`'s own doc
 /// comment gives for defaulting its own graph to ascii: a font missing
 /// those glyphs knocks every column out of alignment). Each card is two
-/// lines (title + priority badge, then category/waiting marker), with a
-/// blank separator line between cards in the same column. Every physical
-/// line therefore carries up to four entries, one per column -- see
+/// lines (title + priority badge, then category/waiting marker -- or, for
+/// a linked task, its key and Jira status), with a blank separator line
+/// between cards in the same column. Every physical line therefore
+/// carries up to four entries, one per column -- see
 /// `AgendaLine::entry_at`.
 pub fn render_board(store: &AgendaStore) -> AgendaPanel {
     let mut b = Builder::new();
@@ -306,7 +381,7 @@ pub fn render_board(store: &AgendaStore) -> AgendaPanel {
 
     let max_cards = columns.iter().map(Vec::len).max().unwrap_or(0);
     if max_cards == 0 {
-        let (text, meta) = empty_line("No tasks yet -- SPC a n to add one");
+        let (text, meta) = empty_line("No tasks yet -- SPC a n to add one, SPC a i to import from Jira");
         b.push(&text, meta);
         return b.finish();
     }
@@ -317,21 +392,38 @@ pub fn render_board(store: &AgendaStore) -> AgendaPanel {
         let mut line2 = String::new();
         let mut entries1 = Vec::new();
         let mut badges1 = Vec::new();
+        let mut badges2 = Vec::new();
         for (col_idx, column) in columns.iter().enumerate() {
             let col_offset = col_idx * column_stride;
             match column.get(row) {
                 Some(task) => {
                     let title_cell = pad_or_truncate(&format!("[{}] {}", task.priority.label(), task.title), CARD_WIDTH);
                     let badge_len = format!("[{}]", task.priority.label()).chars().count();
-                    let mut sub = category_tag(task).trim_start().to_string();
-                    if !store.is_ready(task.id) && task.status != Status::Done {
-                        if !sub.is_empty() {
-                            sub.push(' ');
+                    let mut parts: Vec<String> = Vec::new();
+                    if let Some((mark, color)) = sync_mark(store, task) {
+                        let mark = mark.split(' ').next().unwrap_or_default().to_string();
+                        badges2.push((col_offset, mark.chars().count(), color));
+                        parts.push(mark);
+                    }
+                    match task.jira_key() {
+                        Some(key) => {
+                            parts.push(key.to_string());
+                            if let Some(name) = jira_status_name(task) {
+                                parts.push(format!("· {name}"));
+                            }
                         }
-                        sub.push_str("(waiting)");
+                        None => {
+                            let category = category_tag(task).trim_start().to_string();
+                            if !category.is_empty() {
+                                parts.push(category);
+                            }
+                        }
+                    }
+                    if !store.is_ready(task.id) && task.status != Status::Done {
+                        parts.push("(waiting)".to_string());
                     }
                     line1.push_str(&title_cell);
-                    line2.push_str(&pad_or_truncate(&sub, CARD_WIDTH));
+                    line2.push_str(&pad_or_truncate(&parts.join(" "), CARD_WIDTH));
                     entries1.push((col_offset, AgendaEntry::Task(task.id)));
                     badges1.push((col_offset, badge_len, priority_color(task.priority)));
                 }
@@ -350,7 +442,7 @@ pub fn render_board(store: &AgendaStore) -> AgendaPanel {
         // to that card's task.
         let entries2 = entries1.clone();
         b.push(&line1, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries1, badges: badges1, dim_from: None }));
-        b.push(&line2, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries2, badges: Vec::new(), dim_from: None }));
+        b.push(&line2, Some(AgendaLine { style: AgendaLineStyle::TaskRow, entries: entries2, badges: badges2, dim_from: None }));
         if row + 1 < max_cards {
             b.push_blank();
         }
@@ -361,7 +453,9 @@ pub fn render_board(store: &AgendaStore) -> AgendaPanel {
 
 /// Time entries grouped by calendar day, then by task within the day, with
 /// per-day and per-task-overall totals -- a personal timesheet, not
-/// billing-grade (minute precision, local time, no rounding rules).
+/// billing-grade (minute precision, local time, no rounding rules). Time
+/// on linked tasks that hasn't gone to Jira yet is totalled at the top,
+/// with the key that reviews and sends it.
 pub fn render_report(store: &AgendaStore) -> AgendaPanel {
     let mut b = Builder::new();
 
@@ -378,14 +472,20 @@ pub fn render_report(store: &AgendaStore) -> AgendaPanel {
         return b.finish();
     }
 
+    let (unsent, issues) = store.unsent_time();
+    if issues > 0 {
+        let plural = if issues == 1 { "issue" } else { "issues" };
+        let line = format!("{PROBLEM_MARK} Unsent to Jira: {} across {issues} {plural} -- W to review and send", format_duration(unsent));
+        b.push_badged(&line, AgendaLineStyle::SectionHeader, (0, 1, AgendaBadgeColor::Warn));
+        b.push_blank();
+    }
+
     for (day, entries) in by_day.iter().rev() {
-        let header = day.format("%Y-%m-%d (%A)").to_string();
-        b.push_plain(&header, AgendaLineStyle::SectionHeader);
-        b.push_plain(&"-".repeat(header.chars().count()), AgendaLineStyle::Detail);
+        b.push_section(&day.format("%Y-%m-%d (%A)").to_string());
 
         let mut per_task: std::collections::BTreeMap<TaskId, (String, chrono::Duration)> = std::collections::BTreeMap::new();
         for (task, duration) in entries {
-            let e = per_task.entry(task.id).or_insert((task.title.clone(), chrono::Duration::zero()));
+            let e = per_task.entry(task.id).or_insert((keyed_title(task), chrono::Duration::zero()));
             e.1 += *duration;
         }
         let mut day_total = chrono::Duration::zero();
@@ -398,13 +498,12 @@ pub fn render_report(store: &AgendaStore) -> AgendaPanel {
         b.push_blank();
     }
 
-    b.push_plain("Total by task", AgendaLineStyle::SectionHeader);
-    b.push_plain("-------------", AgendaLineStyle::Detail);
+    b.push_section("Total by task");
     let mut totals: std::collections::BTreeMap<TaskId, (String, chrono::Duration)> = std::collections::BTreeMap::new();
     for task in &store.tasks {
         let total = task.total_time();
         if total > chrono::Duration::zero() {
-            totals.insert(task.id, (task.title.clone(), total));
+            totals.insert(task.id, (keyed_title(task), total));
         }
     }
     let mut grand_total = chrono::Duration::zero();
@@ -415,8 +514,46 @@ pub fn render_report(store: &AgendaStore) -> AgendaPanel {
     }
     b.push_blank();
     b.push_plain(&format!("Grand total: {}", format_duration(grand_total)), AgendaLineStyle::SectionHeader);
-    push_footer(&mut b, ROW_ACTION_HINTS, None);
+    push_footer(&mut b, ROW_ACTION_HINTS, Some("W worklogs"));
 
+    b.finish()
+}
+
+/// The worklog review: `rows` as they'll be sent (already rounded, with
+/// any edits and drops applied by the caller), one per issue per day.
+pub fn render_worklogs(rows: &[WorklogRow], round: u32) -> AgendaPanel {
+    let mut b = Builder::new();
+    let title = if round > 1 { format!("Worklogs to send  (rounded to {})", format_minutes(i64::from(round))) } else { "Worklogs to send".to_string() };
+    b.push_section(&title);
+    if rows.is_empty() {
+        let (text, meta) = empty_line("Nothing to send -- every bit of time on a linked task is already in Jira");
+        b.push(&text, meta);
+        push_footer(&mut b, "Esc back", None);
+        return b.finish();
+    }
+    let mut total = 0;
+    for (i, row) in rows.iter().enumerate() {
+        total += row.minutes;
+        let change = if row.minutes == row.actual_minutes {
+            format_minutes(row.minutes)
+        } else {
+            format!("{} -> {}", format_minutes(row.actual_minutes), format_minutes(row.minutes))
+        };
+        let line = format!("  {}  {}  {}  {change}", row.date.format("%Y-%m-%d"), pad_or_truncate(&row.key, 10), pad_or_truncate(&row.title, 30));
+        let key_start = 2 + 10 + 2;
+        b.push(
+            &line,
+            Some(AgendaLine {
+                style: AgendaLineStyle::TaskRow,
+                entries: vec![(0, AgendaEntry::Worklog(i))],
+                badges: vec![(key_start, row.key.chars().count(), AgendaBadgeColor::Neutral)],
+                dim_from: None,
+            }),
+        );
+    }
+    b.push_blank();
+    b.push_plain(&format!("Total: {}", format_minutes(total)), AgendaLineStyle::SectionHeader);
+    push_footer(&mut b, WORKLOG_HINTS, None);
     b.finish()
 }
 
@@ -443,11 +580,32 @@ fn push_wrapped(b: &mut Builder, indent: &str, text: &str, style: AgendaLineStyl
     }
 }
 
+/// Jira's `2024-01-15T10:30:00.000+0000` in local time.
+fn parse_jira_time(raw: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    chrono::DateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.3f%z").ok().map(|t| t.with_timezone(&chrono::Local))
+}
+
+/// "just now", "12m ago", "3h ago", or a date.
+fn ago(at: chrono::DateTime<chrono::Local>) -> String {
+    let minutes = (chrono::Local::now() - at).num_minutes();
+    if minutes < 1 {
+        "just now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if minutes < 24 * 60 {
+        format!("{}h ago", minutes / 60)
+    } else {
+        at.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
 /// The single task detail pane: title + status badge, priority/category/
 /// timestamps, the "Blocked by"/"Blocks" dependency sections, the subtask
 /// checklist, the notes log (newest last), and the time-entry list --
 /// everything one task can carry, laid out to read top-to-bottom like
-/// `jira_panel::render_detail`'s own issue page.
+/// `jira_panel::render_detail`'s own issue page. A linked task adds its
+/// key, Jira's status/priority/assignee, sync state, any conflicts, and
+/// mixes Jira's comments into its notes as one "Activity" timeline.
 pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
     let mut b = Builder::new();
     let Some(task) = store.task(id) else {
@@ -455,14 +613,66 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
         b.push(&text, meta);
         return b.finish();
     };
+    let link = task.jira.as_ref();
 
-    b.push_plain(&task.title, AgendaLineStyle::Title);
-    let status_line = format!("[{}]  Priority: {}{}", task.status.label(), task.priority.label(), category_tag(task));
-    let badge_len = format!("[{}]", task.status.label()).chars().count();
-    b.push(
-        &status_line,
-        Some(AgendaLine { style: AgendaLineStyle::Detail, entries: Vec::new(), badges: vec![(0, badge_len, status_color(task.status))], dim_from: None }),
-    );
+    b.push_plain(&keyed_title(task), AgendaLineStyle::Title);
+    let mut status_line = format!("[{}]", task.status.label());
+    let badge_len = status_line.chars().count();
+    if let Some(name) = jira_status_name(task) {
+        status_line.push_str(&format!("  Jira: {name}"));
+    }
+    status_line.push_str(&format!("  ·  Priority: {}", task.priority.label()));
+    if let Some(remote) = link.and_then(|l| l.base.priority.as_deref()).filter(|p| !p.eq_ignore_ascii_case(task.priority.label())) {
+        status_line.push_str(&format!(" (Jira: {remote})"));
+    }
+    status_line.push_str(&category_tag(task));
+    b.push_badged(&status_line, AgendaLineStyle::Detail, (0, badge_len, status_color(task.status)));
+
+    if let Some(link) = link {
+        let assignee = link.base.assignee.as_deref().unwrap_or("Unassigned");
+        let synced = link.last_synced.map(ago).unwrap_or_else(|| "never".to_string());
+        b.push_plain(&format!("Assignee: {assignee}  ·  Synced {synced}"), AgendaLineStyle::Detail);
+        if let Some(error) = &link.error {
+            let line = format!("{PROBLEM_MARK} Couldn't update Jira: {error} -- r retries");
+            b.push_badged(&line, AgendaLineStyle::Detail, (0, 1, AgendaBadgeColor::Bad));
+        }
+        let pending = store.pending_for(id).count();
+        if pending > 0 || link.resolving {
+            let what = if pending == 1 { "1 change".to_string() } else { format!("{pending} changes") };
+            let line = if link.resolving { format!("{PENDING_MARK} Checking Jira's workflow...") } else { format!("{PENDING_MARK} {what} waiting to be sent") };
+            b.push_badged(&line, AgendaLineStyle::Detail, (0, 1, AgendaBadgeColor::Warn));
+        }
+        if link.not_mine {
+            b.push_badged(&format!("{PROBLEM_MARK} Reassigned in Jira -- no longer assigned to you"), AgendaLineStyle::Detail, (0, 1, AgendaBadgeColor::Warn));
+        }
+        if !link.conflicts.is_empty() {
+            b.push_blank();
+            b.push_section("Conflicts -- Enter to choose");
+            for conflict in &link.conflicts {
+                let mine = match conflict.field {
+                    SyncField::Title => task.title.clone(),
+                    SyncField::Description => task.description.clone(),
+                    SyncField::Status => task.status.label().to_string(),
+                    SyncField::Priority => task.priority.label().to_string(),
+                };
+                let line = format!(
+                    "  {PROBLEM_MARK} {}: Jira has \"{}\", you have \"{}\"",
+                    conflict.field.label(),
+                    first_line(&conflict.their_value()),
+                    first_line(&mine)
+                );
+                b.push(
+                    &line,
+                    Some(AgendaLine {
+                        style: AgendaLineStyle::TaskRow,
+                        entries: vec![(0, AgendaEntry::Conflict(conflict.field))],
+                        badges: vec![(2, 1, AgendaBadgeColor::Bad)],
+                        dim_from: None,
+                    }),
+                );
+            }
+        }
+    }
     b.push_blank();
 
     b.push_plain(&format!("Created: {}", task.created_at.format("%Y-%m-%d %H:%M")), AgendaLineStyle::Detail);
@@ -471,14 +681,12 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
     b.push_plain(&format!("Time spent: {}", format_duration(elapsed)), AgendaLineStyle::Detail);
     b.push_blank();
 
-    b.push_plain("Description", AgendaLineStyle::SectionHeader);
-    b.push_plain("-----------", AgendaLineStyle::Detail);
+    b.push_section("Description");
     push_wrapped(&mut b, "  ", &task.description, AgendaLineStyle::Body, None);
     b.push_blank();
 
     let blocked_by = store.blocked_by(id);
-    b.push_plain("Blocked by", AgendaLineStyle::SectionHeader);
-    b.push_plain("----------", AgendaLineStyle::Detail);
+    b.push_section("Blocked by");
     if blocked_by.is_empty() {
         b.push_plain("  (none) -- press b to add one", AgendaLineStyle::Empty);
     } else {
@@ -504,8 +712,7 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
 
     let blocks = store.blocks(id);
     if !blocks.is_empty() {
-        b.push_plain("Blocks", AgendaLineStyle::SectionHeader);
-        b.push_plain("------", AgendaLineStyle::Detail);
+        b.push_section("Blocks");
         for dependent in blocks {
             let line = format!("  {}", dependent.title);
             b.push_row(&line, AgendaLineStyle::TaskRow, AgendaEntry::Task(dependent.id));
@@ -513,8 +720,7 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
         b.push_blank();
     }
 
-    b.push_plain("Subtasks", AgendaLineStyle::SectionHeader);
-    b.push_plain("--------", AgendaLineStyle::Detail);
+    b.push_section("Subtasks");
     if task.subtasks.is_empty() {
         b.push_plain("  (none) -- press a to add one", AgendaLineStyle::Empty);
     } else {
@@ -524,20 +730,23 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
     }
     b.push_blank();
 
-    b.push_plain("Notes", AgendaLineStyle::SectionHeader);
-    b.push_plain("-----", AgendaLineStyle::Detail);
-    if task.notes.is_empty() {
-        b.push_plain("  (none) -- press N to add one", AgendaLineStyle::Empty);
-    } else {
-        for (i, note) in task.notes.iter().enumerate() {
-            b.push_row(&format!("  {}", note.at.format("%Y-%m-%d %H:%M")), AgendaLineStyle::Note, AgendaEntry::Note(i));
-            push_wrapped(&mut b, "    ", &note.text, AgendaLineStyle::Body, Some(AgendaEntry::Note(i)));
+    match link {
+        Some(link) => push_activity(&mut b, store, task, &link.base.comments),
+        None => {
+            b.push_section("Notes");
+            if task.notes.is_empty() {
+                b.push_plain("  (none) -- press N to add one", AgendaLineStyle::Empty);
+            } else {
+                for (i, note) in task.notes.iter().enumerate() {
+                    b.push_row(&format!("  {}", note.at.format("%Y-%m-%d %H:%M")), AgendaLineStyle::Note, AgendaEntry::Note(i));
+                    push_wrapped(&mut b, "    ", &note.text, AgendaLineStyle::Body, Some(AgendaEntry::Note(i)));
+                }
+            }
         }
     }
     b.push_blank();
 
-    b.push_plain("Time entries", AgendaLineStyle::SectionHeader);
-    b.push_plain("------------", AgendaLineStyle::Detail);
+    b.push_section("Time entries");
     if task.time_entries.is_empty() {
         b.push_plain("  (none)", AgendaLineStyle::Empty);
     } else {
@@ -546,19 +755,82 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
                 TimeSource::Timer => "timer",
                 TimeSource::Manual => "manual",
             };
-            let line = format!(
+            let mut line = format!(
                 "  {} - {}  {}  ({source})",
                 entry.start.format("%Y-%m-%d %H:%M"),
                 entry.end.format("%H:%M"),
                 format_duration(entry.duration())
             );
+            if link.is_some() {
+                line.push_str(if entry.sent { "  sent" } else { "  unsent" });
+            }
             b.push_row(&line, AgendaLineStyle::Detail, AgendaEntry::TimeEntry(i));
         }
     }
-    push_footer(&mut b, DETAIL_ACTION_HINTS, None);
-    b.push_plain("  on a note: e edits it, D removes it   ·   on a time entry: D removes it", AgendaLineStyle::Footer);
+    push_footer(&mut b, DETAIL_ACTION_HINTS, link.map(|_| LINKED_ACTION_HINTS));
+    let on_note = if link.is_some() { "on a note: e edits it, D removes it, C posts it as a comment" } else { "on a note: e edits it, D removes it" };
+    b.push_plain(&format!("  {on_note}   ·   on a time entry: D removes it"), AgendaLineStyle::Footer);
 
     b.finish()
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let clipped: String = line.chars().take(60).collect();
+    if clipped.chars().count() < line.chars().count() || text.lines().count() > 1 {
+        format!("{clipped}…")
+    } else {
+        clipped
+    }
+}
+
+/// Notes and Jira comments in one timeline, oldest first, each labelled so
+/// a private note never reads as a public comment -- plus any comment
+/// still on its way to Jira, at the end.
+fn push_activity(b: &mut Builder, store: &AgendaStore, task: &Task, comments: &[fenix_agenda::RemoteComment]) {
+    b.push_section("Activity");
+    enum Item<'a> {
+        Note(usize),
+        Comment(usize, &'a fenix_agenda::RemoteComment),
+    }
+    let mut items: Vec<(Option<chrono::DateTime<chrono::Local>>, Item)> = Vec::new();
+    for (i, note) in task.notes.iter().enumerate() {
+        items.push((Some(note.at), Item::Note(i)));
+    }
+    for (i, comment) in comments.iter().enumerate() {
+        items.push((parse_jira_time(&comment.created), Item::Comment(i, comment)));
+    }
+    // Unparseable timestamps sort last rather than first.
+    items.sort_by_key(|(at, _)| (at.is_none(), *at));
+    let sending: Vec<&str> = store
+        .pending_for(task.id)
+        .filter_map(|op| match &op.kind {
+            OpKind::AddComment(body) => Some(body.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    if items.is_empty() && sending.is_empty() {
+        b.push_plain("  (none) -- N adds a private note, C a Jira comment", AgendaLineStyle::Empty);
+        return;
+    }
+    for (at, item) in items {
+        let when = at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+        match item {
+            Item::Note(i) => {
+                b.push_row(&format!("  {when}  note (private)"), AgendaLineStyle::Note, AgendaEntry::Note(i));
+                push_wrapped(b, "    ", &task.notes[i].text, AgendaLineStyle::Body, Some(AgendaEntry::Note(i)));
+            }
+            Item::Comment(i, comment) => {
+                b.push_row(&format!("  {when}  {}", comment.author), AgendaLineStyle::Note, AgendaEntry::Comment(i));
+                push_wrapped(b, "    ", &comment.body, AgendaLineStyle::Body, Some(AgendaEntry::Comment(i)));
+            }
+        }
+    }
+    for body in sending {
+        b.push_badged(&format!("  {PENDING_MARK} sending comment"), AgendaLineStyle::Note, (2, 1, AgendaBadgeColor::Warn));
+        push_wrapped(b, "    ", body, AgendaLineStyle::Body, None);
+    }
 }
 
 /// A pending subtask's hollow-square companion to `STATUS_LED` -- same
@@ -764,5 +1036,121 @@ mod tests {
         assert_eq!(format_duration(chrono::Duration::minutes(45)), "45m");
         assert_eq!(format_duration(chrono::Duration::minutes(90)), "1h 30m");
         assert_eq!(format_duration(chrono::Duration::minutes(120)), "2h 0m");
+    }
+
+    fn linked_store(status: &str) -> (AgendaStore, TaskId) {
+        let mut store = AgendaStore::default();
+        let snapshot = fenix_agenda::RemoteSnapshot {
+            summary: "Fix login timeout".to_string(),
+            status_id: "5".to_string(),
+            status_name: status.to_string(),
+            status_category: "indeterminate".to_string(),
+            priority: Some("Major".to_string()),
+            assignee: Some("Jo".to_string()),
+            comments: vec![fenix_agenda::RemoteComment {
+                id: "1".to_string(),
+                author: "Jane Smith".to_string(),
+                body: "Can we also cover SSO?".to_string(),
+                created: "2020-01-02T10:00:00.000+0000".to_string(),
+            }],
+            ..Default::default()
+        };
+        let update = fenix_agenda::RemoteUpdate { snapshot, status: Status::InProgress, priority: Priority::High, mine: Some(true) };
+        let id = store.create_linked("PROJ-12".to_string(), update, Some("Backend".to_string()));
+        (store, id)
+    }
+
+    #[test]
+    fn a_linked_row_shows_its_key_and_jiras_status_when_it_differs_from_the_column() {
+        let (store, _) = linked_store("In Review");
+        let panel = render_list(&store);
+        assert!(panel.text.contains(&format!("{STATUS_LED} PROJ-12 Fix login timeout (Backend)  · High  · In Review")));
+
+        let (store, _) = linked_store("In Progress");
+        assert!(!render_list(&store).text.contains("· In Progress"), "no point repeating the column name");
+    }
+
+    #[test]
+    fn a_pending_change_shows_the_pending_mark_and_a_failure_the_problem_mark() {
+        let (mut store, id) = linked_store("In Review");
+        store.enqueue(id, fenix_agenda::OpKind::SetSummary("x".to_string()));
+        let panel = render_list(&store);
+        let row = panel.text.lines().find(|l| l.contains("PROJ-12")).unwrap();
+        assert!(row.ends_with(PENDING_MARK));
+        let meta = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Task(id))).unwrap();
+        assert!(meta.badges.iter().any(|&(_, _, c)| c == AgendaBadgeColor::Warn));
+
+        let op = store.next_op().unwrap().id;
+        store.op_failed(op, "HTTP 403".to_string());
+        let panel = render_list(&store);
+        assert!(panel.text.contains(&format!("{PROBLEM_MARK} not synced")));
+    }
+
+    #[test]
+    fn a_linked_board_card_shows_the_key_and_jira_status_on_its_second_line() {
+        let (store, _) = linked_store("In Review");
+        let panel = render_board(&store);
+        assert!(panel.text.contains("PROJ-12 · In Review"));
+    }
+
+    #[test]
+    fn a_linked_detail_page_has_jira_metadata_and_one_activity_timeline() {
+        let (mut store, id) = linked_store("In Review");
+        store.add_note(id, "private thought".to_string());
+        store.enqueue(id, fenix_agenda::OpKind::AddComment("on its way".to_string()));
+
+        let panel = render_detail(&store, id);
+        assert_eq!(panel.text.lines().next(), Some("PROJ-12 Fix login timeout"));
+        assert!(panel.text.contains("[In Progress]  Jira: In Review  ·  Priority: High (Jira: Major) (Backend)"));
+        assert!(panel.text.contains("Assignee: Jo"));
+        assert!(panel.text.contains("Activity"));
+        assert!(!panel.text.contains("\nNotes\n"));
+        let jane = panel.text.find("Jane Smith").unwrap();
+        let note = panel.text.find("note (private)").unwrap();
+        assert!(jane < note, "the 2020 comment sorts before today's note");
+        assert!(panel.text.contains("sending comment"));
+        assert!(panel.text.contains("C comment"));
+        let comment_row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Comment(0)));
+        assert!(comment_row.is_some());
+    }
+
+    #[test]
+    fn a_conflict_gets_its_own_selectable_row() {
+        let (mut store, id) = linked_store("In Review");
+        store.set_title(id, "Mine".to_string());
+        store.enqueue(id, fenix_agenda::OpKind::SetSummary("Mine".to_string()));
+        let mut theirs = store.task(id).unwrap().jira.as_ref().unwrap().base.clone();
+        theirs.summary = "Theirs".to_string();
+        store.apply_remote(id, fenix_agenda::RemoteUpdate { snapshot: theirs, status: Status::InProgress, priority: Priority::High, mine: None });
+
+        let panel = render_detail(&store, id);
+        assert!(panel.text.contains("title: Jira has \"Theirs\", you have \"Mine\""));
+        let row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Conflict(SyncField::Title)));
+        assert!(row.is_some());
+    }
+
+    #[test]
+    fn the_report_totals_unsent_linked_time_and_points_at_the_review() {
+        let (mut store, id) = linked_store("In Review");
+        store.log_manual_time(id, chrono::Duration::minutes(90));
+        let panel = render_report(&store);
+        assert!(panel.text.contains("Unsent to Jira: 1h 30m across 1 issue -- W to review and send"));
+        assert!(panel.text.contains("PROJ-12 Fix login timeout"));
+    }
+
+    #[test]
+    fn the_worklog_review_shows_rounding_and_a_total() {
+        let (mut store, id) = linked_store("In Review");
+        store.log_manual_time(id, chrono::Duration::minutes(50));
+        let rows = store.worklog_batch(15);
+        let panel = render_worklogs(&rows, 15);
+        assert!(panel.text.contains("Worklogs to send  (rounded to 15m)"));
+        assert!(panel.text.contains("50m -> 45m"));
+        assert!(panel.text.contains("Total: 45m"));
+        assert!(panel.text.contains("W send all"));
+        let row = entries_of(&panel).into_iter().find(|l| l.entries.iter().any(|(_, e)| *e == AgendaEntry::Worklog(0)));
+        assert!(row.is_some());
+
+        assert!(render_worklogs(&[], 15).text.contains("Nothing to send"));
     }
 }

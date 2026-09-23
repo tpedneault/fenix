@@ -5,6 +5,7 @@ mod session;
 mod editor_ui;
 mod todos;
 mod home;
+mod agenda_sync;
 mod xml;
 use tool_sessions::LspKey;
 
@@ -38,6 +39,7 @@ use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 use fenix_core::{Buffer, Cursor};
 
 use crate::agenda_panel;
+use agenda_sync::{AgendaSyncEvent, AgendaSyncState, SyncPick};
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -629,6 +631,17 @@ enum ComposePurpose {
     /// single-line prompt means no body, no bullet list, and no way to
     /// see what you have written.
     CommitMessage { repo_root: PathBuf },
+    /// An agenda task's description (`E`), seeded with the current one --
+    /// saved locally and, on a linked task, sent to Jira.
+    TaskDescription { task: TaskId },
+    /// A Jira comment on a linked agenda task (`C`), queued like any other
+    /// change to it.
+    TaskComment { task: TaskId },
+    /// The Jira panel's `E`: an issue's description, seeded with the
+    /// current one.
+    IssueDescription { key: String },
+    /// The Jira panel's `C`: a new comment on an issue.
+    IssueComment { key: String },
 }
 
 impl ComposePurpose {
@@ -643,6 +656,10 @@ impl ComposePurpose {
                 (format!("Comment on !{number} {}:{line}", position.new_path), "send")
             }
             ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
+            ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
+            ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
+            ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
+            ComposePurpose::IssueComment { key } => (format!("Comment on {key}"), "post"),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
     }
@@ -2004,10 +2021,9 @@ enum AgendaPromptKind {
     /// `SPC a n`'s second field -- the title carried forward so `Enter`
     /// can create the task once priority/category are picked next.
     NewTaskDescription { title: String },
-    /// `e` on a task row/detail: a new title.
+    /// `e` on a task row/detail: a new title. (The description has its
+    /// own key, `E`, and a real multi-line compose buffer.)
     EditTitle { id: TaskId },
-    /// `e`'s second field, offered right after the title.
-    EditDescription { id: TaskId },
     /// `N`: an entry appended to the task's notes log.
     AddNote { id: TaskId },
     /// `e` on an existing note row (detail view): pre-filled with that
@@ -2021,6 +2037,13 @@ enum AgendaPromptKind {
     /// `SPC a c` (from outside any task): a new `[agenda]` category,
     /// mirrors `jira_start_add_project_prompt`'s shape.
     AddCategory,
+    /// `I` -> "Type an issue key...": link to any issue by key.
+    LinkKey { id: TaskId },
+    /// `I` -> "+ Create a new Jira issue..." -> a project: the issue type
+    /// to create it as (pre-filled `Task`).
+    LinkIssueType { id: TaskId, project: String },
+    /// `e` on a worklog review row: how much to send for it.
+    WorklogMinutes { task: TaskId, date: chrono::NaiveDate },
 }
 
 struct AgendaPrompt {
@@ -2173,6 +2196,9 @@ pub enum FenixUserEvent {
     /// staleness-guard shape as `JiraTransitionsReady` (see `JiraSession
     /// ::priorities_request_id`'s own doc comment).
     JiraPrioritiesReady { request_id: u64, priorities: Result<Vec<fenix_jira::Priority>, String> },
+    /// Anything the agenda's Jira sync fetched or sent in the background
+    /// -- see `agenda_sync::AgendaSyncEvent`.
+    AgendaSync(AgendaSyncEvent),
     /// File paths handed off from a *later* `fenix` launch via the
     /// single-instance IPC server (`crate::ipc`) -- e.g. double-
     /// clicking a file in Explorer while Fenix is already running. An
@@ -2666,6 +2692,11 @@ enum ActivePicker {
     /// picker while one is already running is exactly what `clock_in`
     /// already does for free the moment you start the next one.
     AgendaClockIn(fenix_picker::PickerState<TaskId>),
+    /// Everything the agenda's Jira side asks you to pick -- an issue to
+    /// link or import, a transition, what Blocked means in a project, a
+    /// priority, an assignee, a side of a conflict. What it's for lives
+    /// in `AgendaSyncState::picker`.
+    WorkSync(fenix_picker::PickerState<SyncPick>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -2716,6 +2747,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::AgendaCategory(s) => s.push_char(c),
         ActivePicker::AgendaDependency(s) => s.push_char(c),
         ActivePicker::AgendaClockIn(s) => s.push_char(c),
+        ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
     }
 }
@@ -2764,6 +2796,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::AgendaCategory(s) => s.backspace(),
         ActivePicker::AgendaDependency(s) => s.backspace(),
         ActivePicker::AgendaClockIn(s) => s.backspace(),
+        ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
     }
 }
@@ -2812,6 +2845,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::AgendaCategory(s) => s.move_selection(delta),
         ActivePicker::AgendaDependency(s) => s.move_selection(delta),
         ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
+        ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
     }
 }
@@ -2863,6 +2897,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::AgendaCategory(s) => s.toggle_mark(),
         ActivePicker::AgendaDependency(s) => s.toggle_mark(),
         ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
+        ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
     }
 }
@@ -2911,6 +2946,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::AgendaCategory(s) => s.query(),
         ActivePicker::AgendaDependency(s) => s.query(),
         ActivePicker::AgendaClockIn(s) => s.query(),
+        ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
     }
 }
@@ -2959,6 +2995,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::AgendaCategory(s) => s.len(),
         ActivePicker::AgendaDependency(s) => s.len(),
         ActivePicker::AgendaClockIn(s) => s.len(),
+        ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
     }
 }
@@ -3007,6 +3044,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::AgendaCategory(s) => s.selected_row(),
         ActivePicker::AgendaDependency(s) => s.selected_row(),
         ActivePicker::AgendaClockIn(s) => s.selected_row(),
+        ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
     }
 }
@@ -3071,6 +3109,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::AgendaCategory(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaDependency(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
@@ -5562,28 +5601,6 @@ struct ProjectReplaceSession {
     confirming: bool,
 }
 
-/// Which write action a `JiraEditSession` will submit on `SPC j s` --
-/// both carry the target issue's key.
-enum JiraEditKind {
-    Comment { key: String },
-    Description { key: String },
-}
-
-/// The active `c`/`e` real-scratch-buffer edit session (Issues/Detail) --
-/// one at a time, mirroring `ProjectReplaceSession`'s own singleton
-/// shape. `pane`/`original_buffer` are the Detail pane's own identity
-/// and its real Jira-rendered buffer, stored explicitly so `jira_submit_
-/// edit`/`jira_cancel_edit` can restore Detail directly (`set_pane_
-/// content`) rather than through `kill_buffer()`'s generic "falls back
-/// to the MRU-next open buffer" behavior -- see `App::jira_start_edit`'s
-/// own doc comment for why that fallback is the wrong tool here.
-struct JiraEditSession {
-    kind: JiraEditKind,
-    pane: fenix_window::WindowId,
-    edit_buffer: BufferId,
-    original_buffer: BufferId,
-}
-
 /// Whether `kind` may never be edited directly -- Docker/Git/Jira panel
 /// buffers are all generated, wholesale-regenerated on every refresh, so
 /// letting Vim edits slip through and then reverting them (see `route_
@@ -6382,6 +6399,8 @@ pub struct App {
     /// does, so this is set explicitly by whichever `agenda_start_*_
     /// picker` opened it.
     agenda_picker_task: Option<fenix_agenda::TaskId>,
+    /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
+    agenda_sync: AgendaSyncState,
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
     /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `docker_session`/`git_session`/
@@ -6496,15 +6515,6 @@ pub struct App {
     /// to find the companion PDF pane/session. Mirrors `pdf_outline_
     /// source` exactly.
     pdf_search_source: HashMap<BufferId, PathBuf>,
-    /// The active `c`/`e` comment/description edit session, if any -- see
-    /// `JiraEditSession`'s own doc comment. Gates the Jira pane-scoped
-    /// `route_keypress` block (`jira_edit.is_none()`): while an edit is
-    /// in progress, none of `t`/`T`/`c`/`e`/`l`/`f` fire, letting every
-    /// keystroke reach the edit buffer as ordinary Vim editing instead --
-    /// load-bearing, not decorative, since a comment/description buffer
-    /// is genuinely free-typed prose that will routinely contain those
-    /// same letters.
-    jira_edit: Option<JiraEditSession>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -7131,6 +7141,12 @@ impl App {
             }
         }
         app.announce_recoverable_work();
+        // Linked agenda tasks stay current while Fenix runs, and changes
+        // queued before the last exit go out now.
+        if app.agenda_store.tasks.iter().any(|t| t.jira.is_some()) {
+            app.agenda_start_ticker();
+            app.agenda_drain_outbox();
+        }
         app
     }
 
@@ -7347,6 +7363,7 @@ impl App {
             agenda_prompt: None,
             agenda_confirm_delete: None,
             agenda_picker_task: None,
+            agenda_sync: AgendaSyncState::default(),
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
@@ -7366,7 +7383,6 @@ impl App {
             pdf_search_panes: HashMap::new(),
             pdf_search_result_lines: HashMap::new(),
             pdf_search_source: HashMap::new(),
-            jira_edit: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -17325,9 +17341,15 @@ impl App {
     /// second one: there's only ever one thing being written, and two
     /// would leave no way to tell which `Enter` submits.
     fn open_compose(&mut self, purpose: ComposePurpose) {
+        self.open_compose_seeded(purpose, "");
+    }
+
+    /// `open_compose`, starting from `seed` -- for editing something that
+    /// already has text (a description) rather than writing from blank.
+    fn open_compose_seeded(&mut self, purpose: ComposePurpose, seed: &str) {
         self.close_compose();
         let returning_to = self.focused_pane_id();
-        let buffer = self.buffers.open_scratch();
+        let buffer = if seed.is_empty() { self.buffers.open_scratch() } else { self.buffers.open_text_view(seed) };
         let pane = self.windows_mut().split(SplitKind::Horizontal, buffer);
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(Cursor::at_start()));
         // A comment is a few lines; the thing being commented on is
@@ -17337,7 +17359,7 @@ impl App {
         self.pane_titles.insert(pane, purpose.title());
         self.windows_mut().focus(pane);
         self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to });
-        self.set_message("write your comment (i to insert), then Esc and Enter to send");
+        self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
         self.wake_caret();
     }
 
@@ -17372,13 +17394,62 @@ impl App {
         let Some(compose) = self.compose.as_ref() else { return };
         let body = self.buffers.get(compose.buffer).map(|ob| ob.buffer.text()).unwrap_or_default();
         let body = body.trim().to_string();
+        let purpose = compose.purpose.clone();
+
+        // The agenda and the Jira panel -- no forge involved. A
+        // description may legitimately be cleared, so only these two
+        // accept an empty buffer.
+        match &purpose {
+            ComposePurpose::TaskDescription { task } => {
+                let task = *task;
+                self.close_compose();
+                if self.agenda_store.task(task).is_some_and(|t| t.description != body) {
+                    self.agenda_store.set_description(task, body.clone());
+                    self.agenda_store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
+                    self.agenda_after_edit();
+                }
+                self.wake_caret();
+                return;
+            }
+            ComposePurpose::IssueDescription { key } => {
+                let key = key.clone();
+                self.close_compose();
+                self.spawn_jira_action(move |client| {
+                    client.update_description(&key, &body)?;
+                    Ok(format!("Description updated for {key}"))
+                });
+                self.wake_caret();
+                return;
+            }
+            _ => {}
+        }
         if body.is_empty() {
             // Posting an empty comment is never what was meant, and the
             // forge would either reject it or publish a blank note.
             self.set_error("nothing written yet -- q discards this instead".to_string());
             return;
         }
-        let purpose = compose.purpose.clone();
+        match &purpose {
+            ComposePurpose::TaskComment { task } => {
+                let task = *task;
+                self.close_compose();
+                self.agenda_store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
+                self.agenda_after_edit();
+                self.wake_caret();
+                return;
+            }
+            ComposePurpose::IssueComment { key } => {
+                let key = key.clone();
+                self.close_compose();
+                self.spawn_jira_action(move |client| {
+                    client.add_comment(&key, &body)?;
+                    Ok(format!("Comment added to {key}"))
+                });
+                self.wake_caret();
+                return;
+            }
+            _ => {}
+        }
 
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
@@ -17419,7 +17490,11 @@ impl App {
             ComposePurpose::NewComment { number, position } => {
                 (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
             }
-            ComposePurpose::CommitMessage { .. } => unreachable!("handled above"),
+            ComposePurpose::CommitMessage { .. }
+            | ComposePurpose::TaskDescription { .. }
+            | ComposePurpose::TaskComment { .. }
+            | ComposePurpose::IssueDescription { .. }
+            | ComposePurpose::IssueComment { .. } => unreachable!("handled above"),
         };
         match result {
             Ok(()) => {
@@ -18558,7 +18633,7 @@ impl App {
 
         let projects_panel = jira_panel::render_projects(&tracked_projects);
         let users_panel = jira_panel::render_users(&tracked_users);
-        let issues_panel = jira_panel::render_issues(&[]);
+        let issues_panel = jira_panel::render_issues(&[], &HashSet::new());
         let detail_panel = jira_panel::render_detail(None);
 
         let projects_buffer = self.buffers.open_jira(&projects_panel.text);
@@ -18632,6 +18707,24 @@ impl App {
     /// `SPC j q`: closes the Jira dashboard session -- mirrors `git_
     /// session_close` exactly (no poller to stop, unlike Docker/Git).
     pub(crate) fn jira_session_close(&mut self) {
+        if self.jira_session.is_none() {
+            return;
+        }
+        // A comment or description being written for one of this
+        // session's issues lives in a pane of its workspace -- closing
+        // the panel discards it rather than leave it pointing at nothing.
+        if self.compose.as_ref().is_some_and(|c| matches!(c.purpose, ComposePurpose::IssueComment { .. } | ComposePurpose::IssueDescription { .. })) {
+            let visible = self.compose.as_ref().is_some_and(|c| self.windows().windows().contains(&c.pane));
+            if visible {
+                self.close_compose();
+            } else if let Some(compose) = self.compose.take() {
+                // In another workspace (closed from elsewhere): its pane
+                // goes with that workspace below; only the buffer is ours
+                // to clean up.
+                self.pane_titles.remove(&compose.pane);
+                self.buffers.close(compose.buffer);
+            }
+        }
         let Some(session) = self.jira_session.take() else { return };
         // A mid-flight `c`/`e` edit holds a scratch buffer pointed at
         // from one of this session's own panes -- closing the whole
@@ -18641,9 +18734,6 @@ impl App {
         // cleanup half of `jira_edit_restore`. The status filter is a
         // picker now (`ActivePicker::JiraStatusFilter`), not a buffer --
         // no cleanup needed here for it.
-        if let Some(edit) = self.jira_edit.take() {
-            self.buffers.close(edit.edit_buffer);
-        }
         for id in [session.projects_buffer, session.users_buffer, session.issues_buffer, session.detail_buffer] {
             self.buffers.close(id);
             self.jira_lines.remove(&id);
@@ -18703,7 +18793,7 @@ impl App {
     /// nothing in this harness can construct -- see `test_route_key`'s
     /// own doc comment), so this is what a test asserts against instead.
     fn jira_pane_action_keys_active(&self) -> bool {
-        self.jira_focused_role().is_some() && self.jira_edit.is_none()
+        self.jira_focused_role().is_some()
     }
 
     /// The pane whose title bar is numbered `n` (`1. Projects` etc.,
@@ -18775,6 +18865,7 @@ impl App {
     /// with here, see `agenda_panel`'s own doc comment), or creates it
     /// fresh the first time.
     fn open_agenda(&mut self, view: agenda_panel::AgendaView) {
+        self.agenda_sync_if_stale();
         self.agenda_view = view;
         let panel = self.render_agenda_view(view);
         if let Some(id) = self.agenda_buffer.filter(|id| self.buffers.get(*id).is_some()) {
@@ -18794,6 +18885,7 @@ impl App {
             agenda_panel::AgendaView::List => agenda_panel::render_list(&self.agenda_store),
             agenda_panel::AgendaView::Board => agenda_panel::render_board(&self.agenda_store),
             agenda_panel::AgendaView::Report => agenda_panel::render_report(&self.agenda_store),
+            agenda_panel::AgendaView::Worklogs => agenda_panel::render_worklogs(&self.agenda_worklog_rows(), self.agenda_worklog_round()),
             agenda_panel::AgendaView::Detail(id) => agenda_panel::render_detail(&self.agenda_store, id),
         }
     }
@@ -18859,7 +18951,10 @@ impl App {
                                 // that rather than guessing.
                                 agenda_panel::AgendaEntry::Subtask(_)
                                 | agenda_panel::AgendaEntry::Note(_)
-                                | agenda_panel::AgendaEntry::TimeEntry(_) => None,
+                                | agenda_panel::AgendaEntry::TimeEntry(_)
+                                | agenda_panel::AgendaEntry::Comment(_)
+                                | agenda_panel::AgendaEntry::Conflict(_)
+                                | agenda_panel::AgendaEntry::Worklog(_) => None,
                             })
                     });
                     (pane, task)
@@ -18914,12 +19009,20 @@ impl App {
     }
 
     fn agenda_start_status_picker(&mut self, id: TaskId) {
+        if self.agenda_store.task(id).is_some_and(|t| t.jira.is_some()) {
+            self.agenda_start_linked_status_picker(id);
+            return;
+        }
         let candidates: Vec<_> = fenix_agenda::Status::ALL.iter().map(|&s| fenix_picker::Candidate::new(s.label(), s)).collect();
         self.agenda_picker_task = Some(id);
         self.enter_picker(ActivePicker::AgendaStatus(fenix_picker::PickerState::new(candidates)));
     }
 
     fn agenda_start_priority_picker(&mut self, id: TaskId) {
+        if self.agenda_store.task(id).is_some_and(|t| t.jira.is_some()) {
+            self.agenda_start_linked_priority_picker(id);
+            return;
+        }
         let candidates: Vec<_> = fenix_agenda::Priority::ALL.iter().map(|&p| fenix_picker::Candidate::new(p.label(), p)).collect();
         self.agenda_picker_task = Some(id);
         self.enter_picker(ActivePicker::AgendaPriority(fenix_picker::PickerState::new(candidates)));
@@ -19035,6 +19138,12 @@ impl App {
                     false
                 }
             }
+            // Jira's comments aren't ours to delete; conflicts are settled
+            // with Enter; worklog rows have their own `D` (see
+            // `agenda_worklog_key`).
+            Some(agenda_panel::AgendaEntry::Comment(_))
+            | Some(agenda_panel::AgendaEntry::Conflict(_))
+            | Some(agenda_panel::AgendaEntry::Worklog(_)) => false,
             // Same Detail-page fallback as `agenda_task_id_at_cursor` --
             // nothing under the cursor, but the page itself names a task.
             None => match self.agenda_view {
@@ -19059,8 +19168,7 @@ impl App {
         if new_idx < 0 || new_idx as usize >= fenix_agenda::Status::ALL.len() {
             return false;
         }
-        self.agenda_store.move_to_status(id, fenix_agenda::Status::ALL[new_idx as usize]);
-        self.agenda_save_and_refresh();
+        self.agenda_set_status(id, fenix_agenda::Status::ALL[new_idx as usize]);
         true
     }
 
@@ -19088,7 +19196,15 @@ impl App {
             // Neither means anything on `Enter` -- editing a note is `e`,
             // removing either is `D`; toggling (like a subtask) has no
             // equivalent for a note or a logged time span.
-            Some(agenda_panel::AgendaEntry::Note(_)) | Some(agenda_panel::AgendaEntry::TimeEntry(_)) => {}
+            Some(agenda_panel::AgendaEntry::Note(_))
+            | Some(agenda_panel::AgendaEntry::TimeEntry(_))
+            | Some(agenda_panel::AgendaEntry::Comment(_))
+            | Some(agenda_panel::AgendaEntry::Worklog(_)) => {}
+            Some(agenda_panel::AgendaEntry::Conflict(field)) => {
+                if let agenda_panel::AgendaView::Detail(id) = self.agenda_view {
+                    self.agenda_start_conflict_picker(id, field);
+                }
+            }
             None => {}
         }
     }
@@ -19102,15 +19218,94 @@ impl App {
         if self.vim.mode() != Mode::Normal || keypress.mods != Mods::default() {
             return false;
         }
+        if self.agenda_view == agenda_panel::AgendaView::Worklogs {
+            if let KeyCode::Char(c) = keypress.code {
+                if let Some(consumed) = self.agenda_worklog_key(c) {
+                    return consumed;
+                }
+            }
+        }
         match keypress.code {
             KeyCode::Named(FenixNamedKey::Escape) => {
-                if matches!(self.agenda_view, agenda_panel::AgendaView::Detail(_)) {
-                    let back = self.agenda_return_view.take().unwrap_or(agenda_panel::AgendaView::List);
+                if matches!(self.agenda_view, agenda_panel::AgendaView::Detail(_) | agenda_panel::AgendaView::Worklogs) {
+                    let fallback = if self.agenda_view == agenda_panel::AgendaView::Worklogs {
+                        agenda_panel::AgendaView::Report
+                    } else {
+                        agenda_panel::AgendaView::List
+                    };
+                    let back = self.agenda_return_view.take().filter(|v| *v != self.agenda_view).unwrap_or(fallback);
                     self.open_agenda(back);
                     true
                 } else {
                     false
                 }
+            }
+            KeyCode::Char('W') if self.agenda_view == agenda_panel::AgendaView::Report => {
+                self.cmd_agenda_worklogs();
+                true
+            }
+            KeyCode::Char('E') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                let seed = self.agenda_store.task(id).map(|t| t.description.clone()).unwrap_or_default();
+                self.open_compose_seeded(ComposePurpose::TaskDescription { task: id }, &seed);
+                true
+            }
+            KeyCode::Char('C') => {
+                // On a note row, `C` posts that note as a comment.
+                if let (Some(agenda_panel::AgendaEntry::Note(index)), agenda_panel::AgendaView::Detail(id)) =
+                    (self.agenda_entry_at_cursor(), self.agenda_view)
+                {
+                    let Some(task) = self.agenda_store.task(id) else { return true };
+                    let (Some(key), Some(note)) = (task.jira_key().map(str::to_string), task.notes.get(index).map(|n| n.text.clone())) else {
+                        self.set_message("C posts to Jira -- link this task first with I");
+                        return true;
+                    };
+                    self.agenda_store.enqueue(id, fenix_agenda::OpKind::AddComment(note));
+                    self.set_message(format!("Posting the note to {key} as a comment..."));
+                    self.agenda_after_edit();
+                    return true;
+                }
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                if self.agenda_store.task(id).is_some_and(|t| t.jira.is_none()) {
+                    self.set_message("C posts a Jira comment -- link this task first with I, or N for a private note");
+                    return true;
+                }
+                self.open_compose_seeded(ComposePurpose::TaskComment { task: id }, "");
+                true
+            }
+            KeyCode::Char('I') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_start_link(id);
+                true
+            }
+            KeyCode::Char('A') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                self.agenda_start_assignee_picker(id);
+                true
+            }
+            KeyCode::Char('y') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                if self.agenda_store.task(id).is_some_and(|t| t.jira.is_none()) {
+                    return false;
+                }
+                self.agenda_copy_link(id);
+                true
+            }
+            KeyCode::Char('o') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                if self.agenda_store.task(id).is_some_and(|t| t.jira.is_none()) {
+                    return false;
+                }
+                self.agenda_open_in_browser(id);
+                true
+            }
+            KeyCode::Char('r') => {
+                let Some(id) = self.agenda_task_id_at_cursor() else { return false };
+                if self.agenda_store.task(id).is_some_and(|t| t.jira.is_none()) {
+                    return false;
+                }
+                self.agenda_retry(id);
+                true
             }
             KeyCode::Char('s') => {
                 let Some(id) = self.agenda_task_id_at_cursor() else { return false };
@@ -19239,12 +19434,14 @@ impl App {
             AgendaPromptKind::NewTaskTitle => format!("New task: {}", prompt.input),
             AgendaPromptKind::NewTaskDescription { .. } => format!("Description (optional): {}", prompt.input),
             AgendaPromptKind::EditTitle { .. } => format!("Title: {}", prompt.input),
-            AgendaPromptKind::EditDescription { .. } => format!("Description: {}", prompt.input),
             AgendaPromptKind::AddNote { .. } => format!("Note: {}", prompt.input),
             AgendaPromptKind::EditNote { .. } => format!("Edit note: {}", prompt.input),
             AgendaPromptKind::ManualTime { .. } => format!("Log time (e.g. \"2h 30m\"): {}", prompt.input),
             AgendaPromptKind::AddSubtask { .. } => format!("Subtask: {}", prompt.input),
             AgendaPromptKind::AddCategory => format!("New category: {}", prompt.input),
+            AgendaPromptKind::LinkKey { .. } => format!("Link to issue (e.g. PROJ-123): {}", prompt.input),
+            AgendaPromptKind::LinkIssueType { project, .. } => format!("New {project} issue type: {}", prompt.input),
+            AgendaPromptKind::WorklogMinutes { .. } => format!("Send (e.g. \"1h 30m\"): {}", prompt.input),
         })
     }
 
@@ -19297,16 +19494,12 @@ impl App {
                 self.open_agenda(agenda_panel::AgendaView::Detail(id));
             }
             AgendaPromptKind::EditTitle { id } => {
-                if value.is_empty() {
+                if value.is_empty() || self.agenda_store.task(id).is_some_and(|t| t.title == value) {
                     return;
                 }
-                let current_description = self.agenda_store.task(id).map(|t| t.description.clone()).unwrap_or_default();
-                self.agenda_store.set_title(id, value);
-                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::EditDescription { id }, input: current_description });
-            }
-            AgendaPromptKind::EditDescription { id } => {
-                self.agenda_store.set_description(id, value);
-                self.agenda_save_and_refresh();
+                self.agenda_store.set_title(id, value.clone());
+                self.agenda_store.enqueue(id, fenix_agenda::OpKind::SetSummary(value));
+                self.agenda_after_edit();
             }
             AgendaPromptKind::AddNote { id } => {
                 if value.is_empty() {
@@ -19346,6 +19539,26 @@ impl App {
                     self.set_error(format!("couldn't save config.ini: {err}"));
                 }
             }
+            AgendaPromptKind::LinkKey { id } => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_fetch_issue(value.to_uppercase(), agenda_sync::IssueFetch::LinkKey(id));
+            }
+            AgendaPromptKind::LinkIssueType { id, project } => {
+                if value.is_empty() {
+                    return;
+                }
+                self.agenda_create_issue_from_task(id, project, value);
+            }
+            AgendaPromptKind::WorklogMinutes { task, date } => {
+                let Some(duration) = parse_loose_duration(&value) else {
+                    self.set_error(format!("couldn't parse duration: {value}"));
+                    return;
+                };
+                self.agenda_sync.worklog_edits.insert((task, date), duration.num_minutes());
+                self.refresh_agenda_buffer();
+            }
         }
         self.wake_caret();
     }
@@ -19354,8 +19567,12 @@ impl App {
     /// is armed -- mirrors `docker_confirm_text`.
     fn agenda_confirm_text(&self) -> Option<String> {
         let id = self.agenda_confirm_delete?;
-        let title = self.agenda_store.task(id).map(|t| t.title.as_str()).unwrap_or("this task");
-        Some(format!("Delete \"{title}\"? (y/n)"))
+        let task = self.agenda_store.task(id);
+        let title = task.map(|t| t.title.as_str()).unwrap_or("this task");
+        Some(match task.and_then(|t| t.jira_key()) {
+            Some(key) => format!("Delete \"{title}\"? ({key} in Jira is not affected) (y/n)"),
+            None => format!("Delete \"{title}\"? (y/n)"),
+        })
     }
 
     /// Mirrors `docker_confirm_key`'s "`y` confirms, anything else
@@ -19475,7 +19692,7 @@ impl App {
                     }
                     session.issues = issues.clone();
                 }
-                self.set_jira_buffer(issues_buffer, jira_panel::render_issues(&issues));
+                self.set_jira_buffer(issues_buffer, jira_panel::render_issues(&issues, &self.agenda_linked_keys()));
             }
             Err(err) => self.set_error(format!("Jira search failed: {err}")),
         }
@@ -19954,35 +20171,14 @@ impl App {
         self.jira_prompt = Some(JiraPrompt { kind: JiraPromptKind::LogTime { key }, input: String::new() });
     }
 
-    /// `c`/`e` on Issues/Detail: opens a real scratch buffer for
-    /// unrestricted Vim editing (the user's own confirmed choice over a
-    /// single-line prompt), seeded with `seed` (empty for a new comment,
-    /// the current description for an edit) and pointed at from the
-    /// Detail pane in place of its own rendered content. `jira_edit`
-    /// tracks `pane`/`original_buffer` explicitly so `jira_submit_edit`/
-    /// `jira_cancel_edit` can restore Detail's own real rendering
-    /// directly, rather than through `kill_buffer`'s generic "falls back
-    /// to the MRU-next open buffer" behavior -- that risks landing Detail
-    /// on some unrelated recently-visited buffer instead.
-    fn jira_start_edit(&mut self, kind: JiraEditKind, seed: String) {
-        let Some(session) = self.jira_session.as_ref() else { return };
-        let pane = session.detail_pane;
-        let original_buffer = session.detail_buffer;
-        let edit_buffer = self.buffers.open_text_view(&seed);
-        self.set_pane_content(pane, edit_buffer);
-        self.jira_edit = Some(JiraEditSession { kind, pane, edit_buffer, original_buffer });
-        self.wake_caret();
-    }
-
-    /// `c` on Issues/Detail: starts a new, empty comment buffer.
+    /// `C` on Issues/Detail: a new comment, in a compose pane.
     pub(crate) fn jira_start_comment(&mut self) {
         let Some(key) = self.jira_current_issue_key() else { return };
-        self.jira_start_edit(JiraEditKind::Comment { key }, String::new());
+        self.open_compose(ComposePurpose::IssueComment { key });
     }
 
-    /// `e` on Issues/Detail: starts a description-edit buffer, pre-filled
-    /// from `session.detail.description` when it's showing the current
-    /// issue (empty otherwise).
+    /// `E` on Issues/Detail: the description, in a compose pane seeded
+    /// with the current one when Detail is showing this issue.
     pub(crate) fn jira_start_edit_description(&mut self) {
         let Some(key) = self.jira_current_issue_key() else { return };
         let seed = self
@@ -19992,52 +20188,7 @@ impl App {
             .filter(|d| d.key == key)
             .and_then(|d| d.description.clone())
             .unwrap_or_default();
-        self.jira_start_edit(JiraEditKind::Description { key }, seed);
-    }
-
-    /// Restores Detail to its own real rendering and closes the scratch
-    /// edit buffer -- the shared tail of `jira_submit_edit`/`jira_
-    /// cancel_edit`. Deliberately `set_pane_content` + `self.buffers.
-    /// close` directly, not `kill_buffer()` (see `jira_start_edit`'s own
-    /// doc comment for why).
-    fn jira_edit_restore(&mut self) -> Option<JiraEditSession> {
-        let session = self.jira_edit.take()?;
-        self.set_pane_content(session.pane, session.original_buffer);
-        self.buffers.close(session.edit_buffer);
-        Some(session)
-    }
-
-    /// `SPC j s`: reads the edit buffer's current text, restores Detail,
-    /// closes the scratch buffer, then submits the right write action
-    /// (`add_comment`/`update_description`) via `spawn_jira_action`. A
-    /// leader binding, not a pane-scoped bare key -- see `jira_edit`'s
-    /// own doc comment on `App` for why that's load-bearing here.
-    pub(crate) fn jira_submit_edit(&mut self) {
-        let Some(session) = &self.jira_edit else { return };
-        let text = self.buffers.get(session.edit_buffer).map(|ob| ob.buffer.text()).unwrap_or_default();
-        let Some(session) = self.jira_edit_restore() else { return };
-        match session.kind {
-            JiraEditKind::Comment { key } => {
-                self.spawn_jira_action(move |client| {
-                    client.add_comment(&key, &text)?;
-                    Ok(format!("Comment added to {key}"))
-                });
-            }
-            JiraEditKind::Description { key } => {
-                self.spawn_jira_action(move |client| {
-                    client.update_description(&key, &text)?;
-                    Ok(format!("Description updated for {key}"))
-                });
-            }
-        }
-        self.wake_caret();
-    }
-
-    /// `SPC j x`: restores Detail and closes the scratch buffer without
-    /// submitting anything.
-    pub(crate) fn jira_cancel_edit(&mut self) {
-        self.jira_edit_restore();
-        self.wake_caret();
+        self.open_compose_seeded(ComposePurpose::IssueDescription { key }, &seed);
     }
 
     /// `f` on Issues: opens a multi-select picker over every status seen
@@ -20075,6 +20226,9 @@ impl App {
     /// focused pane's buffer was never touched, so returning to the
     /// editor just means switching `main_view` back.
     fn picker_cancel(&mut self) {
+        if matches!(self.active_picker, Some(ActivePicker::WorkSync(_))) {
+            self.agenda_sync_picker_cancel();
+        }
         self.active_picker = None;
         self.main_view = MainView::Editor;
     }
@@ -20376,8 +20530,7 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 let Some(id) = self.agenda_picker_task.take() else { return };
-                self.agenda_store.move_to_status(id, status);
-                self.agenda_save_and_refresh();
+                self.agenda_set_status(id, status);
             }
             Some(ActivePicker::AgendaPriority(state)) => {
                 let Some(priority) = state.selected().map(|c| c.payload) else { return };
@@ -20409,6 +20562,13 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.agenda_store.clock_in(id);
                 self.agenda_save_and_refresh();
+            }
+            Some(ActivePicker::WorkSync(state)) => {
+                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                let marked: Vec<SyncPick> = state.marked().cloned().collect();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.agenda_sync_picker_confirm(pick, marked);
             }
             None => {}
         }
@@ -22553,6 +22713,7 @@ impl App {
             FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
+            FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             // Deferred rather than handled here: opening a window needs
             // an `&ActiveEventLoop`, which `handle_user_event` doesn't
@@ -23740,15 +23901,14 @@ impl App {
 
         // Jira dashboard -- the digit-key jump-to-pane shortcut the
         // Docker/Git blocks above already have (`1. Projects`, `2.
-        // Users`, ...), plus the per-issue action keys on Issues/Detail
-        // (`t` transition, `T` edit title, `c` add comment, `e` edit
-        // description, `l` log time) and the status filter's own trigger
-        // (`f`, Issues only). Gated on `jira_edit.is_none()` in addition
-        // to a Jira pane being focused -- load-bearing, not decorative:
-        // while a comment/description edit is in progress, none of these
-        // letters may fire, regardless of Vim mode, or they'd hijack
-        // ordinary typing/editing of that real prose the moment it
-        // contained one of them (see `App::jira_edit`'s own doc comment).
+        // Users`, ...), plus the per-issue action keys on Issues/Detail,
+        // which are the agenda's own: `s` status, `e`/`E` title/
+        // description, `C` comment, `p` priority, `A` assignee, `T` log
+        // time, `y`/`o` copy/open the link -- and `a`/`t` to add the
+        // issue to the agenda (`t` also starts its clock). `f` filters
+        // Issues by status; `b` on a project picks what Blocked means
+        // there. Descriptions and comments open a compose pane, which is
+        // its own pane, so none of these letters can reach it.
         if self.jira_pane_action_keys_active() {
             if let KeyCode::Char(c) = keypress.code {
                 if keypress.mods == Mods::default() && c.is_ascii_digit() {
@@ -23765,26 +23925,46 @@ impl App {
                 }
             }
             match (self.jira_focused_role(), keypress.code) {
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('t')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('s')) if keypress.mods == Mods::default() => {
                     self.jira_start_transition_picker();
                     self.wake_caret();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('T')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('e')) if keypress.mods == Mods::default() => {
                     self.jira_start_edit_title_prompt();
                     self.wake_caret();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('c')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('C')) if keypress.mods == Mods::default() => {
                     self.jira_start_comment();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('e')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('E')) if keypress.mods == Mods::default() => {
                     self.jira_start_edit_description();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('l')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('T')) if keypress.mods == Mods::default() => {
                     self.jira_start_log_time_prompt();
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('a')) if keypress.mods == Mods::default() => {
+                    self.jira_add_to_agenda(false);
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('t')) if keypress.mods == Mods::default() => {
+                    self.jira_add_to_agenda(true);
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('o')) if keypress.mods == Mods::default() => {
+                    self.jira_open_in_browser();
+                    self.wake_caret();
+                    return;
+                }
+                (Some(JiraPaneRole::Projects), KeyCode::Char('b')) if keypress.mods == Mods::default() => {
+                    self.jira_start_blocked_setup();
                     self.wake_caret();
                     return;
                 }
@@ -23797,7 +23977,7 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('P')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('p')) if keypress.mods == Mods::default() => {
                     self.jira_start_priority_picker();
                     self.wake_caret();
                     return;
@@ -23807,7 +23987,7 @@ impl App {
                     self.wake_caret();
                     return;
                 }
-                (Some(JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('x')) if keypress.mods == Mods::default() => {
+                (Some(JiraPaneRole::Projects | JiraPaneRole::Issues | JiraPaneRole::Detail), KeyCode::Char('x')) if keypress.mods == Mods::default() => {
                     self.jira_menu_open = true;
                     self.wake_caret();
                     return;
@@ -24424,6 +24604,7 @@ impl App {
                 Some(picker @ ActivePicker::AgendaCategory(_)) => ("AGENDA CATEGORY", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaDependency(_)) => ("AGENDA DEPENDENCY", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaClockIn(_)) => ("CLOCK IN", picker_len(picker)),
+                Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             // Which half of a two-step comparison you're on, spelled
@@ -24437,6 +24618,12 @@ impl App {
                 Some(ActivePicker::CompareHead { base, .. }) => {
                     format!("{count} refs   {base}...?   pick the ref whose changes you want to see ")
                 }
+                // What this pick is for ("WHAT DOES BLOCKED MEAN IN
+                // PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
+                Some(ActivePicker::WorkSync(_)) => match &self.agenda_sync.picker {
+                    Some(ctx) => format!("{}   {count} matches ", ctx.label),
+                    None => format!("{count} matches "),
+                },
                 _ => format!("{count} matches "),
             };
             return (label, suffix);
@@ -25652,29 +25839,25 @@ impl App {
         if !self.jira_menu_open {
             return None;
         }
+        const ISSUE_BINDINGS: [(&str, &str); 12] = [
+            ("s", "status (transition)"),
+            ("e", "edit title"),
+            ("E", "edit description"),
+            ("C", "comment"),
+            ("p", "priority"),
+            ("A", "assignee"),
+            ("T", "log time"),
+            ("a", "add to agenda"),
+            ("t", "add to agenda + clock in"),
+            ("y", "copy URL"),
+            ("o", "open in browser"),
+            ("f", "status filter"),
+        ];
         let bindings: &[(&str, &str)] = match self.jira_focused_role()? {
-            JiraPaneRole::Projects | JiraPaneRole::Users => return None,
-            JiraPaneRole::Issues => &[
-                ("t", "transition"),
-                ("T", "edit title"),
-                ("c", "comment"),
-                ("e", "edit description"),
-                ("l", "log time"),
-                ("A", "assignee"),
-                ("P", "priority"),
-                ("y", "copy URL"),
-                ("f", "status filter"),
-            ],
-            JiraPaneRole::Detail => &[
-                ("t", "transition"),
-                ("T", "edit title"),
-                ("c", "comment"),
-                ("e", "edit description"),
-                ("l", "log time"),
-                ("A", "assignee"),
-                ("P", "priority"),
-                ("y", "copy URL"),
-            ],
+            JiraPaneRole::Users => return None,
+            JiraPaneRole::Projects => &[("b", "what Blocked means here")],
+            JiraPaneRole::Issues => &ISSUE_BINDINGS,
+            JiraPaneRole::Detail => &ISSUE_BINDINGS[..11],
         };
 
         let (char_width, line_height) = match &self.text {
@@ -43014,8 +43197,9 @@ configure_board stm32
             status: "Open".to_string(),
             assignee: None,
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            ..Default::default()
         };
-        app.set_jira_buffer(issues_buffer, jira_panel::render_issues(&[issue]));
+        app.set_jira_buffer(issues_buffer, jira_panel::render_issues(&[issue], &HashSet::new()));
         app.windows_mut().focus(issues_pane);
         app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
         assert_eq!(app.jira_entry_at_cursor(), Some(jira_panel::JiraEntry::Issue("PROJ-1".to_string())));
@@ -43157,6 +43341,7 @@ configure_board stm32
             status: "Open".to_string(),
             assignee: None,
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            ..Default::default()
         };
         app.apply_jira_issues(3, Ok(vec![stale]));
         assert!(app.jira_session.as_ref().unwrap().issues.is_empty());
@@ -43169,6 +43354,7 @@ configure_board stm32
             status: "Open".to_string(),
             assignee: None,
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            ..Default::default()
         };
         app.apply_jira_issues(5, Ok(vec![fresh]));
         assert_eq!(app.jira_session.as_ref().unwrap().issues.len(), 1);
@@ -43207,6 +43393,7 @@ configure_board stm32
             created: "2024-01-01T00:00:00.000+0000".to_string(),
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
             comments: Vec::new(),
+            ..Default::default()
         };
         app.apply_jira_detail(3, Ok(stale));
         assert!(app.jira_session.as_ref().unwrap().detail.is_none());
@@ -43223,6 +43410,7 @@ configure_board stm32
             created: "2024-01-01T00:00:00.000+0000".to_string(),
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
             comments: Vec::new(),
+            ..Default::default()
         };
         app.apply_jira_detail(5, Ok(fresh));
         assert!(app.jira_session.as_ref().unwrap().detail.is_some());
@@ -43449,7 +43637,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
-        let transition = fenix_jira::Transition { id: "31".to_string(), name: "In Progress".to_string() };
+        let transition = fenix_jira::Transition { id: "31".to_string(), name: "In Progress".to_string(), ..Default::default() };
         let candidates = vec![fenix_picker::Candidate::new(transition.name.clone(), transition)];
         app.enter_picker(ActivePicker::JiraTransition(fenix_picker::PickerState::new(candidates)));
 
@@ -43491,6 +43679,7 @@ configure_board stm32
             created: "2024-01-01T00:00:00.000+0000".to_string(),
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
             comments: Vec::new(),
+            ..Default::default()
         });
 
         app.jira_start_edit_title_prompt();
@@ -43499,26 +43688,25 @@ configure_board stm32
     }
 
     #[test]
-    fn jira_start_comment_opens_an_empty_edit_buffer_over_detail() {
+    fn jira_start_comment_opens_an_empty_compose_pane_for_the_issue() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         let session = app.jira_session.as_mut().unwrap();
         session.last_selected_issue = Some("PROJ-1".to_string());
         let detail_pane = session.detail_pane;
         let detail_buffer = session.detail_buffer;
+        app.windows_mut().focus(detail_pane);
 
         app.jira_start_comment();
 
-        let edit = app.jira_edit.as_ref().expect("expected an active edit session");
-        assert_eq!(edit.pane, detail_pane);
-        assert_eq!(edit.original_buffer, detail_buffer);
-        assert!(matches!(&edit.kind, JiraEditKind::Comment { key } if key == "PROJ-1"));
-        assert_eq!(app.buffers.get(edit.edit_buffer).unwrap().buffer.text(), "");
-        assert_eq!(app.windows().content(detail_pane), Some(&edit.edit_buffer));
+        let compose = app.compose.as_ref().expect("expected a compose pane");
+        assert!(matches!(&compose.purpose, ComposePurpose::IssueComment { key } if key == "PROJ-1"));
+        assert_eq!(app.buffers.get(compose.buffer).unwrap().buffer.text(), "");
+        assert_eq!(app.windows().content(detail_pane), Some(&detail_buffer), "Detail keeps showing the issue while you write");
     }
 
     #[test]
-    fn jira_start_edit_description_seeds_from_the_current_detail_description() {
+    fn jira_start_edit_description_seeds_the_compose_pane_from_the_current_detail() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         let session = app.jira_session.as_mut().unwrap();
@@ -43528,70 +43716,56 @@ configure_board stm32
             summary: "Fix it".to_string(),
             description: Some("Existing description".to_string()),
             status: "Open".to_string(),
-            assignee: None,
-            reporter: None,
-            created: "2024-01-01T00:00:00.000+0000".to_string(),
-            updated: "2024-01-01T00:00:00.000+0000".to_string(),
-            comments: Vec::new(),
+            ..Default::default()
         });
 
         app.jira_start_edit_description();
 
-        let edit = app.jira_edit.as_ref().expect("expected an active edit session");
-        assert_eq!(app.buffers.get(edit.edit_buffer).unwrap().buffer.text(), "Existing description");
-        assert!(matches!(&edit.kind, JiraEditKind::Description { key } if key == "PROJ-1"));
+        let compose = app.compose.as_ref().expect("expected a compose pane");
+        assert_eq!(app.buffers.get(compose.buffer).unwrap().buffer.text(), "Existing description");
+        assert!(matches!(&compose.purpose, ComposePurpose::IssueDescription { key } if key == "PROJ-1"));
     }
 
     #[test]
-    fn jira_cancel_edit_restores_detail_and_closes_the_scratch_buffer() {
+    fn cancelling_a_jira_comment_closes_the_compose_pane() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
-        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
-        let detail_buffer = app.jira_session.as_ref().unwrap().detail_buffer;
         app.jira_start_comment();
-        let edit_buffer = app.jira_edit.as_ref().unwrap().edit_buffer;
+        let buffer = app.compose.as_ref().unwrap().buffer;
 
-        app.jira_cancel_edit();
+        app.compose_cancel();
 
-        assert!(app.jira_edit.is_none());
-        assert!(app.buffers.get(edit_buffer).is_none());
-        assert_eq!(app.windows().content(detail_pane), Some(&detail_buffer));
+        assert!(app.compose.is_none());
+        assert!(app.buffers.get(buffer).is_none());
     }
 
     #[test]
-    fn jira_submit_edit_reads_the_buffers_text_restores_detail_and_closes_it() {
+    fn submitting_a_jira_comment_closes_the_pane_and_tries_to_post_it() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
-        let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
-        let detail_buffer = app.jira_session.as_ref().unwrap().detail_buffer;
-
         app.jira_start_comment();
-        let edit_buffer = app.jira_edit.as_ref().unwrap().edit_buffer;
-        app.windows_mut().focus(detail_pane);
+        let buffer = app.compose.as_ref().unwrap().buffer;
         app.test_set_cursor(Cursor::at_start());
         app.test_insert_str("Looking into it");
 
-        app.jira_submit_edit();
+        app.compose_submit();
 
-        assert!(app.jira_edit.is_none());
-        assert!(app.buffers.get(edit_buffer).is_none());
-        assert_eq!(app.windows().content(detail_pane), Some(&detail_buffer));
+        assert!(app.compose.is_none());
+        assert!(app.buffers.get(buffer).is_none());
         // No `[jira]` credentials configured -- `spawn_jira_action`
-        // surfaces `jira_client`'s own error instead of attempting a
-        // network call, but the buffer swap/restore/close above must
-        // have already happened regardless.
+        // surfaces `jira_client`'s own error instead of a network call.
         assert!(app.status_message.as_ref().is_some_and(|m| m.is_error));
     }
 
     #[test]
-    fn jira_pane_action_keys_active_is_false_while_an_edit_is_in_progress() {
-        // The guard this plan calls out explicitly: `route_keypress`
-        // itself can't be exercised in this test harness (needs a live
-        // `&ActiveEventLoop`), so this asserts against the extracted
-        // `jira_pane_action_keys_active` helper it actually consults --
-        // see that helper's own doc comment.
+    fn jira_pane_action_keys_are_inactive_while_the_compose_pane_has_focus() {
+        // `route_keypress` itself can't be exercised in this test harness
+        // (needs a live `&ActiveEventLoop`), so this asserts against the
+        // `jira_pane_action_keys_active` helper it consults: the compose
+        // pane is its own pane, so the letters you type into it never
+        // reach the Jira keys.
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
@@ -43602,7 +43776,7 @@ configure_board stm32
         app.jira_start_comment();
         assert!(!app.jira_pane_action_keys_active());
 
-        app.jira_cancel_edit();
+        app.compose_cancel();
         assert!(app.jira_pane_action_keys_active());
     }
 
@@ -43618,6 +43792,7 @@ configure_board stm32
             status: "Open".to_string(),
             assignee: None,
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            ..Default::default()
         };
         app.apply_jira_issues(1, Ok(vec![open_issue]));
         assert_eq!(app.jira_session.as_ref().unwrap().known_statuses, HashSet::from(["Open".to_string()]));
@@ -43629,6 +43804,7 @@ configure_board stm32
             status: "Done".to_string(),
             assignee: None,
             updated: "2024-01-01T00:00:00.000+0000".to_string(),
+            ..Default::default()
         };
         app.apply_jira_issues(2, Ok(vec![done_issue]));
         // Accumulated, not replaced -- "Open" from the first fetch is
@@ -43721,17 +43897,17 @@ configure_board stm32
     }
 
     #[test]
-    fn jira_session_close_cleans_up_a_mid_flight_edit_session() {
+    fn jira_session_close_discards_a_comment_being_written_in_it() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         app.jira_session.as_mut().unwrap().last_selected_issue = Some("PROJ-1".to_string());
         app.jira_start_comment();
-        let edit_buffer = app.jira_edit.as_ref().unwrap().edit_buffer;
+        let buffer = app.compose.as_ref().unwrap().buffer;
 
         app.jira_session_close();
 
-        assert!(app.jira_edit.is_none());
-        assert!(app.buffers.get(edit_buffer).is_none());
+        assert!(app.compose.is_none());
+        assert!(app.buffers.get(buffer).is_none());
         assert!(app.jira_session.is_none());
     }
 
@@ -43828,16 +44004,22 @@ configure_board stm32
     }
 
     #[test]
-    fn jira_menu_popup_is_none_on_projects_and_users() {
+    fn jira_menu_popup_is_none_on_users_and_offers_b_on_projects() {
         let mut app = App::with_file(None);
         app.open_jira_panel();
         let session = app.jira_session.as_ref().unwrap();
         let (projects_pane, users_pane) = (session.projects_pane, session.users_pane);
         app.jira_menu_open = true;
-        app.windows_mut().focus(projects_pane);
-        assert!(app.jira_menu_popup(800.0, 580.0).is_none());
         app.windows_mut().focus(users_pane);
         assert!(app.jira_menu_popup(800.0, 580.0).is_none());
+        app.windows_mut().focus(projects_pane);
+        assert_eq!(jira_menu_keys(&app), vec!["b"]);
+    }
+
+    /// The key column of the open Jira menu, in order.
+    fn jira_menu_keys(app: &App) -> Vec<String> {
+        let (_, spans) = app.jira_menu_popup(800.0, 2000.0).unwrap();
+        spans.iter().filter(|(_, color, _)| *color == app.theme.caret_text).map(|(s, _, _)| s.trim().to_string()).collect()
     }
 
     #[test]
@@ -43847,11 +44029,7 @@ configure_board stm32
         let issues_pane = app.jira_session.as_ref().unwrap().issues_pane;
         app.windows_mut().focus(issues_pane);
         app.jira_menu_open = true;
-        let (_, spans) = app.jira_menu_popup(800.0, 580.0).unwrap();
-        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        for key in ["t", "T", "c", "e", "l", "A", "P", "y", "f"] {
-            assert!(text.contains(key), "expected the Issues menu to mention '{key}': {text}");
-        }
+        assert_eq!(jira_menu_keys(&app), ["s", "e", "E", "C", "p", "A", "T", "a", "t", "y", "o", "f"]);
     }
 
     #[test]
@@ -43861,12 +44039,7 @@ configure_board stm32
         let detail_pane = app.jira_session.as_ref().unwrap().detail_pane;
         app.windows_mut().focus(detail_pane);
         app.jira_menu_open = true;
-        let (_, spans) = app.jira_menu_popup(800.0, 580.0).unwrap();
-        let text: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        for key in ["t", "T", "c", "e", "l", "A", "P", "y"] {
-            assert!(text.contains(key), "expected the Detail menu to mention '{key}': {text}");
-        }
-        assert!(!text.contains("status filter"));
+        assert_eq!(jira_menu_keys(&app), ["s", "e", "E", "C", "p", "A", "T", "a", "t", "y", "o"]);
     }
 
     #[test]
