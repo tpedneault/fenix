@@ -14,6 +14,13 @@ pub struct AgendaStore {
     pub tasks: Vec<Task>,
     next_id: u32,
     pub active_timer: Option<ActiveTimer>,
+    /// Changes to linked tasks not yet confirmed by Jira, oldest first --
+    /// saved with everything else so a restart or a dropped VPN never
+    /// loses an edit. See `crate::sync`.
+    #[serde(default)]
+    pub outbox: Vec<crate::jira::PendingOp>,
+    #[serde(default)]
+    pub(crate) next_op_id: u64,
 }
 
 impl AgendaStore {
@@ -21,7 +28,7 @@ impl AgendaStore {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    fn task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
+    pub(crate) fn task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|t| t.id == id)
     }
 
@@ -51,6 +58,7 @@ impl AgendaStore {
             done_at: None,
             archived: false,
             order,
+            jira: None,
         });
         id
     }
@@ -207,7 +215,7 @@ impl AgendaStore {
         if let Some(timer) = self.active_timer.take() {
             let now = Local::now();
             if let Some(task) = self.task_mut(timer.task_id) {
-                task.time_entries.push(TimeEntry { start: timer.started_at, end: now, source: TimeSource::Timer });
+                task.time_entries.push(TimeEntry { start: timer.started_at, end: now, source: TimeSource::Timer, sent: false });
                 task.updated_at = now;
             }
         }
@@ -216,7 +224,7 @@ impl AgendaStore {
     pub fn log_manual_time(&mut self, id: TaskId, duration: chrono::Duration) {
         let now = Local::now();
         if let Some(task) = self.task_mut(id) {
-            task.time_entries.push(TimeEntry { start: now - duration, end: now, source: TimeSource::Manual });
+            task.time_entries.push(TimeEntry { start: now - duration, end: now, source: TimeSource::Manual, sent: false });
             task.updated_at = now;
         }
     }
@@ -328,6 +336,7 @@ impl AgendaStore {
     /// task.
     pub fn delete(&mut self, id: TaskId) {
         self.tasks.retain(|t| t.id != id);
+        self.outbox.retain(|op| op.task != id);
         for task in &mut self.tasks {
             task.depends_on.retain(|&d| d != id);
         }

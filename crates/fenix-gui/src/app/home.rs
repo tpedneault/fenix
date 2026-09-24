@@ -143,7 +143,10 @@ impl App {
         let today = open
             .into_iter()
             .map(|t| dashboard::TaskItem {
-                title: t.title.clone(),
+                title: match t.jira_key() {
+                    Some(key) => format!("{key} {}", t.title),
+                    None => t.title.clone(),
+                },
                 live: live.filter(|(id, _)| *id == t.id).map(|(_, d)| format_elapsed(d)),
                 pressing: matches!(t.priority, fenix_agenda::Priority::High | fenix_agenda::Priority::Urgent),
             })

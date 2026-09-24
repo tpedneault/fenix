@@ -82,6 +82,11 @@ pub struct TimeEntry {
     pub start: DateTime<Local>,
     pub end: DateTime<Local>,
     pub source: TimeSource,
+    /// Already sent to Jira as (part of) a worklog -- or dismissed from
+    /// the worklog review without sending. Only meaningful on a linked
+    /// task.
+    #[serde(default)]
+    pub sent: bool,
 }
 
 impl TimeEntry {
@@ -131,9 +136,16 @@ pub struct Task {
     /// Manual position within its status column; lower sorts first. Only
     /// meaningful relative to other tasks sharing the same `status`.
     pub order: i64,
+    /// The Jira issue this task tracks, if any -- see `crate::jira`.
+    #[serde(default)]
+    pub jira: Option<crate::jira::JiraLink>,
 }
 
 impl Task {
+    pub fn jira_key(&self) -> Option<&str> {
+        self.jira.as_ref().map(|link| link.key.as_str())
+    }
+
     pub fn total_time(&self) -> chrono::Duration {
         self.time_entries.iter().fold(chrono::Duration::zero(), |acc, e| acc + e.duration())
     }

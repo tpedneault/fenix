@@ -4,10 +4,14 @@
 //! `agenda_panel` module renders an `AgendaStore` into a real buffer and
 //! dispatches keys back onto `AgendaStore`'s own methods.
 
+pub mod jira;
 mod persist;
 mod store;
+mod sync;
 mod task;
 
 pub use persist::{default_path, load, save};
+pub use jira::{Conflict, JiraLink, OpKind, PendingOp, RemoteComment, RemoteSnapshot, RemoteUpdate, SyncField};
 pub use store::{ActiveTimer, AgendaStore};
+pub use sync::WorklogRow;
 pub use task::{NoteEntry, Priority, Status, Subtask, Task, TaskId, TimeEntry, TimeSource};

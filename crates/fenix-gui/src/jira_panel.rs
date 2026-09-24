@@ -173,8 +173,9 @@ const STATUS_LED: char = '■';
 /// already exactly what `issue.status` carries (a self-hosted
 /// instance's workflow names aren't known ahead of time, so this can't
 /// be shortened to a letter the way Docker's fixed state machine can),
-/// just no longer bracketed at the front of the row.
-pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
+/// just no longer bracketed at the front of the row. An issue that's
+/// already in the agenda (`in_agenda`, by key) says so at the end.
+pub fn render_issues(issues: &[IssueSummary], in_agenda: &std::collections::HashSet<String>) -> JiraPanel {
     let mut b = Builder::new();
     if issues.is_empty() {
         let (text, meta) = empty_line("No issues");
@@ -185,7 +186,10 @@ pub fn render_issues(issues: &[IssueSummary]) -> JiraPanel {
             let badge_len = prefix.chars().count();
             let middle = format!("{} {}", issue.key, issue.summary);
             let dim_from = prefix.chars().count() + middle.chars().count() + 2;
-            let line = format!("{prefix}{middle}  {}", issue.status);
+            let mut line = format!("{prefix}{middle}  {}", issue.status);
+            if in_agenda.contains(&issue.key) {
+                line.push_str("  · in agenda");
+            }
             b.push(
                 &line,
                 Some(JiraLine {
@@ -357,6 +361,7 @@ mod tests {
             status: status.to_string(),
             assignee: assignee.map(str::to_string),
             updated: "2024-01-15T10:30:00.000+0000".to_string(),
+            ..Default::default()
         }
     }
 
@@ -371,6 +376,7 @@ mod tests {
             created: "2024-01-01T00:00:00.000+0000".to_string(),
             updated: "2024-01-15T10:30:00.000+0000".to_string(),
             comments: vec![],
+            ..Default::default()
         }
     }
 
@@ -402,7 +408,7 @@ mod tests {
 
     #[test]
     fn render_issues_lists_entries_with_the_right_entry_and_badge() {
-        let panel = render_issues(&[issue("PROJ-1", "Fix the thing", "Done", Some("John Doe"))]);
+        let panel = render_issues(&[issue("PROJ-1", "Fix the thing", "Done", Some("John Doe"))], &Default::default());
         assert!(panel.text.contains(&format!("{STATUS_LED} PROJ-1 Fix the thing  Done")));
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(entries[0].entry, Some(JiraEntry::Issue("PROJ-1".to_string())));
@@ -411,7 +417,7 @@ mod tests {
 
     #[test]
     fn render_issues_colors_in_progress_as_warn_and_todo_as_neutral() {
-        let panel = render_issues(&[issue("PROJ-1", "A", "In Progress", None), issue("PROJ-2", "B", "To Do", None)]);
+        let panel = render_issues(&[issue("PROJ-1", "A", "In Progress", None), issue("PROJ-2", "B", "To Do", None)], &Default::default());
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(entries[0].badge.map(|(_, c)| c), Some(JiraBadgeColor::Warn));
         assert_eq!(entries[1].badge.map(|(_, c)| c), Some(JiraBadgeColor::Neutral));
@@ -419,7 +425,16 @@ mod tests {
 
     #[test]
     fn render_issues_empty_list_shows_a_placeholder() {
-        assert!(render_issues(&[]).text.contains("No issues"));
+        assert!(render_issues(&[], &Default::default()).text.contains("No issues"));
+    }
+
+    #[test]
+    fn render_issues_marks_issues_already_in_the_agenda() {
+        let in_agenda = std::collections::HashSet::from(["PROJ-2".to_string()]);
+        let panel = render_issues(&[issue("PROJ-1", "A", "Open", None), issue("PROJ-2", "B", "Open", None)], &in_agenda);
+        let lines: Vec<&str> = panel.text.lines().collect();
+        assert!(!lines[0].contains("in agenda"));
+        assert!(lines[1].ends_with("· in agenda"));
     }
 
     #[test]
@@ -536,8 +551,8 @@ mod tests {
     fn render_detail_comments_header_includes_the_count() {
         let mut d = detail("PROJ-1");
         d.comments = vec![
-            fenix_jira::Comment { author: "Jane Smith".to_string(), body: "First".to_string(), created: "2024-01-02T00:00:00.000+0000".to_string() },
-            fenix_jira::Comment { author: "John Doe".to_string(), body: "Second".to_string(), created: "2024-01-03T00:00:00.000+0000".to_string() },
+            fenix_jira::Comment { author: "Jane Smith".to_string(), body: "First".to_string(), created: "2024-01-02T00:00:00.000+0000".to_string(), ..Default::default() },
+            fenix_jira::Comment { author: "John Doe".to_string(), body: "Second".to_string(), created: "2024-01-03T00:00:00.000+0000".to_string(), ..Default::default() },
         ];
         let panel = render_detail(Some(&d));
         assert!(panel.text.contains("Comments (2)"));
@@ -550,6 +565,7 @@ mod tests {
             author: "Jane Smith".to_string(),
             body: "Looking into it".to_string(),
             created: "2024-01-02T00:00:00.000+0000".to_string(),
+            ..Default::default()
         }];
         let panel = render_detail(Some(&d));
         assert!(panel.text.contains("Jane Smith @ 2024-01-02 00:00"));
@@ -567,6 +583,7 @@ mod tests {
                    the description body above already gets."
                 .to_string(),
             created: "2024-01-02T00:00:00.000+0000".to_string(),
+            ..Default::default()
         }];
         let panel = render_detail(Some(&d));
         let body_rows = panel.lines.iter().flatten().filter(|l| l.style == JiraLineStyle::Body).count();
