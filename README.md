@@ -277,6 +277,22 @@ for anyone curious to poke around or build on it.
   directly in the editor without reopening the picker or re-running the
   search, clamping (not wrapping) at either end -- switch between known
   projects (`SPC p p`).
+- **New projects** (`SPC p c`, or Home's *new project* row): a four-step
+  wizard -- template, location, the template's own questions, then a
+  review of every file it will write and every command it will run
+  (literal arguments, no shell) before anything touches the disk. Ships
+  templates for Python (uv), Rust (cargo), an Arduino sketch, an
+  SCOS-2000 MIB workspace (registered as a `[mib]` root) and an empty
+  folder, with optional `git init` and a first commit. A template is a
+  folder -- `template.toml` plus a `files/` tree -- so your own go in
+  `<config dir>/fenix/templates/`, and a repository can offer its own in
+  `.fenix/templates/`. A failed step stops the run and keeps what's done:
+  `r` retries it, `s` skips it, `o` opens what's there.
+- **Project identity**: every project has a kind (Python, Arduino, MIB,
+  Rust, Tcl, ...), detected from its files or declared as `[project]
+  kind = ...` in `.fenix/project.ini`. Its two- or three-letter tag
+  leads the modeline (`PY orbit-tools · decoder.py`) and Home's project
+  rows, and the window is titled after the project.
 - **Files changing on disk**: every open file is checked against what's
   actually on disk a couple of times a second, and whenever the window
   regains focus. Both are needed -- focus catches editing in another
@@ -1047,6 +1063,7 @@ popup shows what keys continue it.
 | `SPC p s` | Search project (ripgrep) |
 | `SPC p n` / `SPC p N` | Next / previous match in the last project search (quickfix) |
 | `SPC p p` | Switch project |
+| `SPC p c` | New project from a template |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |

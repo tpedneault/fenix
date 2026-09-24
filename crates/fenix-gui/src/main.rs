@@ -3,6 +3,7 @@ mod app;
 mod commands;
 mod completion;
 mod dashboard;
+mod project_wizard;
 mod diff_view;
 mod docker_panel;
 mod forge_panel;

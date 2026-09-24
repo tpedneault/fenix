@@ -104,7 +104,7 @@ pub fn scan(
 /// comment) -- this just checks existence instead of returning the
 /// resolved path, and (unlike that Windows-only function) also handles
 /// Unix, where a plain `PATH` walk with no extension search is enough.
-fn is_on_path(command: &str) -> bool {
+pub(crate) fn is_on_path(command: &str) -> bool {
     let path = Path::new(command);
     if path.is_absolute() || command.contains(['/', '\\']) {
         return path.is_file();

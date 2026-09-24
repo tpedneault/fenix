@@ -232,6 +232,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "switch project",
             "project.switch_project",
         );
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('c')], "new project", "project.new");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
         // `SPC t` is already "toggle" (theme/font-size/fullscreen/...),

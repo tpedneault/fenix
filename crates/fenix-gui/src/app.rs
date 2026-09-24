@@ -9,6 +9,7 @@ mod agenda_sync;
 mod embedded;
 mod local_leader;
 mod xml;
+mod projects;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2246,6 +2247,9 @@ pub enum FenixUserEvent {
     /// A microcontroller toolchain query's answer -- see
     /// `embedded::EmbeddedEvent`.
     Embedded(EmbeddedEvent),
+    /// A new-project wizard step's output or its end -- see
+    /// `projects::ProjectCreateEvent`.
+    ProjectCreate(projects::ProjectCreateEvent),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -5664,6 +5668,8 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             // wholesale-regenerated on every mutation, never typed into
             // directly.
             | BufferKind::Agenda
+            // Laid out from the wizard's state on every change.
+            | BufferKind::Page
     )
 }
 
@@ -6091,6 +6097,14 @@ pub struct App {
     /// else computed from buffer state). `None` outside any recognized
     /// project.
     project_root: Option<PathBuf>,
+    /// Each project root's kind (`fenix_project::detect_kind`), looked up
+    /// once -- the modeline and the window title ask every frame. Behind
+    /// a `RefCell` so `&self` readers like `modeline_pieces` can fill it.
+    /// Cleared when a project is created, the one time a kind can change
+    /// under Fenix's own hands.
+    project_kinds: RefCell<HashMap<PathBuf, fenix_project::ProjectKind>>,
+    /// `SPC p c`'s wizard, while it's open -- see `projects`.
+    project_wizard: Option<projects::ProjectWizardState>,
     active_picker: Option<ActivePicker>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
@@ -7326,6 +7340,8 @@ impl App {
             sidebar_scroll: 0,
             picker_scroll: 0,
             project_root,
+            project_kinds: RefCell::new(HashMap::new()),
+            project_wizard: None,
             active_picker: None,
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
@@ -8125,6 +8141,19 @@ impl App {
     /// that list is explicitly curated via `SPC p a`/`SPC p d` now, not
     /// auto-populated from wherever you happen to open a file -- see
     /// `picker_add_project_prompt`'s own doc comment for why.
+    /// `root`'s kind, detected the first time it's asked for.
+    fn project_kind_of(&self, root: &Path) -> fenix_project::ProjectKind {
+        *self.project_kinds.borrow_mut().entry(root.to_path_buf()).or_insert_with(|| fenix_project::detect_kind(root))
+    }
+
+    /// The focused buffer's project, as (kind, folder name) -- `None` for
+    /// a buffer outside any project, which the chrome then doesn't name.
+    fn focused_project_identity(&self) -> Option<(fenix_project::ProjectKind, String)> {
+        let root = self.project_root.as_deref()?;
+        let name = root.file_name()?.to_string_lossy().into_owned();
+        Some((self.project_kind_of(root), name))
+    }
+
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
         self.refresh_embedded_indicator();
@@ -13879,6 +13908,9 @@ impl App {
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
         self.close_terminal_buffer(id);
+        if self.is_project_wizard_buffer(id) {
+            self.project_wizard = None;
+        }
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -22791,6 +22823,7 @@ impl App {
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
+            FenixUserEvent::ProjectCreate(event) => self.apply_project_create_event(event),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             // Deferred rather than handled here: opening a window needs
             // an `&ActiveEventLoop`, which `handle_user_event` doesn't
@@ -23113,6 +23146,12 @@ impl App {
         // tier as the other capturing prompts above.
         if self.replace_wizard.is_some() {
             self.replace_wizard_key(keypress);
+            return;
+        }
+        // The new-project wizard's page: ahead of the leader, so a space
+        // typed into one of its fields is a space.
+        if self.main_view == MainView::Editor && !self.sidebar_focused && self.page_key(keypress) {
+            self.wake_caret();
             return;
         }
 
@@ -24561,6 +24600,8 @@ impl App {
                 self.terminal_buffer_labels.get(&buffer_id).cloned().unwrap_or_else(|| "*terminal*".to_string())
             } else if ob.kind == BufferKind::Agenda {
                 "*agenda*".to_string()
+            } else if ob.kind == BufferKind::Page {
+                "*new project*".to_string()
             } else {
                 "[No Name]".to_string()
             }
@@ -25102,6 +25143,7 @@ impl App {
             // shift every one of them out from under what the shell
             // thinks it drew.
             || ob.kind == BufferKind::Terminal
+            || ob.kind == BufferKind::Page
         {
             return 0;
         }
@@ -25312,6 +25354,9 @@ impl App {
 
         if ob.kind == BufferKind::Dashboard {
             return self.home_highlights(id, render_base_line, rows);
+        }
+        if ob.kind == BufferKind::Page {
+            return self.page_highlights(id, render_base_line, rows);
         }
         if ob.kind == BufferKind::Docker {
             return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
@@ -26727,6 +26772,7 @@ impl App {
         // focus changes do (`refresh_project_root`), so this is checked
         // here instead, once per rendered frame.
         self.sync_lsp_for_focused_buffer();
+        self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
         // reconfigure -- see `GpuState::pending_resize`'s own doc
@@ -27329,13 +27375,20 @@ impl App {
             // Plain buffer content -- every pane not currently showing an
             // overlay, focused or not. `buffer_id` was already looked up
             // above, alongside `pane_title`.
-            let is_dashboard = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
-            if is_dashboard {
+            let is_home = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
+            if is_home {
                 if self.home_data.date.is_empty() {
                     self.refresh_home_data(true);
                 }
                 self.ensure_home_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width), pane_visible_lines);
             }
+            // The wizard's page is drawn the way Home is: laid-out text,
+            // its own selection, no caret.
+            let is_page = self.is_project_wizard_buffer(buffer_id);
+            if is_page {
+                self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
+            }
+            let is_dashboard = is_home || is_page;
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -27649,7 +27702,13 @@ impl App {
             };
 
             let (home_segments, home_overlay) =
-                if is_dashboard { self.home_backgrounds(buffer_id, pane, render_base_line, pane_visible_lines) } else { Default::default() };
+                if is_page {
+                    self.page_backgrounds(buffer_id, render_base_line, pane_visible_lines)
+                } else if is_home {
+                    self.home_backgrounds(buffer_id, pane, render_base_line, pane_visible_lines)
+                } else {
+                    Default::default()
+                };
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -27682,6 +27741,14 @@ impl App {
         }
 
         let modeline_pieces = self.modeline_pieces();
+        // Which project owns the focused buffer, ahead of everything else
+        // on the modeline -- one language server runs per project root,
+        // so this answers "which one am I talking to?".
+        let project_spans = if self.main_view == MainView::Editor {
+            self.focused_project_identity().map(|(kind, name)| projects::modeline_project_spans(kind, &name, theme)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         _profile.mark("CPU pane preparation complete");
         let (badge_bg, _badge_fg) = self.mode_colors();
         // Top-right corner, clear of both the content the user is actively
@@ -27845,7 +27912,8 @@ impl App {
             // narrower than `PAD_LEFT`, so it never touches this text.
             let badge = modeline_mode_segment(mode_label);
             let mode_segment_chars = badge.chars().count();
-            let existing_chars = mode_segment_chars + suffix.chars().count();
+            let project_chars: usize = project_spans.iter().map(|(text, _)| text.chars().count()).sum();
+            let existing_chars = mode_segment_chars + project_chars + suffix.chars().count();
             // An unexpired error message tints the suffix red (`git_
             // conflicted`'s accent -- no dedicated error color exists
             // yet, and this reads as a reasonable semantic reuse
@@ -27861,6 +27929,7 @@ impl App {
             // over a filled box -- `badge_fg` (`mode_text_dark`/`_light`)
             // was that box's own contrast color and is unused here now.
             spans.push((badge, rgba_to_glyphon(badge_bg)));
+            spans.extend(project_spans);
             spans.extend(suffix_spans);
             let refs: Vec<(&str, glyphon::Color)> = spans.iter().map(|(text, color)| (text.as_str(), *color)).collect();
             text.set_modeline_text(&refs);

@@ -96,7 +96,7 @@ fn short_board(board: &str) -> &str {
 }
 
 impl App {
-    fn embedded_tools(&self) -> fenix_embedded::Tools {
+    pub(super) fn embedded_tools(&self) -> fenix_embedded::Tools {
         fenix_embedded::Tools::discover(&fenix_embedded::ToolOverrides {
             arduino_cli: self.config.embedded_arduino_cli.clone(),
             clangd: self.config.embedded_clangd.clone(),

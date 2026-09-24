@@ -93,6 +93,7 @@ impl CommandRegistry {
             cmd_quickfix_prev,
         );
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
+        registry.register("project.new", "Create a new project from a template", cmd_project_new);
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.register("task.run", "Fuzzy-pick and run a discovered project task", cmd_task_run);
@@ -438,6 +439,10 @@ fn cmd_quickfix_prev(ctx: &mut CommandCtx) {
 
 fn cmd_project_switch(ctx: &mut CommandCtx) {
     ctx.app.picker_switch_project();
+}
+
+fn cmd_project_new(ctx: &mut CommandCtx) {
+    ctx.app.cmd_project_new();
 }
 
 fn cmd_project_add(ctx: &mut CommandCtx) {

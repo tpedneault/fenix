@@ -124,6 +124,7 @@ impl App {
                 root: root.clone(),
                 name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string()),
                 branch: git_branch(root),
+                kind: self.project_kind_of(root),
             })
             .collect();
 
@@ -230,7 +231,7 @@ impl App {
         }
     }
 
-    fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
+    pub(super) fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
         let Some(ob) = self.buffers.get(id) else { return };
         let line = line.min(ob.buffer.line_count().saturating_sub(1));
         let char_idx = ob.buffer.line_start_char(line) + col.min(ob.buffer.line_len(line));
@@ -292,6 +293,7 @@ impl App {
             HomeEntry::Find => self.picker_find_file(),
             HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
             HomeEntry::Project(root) => self.switch_to_project(root),
+            HomeEntry::NewProject => self.cmd_project_new(),
             HomeEntry::Agenda => self.cmd_agenda_open(),
             HomeEntry::Todo { path, line, col } => {
                 self.open_file_from_picker(&path);
@@ -314,6 +316,7 @@ impl App {
             Role::Ember => glyphon::Color::rgb(fenix_brand::EMBER[0], fenix_brand::EMBER[1], fenix_brand::EMBER[2]),
             Role::Warn => theme.git_modified,
             Role::Todo(kind) => theme.todo_color(kind),
+            Role::Kind(kind) => super::projects::kind_color(kind, theme),
         };
         let last = first_line + rows;
         let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = view
