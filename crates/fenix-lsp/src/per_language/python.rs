@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonEnvKind {
@@ -56,6 +57,62 @@ pub fn resolve(project_root: &Path) -> PythonEnvironment {
     }
 
     PythonEnvironment { interpreter: system_python(), kind: PythonEnvKind::System }
+}
+
+/// What a language server's view of a project's packages depends on:
+/// the files that decide which environment `resolve` picks, and the
+/// environment's `site-packages` folder. Just `stat`s -- cheap enough to
+/// take every couple of seconds -- so a server told about an
+/// interpreter once can be told again when `uv add`/`uv sync` changes
+/// what's installed, or when the venv is created after it started.
+/// pyright doesn't watch `site-packages` itself: without a new push, a
+/// package added mid-session stays "could not be resolved".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentStamp {
+    interpreter: PathBuf,
+    files: [Option<SystemTime>; 5],
+    packages: Option<SystemTime>,
+}
+
+impl EnvironmentStamp {
+    /// Whether anything it was taken from has changed since. Only
+    /// `stat`s -- never re-runs `resolve`, which can start `poetry` or
+    /// `python` -- so it's fine on a timer.
+    pub fn is_stale(&self, project_root: &Path) -> bool {
+        *self != stamp(project_root, &self.interpreter)
+    }
+}
+
+pub fn environment_stamp(project_root: &Path, env: &PythonEnvironment) -> EnvironmentStamp {
+    stamp(project_root, &env.interpreter)
+}
+
+fn stamp(project_root: &Path, interpreter: &Path) -> EnvironmentStamp {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    EnvironmentStamp {
+        interpreter: interpreter.to_path_buf(),
+        // `.venv`/`venv` themselves too: a folder's time changes when
+        // something is created in it, so a venv appearing shows here.
+        files: ["pyproject.toml", "uv.lock", "poetry.lock", ".venv", "venv"].map(|name| modified(&project_root.join(name))),
+        packages: site_packages(interpreter).and_then(|dir| modified(&dir)),
+    }
+}
+
+/// The `site-packages` folder of the venv an interpreter lives in --
+/// `Lib\site-packages` on Windows, `lib/pythonX.Y/site-packages`
+/// elsewhere. Adding or removing a package creates or deletes a folder
+/// in it, which changes its modified time.
+fn site_packages(interpreter: &Path) -> Option<PathBuf> {
+    let venv = interpreter.parent()?.parent()?;
+    if cfg!(windows) {
+        let dir = venv.join("Lib").join("site-packages");
+        return dir.is_dir().then_some(dir);
+    }
+    std::fs::read_dir(venv.join("lib"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join("site-packages"))
+        .find(|dir| dir.parent().and_then(|p| p.file_name()).is_some_and(|n| n.to_string_lossy().starts_with("python")) && dir.is_dir())
 }
 
 /// The interpreter executable inside a venv directory, or `None` if
@@ -212,6 +269,29 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), b"[tool.poetry]\nname = \"x\"\n").unwrap();
         let env = resolve(dir.path());
         assert!(matches!(env.kind, PythonEnvKind::Poetry | PythonEnvKind::System));
+    }
+
+    #[test]
+    fn the_stamp_changes_when_a_venv_appears_or_a_package_is_installed() {
+        let dir = TempDir::new("stamp");
+        std::fs::write(dir.path().join("uv.lock"), b"").unwrap();
+        let before = environment_stamp(dir.path(), &resolve(dir.path()));
+        assert!(!before.is_stale(dir.path()), "nothing changed, same stamp");
+
+        fake_venv(dir.path(), ".venv");
+        let env = resolve(dir.path());
+        assert_eq!(env.kind, PythonEnvKind::Uv);
+        assert!(before.is_stale(dir.path()), "the venv appearing is a change");
+
+        let site = if cfg!(windows) { dir.path().join(".venv/Lib/site-packages") } else { dir.path().join(".venv/lib/python3.13/site-packages") };
+        std::fs::create_dir_all(&site).unwrap();
+        let with_site = environment_stamp(dir.path(), &env);
+        // Folder times can be coarse; wait until a new package would
+        // really land in a later tick.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::create_dir(site.join("humanize")).unwrap();
+        assert!(with_site.packages.is_some());
+        assert!(with_site.is_stale(dir.path()), "a package installed is a change");
     }
 
     #[test]

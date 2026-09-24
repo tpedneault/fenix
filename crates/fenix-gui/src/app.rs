@@ -1579,6 +1579,21 @@ struct LspSession {
     /// "remember what I asked" side channel. Removed once answered
     /// (or once the connection that would have answered it is gone).
     pending: HashMap<i64, PendingLspRequest>,
+    /// For a Python server: the environment it was last told about and
+    /// the stamp it had then -- `refresh_python_environments` tells it
+    /// again when the stamp moves (a package added, the venv created).
+    python_env: Option<fenix_lsp::per_language::python::EnvironmentStamp>,
+}
+
+/// Tells a Python server which interpreter the project uses (so it
+/// looks in that venv's `site-packages`), and remembers the stamp it
+/// was told at.
+fn push_python_environment(session: &mut LspSession) {
+    use fenix_lsp::per_language::python;
+    let env = python::resolve(&session.root);
+    session.python_env = Some(python::environment_stamp(&session.root, &env));
+    let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
+    let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -8315,7 +8330,7 @@ impl App {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new() });
+                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None });
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => { self.lsp_unavailable.insert(key); self.set_error(format!("couldn't start {} for {}: {err}", spec.executable, cwd.display())); },
@@ -8405,10 +8420,10 @@ impl App {
                         // client never declared `workspace/configuration`
                         // pull support, so a push right after `initialized`
                         // is the one required step, not just an optimization.
+                        // Pushed again whenever the environment changes --
+                        // see `refresh_python_environments`.
                         if language.language == fenix_syntax::LanguageId::Python {
-                            let env = fenix_lsp::per_language::python::resolve(&session.root);
-                            let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
-                            let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
+                            push_python_environment(session);
                         }
                     }
                     // Now that the session is actually initialized,
@@ -16676,6 +16691,23 @@ impl App {
     /// window regains focus. Both are needed: focus catches editing in
     /// another application, and the timer catches Fenix's own terminal
     /// panel, which never takes focus away from the window at all.
+    /// Tells each Python language server about its environment again
+    /// when it has changed since the last time: `uv add`/`uv sync` (from
+    /// the terminal, a task, the wizard or the doctor's fix) installing
+    /// or removing a package, or the venv being created after the server
+    /// started. pyright doesn't watch `site-packages`, and a new
+    /// `workspace/didChangeConfiguration` is what makes it look again.
+    fn refresh_python_environments(&mut self) {
+        for (key, session) in &mut self.lsp_sessions {
+            if key.language != fenix_syntax::LanguageId::Python || session.capabilities.is_none() {
+                continue;
+            }
+            if session.python_env.as_ref().is_some_and(|last| last.is_stale(&session.root)) {
+                push_python_environment(session);
+            }
+        }
+    }
+
     pub(crate) fn poll_files_changed_on_disk(&mut self) {
         let _profile = crate::profile::Scope::new("poll disk");
         // Advance the maintenance deadline even when watching is disabled.
@@ -16687,6 +16719,7 @@ impl App {
         self.snapshot_dirty_buffers();
         self.checkpoint_session();
         self.tick_home();
+        self.refresh_python_environments();
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -45189,6 +45222,40 @@ configure_board stm32
         assert!(app.pdf_search_source.is_empty());
     }
 
+    #[test]
+    fn a_python_server_is_told_again_when_the_venv_changes() {
+        let dir = TempDir::new("python_env_refresh");
+        dir.write("pyproject.toml", "[project]
+name = \"orbit\"
+");
+        dir.write("uv.lock", "");
+        let path = dir.write("main.py", "import pandas
+");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = LspKey { language: fenix_syntax::LanguageId::Python, root: tool_sessions::lsp_root_for_path(&path) };
+        let (program, args) = echo_command("fixture");
+        let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
+        let mut session = LspSession {
+            generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
+            capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
+        };
+        push_python_environment(&mut session);
+        app.lsp_sessions.insert(key.clone(), session);
+        let first = app.lsp_sessions[&key].python_env.clone().unwrap();
+
+        app.refresh_python_environments();
+        assert_eq!(app.lsp_sessions[&key].python_env.as_ref(), Some(&first), "nothing changed: not told again");
+
+        // `uv sync` creates the venv after the server started.
+        let exe = if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" };
+        dir.write(exe, "");
+        assert!(first.is_stale(&key.root));
+        app.refresh_python_environments();
+        let second = app.lsp_sessions[&key].python_env.clone().unwrap();
+        assert_ne!(second, first, "told about the new venv");
+        assert!(!second.is_stale(&key.root));
+    }
+
     fn project_scope_fixture(name: &str) -> (TempDir, PathBuf) {
         let dir = TempDir::new(name);
         dir.write(".fenix/project.ini", "");
@@ -45203,7 +45270,7 @@ configure_board stm32
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(),
+            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
         });
         key
     }

@@ -782,7 +782,11 @@ for anyone curious to poke around or build on it.
   and JavaScript/TypeScript/TSX
   ([`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)) --
   anything else (or an override for one of these) via a `[lsp]` command
-  you configure -- see [Configuration](#configuration). Live
+  you configure -- see [Configuration](#configuration). A Python server
+  is pointed at the project's environment (uv's `.venv`, Poetry's, a
+  plain `venv`, else the `python` on PATH) and told again whenever it
+  changes -- `uv add`, `uv sync` or a venv created after the server
+  started -- so new packages resolve without a restart. Live
   diagnostics (inline severity-colored markup, modeline error/warning
   counts), `gd` go-to-definition, `gr` find-references (populates the
   quickfix list -- `SPC p n`/`SPC p N` steps through it the same way a
