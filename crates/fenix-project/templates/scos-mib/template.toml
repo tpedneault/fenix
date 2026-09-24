@@ -1,0 +1,215 @@
+[template]
+name = "SCOS-2000 MIB workspace"
+kind = "mib"
+group = "Mission"
+description = "An ICD 7.2 MIB database as tab-separated .dat tables under mib/, a Tcl procedures folder, and the database registered for SPC m lookups."
+
+[[ask]]
+key = "label"
+label = "Label"
+default = "{{name}}"
+hint = "how SPC m t / SPC m k name this database"
+
+[[ask]]
+key = "icd"
+label = "ICD"
+choices = ["7.2"]
+default = "7.2"
+hint = "the Database Import ICD version Fenix reads"
+
+[[ask]]
+key = "tables"
+label = "Tables"
+many = ["telecommands", "telemetry", "calibrations", "monitoring", "sequences"]
+default = ["telecommands", "telemetry", "calibrations"]
+
+[[ask]]
+key = "register"
+label = "Register"
+default = true
+hint = "add mib/ as a [mib] root in config.ini"
+
+[[ask]]
+key = "procedures"
+label = "Procedures"
+default = true
+hint = "a procedures/ folder for Tcl telecommand scripts"
+
+[[file]]
+path = "mib/vdf.dat"
+content = "{{label}}\t{{name}}\n"
+
+[[file]]
+path = ".fenix/project.ini"
+content = "[project]\nkind = mib\n"
+
+[[file]]
+path = "procedures/{{name_snake}}.tcl"
+from = "procedures/main.tcl"
+when = "procedures"
+
+[[hook]]
+kind = "mib-root"
+path = "mib"
+label = "{{label}}"
+when = "register"
+
+[[file]]
+path = "mib/ccf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/cdf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/cpc.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/cca.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/ccs.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/paf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/pas.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/prf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/prv.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/tcp.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/pcdf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/pcpc.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/dst.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "mib/pid.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/pic.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/tpcf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/pcf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/plf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/vpd.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "mib/caf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/cap.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/txf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/txp.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/mcf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/lgf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mib/ocf.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "mib/ocp.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "mib/cur.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "mib/csf.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "mib/csp.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "mib/css.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "mib/sdf.dat"
+content = ""
+when = "tables == sequences"

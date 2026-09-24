@@ -10,7 +10,7 @@ const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", 
 /// after the folder itself -- the one rule the Arduino tools hold every
 /// sketch to. A sketch inside a larger repository is its own project, so
 /// a class repo with one folder per lab gets one root per lab.
-fn is_sketch(dir: &Path) -> bool {
+pub(crate) fn is_sketch(dir: &Path) -> bool {
     if dir.join("sketch.yaml").is_file() {
         return true;
     }

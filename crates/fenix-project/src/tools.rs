@@ -122,16 +122,22 @@ impl ProjectTools {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
-        let result: Self = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Parses and validates `tools.json` text -- `read`'s checks, for
+    /// text that isn't on disk yet (a template's generated file).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let result: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
         for (name, command) in result.lsp.iter().chain(&result.dap).chain(&result.tasks) {
             if name.trim().is_empty() {
-                return Err(format!("{}: empty tool name", path.display()));
+                return Err("empty tool name".to_string());
             }
-            command.validate().map_err(|e| format!("{} ({name}): {e}", path.display()))?;
+            command.validate().map_err(|e| format!("({name}): {e}"))?;
         }
         let launch_check =
             CommandSpec { executable: "launch".into(), args: result.launch.args.clone().unwrap_or_default(), cwd: result.launch.cwd.clone(), env: result.launch.env.clone() };
-        launch_check.validate().map_err(|e| format!("{} (launch): {e}", path.display()))?;
+        launch_check.validate().map_err(|e| format!("(launch): {e}"))?;
         Ok(result)
     }
 }

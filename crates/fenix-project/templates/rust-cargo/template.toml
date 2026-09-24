@@ -1,0 +1,26 @@
+[template]
+name = "Rust · cargo"
+kind = "rust"
+group = "Languages"
+description = "A cargo package, created by cargo init so it matches the installed toolchain."
+needs = ["cargo"]
+
+[[ask]]
+key = "crate_type"
+label = "Crate"
+choices = ["bin", "lib"]
+default = "bin"
+
+[[run]]
+exec = "cargo"
+args = ["init", "--{{crate_type}}", "--name", "{{name_snake}}", "--vcs", "none"]
+
+[[task]]
+name = "test"
+exec = "cargo"
+args = ["test"]
+
+[[task]]
+name = "clippy"
+exec = "cargo"
+args = ["clippy", "--all-targets"]
