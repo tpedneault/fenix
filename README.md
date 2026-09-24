@@ -51,7 +51,7 @@ for anyone curious to poke around or build on it.
 - **Jumplist** (`Ctrl-O`/`Ctrl-I`): back/forward through recent cursor
   positions, recorded on `gg`/`G`/`%`/a confirmed search/`*`/`#` and on
   jumping to a symbol definition, a grep match, a quickfix entry, or a
-  mark -- so jumping to a definition (`SPC c s`), a search hit
+  mark -- so jumping to a Tcl definition (`SPC m s`), a search hit
   (`SPC p s`), or a mark (`` `a ``) and hitting `Ctrl-O` takes you right
   back, even across files. A single global back/forward pair of stacks
   (like a browser's history), not real Vim's per-window circular list --
@@ -89,7 +89,7 @@ for anyone curious to poke around or build on it.
   `it`/`at` select a tag's contents or the whole element (real Vim's
   text objects, textual, so they work in any file); `gcc` wraps lines in
   `<!-- -->` (Markdown too); multi-line elements fold (`SPC c z`), appear
-  in `SPC c s` and the breadcrumbs; `SPC c o` is an element outline
+  in the breadcrumbs (`SPC c b`); `SPC c o` is an element outline
   labeled with each element's `id`/`name`/`key`; `SPC c F`/`SPC c f`
   reindent by element depth; `SPC c v` checks well-formedness and jumps
   to the first error (saving a malformed XML file also says so); `SPC c
@@ -723,7 +723,11 @@ for anyone curious to poke around or build on it.
   installed as an npm-style `.cmd` shim (`typescript-language-server`,
   `bash-language-server`, and most other JS-ecosystem tooling) launches
   correctly despite `PATH` resolution quirks Rust's own process-spawning
-  otherwise has no answer for.
+  otherwise has no answer for. A server that asks for incremental sync
+  gets each edit as one ranged change rather than the whole document
+  (some, like `arduino-language-server`, accept nothing else). Inside an
+  Arduino sketch, C/C++ files go to `arduino-language-server` instead of
+  plain `clangd` (see the Arduino bullet).
 - **Build/task runner**: `SPC p t` fuzzy-picks a task discovered from the
   focused buffer's project root -- built-in defaults for whichever
   ecosystem markers are present (`cargo build`/`test`/`clippy` for a
@@ -783,7 +787,7 @@ for anyone curious to poke around or build on it.
   Fenix never downloads or manages a tool binary itself, the same
   posture the debugger bullet above already takes for adapters it
   doesn't have.
-- **Symbol picker**: `SPC c s` opens a fuzzy-find popup listing every
+- **Symbol picker**: `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
   autocompletion draws on -- confirming a selection opens the file it's
@@ -801,7 +805,38 @@ for anyone curious to poke around or build on it.
   result. `SPC` reaches the leader menu from Visual mode as well as
   Normal for this reason, so `SPC c f` can act on a selection without
   leaving it first.
-- **SCOS-2000 MIB** (`SPC m ...`): fuzzy-find and inspect telecommands
+- **Mode menu** (`SPC m`): a menu whose contents depend on what you're
+  working in, like Doom Emacs' local leader -- the focused buffer's
+  project first, then its language, merged when both apply (the more
+  specific one wins a shared key). Arduino sketches get the Arduino
+  commands below; Tcl files get the MIB commands plus Tcl's symbol
+  picker (`SPC m s`) and tag refresh (`SPC m T`). The status line names
+  the menu that opened; a buffer with no menu says so. Every other
+  `SPC` key is the same everywhere.
+- **Arduino** (`SPC m ...` in a sketch): Arduino projects through
+  [Arduino CLI](https://arduino.github.io/arduino-cli/), the engine the
+  Arduino IDE uses. `SPC m b` builds and `SPC m u` uploads through the
+  task runner, so compiler errors point at the real `.ino` line and land
+  in the quickfix list. `SPC m m` opens a serial monitor in a terminal
+  pane (type a line and `Enter` to send it); uploading stops it and
+  restarts it afterwards, since only one program can hold the port, and
+  `SPC m B` sets its speed. `SPC m s` / `SPC m o` / `SPC m p` pick the
+  board, its options (a Nano's "Old Bootloader" processor, say) and the
+  port -- a single recognized board is found and used on its own.
+  `SPC m l` installs from the whole Arduino library index, `SPC m c`
+  installs board packages, and `SPC m i` shows the board, port, speed
+  and whether completion is ready. `SPC f n` creates a sketch from
+  anywhere. The board and port live in the sketch's own `sketch.yaml`,
+  so the Arduino IDE and `arduino-cli` agree with Fenix; the modeline
+  shows them (`nano · COM4`). Completion, live errors and hover come
+  from `arduino-language-server`, which understands `.ino` files the way
+  the Arduino builder does and completes from the board's core and every
+  included library. `SPC m d` debugs boards that support it (flashing a
+  debug build and opening Arduino CLI's GDB console) and says why when
+  one can't -- AVR boards (Uno, Nano, Mega) have no debug interface.
+  Built behind a platform interface (`fenix-embedded`), so another
+  family such as STM32 can be added with the same keys and panes.
+- **SCOS-2000 MIB** (`SPC m ...` in a Tcl file): fuzzy-find and inspect telecommands
   (`SPC m t`), TM packets (`SPC m k`), TM parameters (`SPC m p`), and
   calibration definitions (`SPC m c`, numeric curves/status
   enumerations/range checks) from one or more configured MIB directories
@@ -916,7 +951,7 @@ and degrade gracefully (never a hard error) if they're not:
   search (`SPC p s`).
 - [`git`](https://git-scm.com/) — git-status badges in the file explorer.
 - [`Universal Ctags`](https://ctags.io/) (`ctags`) — project-definition
-  completion for Tcl (`SPC c s`, `SPC c T`). If it's missing, exits
+  completion for Tcl (`SPC m s`, `SPC m T` in a Tcl file). If it's missing, exits
   non-zero, or produces output this parser doesn't recognize, the
   reason is logged to stderr rather than just silently yielding no
   definitions — check the terminal Fenix was launched from.
@@ -928,6 +963,19 @@ and degrade gracefully (never a hard error) if they're not:
   Podman) works too, indistinguishably. With neither on `PATH` (or an
   unreachable daemon) the panel just shows an empty listing instead of
   failing.
+
+- [`arduino-cli`](https://arduino.github.io/arduino-cli/) — Arduino
+  sketches (`SPC m ...` in a sketch). Found on `PATH`, in its installer's
+  default location, or at `[embedded] arduino_cli`. Each board also
+  needs its board package installed once (`SPC m c`, or `arduino-cli
+  core install arduino:avr` for the Uno/Nano/Mega).
+- [`arduino-language-server`](https://github.com/arduino/arduino-language-server)
+  and Arduino's build of [`clangd`](https://github.com/arduino/clang-static-binaries)
+  — completion and live errors in sketches. Looked for in Fenix's tools
+  folder (`tools` next to `config.ini`, each in its own subfolder as its
+  release archive unpacks), on `PATH`, and inside an Arduino IDE 2
+  install; `[embedded]` can point at them instead. Without them, sketches
+  still build, upload and monitor; `SPC m i` says what's missing.
 
 The PDF viewer (`SPC r ...`) needs a native library rather than a
 `PATH` executable, so it's set up once by hand rather than
@@ -968,6 +1016,7 @@ popup shows what keys continue it.
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
 | `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
+| `SPC f n` | Create a new Arduino sketch |
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
 | `SPC f R` | Rename the current file on disk |
@@ -1084,22 +1133,35 @@ popup shows what keys continue it.
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
 | `SPC c a` | Choose a code action and preview its edits (LSP) |
-| `SPC c T` | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |
 | `SPC c F` | Indent region -- reindent the whole focused buffer structurally, or (with an attached language server) reformat it (LSP) |
-| `SPC c s` | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC c x` | Toggle the GFM task checkbox (`- [ ]`/`- [x]`) on the current line |
 | `SPC c o` | Fuzzy-find a Markdown heading, or an XML element, and jump to it |
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
-| `SPC m i` | Build and insert a telecommand from the MIB |
-| `SPC m t` | Fuzzy-find a MIB telecommand and view its details |
-| `SPC m k` | Fuzzy-find a MIB TM packet and view its details |
-| `SPC m p` | Fuzzy-find a MIB TM parameter and view its details |
-| `SPC m c` | Fuzzy-find a MIB calibration definition and view its details |
-| `SPC m r` | Reparse the configured MIB directories from disk |
-| `SPC m a` | Browse to and register a new MIB root directory |
-| `SPC m d` | Fuzzy-find and remove a configured MIB root |
+| `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
+| `SPC m i` (Tcl) | Build and insert a telecommand from the MIB |
+| `SPC m t` (Tcl) | Fuzzy-find a MIB telecommand and view its details |
+| `SPC m k` (Tcl) | Fuzzy-find a MIB TM packet and view its details |
+| `SPC m p` (Tcl) | Fuzzy-find a MIB TM parameter and view its details |
+| `SPC m c` (Tcl) | Fuzzy-find a MIB calibration definition and view its details |
+| `SPC m r` (Tcl) | Reparse the configured MIB directories from disk |
+| `SPC m a` (Tcl) | Browse to and register a new MIB root directory |
+| `SPC m d` (Tcl) | Fuzzy-find and remove a configured MIB root |
+| `SPC m s` (Tcl) | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
+| `SPC m T` (Tcl) | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
+| `SPC m b` (Arduino) | Build (verify) the sketch |
+| `SPC m u` (Arduino) | Build and upload to the board; the serial monitor steps aside and comes back |
+| `SPC m m` (Arduino) | Open the serial monitor |
+| `SPC m B` (Arduino) | Choose the serial monitor's speed |
+| `SPC m p` (Arduino) | Choose the port |
+| `SPC m s` (Arduino) | Choose the board |
+| `SPC m o` (Arduino) | Choose the board's options (processor, clock, ...) |
+| `SPC m l` (Arduino) | Install a library from the Arduino library index |
+| `SPC m c` (Arduino) | Install a board package |
+| `SPC m d` (Arduino) | Debug, on boards that support it |
+| `SPC m n` (Arduino) | New sketch next to this one |
+| `SPC m i` (Arduino) | Show the board, port, speed and whether completion is ready |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
 | `SPC w h/j/k/l` | Move focus between windows -- and across OS windows, by where they sit on the desktop |
 | `SPC w w` | Cycle to the next window |
@@ -1519,6 +1581,9 @@ symbols_file = /home/you/tcl-symbols.txt
 server1 = python|C:\Users\you\.local\bin\pyright-langserver.exe --stdio
 server2 = rust|rust-analyzer
 
+[embedded]
+arduino_cli = C:\Program Files\Arduino CLI\arduino-cli.exe
+
 [mib]
 root1 = MIB-A|C:\data\mib-a
 root2 = MIB-B|C:\data\mib-b
@@ -1571,8 +1636,11 @@ window2 = 4480,0,1920,1040|true
 | `editor` | `animations` | `true`/`false` -- whether caret-fade, scroll-ease, and yank/paste-pulse animations play at all; unset defaults to `true`. `SPC t a` toggles and persists this live |
 | `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
 | `lsp` | `server1`, `server2`, ... | A language server to launch, as `LANGUAGE\|COMMAND` (numbered, same reason as `mib`'s roots) -- `LANGUAGE` is one of `python`, `rust`, `c`, `cpp`, `bash`, `javascript`, `typescript`, `tsx`, ...; `COMMAND` is the program plus arguments, split on whitespace (no shell-quoting support). Overrides the built-in default for that language if one exists (`python` → `pyright-langserver --stdio`, `rust` → `rust-analyzer`, `c`/`cpp` → `clangd`, `bash` → `bash-language-server start`, `javascript`/`typescript`/`tsx` → `typescript-language-server --stdio`); required for every other language |
+| `embedded` | `arduino_cli` | Path to `arduino-cli`, when it isn't on `PATH` or in its installer's default location |
+| `embedded` | `clangd` | Path to the `clangd` the Arduino language server runs (Arduino's own build) |
+| `embedded` | `arduino_language_server` | Path to `arduino-language-server`, for completion in sketches, when it isn't in Fenix's tools folder, on `PATH` or in an Arduino IDE 2 install |
 | `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
-| `mib` | `telecommand_template` | Template used when `SPC m i` inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
+| `mib` | `telecommand_template` | Template used when `SPC m i` (in a Tcl file) inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
 | `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
 | `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
 | `documents` | `doc1`, `doc2`, ... | One entry in the `SPC r f` document index, as `NAME\|PATH` (numbered, same reason as `mib`'s roots). `NAME` is what the picker lists and fuzzy-matches; `PATH` can be any file Fenix opens, PDF or not |
@@ -1632,7 +1700,8 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
 | `fenix-completion` | Completion sources: Tcl keywords, ctags-scanned definitions, external symbols file |
 | `fenix-format` | Structural, language-independent reindentation (bracket-nesting depth) — `SPC c f`/`SPC c F` |
-| `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` |
+| `fenix-mib` | SCOS-2000 MIB parsing (ICD 7.2) and telecommand/TM-packet/TM-parameter/calibration queries — `SPC m ...` in Tcl files |
+| `fenix-embedded` | Microcontroller projects behind a `Platform` trait (Arduino, via `arduino-cli`, today): sketch detection, build/upload/monitor/language-server commands, board/port/library/package queries, tool discovery — no thread/event-loop knowledge of its own |
 | `fenix-table` | Pure layout math for a delimited table (row parsing, per-column widths, tab-stop positions) — feeds `fenix-gui`'s elastic-column table view, `SPC f t` |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-diff` | Unified-diff parsing (files/hunks/lines, both sides' line numbers) and single-hunk patch synthesis — pure, no I/O; what hunk staging and diff rendering are both built on |
