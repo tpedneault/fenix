@@ -859,6 +859,19 @@ mod tests {
     }
 
     #[test]
+    fn spc_g_q_closes_the_git_page_in_front() {
+        let repo = Repo::new("close-view");
+        let mut app = app_on(&repo, "a.txt");
+        app.open_git_status();
+        let page = app.focused_buffer_id();
+        assert!(app.is_page_buffer(page));
+        app.close_git_view();
+        assert!(!app.pages.contains_key(&page), "closed");
+        app.close_git_view();
+        assert_eq!(app.status_message.as_ref().map(|m| m.text.as_str()), Some("no Git view in front to close"));
+    }
+
+    #[test]
     fn opening_it_again_reuses_the_page() {
         let repo = Repo::new("reuse");
         let mut app = app_on(&repo, "a.txt");

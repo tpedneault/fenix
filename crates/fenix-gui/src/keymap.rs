@@ -307,62 +307,52 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('l')], "lsp");
         t.insert(&[spc, KeyPress::char('l'), KeyPress::char('m')], "tool status", "tools.status");
 
-        // Lazygit-style Git panel.
+        // Git. The status page (`g`) is the hub and has its own keys for
+        // most of what's done to a repository; these are the ways in,
+        // and what's done from the file being edited.
         t.label_group(&[spc, KeyPress::char('g')], "git");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "open git panel", "git.open");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
-        // Purpose-built views rather than more panes on one panel: the
-        // working tree and the history answer different questions.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log (history that acts)", "git.log");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "status page", "git.open");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log", "git.log");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('H')], "these lines' history", "git.line_history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('L')], "close history", "git.history_close");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch (--all --prune)", "git.fetch");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('C')], "close compare", "git.compare_close");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
-        // The hunk under the cursor, in the file being edited -- `]h`/`[h`
-        // move between them.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", "git.fetch");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull --rebase", "git.pull_rebase");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('r')], "rebase onto...", "git.rebase");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('m')], "merge...", "git.merge");
+        // `M`, not `m` -- `SPC g m` is the merge *operation*, and the two
+        // are asked for in completely different moods.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('P')], "open a pull request", "git.pull_request");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('M')], "reviews", "git.merge_requests");
+        // The file being edited: its hunks (`]h`/`[h` move between them)
+        // and its blame.
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('a')], "stage hunk", "git.hunk_stage");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('d')], "discard hunk", "git.hunk_discard");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('i')], "preview hunk", "git.hunk_preview");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('B')], "blame", "git.blame");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('e')], "explain this line", "git.blame_explain");
-
-        // Operations that rewrite history, and the two keys that end one
-        // that stopped for a conflict. `R`/`A` are deliberately one pair
-        // for every kind of suspended operation -- from the user's side
-        // it's one question ("keep going" / "put it back"), and the
-        // Status banner names which operation is answering.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('r')], "rebase onto...", "git.rebase");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('R')], "continue", "git.continue");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('A')], "abort", "git.abort");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('m')], "merge...", "git.merge");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull --rebase", "git.pull_rebase");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('F')], "force-push (lease)", "git.force_push");
-
-        // Conflict resolution, on whichever file is focused.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('j')], "next conflict", "git.next_conflict");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('k')], "prev conflict", "git.prev_conflict");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('o')], "keep ours", "git.keep_ours");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('t')], "keep theirs", "git.keep_theirs");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('b')], "keep both", "git.keep_both");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('s')], "stage resolved", "git.stage_resolved");
-
-        // The Merge view -- the conflicted files, and whichever one is
-        // selected shown as two columns under the names of the branches
-        // they actually came from.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x')], "resolve conflicts", "git.merge_view");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('X')], "close conflicts", "git.merge_close");
-
-        // GitLab merge requests. `M`, not `m` -- `SPC g m` is the merge
-        // *operation*, and the two are asked for in completely
-        // different moods.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('M')], "merge requests", "git.merge_requests");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('P')], "open a pull request", "git.pull_request");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('Q')], "close merge requests", "git.merge_requests_close");
+        // A merge or rebase that stopped: resolving the conflicts, and the
+        // two keys that end it. `c`/`a` are one pair for every kind of
+        // suspended operation -- from the user's side it's one question
+        // ("keep going" / "put it back"), and the banner names which
+        // operation is answering.
+        t.label_group(&[spc, KeyPress::char('g'), KeyPress::char('x')], "conflicts");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('x')], "resolve side by side", "git.merge_view");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('j')], "next conflict", "git.next_conflict");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('k')], "prev conflict", "git.prev_conflict");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('o')], "keep ours", "git.keep_ours");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('t')], "keep theirs", "git.keep_theirs");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('b')], "keep both", "git.keep_both");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('s')], "stage resolved", "git.stage_resolved");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('c')], "continue", "git.continue");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('a')], "abort", "git.abort");
+        // One key closes whichever Git view is in front -- the panels,
+        // the graph, a comparison, the conflicts view, the older merge
+        // request view -- rather than one each.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close this git view", "git.close_view");
 
         // Jira dashboard -- read-only browsing this phase (see the Jira
         // dashboard plan's own scope notes). `p`/`u` add/delete letters
@@ -539,6 +529,32 @@ mod tests {
     #[test]
     fn describe_keypress_formats_named_keys() {
         assert_eq!(describe_keypress(&KeyPress::named(FenixNamedKey::Escape)), "Esc");
+    }
+
+    #[test]
+    fn spc_g_is_short_and_conflicts_have_a_group_of_their_own() {
+        let trie = leader_trie();
+        let mut m = trie.matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('g'));
+        let listed = m.pending_children();
+        assert!(listed.len() <= 22, "{} entries under SPC g: {listed:?}", listed.len());
+        let resolve = |keys: &str| {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            let mut last = None;
+            for c in keys.chars() {
+                if let fenix_keymap::Step::Matched(action) = m.feed(KeyPress::char(c)) {
+                    last = Some(*action);
+                }
+            }
+            last
+        };
+        assert_eq!(resolve("gxx"), Some("git.merge_view"));
+        assert_eq!(resolve("gxc"), Some("git.continue"));
+        assert_eq!(resolve("gxo"), Some("git.keep_ours"));
+        assert_eq!(resolve("gq"), Some("git.close_view"));
+        assert_eq!(resolve("gP"), Some("git.pull_request"));
     }
 
     #[test]

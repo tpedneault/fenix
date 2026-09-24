@@ -1799,7 +1799,7 @@ struct GitSession {
     /// real Lazygit-accurate behavior, not a simplification).
     status: Option<fenix_git::RepoStatus>,
     /// A suspended rebase/merge/cherry-pick, if the repo is in one --
-    /// what the Status pane's banner reports and what `SPC g R`/`SPC g A`
+    /// what the Status pane's banner reports and what `SPC g x c`/`SPC g x a`
     /// act on.
     in_progress: Option<fenix_git::InProgress>,
     /// Which branch each side of a conflict's markers actually is,
@@ -1926,7 +1926,7 @@ enum GitConfirmAction {
     DiscardDir { path: String },
     DeleteBranch { name: String },
     DropStash { index: usize },
-    /// Rewrite a published branch (`SPC g F`). Always
+    /// Rewrite a published branch (`git.force_push`). Always
     /// `--force-with-lease`, but still confirmed: it changes history
     /// someone else may already have.
     ForcePush,
@@ -15913,7 +15913,7 @@ impl App {
         // can't be staged at all -- resolving the conflict is what
         // stages it.
         if model.files.get(anchor.file).is_some_and(|f| f.is_combined) {
-            self.set_error("this file is conflicted -- resolve it (SPC g o/t/b) rather than staging a hunk".to_string());
+            self.set_error("this file is conflicted -- resolve it (SPC g x o/t/b) rather than staging a hunk".to_string());
             return;
         }
         let allowed = match (model.source, target) {
@@ -16564,7 +16564,7 @@ impl App {
         match result {
             Ok(_) => self.set_message(format!("{what} finished")),
             Err(err) => match fenix_git::in_progress(&repo_root) {
-                Some(op) => self.set_error(format!("{} -- resolve the conflicts, then SPC g R to continue", op.label())),
+                Some(op) => self.set_error(format!("{} -- resolve the conflicts, then SPC g x c to continue", op.label())),
                 None => self.set_error(format!("{what} failed: {}", err.trim().lines().next().unwrap_or("").trim())),
             },
         }
@@ -17572,7 +17572,7 @@ impl App {
         }
     }
 
-    /// `SPC g Q`: closes the Merge Requests view.
+    /// `SPC g q` (in its workspace): closes the Merge Requests view.
     pub(crate) fn forge_close(&mut self) {
         let Some(session) = self.forge_session.take() else { return };
         for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
@@ -17795,7 +17795,7 @@ impl App {
 
     // -- Merge view (`SPC g x`) --------------------------------------------
 
-    /// `SPC g x`: opens (or refocuses and refreshes) the Merge view --
+    /// `SPC g x x`: opens (or refocuses and refreshes) the Merge view --
     /// every conflicted file on the left, the selected one shown as two
     /// aligned columns on the right.
     pub(crate) fn open_merge_view(&mut self) {
@@ -18036,7 +18036,7 @@ impl App {
             .or_else(|| lines.iter().skip(line).flatten().find_map(|l| l.conflict))
     }
 
-    /// `SPC g o`/`t`/`b` inside the Merge view: resolve the conflict
+    /// `SPC g x o`/`t`/`b` inside the Merge view: resolve the conflict
     /// under the cursor, on disk, and re-render.
     ///
     /// Writes the file rather than a buffer because the Merge pane isn't
@@ -18070,7 +18070,7 @@ impl App {
         };
         let left = fenix_git::find_conflicts(&resolved).len();
         self.set_message(if left == 0 {
-            format!("kept {kept} -- {path} is resolved, SPC g s stages it")
+            format!("kept {kept} -- {path} is resolved, SPC g x s stages it")
         } else {
             format!("kept {kept} -- {left} conflict(s) left in {path}")
         });
@@ -18080,7 +18080,7 @@ impl App {
         true
     }
 
-    /// `SPC g X`: closes the Merge view.
+    /// `SPC g q` (in its workspace): closes the Merge view.
     pub(crate) fn merge_close(&mut self) {
         let Some(session) = self.merge_session.take() else { return };
         for id in [session.files_buffer, session.merge_buffer] {
@@ -18139,7 +18139,7 @@ impl App {
         self.run_git_operation(&format!("merge {branch}"), result);
     }
 
-    /// `SPC g R`: carries on whichever operation is suspended.
+    /// `SPC g x c`: carries on whichever operation is suspended.
     ///
     /// One key for all of them because from the user's side it's one
     /// question -- "I've fixed it, keep going" -- and having to remember
@@ -18170,7 +18170,7 @@ impl App {
         self.run_git_operation("continue", result);
     }
 
-    /// `SPC g A`: abandons whichever operation is suspended, putting the
+    /// `SPC g x a`: abandons whichever operation is suspended, putting the
     /// tree back where it started.
     pub(crate) fn git_operation_abort(&mut self) {
         let repo_root = self.git_action_repo_root();
@@ -18197,7 +18197,7 @@ impl App {
         self.run_git_operation("pull --rebase", result);
     }
 
-    /// `SPC g F`: push after a rebase rewrote history.
+    /// `git.force_push`: push after a rebase rewrote history.
     ///
     /// Always `--force-with-lease`: it refuses if the remote moved since
     /// the last fetch, so it can't silently discard someone else's work.
@@ -18217,7 +18217,7 @@ impl App {
         fenix_git::find_conflicts(&self.open().buffer.text())
     }
 
-    /// `SPC g j`/`SPC g k`: move to the next/previous conflict in the
+    /// `SPC g x j`/`SPC g x k`: move to the next/previous conflict in the
     /// focused file.
     pub(crate) fn goto_conflict(&mut self, forward: bool) {
         if self.merge_goto_conflict(forward) {
@@ -18241,7 +18241,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g j`/`SPC g k` inside the Merge view: jump to the next or
+    /// `SPC g x j`/`SPC g x k` inside the Merge view: jump to the next or
     /// previous conflict's separator row. Returns whether it applied,
     /// so the plain-buffer path can take over when it didn't.
     fn merge_goto_conflict(&mut self, forward: bool) -> bool {
@@ -18277,7 +18277,7 @@ impl App {
         true
     }
 
-    /// `SPC g o`/`SPC g t`/`SPC g b`: resolve the conflict under the
+    /// `SPC g x o`/`t`/`b`: resolve the conflict under the
     /// cursor by keeping ours, theirs, or both.
     ///
     /// Edits the buffer rather than the file on disk, so it lands in the
@@ -18709,7 +18709,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g C`: closes the Compare view.
+    /// `SPC g q` (in its workspace): closes the Compare view.
     pub(crate) fn compare_close(&mut self) {
         let Some(session) = self.compare_session.take() else { return };
         for id in [session.commits_buffer, session.diff_buffer] {
@@ -18727,7 +18727,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g L`: closes the History view.
+    /// `SPC g q` (in its workspace): closes the History view.
     pub(crate) fn history_close(&mut self) {
         let Some(session) = self.history_session.take() else { return };
         for id in [session.graph_buffer, session.refs_buffer, session.detail_buffer] {
@@ -18764,7 +18764,30 @@ impl App {
         }
     }
 
-    /// `SPC g q`: closes the whole Git session -- mirrors
+    /// `SPC g q`: closes whichever Git view the focused workspace holds
+    /// -- a panel view, or a Git page.
+    pub(crate) fn close_git_view(&mut self) {
+        let here = self.workspaces.active_index();
+        let panes = self.windows().windows();
+        if self.history_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.history_close();
+        } else if self.compare_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.compare_close();
+        } else if self.merge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.merge_close();
+        } else if self.forge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.forge_close();
+        } else if self.git_session.as_ref().is_some_and(|s| panes.contains(&s.status_pane)) {
+            self.git_session_close();
+        } else if self.is_page_buffer(self.focused_buffer_id()) {
+            let id = self.focused_buffer_id();
+            self.close_page(id);
+        } else {
+            self.set_message("no Git view in front to close");
+        }
+    }
+
+    /// Closes the whole Git panel session -- mirrors
     /// `docker_session_close` exactly.
     pub(crate) fn git_session_close(&mut self) {
         let Some(session) = self.git_session.take() else { return };
@@ -39164,7 +39187,7 @@ configure_board stm32
 
         let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
         assert!(status.contains("REBASING"), "the banner has to say what's running:\n{status}");
-        assert!(status.contains("SPC g R continue"), "and how to get out of it:\n{status}");
+        assert!(status.contains("SPC g x c continue"), "and how to get out of it:\n{status}");
         assert!(status.contains("conflicted file"), "the conflict count belongs there too:\n{status}");
         // The message points at the next step rather than reading as a
         // plain failure -- a conflict is the normal middle of a rebase.
@@ -40967,7 +40990,7 @@ configure_board stm32
         app.git_rebase_onto("develop");
 
         let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
-        assert!(status.contains("SPC g x to resolve"), "the banner points at the view that explains it:\n{status}");
+        assert!(status.contains("SPC g x x to resolve"), "the banner points at the view that explains it:\n{status}");
         assert!(status.contains("ours: develop"), "got:\n{status}");
         assert!(status.contains("theirs: myfeature"), "got:\n{status}");
     }

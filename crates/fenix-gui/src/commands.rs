@@ -153,6 +153,7 @@ impl CommandRegistry {
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
         registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
+        registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
         registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
         registry.register("git.file_history", "Show the history of the focused file", cmd_git_file_history);
         registry.register("git.line_history", "Show the history of the selected lines", cmd_git_line_history);
@@ -1032,6 +1033,10 @@ fn cmd_git_blame(ctx: &mut CommandCtx) {
 
 fn cmd_git_blame_explain(ctx: &mut CommandCtx) {
     ctx.app.git_blame_explain();
+}
+
+fn cmd_git_close_view(ctx: &mut CommandCtx) {
+    ctx.app.close_git_view();
 }
 
 fn cmd_git_pull_request(ctx: &mut CommandCtx) {

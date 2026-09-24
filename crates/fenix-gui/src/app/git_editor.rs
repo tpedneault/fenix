@@ -29,7 +29,7 @@ impl ChromeGit {
     /// operation that's waiting and its keys.
     pub fn segment(&self) -> String {
         if let Some(op) = &self.op {
-            return format!("   {op} -- SPC g R continue, SPC g A abort");
+            return format!("   {op} -- SPC g x c continue, SPC g x a abort");
         }
         let mut out = format!("   {}", self.branch);
         if let Some((ahead, behind)) = self.tracking {
@@ -676,7 +676,7 @@ mod tests {
         assert!(suffix.contains("main •1"), "{suffix}");
         let mut state = app.chrome_git.clone().unwrap();
         state.op = Some("REBASING 2/3".into());
-        assert!(state.segment().contains("REBASING 2/3 -- SPC g R continue"));
+        assert!(state.segment().contains("REBASING 2/3 -- SPC g x c continue"));
         state.op = None;
         state.tracking = Some((2, 1));
         assert_eq!(state.segment(), "   main ↑2 ↓1 •1");

@@ -632,7 +632,7 @@ for anyone curious to poke around or build on it.
   selection already superseded) so scrolling through many files never
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
-- **History / commit graph** (`SPC g l`): a real commit DAG across
+- **History / commit graph** (`SPC g G`): a real commit DAG across
   *every* branch (`git log --all`), drawn the way `git log --graph`
   draws it -- two columns per lane, with a connector row below a merge
   (`|\`) and above the commit that branches converge on (`|/`), so the
@@ -655,7 +655,7 @@ for anyone curious to poke around or build on it.
   there's no upstream at all -- led by how long ago you last fetched,
   since every one of those badges is only as current as that. `SPC g f`
   fetches (`--all --prune`, so deleted remote branches actually
-  disappear and `[gone]` becomes true); `u` refreshes; `SPC g L` closes.
+  disappear and `[gone]` becomes true); `u` refreshes; `SPC g q` closes.
 - **Compare refs** (`SPC g c`): pick any two refs -- branches, remote
   branches or tags -- and see what one adds over the other: the commits
   between them beside the full diff, hunk-navigable like every other
@@ -663,7 +663,7 @@ for anyone curious to poke around or build on it.
   merge base: "what does this branch actually do", the same thing a
   merge request shows), with `t` toggling two-dot (`base..head`, every
   difference between the two trees, including what the base gained
-  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g C`
+  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g q`
   closes. The base picker leads with `[git] base_branch` from
   `config.ini`, falling back to whichever of `main`/`master` the repo
   actually has, so "how does this differ from the mainline" is two keys
@@ -671,16 +671,16 @@ for anyone curious to poke around or build on it.
   second echoes the base you already chose (`master...?`).
 - **Rebase, merge and conflicts**: `SPC g r` rebases the current branch
   onto a ref you pick, `SPC g m` merges one in, `SPC g p` pulls with
-  `--rebase`, and `SPC g F` force-pushes -- always
-  `--force-with-lease`, never a bare `--force`, so a rebase-and-push
+  `--rebase`, and a push from the Git page's push menu with `-f` is
+  always `--force-with-lease`, never a bare `--force`, so a rebase-and-push
   can't silently discard what someone else pushed in between. When one
   of those stops, the Status pane leads with a banner naming what's
-  suspended and how far it got (`REBASING 3/7 -- SPC g R continue,
-  SPC g A abort`), and lists the conflicted files as their own section;
-  `SPC g R` and `SPC g A` finish or undo whichever operation it is --
+  suspended and how far it got (`REBASING 3/7 -- SPC g x c continue,
+  SPC g x a abort`), and lists the conflicted files as their own section;
+  `SPC g x c` and `SPC g x a` finish or undo whichever operation it is --
   rebase, merge, cherry-pick or revert -- so there's one pair of keys to
-  remember rather than one per operation. In a conflicted file, `SPC g j`
-  and `SPC g k` walk the markers and `SPC g o`/`SPC g t`/`SPC g b` keep
+  remember rather than one per operation. In a conflicted file, `SPC g x j`
+  and `SPC g x k` walk the markers and `SPC g x o`/`t`/`b` keep
   ours, theirs, or both for the conflict under the cursor, markers
   removed. Anything that rewrites the working tree also re-reads the
   files you already have open, so a buffer never keeps showing what a
@@ -688,7 +688,7 @@ for anyone curious to poke around or build on it.
   written it straight back over git's conflict markers. A file with
   unsaved edits is left alone and counted in a message instead: your own
   work always outranks the refresh.
-- **Resolving conflicts** (`SPC g x`): the conflicted files on the
+- **Resolving conflicts** (`SPC g x x`): the conflicted files on the
   left, the selected one shown as **two aligned columns** on the right
   -- your side and the incoming side on the same row, with shared text
   spanning the full width so it still reads as one file. `o` keeps the
@@ -1277,37 +1277,32 @@ popup shows what keys continue it.
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
 | `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
-| `SPC g q` | Close the Git panel session |
 | `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
 | `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
-| `SPC g G` | Open the History view (commit graph, refs, commit diff) |
-| `SPC g L` | Close the History view |
-| `SPC g f` | Fetch all remotes and prune deleted branches |
+| `SPC g G` | Open the graph view (commit graph, refs, commit diff) |
 | `SPC g c` | Compare two refs (pick base, then head) |
 | `SPC g z` | The operation log -- undo what Fenix ran on the repository |
-| `]h` / `[h` | Next / previous changed hunk in the file |
-| `SPC g a` / `SPC g d` / `SPC g i` | Stage / discard / preview the hunk under the cursor |
-| `SPC g w` | Switch branch, most recently used first |
-| `SPC g B` / `SPC g e` | Blame beside the text / the commit behind this line |
-| `SPC g C` | Close the Compare view |
+| `SPC g w` / `SPC g f` / `SPC g p` | Switch branch (most recently used first) / fetch all remotes and prune / pull with `--rebase` |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
-| `SPC g p` / `SPC g F` | Pull with `--rebase` / push `--force-with-lease` |
-| `SPC g R` / `SPC g A` | Continue / abort the suspended operation |
-| `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
-| `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
-| `SPC g x` / `SPC g X` | Open / close the Merge view (conflicts side by side) |
 | `SPC g P` | Open a pull request for this branch, prefilled from its commits |
 | `SPC g M` | The review inbox (the older Merge Requests view with `[git] layout = panes`) |
+| `]h` / `[h` | Next / previous changed hunk in the file |
+| `SPC g a` / `SPC g d` / `SPC g i` | Stage / discard / preview the hunk under the cursor |
+| `SPC g B` / `SPC g e` | Blame beside the text / the commit behind this line |
+| `SPC g x x` | Resolve conflicts side by side (the Merge view) |
+| `SPC g x j` / `SPC g x k` | Next / previous conflict in the focused file |
+| `SPC g x o` / `t` / `b` | Keep ours / theirs / both for the conflict under the cursor |
+| `SPC g x s` | Stage the conflicted file as resolved |
+| `SPC g x c` / `SPC g x a` | Continue / abort the suspended rebase, merge, cherry-pick or revert |
+| `SPC g q` | Close the Git view in front -- the panel, graph, comparison, conflicts or merge requests view, or a Git page |
 | `o` / `M` (Git page) | This branch's pull request -- review it, or open one / the review inbox |
 | `C-c C-c` / `Enter` / `e` / `d` (New pull request) | Open it (press twice) / edit a field / write the description / toggle draft |
-| `SPC g Q` | Close the older Merge Requests view |
 | `1` / `2` (Merge Requests) | Jump to the list / detail pane |
 | `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
 | `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
 | `r` / `R` / `C` (Review pane) | Reply to this thread / resolve or reopen it / comment on this line |
 | `A` / `m` (Merge Requests) | Approve or withdraw / merge (press twice) |
 | `Enter` / `q` (Compose) | Send what's written / discard it (also used for commit messages) |
-| `SPC g s` | Stage the selected conflicted file as resolved |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
 | `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
