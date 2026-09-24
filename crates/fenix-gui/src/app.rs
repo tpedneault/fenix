@@ -2346,6 +2346,8 @@ enum ExplorerPurpose {
     PickProjectDir,
     PickMibRootDir,
     FindFrom,
+    /// The new-project wizard's "In" folder: `S` hands it back.
+    PickWizardParent,
 }
 
 /// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
@@ -3317,9 +3319,18 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
 /// without this they land in the user's actual list, which is how the
 /// crash-recovery work found the same mistake in itself. A test suite
 /// must not leave its temp directories in the user's history.
+/// Under test, a file of `name` no other `App` shares: tests run in
+/// parallel, and one that saves a MIB root or a project must not leak it
+/// into another -- or into the Fenix you actually use.
+fn isolated_test_path(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("fenix-test-state-{}", std::process::id())).join(format!("{n}-{name}"))
+}
+
 fn default_project_meta_path() -> PathBuf {
     if cfg!(test) {
-        std::env::temp_dir().join(format!("fenix-test-project-meta-{}.json", std::process::id()))
+        isolated_test_path("project_meta.json")
     } else {
         fenix_project::meta::ProjectMeta::default_path().unwrap_or_else(|| PathBuf::from("project_meta.json"))
     }
@@ -7221,13 +7232,13 @@ impl App {
         // Tests get their own lists, so running them never edits the
         // project list or recent files of the Fenix you use.
         let known_projects_path = if cfg!(test) {
-            std::env::temp_dir().join(format!("fenix-test-projects-{}.txt", std::process::id()))
+            isolated_test_path("projects.txt")
         } else {
             fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"))
         };
         let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
         let recent_files_path = if cfg!(test) {
-            std::env::temp_dir().join(format!("fenix-test-recent-files-{}.txt", std::process::id()))
+            isolated_test_path("recent_files.txt")
         } else {
             fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
         };
@@ -7284,7 +7295,11 @@ impl App {
         // path, so this correctly comes out `None`.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
-        let config_path = fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"));
+        let config_path = if cfg!(test) {
+            isolated_test_path("config.ini")
+        } else {
+            fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"))
+        };
         let config_existed = config_path.exists();
         let config = fenix_config::Config::load_or_default(config_path);
         // First launch on this machine: write the file immediately
@@ -8210,7 +8225,7 @@ impl App {
         let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
-        let cwd = tool_sessions::root_for_path(&path);
+        let cwd = tool_sessions::lsp_root_for_path(&path);
         self.ensure_lsp_session(language, &cwd);
         let language = LspKey { language, root: cwd };
 
@@ -8344,7 +8359,7 @@ impl App {
             fenix_lsp::LspEvent::Notification { method, params } => {
                 if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
                     if let Ok(diagnostics) = serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
-                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
+                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::lsp_root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
                     }
                 }
             }
@@ -8490,7 +8505,7 @@ impl App {
         let path = ob.buffer.path()?;
         let language = fenix_syntax::detect_language_from_path(path)?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
-        let language = LspKey { language, root: tool_sessions::root_for_path(path) };
+        let language = LspKey { language, root: tool_sessions::lsp_root_for_path(path) };
         let session = self.lsp_sessions.get(&language)?;
         session.capabilities.as_ref()?;
         if !session.open_documents.contains_key(&canonical) {
@@ -21320,6 +21335,9 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::FindFrom {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.start_find_from_here(&cwd);
+                } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.wizard_parent_picked(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
                 // `S` only means something while picking a project/MIB dir,
@@ -21347,7 +21365,7 @@ impl App {
 
         if !is_dir
             && self.main_view == MainView::Explorer
-            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir)
+            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir | ExplorerPurpose::PickWizardParent)
         {
             return;
         }
@@ -24702,6 +24720,9 @@ impl App {
                         ExplorerPurpose::PickMibRootDir => {
                             format!("{}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::PickWizardParent => {
+                            format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
+                        }
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
                         }
@@ -24713,6 +24734,7 @@ impl App {
                 ExplorerPurpose::Browse => "EXPLORE",
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
                 ExplorerPurpose::PickMibRootDir => "ADDMIB",
+                ExplorerPurpose::PickWizardParent => "NEWIN",
                 ExplorerPurpose::FindFrom => "FINDFROM",
             };
             return (badge, suffix);
@@ -42656,7 +42678,7 @@ configure_board stm32
         let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
         let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
         let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
-        let content_rect = pane_content_rect(rect, text::LINE_HEIGHT, true);
+        let content_rect = pane_content_rect(rect, text::LINE_HEIGHT, app.pane_has_breadcrumb(pane));
         let visible_lines = text::lines_that_fit(content_rect.h, text::LINE_HEIGHT);
 
         app.scroll_window_at(VimScrollTarget::Center, 800.0, 600.0);
@@ -45175,7 +45197,7 @@ configure_board stm32
     }
 
     fn install_test_lsp(app: &mut App, path: &Path) -> LspKey {
-        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::root_for_path(path) };
+        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::lsp_root_for_path(path) };
         let (program, args) = echo_command("fixture");
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let canonical = fenix_lsp::normalize(refactor::identity(path));

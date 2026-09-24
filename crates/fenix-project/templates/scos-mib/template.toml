@@ -1,9 +1,9 @@
 [template]
-name = "SCOS-2000 MIB workspace"
+name = "SCOS-2000 MIB"
 kind = "mib"
 group = "Mission"
-open = ["procedures/{{name_snake}}.tcl"]
-description = "An ICD 7.2 MIB database as tab-separated .dat tables under mib/, a Tcl procedures folder, and the database registered for SPC m lookups."
+open = ["vdf.dat"]
+description = "An ICD 7.2 MIB database and nothing else: its tab-separated .dat tables, registered for SPC m lookups."
 
 [[ask]]
 key = "label"
@@ -28,189 +28,174 @@ default = ["telecommands", "telemetry", "calibrations"]
 key = "register"
 label = "Register"
 default = true
-hint = "add mib/ as a [mib] root in config.ini"
-
-[[ask]]
-key = "procedures"
-label = "Procedures"
-default = true
-hint = "a procedures/ folder for Tcl telecommand scripts"
+hint = "add it as a [mib] root in config.ini"
 
 [[file]]
-path = "mib/vdf.dat"
+path = "vdf.dat"
 content = "{{label}}\t{{name}}\n"
-
-[[file]]
-path = ".fenix/project.ini"
-content = "[project]\nkind = mib\n"
-
-[[file]]
-path = "procedures/{{name_snake}}.tcl"
-from = "procedures/main.tcl"
-when = "procedures"
 
 [[hook]]
 kind = "mib-root"
-path = "mib"
+path = "."
 label = "{{label}}"
 when = "register"
 
 [[file]]
-path = "mib/ccf.dat"
+path = "ccf.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/cdf.dat"
+path = "cdf.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/cpc.dat"
+path = "cpc.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/cca.dat"
+path = "cca.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/ccs.dat"
+path = "ccs.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/paf.dat"
+path = "paf.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/pas.dat"
+path = "pas.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/prf.dat"
+path = "prf.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/prv.dat"
+path = "prv.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/tcp.dat"
+path = "tcp.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/pcdf.dat"
+path = "pcdf.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/pcpc.dat"
+path = "pcpc.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/dst.dat"
+path = "dst.dat"
 content = ""
 when = "tables == telecommands"
 
 [[file]]
-path = "mib/pid.dat"
+path = "pid.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/pic.dat"
+path = "pic.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/tpcf.dat"
+path = "tpcf.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/pcf.dat"
+path = "pcf.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/plf.dat"
+path = "plf.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/vpd.dat"
+path = "vpd.dat"
 content = ""
 when = "tables == telemetry"
 
 [[file]]
-path = "mib/caf.dat"
+path = "caf.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/cap.dat"
+path = "cap.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/txf.dat"
+path = "txf.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/txp.dat"
+path = "txp.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/mcf.dat"
+path = "mcf.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/lgf.dat"
+path = "lgf.dat"
 content = ""
 when = "tables == calibrations"
 
 [[file]]
-path = "mib/ocf.dat"
+path = "ocf.dat"
 content = ""
 when = "tables == monitoring"
 
 [[file]]
-path = "mib/ocp.dat"
+path = "ocp.dat"
 content = ""
 when = "tables == monitoring"
 
 [[file]]
-path = "mib/cur.dat"
+path = "cur.dat"
 content = ""
 when = "tables == monitoring"
 
 [[file]]
-path = "mib/csf.dat"
+path = "csf.dat"
 content = ""
 when = "tables == sequences"
 
 [[file]]
-path = "mib/csp.dat"
+path = "csp.dat"
 content = ""
 when = "tables == sequences"
 
 [[file]]
-path = "mib/css.dat"
+path = "css.dat"
 content = ""
 when = "tables == sequences"
 
 [[file]]
-path = "mib/sdf.dat"
+path = "sdf.dat"
 content = ""
 when = "tables == sequences"

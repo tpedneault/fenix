@@ -14,6 +14,16 @@ pub(super) fn root_for_path(path: &Path) -> PathBuf {
     fenix_lsp::normalize(refactor::identity(&root))
 }
 
+/// The root a language server for `path` runs in: the language workspace
+/// its project belongs to (a Cargo or uv workspace, an npm/pnpm
+/// workspace, a `go.work`), else its project. One rust-analyzer per Cargo
+/// workspace instead of one per member crate, and pyright started where a
+/// uv workspace's shared `.venv` is.
+pub(super) fn lsp_root_for_path(path: &Path) -> PathBuf {
+    let root = root_for_path(path);
+    fenix_lsp::normalize(fenix_project::workspace::language_root(&root))
+}
+
 pub(super) fn generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)

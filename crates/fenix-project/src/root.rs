@@ -30,6 +30,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             || dir.join(".fenix/project.ini").is_file()
             || MARKERS.iter().any(|marker| dir.join(marker).exists())
             || is_sketch(dir)
+            || crate::kind::holds_mib_tables(dir)
         {
             return Some(dir.to_path_buf());
         }
@@ -67,6 +68,14 @@ mod tests {
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join("scratch.ino"), b"").unwrap();
         assert_eq!(find_project_root(&stray.join("scratch.ino")), Some(dir.path().to_path_buf()), "an .ino not named after its folder isn't a sketch");
+    }
+
+    #[test]
+    fn a_folder_of_mib_tables_is_a_project() {
+        let dir = TempDir::new("mib_marker");
+        fs::write(dir.path().join("vdf.dat"), b"M	m
+").unwrap();
+        assert_eq!(find_project_root(&dir.path().join("vdf.dat")), Some(dir.path().to_path_buf()));
     }
 
     #[test]

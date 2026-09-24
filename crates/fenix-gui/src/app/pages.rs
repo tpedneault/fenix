@@ -87,6 +87,7 @@ pub enum PageEvent {
     Finished { buffer: BufferId, generation: u64, result: Result<(), String> },
     Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
     HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
+    Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
 }
 
 type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -449,6 +450,16 @@ impl App {
                     }
                 }
             }
+            PageEvent::Subprojects { buffer, root, found } => {
+                let Some(state) = self.pages.get_mut(&buffer) else { return };
+                state.stale = true;
+                if let PageModel::Hub(h) = &mut state.model {
+                    h.set_subprojects(&root, found);
+                    for p in h.projects.iter_mut().filter(|p| p.parent.is_some() && p.health.is_none()) {
+                        p.health = self.project_health.get(&p.root).copied();
+                    }
+                }
+            }
             PageEvent::HubInfo { buffer, root, git, health } => {
                 self.project_health.insert(root.clone(), health);
                 let Some(state) = self.pages.get_mut(&buffer) else { return };
@@ -661,7 +672,34 @@ impl App {
                 self.wizard_run_next(id);
             }
             Action::Finish => self.wizard_finish(id),
+            Action::BrowseParent => {
+                let Some(PageModel::Wizard(w)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                // Start where it points now, or the nearest folder of it
+                // that exists.
+                let start = Path::new(w.parent.trim()).ancestors().find(|p| p.is_dir()).map(Path::to_path_buf).or_else(dirs::home_dir).unwrap_or_default();
+                match ExplorerState::opened(&start) {
+                    Ok(explorer) => {
+                        self.explorer = Some(explorer);
+                        self.explorer_purpose = ExplorerPurpose::PickWizardParent;
+                        self.main_view = MainView::Explorer;
+                    }
+                    Err(e) => self.set_error(format!("couldn't list {} ({e})", start.display())),
+                }
+            }
         }
+    }
+
+    /// `S` in the explorer the wizard opened: that folder becomes where
+    /// the project is created, and the wizard comes back.
+    pub(super) fn wizard_parent_picked(&mut self, dir: &Path) {
+        self.explorer = None;
+        self.explorer_purpose = ExplorerPurpose::Browse;
+        self.main_view = MainView::Editor;
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::Wizard(_))) else { return };
+        if let Some(PageModel::Wizard(w)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+            w.set_parent(dir);
+        }
+        self.show_page(id);
     }
 
     /// Starts the next pending step, if the run should go on: writing the
@@ -706,7 +744,10 @@ impl App {
         self.project_kinds.borrow_mut().clear();
         for hook in &plan.hooks {
             match hook {
-                fenix_project::template::Hook::MibRoot { path, label } => self.add_mib_root(dir.join(path), label.clone()),
+                fenix_project::template::Hook::MibRoot { path, label } => {
+                    let root = if path == "." { dir.clone() } else { dir.join(path) };
+                    self.add_mib_root(root, label.clone());
+                }
             }
         }
         let steps = wizard.run.as_ref().map(|r| r.steps.len()).unwrap_or(0);
@@ -786,6 +827,9 @@ impl App {
                 p
             })
             .collect();
+        // Subprojects of projects still listed, until the next scan.
+        let listed: Vec<PathBuf> = hub.projects.iter().map(|p| p.root.clone()).collect();
+        hub.projects.extend(old.into_iter().filter(|o| o.parent.as_ref().is_some_and(|parent| listed.contains(parent)) && !listed.contains(&o.root)));
         if let Some(root) = selected {
             hub.focus_root(&root);
         }
@@ -798,14 +842,26 @@ impl App {
     /// the UI thread, one project at a time.
     fn hub_fetch(&mut self, id: BufferId) {
         let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let projects: Vec<(PathBuf, fenix_project::ProjectKind)> = hub.projects.iter().filter(|p| p.exists).map(|p| (p.root.clone(), p.kind)).collect();
+        let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
+            hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
         let probe = self.app_probe();
         self.page_spawn(move |send| {
-            for (root, kind) in projects {
+            let info = |root: PathBuf, kind: fenix_project::ProjectKind| {
                 let git = fenix_project::vcs::git_summary(&root);
                 let checks = doctor::diagnose(&root, kind, &probe, false);
                 let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
                 send(PageEvent::HubInfo { buffer: id, root, git, health });
+            };
+            // Every project's own row first, then what's inside each.
+            let mut found_all = Vec::new();
+            for (root, kind) in &projects {
+                let found = fenix_project::workspace::subprojects(root);
+                send(PageEvent::Subprojects { buffer: id, root: root.clone(), found: found.clone() });
+                info(root.clone(), *kind);
+                found_all.extend(found);
+            }
+            for (root, kind) in found_all {
+                info(root, kind);
             }
         });
     }
@@ -818,7 +874,8 @@ impl App {
             // Opened while the hub still holds its pane, so a workspace
             // holding nothing but the hub is reused, not left behind.
             Action::Open(root) => {
-                self.open_project(root, None, true);
+                let subproject = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Hub(h)) if h.projects.iter().any(|p| p.root == root && p.parent.is_some()));
+                self.open_project(root, None, !subproject);
                 self.close_page(id);
             }
             Action::Add(path) => {
@@ -1206,6 +1263,22 @@ mod tests {
     }
 
     #[test]
+    fn b_browses_for_the_folder_and_s_brings_it_back() {
+        let dir = Scratch::new("browse");
+        std::fs::create_dir_all(dir.0.join("inner")).unwrap();
+        let mut app = wizard_app("empty", &dir.0, false);
+        press(&mut app, "\nfresh\n");
+        press(&mut app, "b");
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickWizardParent);
+        assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.0);
+        app.wizard_parent_picked(&dir.0.join("inner"));
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.open().kind, BufferKind::Page, "back on the wizard");
+        assert_eq!(wizard(&app).target(), dir.0.join("inner").join("fresh"));
+    }
+
+    #[test]
     fn project_new_with_arguments_goes_straight_to_review() {
         let name = format!("fenix-preset-{}", std::process::id());
         let mut app = App::with_file(None);
@@ -1270,6 +1343,29 @@ mod tests {
 ");
         assert_eq!(app.workspaces.len(), before, "the hub's workspace became the project's");
         assert!(app.workspaces.workspaces.iter().all(|w| w.windows.windows().iter().all(|p| w.windows.content(*p).is_some_and(|id| app.buffers.get(*id).is_some()))));
+    }
+
+    #[test]
+    fn a_registered_monorepo_shows_its_subprojects_which_open_without_being_registered() {
+        let mono = Scratch::new("hub-mono");
+        std::fs::create_dir_all(mono.0.join(".git")).unwrap();
+        std::fs::write(mono.0.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(mono.0.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::create_dir_all(mono.0.join("crates/core/src")).unwrap();
+        std::fs::write(mono.0.join("crates/core/Cargo.toml"), "[package]\nname = \"core\"\n").unwrap();
+        std::fs::write(mono.0.join("crates/core/src/lib.rs"), "").unwrap();
+        let mut app = app_with(&[&mono.0]);
+        app.cmd_project_hub();
+        let text = page_text(&mut app);
+        assert!(text.contains("crates/core"), "the subproject is listed:\n{text}");
+        press(&mut app, "j\n");
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("lib.rs")), "its main file");
+        assert_eq!(app.workspaces.active_name(), "core");
+        assert_eq!(app.known_projects.roots(), std::slice::from_ref(&mono.0), "not added to the list");
+        // Its language server runs for the whole Cargo workspace.
+        let lib = mono.0.join("crates/core/src/lib.rs");
+        assert_eq!(tool_sessions::lsp_root_for_path(&lib), mono.0);
+        assert_eq!(tool_sessions::root_for_path(&lib), mono.0.join("crates/core"), "tasks and the modeline stay the member's");
     }
 
     #[test]

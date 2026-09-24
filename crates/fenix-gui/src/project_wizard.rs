@@ -38,6 +38,8 @@ pub enum Action {
     Skip,
     /// Register and open what's there.
     Finish,
+    /// Browse for the folder to create it in.
+    BrowseParent,
 }
 
 /// A row that `Enter`/`Space`/`h`/`l` act on.
@@ -145,6 +147,12 @@ pub struct Wizard {
     pub problem: Option<String>,
     pub plan: Option<Plan>,
     pub run: Option<Run>,
+    /// The git repository the new project would land inside, if any --
+    /// then `git init` defaults off: the repository already covers it.
+    pub repository: Option<PathBuf>,
+    /// Whether you've set the git rows yourself; if so, moving the
+    /// project in or out of a repository leaves them alone.
+    git_touched: bool,
 }
 
 /// The order groups are listed in; anything else ("Yours") comes after.
@@ -169,7 +177,10 @@ impl Wizard {
             problem: None,
             plan: None,
             run: None,
+            repository: None,
+            git_touched: false,
         };
+        wizard.refresh_location();
         if let Some(&first) = wizard.template_order().first() {
             wizard.template = first;
         }
@@ -268,7 +279,10 @@ impl Wizard {
                     }
                 }
             }
-            Field::Parent => self.parent = value,
+            Field::Parent => {
+                self.parent = value;
+                self.refresh_location();
+            }
             Field::Ask(i) => {
                 if let Some(key) = self.chosen().map(|t| t.asks[i].key.clone()) {
                     self.answers.insert(key, Answer::Text(value));
@@ -282,12 +296,14 @@ impl Wizard {
     fn change(&mut self, field: Field, forward: bool) {
         match field {
             Field::GitInit => {
+                self.git_touched = true;
                 self.git_init = !self.git_init;
                 if !self.git_init {
                     self.git_commit = false;
                 }
             }
             Field::GitCommit => {
+                self.git_touched = true;
                 self.git_commit = !self.git_commit;
                 if self.git_commit {
                     self.git_init = true;
@@ -398,6 +414,32 @@ impl Wizard {
             }
         }
         Ok(plan)
+    }
+
+    /// Sets the folder to create the project in (the explorer's pick).
+    pub fn set_parent(&mut self, parent: &Path) {
+        self.set_text(Field::Parent, parent.display().to_string());
+        self.problem = None;
+    }
+
+    /// Re-reads what the parent folder is inside: a repository turns the
+    /// git rows off (unless you've set them yourself).
+    fn refresh_location(&mut self) {
+        self.repository = fenix_project::vcs::repository_root(Path::new(self.parent.trim()));
+        if !self.git_touched {
+            self.git_init = self.repository.is_none();
+            self.git_commit = self.repository.is_none();
+        }
+    }
+
+    /// The language workspace the new project would join (`cargo init`
+    /// and `uv init` add themselves to one), for the review to say so.
+    pub fn joins_workspace(&self) -> Option<PathBuf> {
+        let kind = self.chosen()?.kind;
+        if !matches!(kind, fenix_project::ProjectKind::Rust | fenix_project::ProjectKind::Python) {
+            return None;
+        }
+        fenix_project::workspace::workspace_above(Path::new(self.parent.trim()), kind)
     }
 
     fn advance(&mut self) -> Action {
@@ -560,6 +602,10 @@ impl Wizard {
         let field = self.focused();
         match key {
             Key::Char('q') => return Action::Close,
+            Key::Char('b') if self.step == Step::Location => {
+                self.focus_on(Field::Parent);
+                return Action::BrowseParent;
+            }
             Key::Escape => return self.back(),
             Key::Down | Key::Char('j') | Key::Tab => self.move_focus(1),
             Key::Up | Key::Char('k') | Key::BackTab => self.move_focus(-1),
@@ -860,7 +906,7 @@ fn layout_location(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
         _ => "the folder's name",
     };
     text_field(g, wizard, y, left, width, Field::Name, "Name", Some(name_hint));
-    text_field(g, wizard, y + 1, left, width, Field::Parent, "In", None);
+    text_field(g, wizard, y + 1, left, width, Field::Parent, "In", Some("b browse"));
     let result = wizard.target();
     let ok = !wizard.name.is_empty() && wizard.location_problem().is_none();
     g.put(y + 2, left + 2, "Creates", Role::Muted);
@@ -869,13 +915,17 @@ fn layout_location(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
     y += 4;
     g.heading(y, left, width, "After creating");
     y += 1;
-    toggle_field(g, wizard, y, left, width, Field::GitInit, "Git", wizard.git_init, "git init");
+    let git_text = match &wizard.repository {
+        Some(repo) => format!("git init -- it's inside the {} repository already", repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        None => "git init".to_string(),
+    };
+    toggle_field(g, wizard, y, left, width, Field::GitInit, "Git", wizard.git_init, &git_text);
     toggle_field(g, wizard, y + 1, left, width, Field::GitCommit, "", wizard.git_commit, "first commit");
     toggle_field(g, wizard, y + 2, left, width, Field::Register, "Projects", wizard.register, "add to SPC p p and Home");
     y += 4;
     continue_row(g, wizard, y, left, width, if wizard.chosen().is_some_and(|t| t.asks.is_empty()) { "Review" } else { "Options" });
     problem_row(g, wizard, y + 2, left, width);
-    &[("Enter", "edit / next"), ("Space", "toggle"), ("j k", "move"), ("Esc", "back"), ("q", "close")]
+    &[("Enter", "edit / next"), ("b", "browse"), ("Space", "toggle"), ("j k", "move"), ("Esc", "back"), ("q", "close")]
 }
 
 fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
@@ -963,8 +1013,13 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
     if wizard.register {
         then.push("add it to your projects".to_string());
     }
+    if let Some(workspace) = wizard.joins_workspace() {
+        let tool = if plan.kind == fenix_project::ProjectKind::Rust { "cargo" } else { "uv" };
+        then.push(format!("{tool} adds it to the workspace at {}", workspace.display()));
+    }
     for hook in &plan.hooks {
         match hook {
+            Hook::MibRoot { path, label } if path == "." => then.push(format!("register it as MIB root \"{label}\"")),
             Hook::MibRoot { path, label } => then.push(format!("register {path}/ as MIB root \"{label}\"")),
         }
     }
@@ -1144,6 +1199,39 @@ mod tests {
             let error = wizard(&dir).preset(bad).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn inside_a_repository_git_init_defaults_off_and_workspaces_are_named() {
+        let repo = std::env::temp_dir().join(format!("fenix-wizard-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("crates")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let mut w = wizard(&repo.join("crates"));
+        assert!(w.repository.is_some());
+        assert!(!w.git_init && !w.git_commit, "the repository already covers it");
+        assert!(w.choose("rust-cargo"));
+        assert_eq!(w.joins_workspace().as_deref(), Some(repo.as_path()));
+        w.set_parent(&std::env::temp_dir());
+        assert!(w.git_init, "outside it again: back on");
+        w.focus_on(Field::GitInit);
+        w.step = Step::Location;
+        w.key(Key::Space);
+        w.set_parent(&repo);
+        assert!(!w.git_init, "still off: you turned it off yourself");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn b_on_location_asks_to_browse_for_the_folder() {
+        let mut w = wizard(Path::new("/tmp"));
+        w.key(Key::Enter);
+        w.key(Key::Escape); // leave the name field
+        assert_eq!(w.key(Key::Char('b')), Action::BrowseParent);
+        assert_eq!(w.focused(), Some(Field::Parent));
+        w.set_parent(&std::env::temp_dir());
+        assert_eq!(w.parent, std::env::temp_dir().display().to_string());
     }
 
     #[test]

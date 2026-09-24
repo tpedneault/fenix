@@ -26,10 +26,15 @@ pub enum ProjectKind {
     Other,
 }
 
-/// The tables that say "this directory is a MIB": telecommands, TM
-/// parameters and packets. Any one is enough -- a TM-only database has
-/// no `ccf.dat`.
-const MIB_TABLES: &[&str] = &["ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat"];
+/// The tables that say "this directory is a MIB": its version table,
+/// telecommands, TM parameters and packets, calibrations. Any one is
+/// enough -- a TM-only database has no `ccf.dat`.
+const MIB_TABLES: &[&str] = &["vdf.dat", "ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat", "caf.dat", "txf.dat"];
+
+/// Whether `dir` holds MIB tables itself (not in a `mib/` below it).
+pub(crate) fn holds_mib_tables(dir: &Path) -> bool {
+    MIB_TABLES.iter().any(|t| dir.join(t).is_file())
+}
 
 impl ProjectKind {
     pub const ALL: [ProjectKind; 9] = [
@@ -115,7 +120,7 @@ pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     if crate::root::is_sketch(root) {
         return ProjectKind::Arduino;
     }
-    if [root.to_path_buf(), root.join("mib")].iter().any(|dir| MIB_TABLES.iter().any(|t| dir.join(t).is_file())) {
+    if holds_mib_tables(root) || holds_mib_tables(&root.join("mib")) {
         return ProjectKind::Mib;
     }
     let has = |name: &str| root.join(name).exists();
@@ -162,7 +167,7 @@ pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
         ProjectKind::Node => vec![root.join("src/index.ts"), root.join("src/index.js"), root.join("index.ts"), root.join("index.js")],
         ProjectKind::Cpp => vec![root.join("src/main.cpp"), root.join("main.cpp"), root.join("src/main.c"), root.join("main.c")],
         ProjectKind::Tcl => vec![root.join("main.tcl")],
-        ProjectKind::Mib => first_in(&root.join("procedures"), "tcl").into_iter().collect(),
+        ProjectKind::Mib => ["ccf.dat", "pcf.dat", "vdf.dat"].iter().flat_map(|t| [root.join(t), root.join("mib").join(t)]).collect(),
         ProjectKind::Other => Vec::new(),
     };
     candidates.into_iter().find(|p| p.is_file()).or_else(|| if kind == ProjectKind::Tcl { first_in(root, "tcl") } else { None })
@@ -222,6 +227,7 @@ mod tests {
             ("main.tcl", ProjectKind::Tcl),
             ("mib/ccf.dat", ProjectKind::Mib),
             ("pcf.dat", ProjectKind::Mib),
+            ("vdf.dat", ProjectKind::Mib),
             (".projectile", ProjectKind::Other),
         ];
         for (file, kind) in cases {
@@ -250,9 +256,9 @@ mod tests {
         assert_eq!(main_file(&dir.path().join("py"), ProjectKind::Python), Some(dir.path().join("py/src/orbit/__init__.py")));
         dir.write("rs/src/lib.rs", "");
         assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Rust), Some(dir.path().join("rs/src/lib.rs")));
-        dir.write("mib/procedures/b.tcl", "");
-        dir.write("mib/procedures/a.tcl", "");
-        assert_eq!(main_file(&dir.path().join("mib"), ProjectKind::Mib), Some(dir.path().join("mib/procedures/a.tcl")));
+        dir.write("db/vdf.dat", "");
+        dir.write("db/pcf.dat", "");
+        assert_eq!(main_file(&dir.path().join("db"), ProjectKind::Mib), Some(dir.path().join("db/pcf.dat")));
         assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Go), None);
     }
 

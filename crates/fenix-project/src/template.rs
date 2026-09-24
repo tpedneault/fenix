@@ -950,7 +950,7 @@ const BUILTINS: &[Builtin] = &[
     builtin!("python-uv", ["README.md", ".gitignore", "tests/test_smoke.py"]),
     builtin!("rust-cargo", [".gitignore"]),
     builtin!("arduino-sketch", ["blink.ino", "echo.ino", "empty.ino", ".gitignore"]),
-    builtin!("scos-mib", ["README.md", ".gitattributes", "procedures/main.tcl"]),
+    builtin!("scos-mib", []),
     builtin!("empty", ["README.md"]),
 ];
 
@@ -1115,16 +1115,17 @@ mod tests {
     }
 
     #[test]
-    fn the_mib_plan_writes_only_the_chosen_table_groups_and_registers_the_root() {
+    fn the_mib_plan_writes_only_the_chosen_tables_and_nothing_else() {
         let template = builtin_templates().into_iter().find(|t| t.id == "scos-mib").unwrap();
         let mut answers = template.default_answers("mission-c");
         answers.insert("tables".into(), Answer::Many(vec!["telecommands".into()]));
         let plan = template.plan("mission-c", Path::new("p"), &answers).unwrap();
-        assert!(plan.files.iter().any(|f| f.path == "mib/ccf.dat"));
-        assert!(!plan.files.iter().any(|f| f.path == "mib/pcf.dat"));
-        assert_eq!(plan.files.iter().find(|f| f.path == "mib/vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
-        assert!(plan.files.iter().any(|f| f.path == "procedures/mission_c.tcl"));
-        assert_eq!(plan.hooks, [Hook::MibRoot { path: "mib".into(), label: "mission-c".into() }]);
+        let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.iter().all(|p| p.ends_with(".dat") && !p.contains('/')), "only tables, at the top: {paths:?}");
+        assert!(paths.contains(&"ccf.dat") && !paths.contains(&"pcf.dat"));
+        assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.hooks, [Hook::MibRoot { path: ".".into(), label: "mission-c".into() }]);
         assert_eq!(plan.kind, ProjectKind::Mib);
     }
 

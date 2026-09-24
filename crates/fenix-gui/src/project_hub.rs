@@ -34,6 +34,10 @@ pub struct HubProject {
     pub tasks: Vec<String>,
     /// Whether the folder is still there.
     pub exists: bool,
+    /// For a project found inside a registered one (a monorepo's
+    /// subproject), that registered project's root. Shown indented under
+    /// it; opening it doesn't add it to your list.
+    pub parent: Option<PathBuf>,
 }
 
 impl HubProject {
@@ -54,7 +58,16 @@ impl HubProject {
             work: Vec::new(),
             tasks: Vec::new(),
             exists,
+            parent: None,
         }
+    }
+
+    /// A subproject of `parent`, named by its path below it.
+    pub fn child(root: PathBuf, kind: ProjectKind, parent: &Path) -> Self {
+        let mut p = HubProject::new(root.clone(), kind);
+        p.name = root.strip_prefix(parent).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or(p.name);
+        p.parent = Some(parent.to_path_buf());
+        p
     }
 }
 
@@ -103,24 +116,52 @@ impl Hub {
     }
 
     /// Project indices in display order, with the heading each starts
-    /// under: pinned first, then groups alphabetically, then the rest.
+    /// under: pinned first, then groups alphabetically, then the rest --
+    /// each registered project followed by its subprojects. A subproject
+    /// that matches the filter brings its parent along, for context.
     pub fn rows(&self) -> Vec<(String, usize)> {
         let filter = self.filter.trim();
         let visible = |p: &HubProject| {
             self.kind_filter.is_none_or(|k| p.kind == k)
                 && (filter.is_empty() || matches(&p.name, filter) || matches(&p.root.display().to_string(), filter) || p.group.as_deref().is_some_and(|g| matches(g, filter)))
         };
+        let children = |root: &Path| -> Vec<usize> {
+            self.projects.iter().enumerate().filter(|(_, c)| c.parent.as_deref() == Some(root) && visible(c)).map(|(i, _)| i).collect()
+        };
+        let top = |p: &HubProject| p.parent.is_none() && (visible(p) || !children(&p.root).is_empty());
         let mut rows: Vec<(String, usize)> = Vec::new();
-        rows.extend(self.projects.iter().enumerate().filter(|(_, p)| p.pinned && visible(p)).map(|(i, _)| ("Pinned".to_string(), i)));
-        let mut groups: Vec<&str> = self.projects.iter().filter(|p| !p.pinned).filter_map(|p| p.group.as_deref()).collect();
+        let push = |rows: &mut Vec<(String, usize)>, heading: &str, i: usize| {
+            rows.push((heading.to_string(), i));
+            rows.extend(children(&self.projects[i].root).into_iter().map(|c| (heading.to_string(), c)));
+        };
+        for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| p.pinned && top(p)) {
+            push(&mut rows, "Pinned", i);
+        }
+        let mut groups: Vec<&str> = self.projects.iter().filter(|p| !p.pinned && p.parent.is_none()).filter_map(|p| p.group.as_deref()).collect();
         groups.sort_unstable();
         groups.dedup();
         for group in groups {
-            rows.extend(self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.as_deref() == Some(group) && visible(p)).map(|(i, _)| (group.to_string(), i)));
+            for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.as_deref() == Some(group) && top(p)) {
+                push(&mut rows, group, i);
+            }
         }
         let heading = if rows.is_empty() { "Projects" } else { "Ungrouped" };
-        rows.extend(self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.is_none() && visible(p)).map(|(i, _)| (heading.to_string(), i)));
+        for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.is_none() && top(p)) {
+            push(&mut rows, heading, i);
+        }
         rows
+    }
+
+    /// Replaces `parent`'s subprojects with `found`, leaving out any
+    /// that are registered in their own right (they have their own row).
+    pub fn set_subprojects(&mut self, parent: &Path, found: Vec<(PathBuf, ProjectKind)>) {
+        let selected = self.selected().map(|p| p.root.clone());
+        self.projects.retain(|p| p.parent.as_deref() != Some(parent));
+        let registered: Vec<PathBuf> = self.projects.iter().filter(|p| p.parent.is_none()).map(|p| p.root.clone()).collect();
+        self.projects.extend(found.into_iter().filter(|(root, _)| !registered.contains(root)).map(|(root, kind)| HubProject::child(root, kind, parent)));
+        if let Some(root) = selected {
+            self.focus_root(&root);
+        }
     }
 
     pub fn selected(&self) -> Option<&HubProject> {
@@ -195,6 +236,9 @@ impl Hub {
             return Action::None;
         }
         let root = self.selected().map(|p| p.root.clone());
+        // Pins, groups and removal are about your list; a subproject is
+        // on it through its repository.
+        let listed = self.selected().is_some_and(|p| p.parent.is_none());
         let pending_remove = self.confirm_remove.take();
         match key {
             Key::Char('q') => return Action::Close,
@@ -205,7 +249,7 @@ impl Hub {
             Key::Escape => return Action::Close,
             Key::Char('j') | Key::Down => self.focus = (self.focus + 1).min(self.rows().len().saturating_sub(1)),
             Key::Char('k') | Key::Up => self.focus = self.focus.saturating_sub(1),
-            Key::Char('g') => {
+            Key::Char('g') if listed => {
                 if let Some(p) = self.selected() {
                     self.editing_group = Some(p.group.clone().unwrap_or_default());
                 }
@@ -233,8 +277,8 @@ impl Hub {
             Key::Char('a') => return Action::Browse,
             Key::Char('h') => return root.map(Action::Doctor).unwrap_or(Action::None),
             Key::Char(',') => return root.map(Action::Settings).unwrap_or(Action::None),
-            Key::Char('P') => return root.map(Action::TogglePin).unwrap_or(Action::None),
-            Key::Char('d') => {
+            Key::Char('P') if listed => return root.map(Action::TogglePin).unwrap_or(Action::None),
+            Key::Char('d') if listed => {
                 if let Some(root) = root {
                     if pending_remove.as_ref() == Some(&root) {
                         return Action::Remove(root);
@@ -242,6 +286,8 @@ impl Hub {
                     self.confirm_remove = Some(root);
                 }
             }
+            // On a subproject: nothing to pin, group or remove.
+            Key::Char('P' | 'g' | 'd') => {}
             Key::Char(c) if c.is_alphanumeric() => {
                 // Typing a name straight away filters, as the old picker did.
                 self.filtering = true;
@@ -336,9 +382,14 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         if focused {
             g.focus(y, left..left + list_width.saturating_sub(2));
         }
-        g.put(y, left + 2, p.kind.tag(), Role::Kind(p.kind));
+        // A subproject sits under its repository, indented.
+        let indent = if p.parent.is_some() { 3 } else { 0 };
+        if indent > 0 {
+            g.put(y, left + 2, "└", Role::Muted);
+        }
+        g.put(y, left + 2 + indent, p.kind.tag(), Role::Kind(p.kind));
         // Right side: health dot, changes, branch.
-        let branch = p.git.as_ref().and_then(|g| g.branch.clone()).or_else(|| p.branch.clone());
+        let branch = if p.parent.is_some() { None } else { p.git.as_ref().and_then(|g| g.branch.clone()).or_else(|| p.branch.clone()) };
         let mut right = String::new();
         if let Some(branch) = &branch {
             right.push_str(&fit(branch, 18));
@@ -355,8 +406,8 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         }
         let right_len = right.chars().count() + 2;
         let right_x = (left + list_width).saturating_sub(right_len + 2);
-        let name_room = right_x.saturating_sub(left + 8);
-        g.put(y, left + 7, &fit(&p.name, name_room), if focused { Role::Title } else { Role::Text });
+        let name_room = right_x.saturating_sub(left + 8 + indent);
+        g.put(y, left + 7 + indent, &fit(&p.name, name_room), if focused { Role::Title } else { Role::Text });
         g.put(y, right_x, &right, if p.exists { Role::Muted } else { Role::Bad });
         if let Some((health, _)) = p.health {
             g.put(y, (left + list_width).saturating_sub(3), "●", health_role(health));
@@ -505,6 +556,31 @@ mod tests {
         p.group = group.map(str::to_string);
         p.pinned = pinned;
         p
+    }
+
+    #[test]
+    fn subprojects_sit_under_their_repository_and_bring_it_along_when_filtered() {
+        let mut hub = hub();
+        let mono = PathBuf::from("/work/report-gen");
+        hub.set_subprojects(&mono, vec![(mono.join("crates/core"), ProjectKind::Rust), (mono.join("tools"), ProjectKind::Python), (PathBuf::from("/work/orbit-tools"), ProjectKind::Python)]);
+        let rows = names(&hub);
+        let at = rows.iter().position(|r| r == "Ungrouped/report-gen").unwrap();
+        assert_eq!(&rows[at + 1..], ["Ungrouped/crates/core", "Ungrouped/tools"], "a registered one isn't repeated as a child");
+        let text = layout(&hub, 130).text;
+        assert!(text.contains("└  RS   crates/core"), "{text}");
+        for c in "/crates".chars() {
+            hub.key(Key::Char(c));
+        }
+        assert_eq!(names(&hub), ["Projects/report-gen", "Projects/crates/core"]);
+        hub.key(Key::Escape);
+        // Pins, groups and removal don't apply to a subproject.
+        hub.focus = names(&hub).iter().position(|r| r.ends_with("crates/core")).unwrap();
+        assert_eq!(hub.key(Key::Char('P')), Action::None);
+        assert_eq!(hub.key(Key::Char('d')), Action::None);
+        assert_eq!(hub.key(Key::Enter), Action::Open(mono.join("crates/core")));
+        // Found again: replaced, not doubled.
+        hub.set_subprojects(&mono, vec![(mono.join("tools"), ProjectKind::Python)]);
+        assert_eq!(hub.projects.iter().filter(|p| p.parent.is_some()).count(), 1);
     }
 
     fn hub() -> Hub {

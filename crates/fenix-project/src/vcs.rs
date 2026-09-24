@@ -7,10 +7,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The branch checked out in `root`, read straight from `.git/HEAD` (a
-/// worktree's `.git` file is followed to its real git dir). A detached
-/// HEAD reads as its short commit.
+/// The repository `path` is in: the nearest ancestor (or `path` itself)
+/// with a `.git` -- so a subproject of a monorepo belongs to the
+/// monorepo's repository, not to none.
+pub fn repository_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_path_buf)
+}
+
+/// The branch checked out in the repository `root` is in, read straight
+/// from `.git/HEAD` (a worktree's `.git` file is followed to its real git
+/// dir). A detached HEAD reads as its short commit.
 pub fn git_branch(root: &Path) -> Option<String> {
+    let root = repository_root(root)?;
     let dot_git = root.join(".git");
     let git_dir = if dot_git.is_file() {
         let pointer = std::fs::read_to_string(&dot_git).ok()?;
@@ -76,19 +84,19 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// `root`'s git summary, or `None` when it isn't a repository (or git
-/// isn't installed). Runs two git processes -- call it off the UI thread.
+/// `root`'s git summary, or `None` when it isn't in a repository (or git
+/// isn't installed). Scoped to `root`: in a monorepo, a subproject's
+/// changes and last commit are its own, not the whole repository's. Runs
+/// two git processes -- call it off the UI thread.
 pub fn git_summary(root: &Path) -> Option<GitSummary> {
-    if !root.join(".git").exists() {
-        return None;
-    }
-    let status = git(root, &["status", "--porcelain=v1", "--branch"])?;
+    repository_root(root)?;
+    let status = git(root, &["status", "--porcelain=v1", "--branch", "--", "."])?;
     let mut summary = GitSummary::default();
     parse_status(&status, &mut summary);
     if summary.branch.is_none() {
         summary.branch = git_branch(root);
     }
-    summary.last_commit = git(root, &["log", "-1", "--format=%s%x1f%ct"]).and_then(|text| {
+    summary.last_commit = git(root, &["log", "-1", "--format=%s%x1f%ct", "--", "."]).and_then(|text| {
         let (subject, time) = text.trim().split_once('\u{1f}')?;
         Some((subject.to_string(), time.trim().parse().ok()?))
     });
@@ -142,5 +150,17 @@ mod tests {
         assert_eq!(summary.changed, 1);
         assert_eq!(summary.last_commit.as_ref().map(|(s, _)| s.as_str()), Some("First thing"));
         assert!(git_summary(&dir.path().join("missing")).is_none());
+
+        // A subproject: the repository's branch, its own changes only.
+        dir.write("sub/Cargo.toml", "[package]");
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "Add sub"]);
+        dir.write("sub/new.rs", "");
+        let sub = git_summary(&dir.path().join("sub")).unwrap();
+        assert_eq!(sub.branch.as_deref(), Some("trunk"));
+        assert_eq!(sub.changed, 1, "b.txt at the top isn't the subproject's");
+        assert_eq!(sub.last_commit.map(|(s, _)| s).as_deref(), Some("Add sub"));
+        assert_eq!(repository_root(&dir.path().join("sub")).as_deref(), Some(dir.path()));
+        assert_eq!(git_branch(&dir.path().join("sub")).as_deref(), Some("trunk"));
     }
 }

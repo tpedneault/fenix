@@ -428,9 +428,18 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
             Err(e) => d.push(Check::new(Section::Project, "tools.json", Health::Bad, e).at(tools_path, 1)),
         }
     }
-    if root.join(".git").exists() {
+    let repository = crate::vcs::repository_root(root);
+    if let Some(repo) = repository {
         let branch = crate::vcs::git_branch(root).unwrap_or_else(|| "?".to_string());
-        d.push(Check::new(Section::Project, "git", Health::Ok, branch));
+        // A monorepo's subproject is in git through the repository above
+        // it -- never offer to start a second one inside it.
+        let detail = if repo == root {
+            branch
+        } else {
+            let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| repo.display().to_string());
+            format!("{branch} · part of the {name} repository")
+        };
+        d.push(Check::new(Section::Project, "git", Health::Ok, detail));
     } else {
         d.push(Check::new(Section::Project, "git", Health::Info, "not a repository").run("git init", "git", &["init"], true));
     }
@@ -575,6 +584,19 @@ mod tests {
         assert!(matches!(&registered.fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::RegisterMibRoot { path, .. }) if path == &dir.path().join("mib")));
         let probe = FakeProbe { mib_roots: vec![dir.path().join("mib")], ..Default::default() };
         assert_eq!(find(&diagnose(dir.path(), ProjectKind::Mib, &probe, false), "registered").health, Health::Ok);
+    }
+
+    #[test]
+    fn a_subproject_is_in_its_repository_and_never_offered_git_init() {
+        let dir = TempDir::new("doctor_nested");
+        dir.write(".git/HEAD", "ref: refs/heads/trunk
+");
+        dir.write("crates/core/Cargo.toml", "[package]");
+        let checks = diagnose(&dir.path().join("crates/core"), ProjectKind::Rust, &FakeProbe::default(), false);
+        let git = find(&checks, "git");
+        assert_eq!(git.health, Health::Ok);
+        assert!(git.detail.starts_with("trunk · part of the "), "{}", git.detail);
+        assert!(git.fix.is_none());
     }
 
     #[test]
