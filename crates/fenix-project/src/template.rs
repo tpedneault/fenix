@@ -48,12 +48,34 @@
 //! [tools]                    # any other tools.json content, verbatim
 //! ```
 //!
-//! Variables: every `ask` key, plus `name`, `name_snake`, `name_kebab`
-//! and `name_pascal`. `when` is `key`, `!key`, `key == value` or
-//! `key != value`; for a `many` ask, `==` means "includes". An unknown
-//! variable in a path, argument or label is an error when the template
-//! loads; in file contents a `{{...}}` that isn't a variable is left
-//! alone, so Tcl's and C's own braces survive. Commands never go
+//! Variables: every `ask` key, plus `name`, `name_snake`, `name_kebab`,
+//! `name_pascal` and `name_upper` (`NAME_SNAKE`, for C macros). `when`
+//! is `key`, `!key`, `key == value` or `key != value`, or a list of those
+//! that must all hold; for a `many` ask, `==` means "includes". An
+//! `[[ask]]` can have a `when` too: it's only asked when that holds (its
+//! default still applies otherwise).
+//!
+//! Files are written before the commands run, so a command sees them --
+//! except a `[[file]]` with `after = true`, and the generated
+//! `.fenix/tools.json`, which are written after the commands and before
+//! git: a scaffolder like `npm create vite` refuses a folder that already
+//! has something in it.
+//!
+//! File contents can keep or drop whole lines with blocks, each
+//! directive on a line of its own:
+//!
+//! ```text
+//! {{#if tests == gtest}}
+//! FetchContent_Declare(googletest ...)
+//! {{else}}
+//! enable_testing()
+//! {{/if}}
+//! ```
+//!
+//! Blocks nest; their conditions are checked when the template loads.
+//! An unknown variable in a path, argument or label is an error when the
+//! template loads; in file contents a `{{...}}` that isn't a variable is
+//! left alone, so Tcl's and C's own braces survive. Commands never go
 //! through a shell: each `args` entry is one literal argument.
 
 use std::collections::BTreeMap;
@@ -97,6 +119,10 @@ pub enum NameRule {
     /// or digit, at most 63 characters -- the folder and its main `.ino`
     /// share the name.
     Sketch,
+    /// An npm package name, since scaffolders name the package after the
+    /// folder: lowercase letters, digits, `- . _`, starting with a letter
+    /// or digit.
+    Npm,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +139,8 @@ pub struct Ask {
     pub label: String,
     pub hint: Option<String>,
     pub kind: AskKind,
+    /// Only asked when this holds -- see `Template::asks_now`.
+    when: Option<Cond>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +158,16 @@ enum Cond {
     Falsy(String),
     Eq(String, String),
     Ne(String, String),
+    /// A list: every one must hold.
+    All(Vec<Cond>),
+}
+
+/// A `when` as written: one condition, or a list that must all hold.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum RawWhen {
+    One(String),
+    All(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,6 +175,8 @@ struct FileEntry {
     path: String,
     body: String,
     when: Option<Cond>,
+    /// Written after the commands rather than before.
+    after: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +277,7 @@ struct RawAsk {
     choices: Option<Vec<String>>,
     many: Option<Vec<String>>,
     default: Option<toml::Value>,
+    when: Option<RawWhen>,
 }
 
 #[derive(Deserialize)]
@@ -245,7 +286,9 @@ struct RawFile {
     path: String,
     from: Option<String>,
     content: Option<String>,
-    when: Option<String>,
+    when: Option<RawWhen>,
+    #[serde(default)]
+    after: bool,
 }
 
 #[derive(Deserialize)]
@@ -255,7 +298,7 @@ struct RawRun {
     #[serde(default)]
     args: Vec<String>,
     cwd: Option<String>,
-    when: Option<String>,
+    when: Option<RawWhen>,
 }
 
 #[derive(Deserialize)]
@@ -265,7 +308,7 @@ struct RawTask {
     exec: String,
     #[serde(default)]
     args: Vec<String>,
-    when: Option<String>,
+    when: Option<RawWhen>,
 }
 
 #[derive(Deserialize)]
@@ -274,10 +317,10 @@ struct RawHook {
     kind: String,
     path: String,
     label: Option<String>,
-    when: Option<String>,
+    when: Option<RawWhen>,
 }
 
-const NAME_VARS: [&str; 4] = ["name", "name_snake", "name_kebab", "name_pascal"];
+const NAME_VARS: [&str; 5] = ["name", "name_snake", "name_kebab", "name_pascal", "name_upper"];
 
 impl Template {
     /// Parses and fully validates one template: its `template.toml` text
@@ -288,10 +331,12 @@ impl Template {
         let name_rule = match raw.template.name_rule.as_deref() {
             None | Some("any") => NameRule::Any,
             Some("sketch") => NameRule::Sketch,
+            Some("npm") => NameRule::Npm,
             Some(other) => return Err(format!("unknown name_rule \"{other}\"")),
         };
 
         let mut asks = Vec::new();
+        let mut ask_whens = Vec::new();
         for raw_ask in raw.ask {
             let key = raw_ask.key.trim().to_string();
             if key.is_empty() || !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
@@ -332,7 +377,8 @@ impl Template {
                 (None, None, None) => AskKind::Text { default: String::new() },
                 (None, None, Some(_)) => return Err(format!("ask \"{key}\": default must be text or true/false")),
             };
-            asks.push(Ask { key, label: raw_ask.label, hint: raw_ask.hint, kind });
+            asks.push(Ask { key, label: raw_ask.label, hint: raw_ask.hint, kind, when: None });
+            ask_whens.push(raw_ask.when);
         }
 
         let mut template = Template {
@@ -353,6 +399,14 @@ impl Template {
             tools: None,
         };
 
+        // An ask's `when` can name any ask, so it's read once they all are.
+        for (i, when) in ask_whens.into_iter().enumerate() {
+            let cond = template.parse_when(when.as_ref())?;
+            if cond.as_ref().is_some_and(|c| c.mentions(&template.asks[i].key)) {
+                return Err(format!("ask \"{}\" can't depend on itself", template.asks[i].key));
+            }
+            template.asks[i].when = cond;
+        }
         for path in &template.open {
             template.check_relative(path)?;
             template.check_vars(path, false)?;
@@ -361,10 +415,11 @@ impl Template {
         // where an entry says; every other file under `files/` is copied.
         let referenced: Vec<&str> = raw.file.iter().filter_map(|f| f.from.as_deref()).collect();
         for (path, body) in files {
+            template.check_blocks(body).map_err(|e| format!("files/{path}: {e}"))?;
             if !referenced.contains(&path.as_str()) {
                 template.check_relative(path)?;
                 template.check_vars(path, false)?;
-                template.files.push(FileEntry { path: path.clone(), body: body.clone(), when: None });
+                template.files.push(FileEntry { path: path.clone(), body: body.clone(), when: None, after: false });
             }
         }
         for raw_file in raw.file {
@@ -376,11 +431,14 @@ impl Template {
                     .find(|(path, _)| *path == from)
                     .map(|(_, body)| body.clone())
                     .ok_or_else(|| format!("file \"{}\": files/{from} doesn't exist", raw_file.path))?,
-                (None, Some(content)) => content,
+                (None, Some(content)) => {
+                    template.check_blocks(&content).map_err(|e| format!("file \"{}\": {e}", raw_file.path))?;
+                    content
+                }
                 _ => return Err(format!("file \"{}\" needs exactly one of from or content", raw_file.path)),
             };
-            let when = template.parse_when(raw_file.when.as_deref())?;
-            template.files.push(FileEntry { path: raw_file.path, body, when });
+            let when = template.parse_when(raw_file.when.as_ref())?;
+            template.files.push(FileEntry { path: raw_file.path, body, when, after: raw_file.after });
         }
         for raw_run in raw.run {
             template.check_vars(&raw_run.exec, false)?;
@@ -391,7 +449,7 @@ impl Template {
                 template.check_relative(cwd)?;
                 template.check_vars(cwd, false)?;
             }
-            let when = template.parse_when(raw_run.when.as_deref())?;
+            let when = template.parse_when(raw_run.when.as_ref())?;
             template.runs.push(RunEntry { exec: raw_run.exec, args: raw_run.args, cwd: raw_run.cwd, when });
         }
         for raw_task in raw.task {
@@ -400,7 +458,7 @@ impl Template {
             for arg in &raw_task.args {
                 template.check_vars(arg, true)?;
             }
-            let when = template.parse_when(raw_task.when.as_deref())?;
+            let when = template.parse_when(raw_task.when.as_ref())?;
             template.tasks.push(TaskEntry { name: raw_task.name, exec: raw_task.exec, args: raw_task.args, when });
         }
         for raw_hook in raw.hook {
@@ -412,7 +470,7 @@ impl Template {
             template.check_vars(&raw_hook.path, false)?;
             let label = raw_hook.label.unwrap_or_else(|| "{{name}}".to_string());
             template.check_vars(&label, false)?;
-            let when = template.parse_when(raw_hook.when.as_deref())?;
+            let when = template.parse_when(raw_hook.when.as_ref())?;
             template.hooks.push(HookEntry { kind, path: raw_hook.path, label, when });
         }
         if let Some(tools) = raw.tools {
@@ -436,6 +494,35 @@ impl Template {
             }
         }
         Ok(template)
+    }
+
+    /// Every `{{#if}}` block in `body` balanced, and its condition about
+    /// an ask that exists.
+    fn check_blocks(&self, body: &str) -> Result<(), String> {
+        let mut depth: Vec<bool> = Vec::new(); // whether each open block has had its else
+        for (n, line) in body.lines().enumerate() {
+            match directive(line) {
+                Some(Directive::If(expr)) => {
+                    self.parse_one_when(expr).map_err(|e| format!("line {}: {e}", n + 1))?;
+                    depth.push(false);
+                }
+                Some(Directive::Else) => match depth.last_mut() {
+                    Some(seen) if !*seen => *seen = true,
+                    Some(_) => return Err(format!("line {}: a second {{{{else}}}} in one block", n + 1)),
+                    None => return Err(format!("line {}: {{{{else}}}} outside a block", n + 1)),
+                },
+                Some(Directive::End) if depth.pop().is_none() => {
+                    return Err(format!("line {}: {{{{/if}}}} with no {{{{#if}}}}", n + 1));
+                }
+                Some(Directive::End) | None => {}
+            }
+        }
+        if depth.is_empty() { Ok(()) } else { Err("a {{#if}} isn't closed".to_string()) }
+    }
+
+    /// Whether ask `i` should be asked, given the answers so far.
+    pub fn asks_now(&self, i: usize, answers: &Answers) -> bool {
+        self.asks.get(i).is_some_and(|ask| cond_holds(ask.when.as_ref(), answers))
     }
 
     fn ask(&self, key: &str) -> Option<&Ask> {
@@ -475,20 +562,25 @@ impl Template {
         Ok(())
     }
 
-    fn parse_when(&self, when: Option<&str>) -> Result<Option<Cond>, String> {
-        let Some(when) = when.map(str::trim) else {
+    fn parse_when(&self, when: Option<&RawWhen>) -> Result<Option<Cond>, String> {
+        match when {
+            None => Ok(None),
+            Some(RawWhen::One(one)) => self.parse_one_when(one),
+            Some(RawWhen::All(all)) => {
+                let conds = all.iter().map(|w| self.parse_one_when(w)).collect::<Result<Vec<_>, _>>()?;
+                Ok(Some(Cond::All(conds.into_iter().flatten().collect())))
+            }
+        }
+    }
+
+    fn parse_one_when(&self, when: &str) -> Result<Option<Cond>, String> {
+        let when = when.trim();
+        let Some(cond) = parse_cond(when) else {
             return Ok(None);
         };
-        let cond = if let Some((key, value)) = when.split_once("!=") {
-            Cond::Ne(key.trim().to_string(), value.trim().to_string())
-        } else if let Some((key, value)) = when.split_once("==") {
-            Cond::Eq(key.trim().to_string(), value.trim().to_string())
-        } else if let Some(key) = when.strip_prefix('!') {
-            Cond::Falsy(key.trim().to_string())
-        } else {
-            Cond::Truthy(when.to_string())
+        let (Cond::Truthy(key) | Cond::Falsy(key) | Cond::Eq(key, _) | Cond::Ne(key, _)) = &cond else {
+            return Ok(Some(cond));
         };
-        let (Cond::Truthy(key) | Cond::Falsy(key) | Cond::Eq(key, _) | Cond::Ne(key, _)) = &cond;
         let Some(ask) = self.ask(key) else {
             return Err(format!("when \"{when}\": \"{key}\" isn't an ask"));
         };
@@ -529,15 +621,17 @@ impl Template {
         let ctx = Context { names: name_vars(name), answers: &answers };
 
         let mut files: Vec<PlannedFile> = Vec::new();
+        let mut after_files: Vec<PlannedFile> = Vec::new();
         for entry in &self.files {
             if !ctx.holds(entry.when.as_ref()) {
                 continue;
             }
             let path = ctx.text(&entry.path)?;
-            if files.iter().any(|f| f.path == path) {
+            if files.iter().chain(&after_files).any(|f| f.path == path) {
                 return Err(format!("two files would both be written to {path}"));
             }
-            files.push(PlannedFile { path, contents: ctx.contents(&entry.body) });
+            let planned = PlannedFile { path, contents: ctx.contents(&entry.body) };
+            if entry.after { after_files.push(planned) } else { files.push(planned) }
         }
 
         let mut tools = self.tools.clone().map(|t| ctx.json(t)).transpose()?.unwrap_or_else(|| serde_json::json!({}));
@@ -550,12 +644,12 @@ impl Template {
             tasks.as_object_mut().ok_or("[tools.tasks] must be a table")?.insert(ctx.text(&task.name)?, spec);
         }
         if tools.as_object().is_some_and(|o| !o.is_empty()) {
-            if files.iter().any(|f| f.path == ".fenix/tools.json") {
+            if files.iter().chain(&after_files).any(|f| f.path == ".fenix/tools.json") {
                 return Err("both files/ and the template's tasks write .fenix/tools.json".to_string());
             }
             let text = serde_json::to_string_pretty(&tools).map_err(|e| e.to_string())? + "\n";
             ProjectTools::parse(&text).map_err(|e| format!("the generated .fenix/tools.json is invalid: {e}"))?;
-            files.push(PlannedFile { path: ".fenix/tools.json".to_string(), contents: text });
+            after_files.push(PlannedFile { path: ".fenix/tools.json".to_string(), contents: text });
         }
 
         let mut steps = Vec::new();
@@ -580,7 +674,7 @@ impl Template {
         }
 
         let open = self.open.iter().map(|p| ctx.text(p)).collect::<Result<_, _>>()?;
-        Ok(Plan { dir: parent.join(name), kind: self.kind, files, steps, hooks, open })
+        Ok(Plan { dir: parent.join(name), kind: self.kind, files, after_files, steps, hooks, open })
     }
 }
 
@@ -680,7 +774,38 @@ impl Context<'_> {
     }
 
     fn contents(&self, text: &str) -> String {
-        substitute_known(text, &|name| self.scalar(name))
+        substitute_known(&self.blocks(text), &|name| self.scalar(name))
+    }
+
+    /// `text` with each `{{#if}}` block's lines kept or dropped.
+    fn blocks(&self, text: &str) -> String {
+        if !text.contains("{{#if") {
+            return text.to_string();
+        }
+        // For each open block: (whether its parent was being kept,
+        // whether its own lines are being kept now).
+        let mut stack: Vec<(bool, bool)> = Vec::new();
+        let keeping = |stack: &[(bool, bool)]| stack.last().is_none_or(|(_, keep)| *keep);
+        let mut out = String::new();
+        for line in text.split_inclusive('\n') {
+            match directive(line) {
+                Some(Directive::If(expr)) => {
+                    let parent = keeping(&stack);
+                    stack.push((parent, parent && self.holds(parse_cond(expr).as_ref())));
+                }
+                Some(Directive::Else) => {
+                    if let Some((parent, keep)) = stack.last_mut() {
+                        *keep = *parent && !*keep;
+                    }
+                }
+                Some(Directive::End) => {
+                    stack.pop();
+                }
+                None if keeping(&stack) => out.push_str(line),
+                None => {}
+            }
+        }
+        out
     }
 
     fn args(&self, args: &[String]) -> Result<Vec<String>, String> {
@@ -710,25 +835,73 @@ impl Context<'_> {
     }
 
     fn holds(&self, cond: Option<&Cond>) -> bool {
-        let truthy = |key: &str| match self.answers.get(key) {
-            Some(Answer::Text(s)) => !s.trim().is_empty(),
-            Some(Answer::Bool(b)) => *b,
-            Some(Answer::Many(items)) => !items.is_empty(),
-            None => false,
-        };
-        let equals = |key: &str, value: &str| match self.answers.get(key) {
-            Some(Answer::Text(s)) => s.trim() == value,
-            Some(Answer::Bool(b)) => b.to_string() == value,
-            Some(Answer::Many(items)) => items.iter().any(|i| i == value),
-            None => false,
-        };
-        match cond {
-            None => true,
-            Some(Cond::Truthy(key)) => truthy(key),
-            Some(Cond::Falsy(key)) => !truthy(key),
-            Some(Cond::Eq(key, value)) => equals(key, value),
-            Some(Cond::Ne(key, value)) => !equals(key, value),
+        cond_holds(cond, self.answers)
+    }
+}
+
+impl Cond {
+    fn mentions(&self, key: &str) -> bool {
+        match self {
+            Cond::Truthy(k) | Cond::Falsy(k) | Cond::Eq(k, _) | Cond::Ne(k, _) => k == key,
+            Cond::All(all) => all.iter().any(|c| c.mentions(key)),
         }
+    }
+}
+
+/// A `{{#if ...}}`, `{{else}}` or `{{/if}}` line.
+enum Directive<'a> {
+    If(&'a str),
+    Else,
+    End,
+}
+
+fn directive(line: &str) -> Option<Directive<'_>> {
+    let inner = line.trim().strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    if let Some(expr) = inner.strip_prefix("#if ") {
+        Some(Directive::If(expr.trim()))
+    } else if inner == "else" {
+        Some(Directive::Else)
+    } else if inner == "/if" {
+        Some(Directive::End)
+    } else {
+        None
+    }
+}
+
+/// A `when` expression, unchecked (checked ones come from `parse_when`).
+fn parse_cond(when: &str) -> Option<Cond> {
+    let when = when.trim();
+    Some(if let Some((key, value)) = when.split_once("!=") {
+        Cond::Ne(key.trim().to_string(), value.trim().to_string())
+    } else if let Some((key, value)) = when.split_once("==") {
+        Cond::Eq(key.trim().to_string(), value.trim().to_string())
+    } else if let Some(key) = when.strip_prefix('!') {
+        Cond::Falsy(key.trim().to_string())
+    } else {
+        Cond::Truthy(when.to_string())
+    })
+}
+
+fn cond_holds(cond: Option<&Cond>, answers: &Answers) -> bool {
+    let truthy = |key: &str| match answers.get(key) {
+        Some(Answer::Text(s)) => !s.trim().is_empty(),
+        Some(Answer::Bool(b)) => *b,
+        Some(Answer::Many(items)) => !items.is_empty(),
+        None => false,
+    };
+    let equals = |key: &str, value: &str| match answers.get(key) {
+        Some(Answer::Text(s)) => s.trim() == value,
+        Some(Answer::Bool(b)) => b.to_string() == value,
+        Some(Answer::Many(items)) => items.iter().any(|i| i == value),
+        None => false,
+    };
+    match cond {
+        None => true,
+        Some(Cond::Truthy(key)) => truthy(key),
+        Some(Cond::Falsy(key)) => !truthy(key),
+        Some(Cond::Eq(key, value)) => equals(key, value),
+        Some(Cond::Ne(key, value)) => !equals(key, value),
+        Some(Cond::All(all)) => all.iter().all(|c| cond_holds(Some(c), answers)),
     }
 }
 
@@ -785,7 +958,8 @@ fn name_vars(name: &str) -> BTreeMap<&'static str, String> {
             chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
         })
         .collect();
-    BTreeMap::from([("name", name.to_string()), ("name_snake", snake), ("name_kebab", words.join("-")), ("name_pascal", pascal)])
+    let upper = snake.to_uppercase();
+    BTreeMap::from([("name", name.to_string()), ("name_snake", snake), ("name_kebab", words.join("-")), ("name_pascal", pascal), ("name_upper", upper)])
 }
 
 /// Whether `name` can be a project folder: never a path, never one of
@@ -808,6 +982,14 @@ pub fn validate_name(name: &str, rule: NameRule) -> Result<(), String> {
         || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit());
     if reserved {
         return Err(format!("{name} is a reserved name on Windows"));
+    }
+    if rule == NameRule::Npm {
+        if !name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return Err("a package name starts with a lowercase letter or digit".to_string());
+        }
+        if let Some(c) = name.chars().find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'))) {
+            return Err(format!("a package name can't contain '{c}' -- lowercase letters, digits, - . _ only"));
+        }
     }
     if rule == NameRule::Sketch {
         if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
@@ -884,7 +1066,11 @@ pub enum Hook {
 pub struct Plan {
     pub dir: PathBuf,
     pub kind: ProjectKind,
+    /// Written before the commands run.
     pub files: Vec<PlannedFile>,
+    /// Written after them (and before git): `after = true` files and the
+    /// generated `.fenix/tools.json`.
+    pub after_files: Vec<PlannedFile>,
     pub steps: Vec<Step>,
     pub hooks: Vec<Hook>,
     /// Candidates to open when it's done, relative to `dir`.
@@ -917,7 +1103,18 @@ impl Plan {
             return Err(problem);
         }
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        for file in &self.files {
+        self.write(&self.files)
+    }
+
+    /// Writes the files that come after the commands -- into the folder
+    /// they made, still never over anything.
+    pub fn write_after_files(&self) -> Result<usize, String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        self.write(&self.after_files)
+    }
+
+    fn write(&self, files: &[PlannedFile]) -> Result<usize, String> {
+        for file in files {
             let path = self.dir.join(&file.path);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -925,7 +1122,7 @@ impl Plan {
             let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             io::Write::write_all(&mut out, file.contents.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
         }
-        Ok(self.files.len())
+        Ok(files.len())
     }
 }
 
@@ -947,10 +1144,20 @@ macro_rules! builtin {
 type Builtin = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
 
 const BUILTINS: &[Builtin] = &[
-    builtin!("python-uv", ["README.md", ".gitignore", "tests/test_smoke.py"]),
-    builtin!("rust-cargo", [".gitignore"]),
-    builtin!("arduino-sketch", ["blink.ino", "echo.ino", "empty.ino", ".gitignore"]),
+    builtin!("python-uv", [".gitignore", "README.md", "tests/test_smoke.py"]),
+    builtin!("python-data", [".gitignore", "README.md", "data/processed/.gitkeep", "data/raw/.gitkeep", "notebooks/explore.ipynb", "src/{{name_snake}}/analysis.py", "src/{{name_snake}}/io.py", "tests/test_io.py"]),
+    builtin!("python-gui", [".gitignore", "README.md", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/__main__.py", "src/{{name_snake}}/window.py", "tests/test_window.py"]),
+    builtin!("python-cli", [".gitignore", "README.md", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/__main__.py", "src/{{name_snake}}/cli.py", "tests/test_cli.py"]),
+    builtin!("python-api", [".gitignore", "Dockerfile", "README.md", "dockerignore", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/main.py", "tests/test_api.py"]),
+    builtin!("rust-cargo", [".gitignore", "main_clap.rs"]),
+    builtin!("rust-workspace", [".gitignore", "Cargo.toml", "README.md"]),
+    builtin!("cmake", [".clangd", ".gitignore", "CMakeLists.txt", "CMakePresets.json", "README.md", "c/header.h", "c/library.c", "c/main.c", "c/test.c", "c/tests.cmake", "cpp/header.hpp", "cpp/library.cpp", "cpp/main.cpp", "cpp/test.cpp", "cpp/tests.cmake"]),
+    builtin!("web-vite", []),
+    builtin!("arduino-sketch", [".gitignore", "blink.ino", "echo.ino", "empty.ino"]),
+    builtin!("arduino-library", ["README.md", "examples/Basic/Basic.ino", "keywords.txt", "library.properties", "src/{{name}}.cpp", "src/{{name}}.h"]),
     builtin!("scos-mib", []),
+    builtin!("tcl-package", ["README.md", "pkgIndex.tcl", "tests/all.tcl", "tests/{{name_snake}}.test", "{{name_snake}}.tcl"]),
+    builtin!("monorepo", [".editorconfig", ".fenix/project.ini", ".gitignore", "README.md"]),
     builtin!("empty", ["README.md"]),
 ];
 
@@ -1071,6 +1278,54 @@ mod tests {
         }
     }
 
+    /// Every answer each ask can take -- every choice, both states of a
+    /// toggle, and for a list none, each one alone, and all of them.
+    fn every_answer(ask: &Ask) -> Vec<Answer> {
+        match &ask.kind {
+            AskKind::Text { default } => vec![Answer::Text(default.clone()), Answer::Text("a, b".into())],
+            AskKind::Choice { choices, .. } => choices.iter().map(|c| Answer::Text(c.clone())).collect(),
+            AskKind::Toggle { .. } => vec![Answer::Bool(true), Answer::Bool(false)],
+            AskKind::Many { options, .. } => {
+                let mut all = vec![Answer::Many(Vec::new()), Answer::Many(options.clone())];
+                all.extend(options.iter().map(|o| Answer::Many(vec![o.clone()])));
+                all
+            }
+        }
+    }
+
+    #[test]
+    fn every_builtin_plans_cleanly_for_every_combination_of_answers() {
+        for template in builtin_templates() {
+            let name = if template.name_rule == NameRule::Sketch { "ServoSweep" } else { "orbit-tools" };
+            let mut combinations: Vec<Answers> = vec![template.default_answers(name)];
+            for ask in &template.asks {
+                combinations = combinations
+                    .into_iter()
+                    .flat_map(|answers| {
+                        every_answer(ask).into_iter().map(move |answer| {
+                            let mut answers = answers.clone();
+                            answers.insert(ask.key.clone(), answer);
+                            answers
+                        })
+                    })
+                    .collect();
+            }
+            for answers in &combinations {
+                let plan = template.plan(name, Path::new("parent"), answers).unwrap_or_else(|e| panic!("{} with {answers:?}: {e}", template.id));
+                for file in plan.files.iter().chain(&plan.after_files) {
+                    for leftover in ["{{#if", "{{else}}", "{{/if}}", "{{name", "{{#"] {
+                        assert!(!file.contents.contains(leftover), "{}: {} keeps {leftover:?} with {answers:?}:
+{}", template.id, file.path, file.contents);
+                    }
+                    for ask in &template.asks {
+                        let var = format!("{{{{{}}}}}", ask.key);
+                        assert!(!file.contents.contains(&var), "{}: {} keeps {var}", template.id, file.path);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn name_variables_follow_separators_and_case() {
         let vars = name_vars("orbit-tools");
@@ -1089,7 +1344,8 @@ mod tests {
         let plan = template.plan("orbit-tools", Path::new("p"), &answers).unwrap();
         let lines: Vec<String> = plan.steps.iter().map(Step::display).collect();
         assert_eq!(lines, ["uv init --app --package --python 3.12 --name orbit-tools --vcs none --no-readme", "uv add requests rich", "uv add --dev pytest",]);
-        let tools = plan.files.iter().find(|f| f.path == ".fenix/tools.json").unwrap();
+        assert!(!plan.files.iter().any(|f| f.path == ".fenix/tools.json"), "written after the commands");
+        let tools = plan.after_files.iter().find(|f| f.path == ".fenix/tools.json").unwrap();
         let parsed = ProjectTools::parse(&tools.contents).unwrap();
         assert_eq!(parsed.tasks.keys().collect::<Vec<_>>(), ["run", "test"], "no lint task without ruff");
         assert!(plan.files.iter().any(|f| f.path == "tests/test_smoke.py"));
@@ -1168,12 +1424,64 @@ mod tests {
     }
 
     #[test]
+    fn blocks_keep_or_drop_lines_and_nest() {
+        let text = format!(
+            "{HEAD}[[ask]]\nkey = \"lang\"\nlabel = \"L\"\nchoices = [\"c\", \"cpp\"]\n[[ask]]\nkey = \"tests\"\nlabel = \"T\"\ndefault = true\n[[ask]]\nkey = \"std\"\nlabel = \"S\"\nchoices = [\"17\", \"20\"]\nwhen = \"lang == cpp\"\n"
+        );
+        let body = "top\n{{#if lang == cpp}}\nC++{{std}}\n  {{#if tests}}\ngtest\n  {{/if}}\n{{else}}\nC\n{{/if}}\nend {{name_upper}}\n";
+        let template = Template::parse("t", &text, &[("f.txt".into(), body.into())], Origin::BuiltIn).unwrap();
+        let mut answers = template.default_answers("my-lib");
+        let plan = template.plan("my-lib", Path::new("p"), &answers).unwrap();
+        assert_eq!(plan.files[0].contents, "top\nC\nend MY_LIB\n");
+        answers.insert("lang".into(), Answer::Text("cpp".into()));
+        answers.insert("std".into(), Answer::Text("20".into()));
+        let plan = template.plan("my-lib", Path::new("p"), &answers).unwrap();
+        assert_eq!(plan.files[0].contents, "top\nC++20\ngtest\nend MY_LIB\n");
+        answers.insert("tests".into(), Answer::Bool(false));
+        let plan = template.plan("my-lib", Path::new("p"), &answers).unwrap();
+        assert_eq!(plan.files[0].contents, "top\nC++20\nend MY_LIB\n");
+        // The C++ standard is only asked for C++.
+        let std = template.asks.iter().position(|a| a.key == "std").unwrap();
+        assert!(template.asks_now(std, &answers));
+        answers.insert("lang".into(), Answer::Text("c".into()));
+        assert!(!template.asks_now(std, &answers));
+    }
+
+    #[test]
+    fn a_when_list_needs_all_and_after_files_wait_for_the_commands() {
+        let text = format!(
+            "{HEAD}[[ask]]\nkey = \"a\"\nlabel = \"A\"\ndefault = true\n[[ask]]\nkey = \"b\"\nlabel = \"B\"\nchoices = [\"x\", \"y\"]\n\
+             [[file]]\npath = \"both\"\ncontent = \"\"\nwhen = [\"a\", \"b == y\"]\n[[file]]\npath = \"late\"\ncontent = \"\"\nafter = true\n"
+        );
+        let template = parse(&text).unwrap();
+        let mut answers = template.default_answers("demo");
+        let plan = template.plan("demo", Path::new("p"), &answers).unwrap();
+        assert!(plan.files.is_empty(), "b is x, so `both` isn't written");
+        assert_eq!(plan.after_files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["late"]);
+        answers.insert("b".into(), Answer::Text("y".into()));
+        assert_eq!(template.plan("demo", Path::new("p"), &answers).unwrap().files[0].path, "both");
+    }
+
+    #[test]
+    fn broken_blocks_are_refused_when_the_template_loads() {
+        for (body, why) in [("{{#if nope}}\nx\n{{/if}}\n", "isn't an ask"), ("{{#if on}}\nx\n", "isn't closed"), ("x\n{{/if}}\n", "no {{#if}}"), ("{{#if on}}\n{{else}}\n{{else}}\n{{/if}}\n", "second")] {
+            let text = format!("{HEAD}[[ask]]\nkey = \"on\"\nlabel = \"O\"\ndefault = true\n");
+            let error = Template::parse("t", &text, &[("f".into(), body.into())], Origin::BuiltIn).unwrap_err();
+            assert!(error.contains(why), "{body:?}: {error}");
+        }
+        let text = format!("{HEAD}[[ask]]\nkey = \"a\"\nlabel = \"A\"\nwhen = \"a\"\n");
+        assert!(parse(&text).unwrap_err().contains("itself"));
+    }
+
+    #[test]
     fn names_that_cannot_be_folders_are_refused() {
         for bad in ["", " lead", "a/b", "a:b", "CON", "com3.txt", "trail."] {
             assert!(validate_name(bad, NameRule::Any).is_err(), "{bad:?}");
         }
         assert!(validate_name("orbit tools", NameRule::Any).is_ok());
         assert!(validate_name("_lab", NameRule::Sketch).is_err());
+        assert!(validate_name("my-site", NameRule::Npm).is_ok());
+        assert!(validate_name("MySite", NameRule::Npm).is_err());
     }
 
     #[test]

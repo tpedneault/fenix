@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 /// no particular priority order -- any one of them is enough. `.git` and
 /// `.projectile` are ecosystem-agnostic; the rest are the common
 /// per-language "this is the top of a package" manifest.
-const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt"];
+const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt", "library.properties", "pkgIndex.tcl"];
 
 /// An Arduino sketch folder: `sketch.yaml`, or a main `.ino`/`.pde` named
 /// after the folder itself -- the one rule the Arduino tools hold every

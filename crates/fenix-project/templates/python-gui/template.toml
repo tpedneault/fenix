@@ -1,0 +1,49 @@
+[template]
+name = "Python · desktop app"
+kind = "python"
+group = "Python"
+description = "A desktop application packaged with uv: a main window with a button and a label, run with uv run <name>."
+needs = ["uv"]
+open = ["src/{{name_snake}}/window.py"]
+
+[[ask]]
+key = "toolkit"
+label = "Toolkit"
+choices = ["PySide6", "tkinter"]
+default = "PySide6"
+hint = "PySide6: Qt, the whole toolkit · tkinter: in the standard library, nothing to install"
+
+[[ask]]
+key = "python"
+label = "Python"
+choices = ["3.13", "3.12", "3.11"]
+default = "3.12"
+hint = "uv downloads it if it isn't installed"
+
+[[run]]
+exec = "uv"
+args = ["init", "--app", "--package", "--python", "{{python}}", "--name", "{{name_kebab}}", "--vcs", "none", "--no-readme"]
+
+[[run]]
+exec = "uv"
+args = ["add", "pyside6"]
+when = "toolkit == PySide6"
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "pytest", "ruff"]
+
+[[task]]
+name = "run"
+exec = "uv"
+args = ["run", "{{name_kebab}}"]
+
+[[task]]
+name = "test"
+exec = "uv"
+args = ["run", "pytest"]
+
+[[task]]
+name = "lint"
+exec = "uv"
+args = ["run", "ruff", "check"]

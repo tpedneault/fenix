@@ -72,6 +72,9 @@ pub enum Status {
 #[derive(Debug, Clone)]
 pub enum RunWork {
     WriteFiles,
+    /// The files that wait for the template's commands (see
+    /// `Plan::after_files`).
+    WriteAfterFiles,
     Command(CommandStep),
 }
 
@@ -146,6 +149,9 @@ pub struct Wizard {
     /// Why the current step can't go on, shown under it.
     pub problem: Option<String>,
     pub plan: Option<Plan>,
+    /// How many of `plan.steps` are the template's own -- the rest are
+    /// the wizard's git steps, which come after the late files.
+    template_steps: usize,
     pub run: Option<Run>,
     /// The git repository the new project would land inside, if any --
     /// then `git init` defaults off: the repository already covers it.
@@ -156,7 +162,7 @@ pub struct Wizard {
 }
 
 /// The order groups are listed in; anything else ("Yours") comes after.
-const GROUPS: [&str; 4] = ["Languages", "Embedded", "Mission", "Start from"];
+const GROUPS: [&str; 7] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Start from"];
 
 impl Wizard {
     pub fn new(templates: Vec<Template>, errors: Vec<String>, found: BTreeMap<String, bool>, parent: &Path) -> Self {
@@ -176,6 +182,7 @@ impl Wizard {
             editing: None,
             problem: None,
             plan: None,
+            template_steps: 0,
             run: None,
             repository: None,
             git_touched: false,
@@ -216,7 +223,7 @@ impl Wizard {
             Step::Options => {
                 let mut fields = Vec::new();
                 if let Some(template) = self.chosen() {
-                    for (i, ask) in template.asks.iter().enumerate() {
+                    for (i, ask) in template.asks.iter().enumerate().filter(|(i, _)| template.asks_now(*i, &self.answers)) {
                         match &ask.kind {
                             AskKind::Many { options, .. } => fields.extend((0..options.len()).map(|o| Field::ManyOption(i, o))),
                             _ => fields.push(Field::Ask(i)),
@@ -406,6 +413,7 @@ impl Wizard {
     pub fn build_plan(&self) -> Result<Plan, String> {
         let template = self.chosen().ok_or("no template chosen")?;
         let mut plan = template.plan(&self.name, Path::new(self.parent.trim()), &self.answers)?;
+        // Git comes last: after the template's commands and its late files.
         if self.git_init {
             plan.steps.push(CommandStep::new("git", &["init"]));
             if self.git_commit {
@@ -472,13 +480,16 @@ impl Wizard {
                     return Action::None;
                 }
                 let Some(plan) = self.plan.clone() else { return Action::None };
-                let mut steps = vec![RunStep {
-                    label: format!("write {} file{}", plan.files.len(), if plan.files.len() == 1 { "" } else { "s" }),
-                    work: RunWork::WriteFiles,
-                    status: Status::Pending,
-                    output: Vec::new(),
-                }];
-                steps.extend(plan.steps.iter().map(|s| RunStep { label: s.display(), work: RunWork::Command(s.clone()), status: Status::Pending, output: Vec::new() }));
+                let files = |n: usize, what: &str| format!("write {n} file{}{what}", if n == 1 { "" } else { "s" });
+                let step = |label: String, work: RunWork| RunStep { label, work, status: Status::Pending, output: Vec::new() };
+                let command = |s: &CommandStep| step(s.display(), RunWork::Command(s.clone()));
+                let mut steps = vec![step(files(plan.files.len(), ""), RunWork::WriteFiles)];
+                let (template, git) = plan.steps.split_at(self.template_steps.min(plan.steps.len()));
+                steps.extend(template.iter().map(command));
+                if !plan.after_files.is_empty() {
+                    steps.push(step(files(plan.after_files.len(), " the commands left for last"), RunWork::WriteAfterFiles));
+                }
+                steps.extend(git.iter().map(command));
                 self.run = Some(Run { steps, cancel_requested: false });
                 self.go_to(Step::Creating);
                 return Action::Create;
@@ -545,6 +556,7 @@ impl Wizard {
     fn enter_review(&mut self) -> Action {
         match self.build_plan() {
             Ok(plan) => {
+                self.template_steps = self.chosen().and_then(|t| t.plan(&self.name, Path::new(self.parent.trim()), &self.answers).ok()).map_or(0, |p| p.steps.len());
                 self.plan = Some(plan);
                 self.go_to(Step::Review);
             }
@@ -936,7 +948,8 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
     y += 2;
     g.heading(y, left, width, &template.name);
     y += 1;
-    for (i, ask) in template.asks.iter().enumerate() {
+    // A question that doesn't apply to the answers so far isn't shown.
+    for (i, ask) in template.asks.iter().enumerate().filter(|(i, _)| template.asks_now(*i, &wizard.answers)) {
         match &ask.kind {
             AskKind::Text { .. } => text_field(g, wizard, y, left, width, Field::Ask(i), &ask.label, ask.hint.as_deref()),
             AskKind::Choice { choices, .. } => {
@@ -987,11 +1000,17 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
     let end = g.put(y, left + 2, plan.kind.tag(), Role::Kind(plan.kind));
     g.put(y, end + 2, &fit(&plan.dir.display().to_string(), width.saturating_sub(8)), Role::Title);
     y += 2;
-    g.heading(y, left, width, &format!("Files · {} new", plan.files.len()));
+    g.heading(y, left, width, &format!("Files · {} new", plan.files.len() + plan.after_files.len()));
     y += 1;
     for file in &plan.files {
         g.put(y, left + 2, "+", Role::Good);
         g.put(y, left + 4, &fit(&file.path, width - 6), Role::Text);
+        y += 1;
+    }
+    for file in &plan.after_files {
+        g.put(y, left + 2, "+", Role::Good);
+        let end = g.put(y, left + 4, &fit(&file.path, width.saturating_sub(30)), Role::Text);
+        g.put(y, end + 2, "after the commands", Role::Muted);
         y += 1;
     }
     if !plan.steps.is_empty() {
@@ -1109,13 +1128,16 @@ mod tests {
     }
 
     #[test]
-    fn templates_are_listed_by_group_with_languages_first() {
+    fn templates_are_listed_by_group_with_python_first() {
         let w = wizard(Path::new("/tmp"));
         let groups: Vec<&str> = w.template_order().iter().map(|&i| w.templates[i].group.as_str()).collect();
-        assert_eq!(groups.first(), Some(&"Languages"));
+        assert_eq!(groups.first(), Some(&"Python"));
+        let mut seen: Vec<&str> = groups.clone();
+        seen.dedup();
+        assert_eq!(seen, GROUPS, "each group once, in order");
         assert_eq!(groups.last(), Some(&"Start from"));
         let page = layout(&w, 120);
-        assert!(page.text.contains("LANGUAGES") && page.text.contains("EMBEDDED") && page.text.contains("MISSION"));
+        assert!(page.text.contains("PYTHON") && page.text.contains("SYSTEMS") && page.text.contains("EMBEDDED") && page.text.contains("MISSION"));
         assert!(page.text.contains("Python · uv"));
         assert!(page.text.contains("found"), "the focused template's needs are looked up:\n{}", page.text);
     }
@@ -1221,6 +1243,25 @@ mod tests {
         w.set_parent(&repo);
         assert!(!w.git_init, "still off: you turned it off yourself");
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn late_files_are_written_after_the_template_but_before_git() {
+        let mut w = wizard(&std::env::temp_dir().join("nowhere-fenix"));
+        assert!(w.choose("python-uv"));
+        w.name = "orbit".into();
+        w.step = Step::Location;
+        w.focus = w.fields().len() - 1;
+        w.key(Key::Enter); // Location -> Options
+        w.focus = w.fields().len() - 1;
+        w.key(Key::Enter); // Options -> Review
+        assert_eq!(w.step, Step::Review);
+        w.key(Key::Enter);
+        let labels: Vec<String> = w.run.as_ref().unwrap().steps.iter().map(|s| s.label.clone()).collect();
+        let late = labels.iter().position(|l| l.contains("left for last")).expect("a late-files step");
+        let first_git = labels.iter().position(|l| l.starts_with("git ")).unwrap();
+        let last_uv = labels.iter().rposition(|l| l.starts_with("uv ")).unwrap();
+        assert!(last_uv < late && late < first_git, "{labels:?}");
     }
 
     #[test]

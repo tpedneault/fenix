@@ -1,0 +1,25 @@
+[template]
+name = "Arduino library"
+kind = "arduino"
+group = "Embedded"
+name_rule = "sketch"
+description = "An Arduino library in the standard layout: library.properties, src/, an example sketch and keywords.txt."
+needs = ["arduino-cli"]
+open = ["src/{{name}}.cpp"]
+
+[[ask]]
+key = "author"
+label = "Author"
+default = ""
+
+[[ask]]
+key = "board"
+label = "Example board"
+choices = ["arduino:avr:uno", "arduino:avr:nano", "arduino:avr:mega", "arduino:renesas_uno:unor4wifi", "esp32:esp32:esp32"]
+default = "arduino:avr:uno"
+hint = "what the build task compiles the example for"
+
+[[task]]
+name = "build example"
+exec = "arduino-cli"
+args = ["compile", "--fqbn", "{{board}}", "--library", ".", "examples/Basic"]

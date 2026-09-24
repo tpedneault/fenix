@@ -719,11 +719,11 @@ impl App {
         };
         run.steps[i].status = Status::Running;
         match run.steps[i].work.clone() {
-            RunWork::WriteFiles => {
+            work @ (RunWork::WriteFiles | RunWork::WriteAfterFiles) => {
                 state.generation += 1;
                 state.started = Some(Instant::now());
                 let generation = state.generation;
-                let result = plan.write_files().map(|_| ());
+                let result = if matches!(work, RunWork::WriteFiles) { plan.write_files() } else { plan.write_after_files() }.map(|_| ());
                 self.apply_page_event(PageEvent::Finished { buffer: id, generation, result });
             }
             RunWork::Command(step) => self.page_run(id, step, &plan.dir),

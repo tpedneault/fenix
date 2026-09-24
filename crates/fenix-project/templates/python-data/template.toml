@@ -1,0 +1,101 @@
+[template]
+name = "Python · data analysis"
+kind = "python"
+group = "Python"
+description = "A uv project for working with data: a package that loads and saves it, notebooks beside it, and data/raw and data/processed kept out of git."
+needs = ["uv"]
+open = ["src/{{name_snake}}/analysis.py"]
+
+[[ask]]
+key = "frames"
+label = "Data frames"
+choices = ["pandas", "polars"]
+default = "pandas"
+
+[[ask]]
+key = "formats"
+label = "Reads"
+many = ["csv", "parquet", "excel"]
+default = ["csv", "parquet"]
+
+[[ask]]
+key = "plots"
+label = "Plots"
+choices = ["matplotlib", "plotly", "none"]
+default = "matplotlib"
+
+[[ask]]
+key = "notebooks"
+label = "Notebooks"
+default = true
+hint = "JupyterLab, and a notebook to start from"
+
+[[ask]]
+key = "python"
+label = "Python"
+choices = ["3.13", "3.12", "3.11"]
+default = "3.12"
+hint = "uv downloads it if it isn't installed"
+
+[[run]]
+exec = "uv"
+args = ["init", "--lib", "--python", "{{python}}", "--name", "{{name_kebab}}", "--vcs", "none", "--no-readme"]
+
+[[run]]
+exec = "uv"
+args = ["add", "{{frames}}", "numpy"]
+
+[[run]]
+exec = "uv"
+args = ["add", "pyarrow"]
+when = "formats == parquet"
+
+[[run]]
+exec = "uv"
+args = ["add", "openpyxl"]
+when = ["formats == excel", "frames == pandas"]
+
+[[run]]
+exec = "uv"
+args = ["add", "fastexcel"]
+when = ["formats == excel", "frames == polars"]
+
+[[run]]
+exec = "uv"
+args = ["add", "{{plots}}"]
+when = "plots != none"
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "jupyterlab", "ipykernel"]
+when = "notebooks"
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "pytest", "ruff"]
+
+[[task]]
+name = "analyse"
+exec = "uv"
+args = ["run", "python", "-m", "{{name_snake}}.analysis"]
+
+[[task]]
+name = "lab"
+exec = "uv"
+args = ["run", "jupyter", "lab"]
+when = "notebooks"
+
+[[task]]
+name = "test"
+exec = "uv"
+args = ["run", "pytest"]
+
+[[task]]
+name = "lint"
+exec = "uv"
+args = ["run", "ruff", "check"]
+
+[[file]]
+path = "notebooks/explore.ipynb"
+from = "notebooks/explore.ipynb"
+when = "notebooks"

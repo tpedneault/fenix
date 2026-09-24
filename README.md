@@ -287,19 +287,51 @@ for anyone curious to poke around or build on it.
   returns there next time -- `[windows] workspace_per_project = false`
   turns that off. `SPC p P` is the old path-only quick switcher.
 - **New projects** (`SPC p c`, or Home's *new project* row): a four-step
-  wizard -- template, location, the template's own questions, then a
-  review of every file it will write and every command it will run
-  (literal arguments, no shell) before anything touches the disk. Ships
-  templates for Python (uv), Rust (cargo), an Arduino sketch, an
-  SCOS-2000 MIB workspace (registered as a `[mib]` root) and an empty
-  folder, with optional `git init` and a first commit. A template is a
-  folder -- `template.toml` plus a `files/` tree -- so your own go in
+  wizard -- template, location (typed, or `b` to pick the folder in the
+  explorer), the template's own questions, then a review of every file it
+  will write and every command it will run (literal arguments, no shell)
+  before anything touches the disk. Built-in templates:
+  - *Python* (uv): an app or library; data processing (pandas or polars,
+    matplotlib or plotly, optional notebooks); a desktop GUI (PySide6 or
+    tkinter); a command-line tool (typer, click or argparse); a FastAPI
+    web API (optional Dockerfile).
+  - *Systems*: a Rust crate (binary -- optionally a clap CLI -- or
+    library); a Cargo workspace; a C or C++ CMake project -- executable,
+    static or shared library -- with presets, `.clangd` and GoogleTest,
+    Catch2 or plain CTest.
+  - *Web*: a Vite app (React, Vue, Svelte, Preact, Solid, Lit or vanilla,
+    all TypeScript).
+  - *Embedded*: an Arduino sketch, or an Arduino library with an example.
+  - *Mission*: an SCOS-2000 MIB -- only the chosen `.dat` tables,
+    registered as a `[mib]` root.
+  - *Scripting*: a Tcl package with a tcltest suite.
+  - *Start from*: a monorepo (optionally a Cargo, uv and/or npm
+    workspace at its root) or an empty folder.
+
+  Each writes a `.fenix/tools.json` with its build/run/test tasks, and
+  offers `git init` with a first commit -- off by default when the
+  location is already inside a repository. A template is a folder --
+  `template.toml` plus a `files/` tree -- so your own go in
   `<config dir>/fenix/templates/`, and a repository can offer its own in
-  `.fenix/templates/`. A failed step stops the run and keeps what's done:
-  `r` retries it, `s` skips it, `o` opens what's there.
+  `.fenix/templates/`. Files can hold `{{#if key}}`/`{{else}}`/`{{/if}}`
+  line blocks; a `when` (on a file, a command, a task or a question) is
+  `key`, `!key`, `key == value`, `key != value` or a list of them that
+  must all hold; `after = true` writes a file once the commands have run
+  (for scaffolders like `npm create` that want an empty folder). A failed
+  step stops the run and keeps what's done: `r` retries it, `s` skips
+  it, `o` opens what's there.
   `:project-new [template] [name] [key=value ...]` skips the pages --
   `:project-new python-uv orbit python=3.13 dev=pytest,ruff` lands on the
   review.
+- **Monorepos and nested projects**: a project inside another
+  repository is its own project -- its git summary and the doctor are
+  scoped to its folder ("part of the X repository"). Tasks and the
+  modeline use the project; the language server starts at the enclosing
+  Cargo/uv/npm/pnpm/Go workspace, so navigation crosses crates. The hub
+  lists a project's subprojects (up to four levels down, skipping build
+  and dependency folders) indented beneath it, and opening one doesn't
+  add it to the list. A project created inside a Cargo or uv workspace
+  joins it.
 - **Project doctor** (`SPC p h`): every check the project's kind needs --
   uv and whether the venv matches `uv.lock`, the language server (found
   even when installed off PATH), debugpy; `arduino-cli`, the board's

@@ -18,6 +18,7 @@ pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
         ProjectKind::Cpp => theme.syntax_keyword,
         ProjectKind::Node => theme.syntax_number,
         ProjectKind::Go => theme.syntax_type,
+        ProjectKind::Monorepo => theme.fg,
         ProjectKind::Other => theme.gutter_fg,
     }
 }

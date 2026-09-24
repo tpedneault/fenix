@@ -253,7 +253,7 @@ pub fn diagnose(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool) -
             d.program(Section::Toolchain, "node", Health::Bad, "install Node.js");
             d.program(Section::Toolchain, "typescript-language-server", Health::Warn, "npm install -g typescript-language-server typescript");
         }
-        ProjectKind::Other => {}
+        ProjectKind::Monorepo | ProjectKind::Other => {}
     }
     project(&mut d, tools);
     d.checks
@@ -326,6 +326,10 @@ fn arduino(d: &mut Doctor) {
     let cli = d.program(Section::Toolchain, "arduino-cli", Health::Bad, "install Arduino CLI from https://arduino.github.io/arduino-cli");
     d.program(Section::Toolchain, "arduino-language-server", Health::Warn, "no completion -- see the Arduino page of the wiki");
     d.program(Section::Toolchain, "clangd", Health::Warn, "no completion -- use the one from an Arduino IDE 2 install");
+    // A library has no board or port of its own; its examples do.
+    if !crate::root::is_sketch(root) {
+        return;
+    }
     let yaml = std::fs::read_to_string(root.join("sketch.yaml")).unwrap_or_default();
     let value = |key: &str| yaml.lines().find_map(|l| l.trim().strip_prefix(key)?.trim().strip_prefix(':').map(|v| v.trim().to_string())).filter(|v| !v.is_empty());
     let fqbn = value("default_fqbn");

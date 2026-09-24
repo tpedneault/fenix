@@ -21,6 +21,9 @@ pub enum ProjectKind {
     Cpp,
     Node,
     Go,
+    /// A repository of many projects. Declared (`kind = monorepo`), not
+    /// guessed: plenty of single projects have a Cargo or uv workspace.
+    Monorepo,
     /// A root with a marker (`.git`, `.projectile`) but nothing that says
     /// what's in it.
     Other,
@@ -37,7 +40,7 @@ pub(crate) fn holds_mib_tables(dir: &Path) -> bool {
 }
 
 impl ProjectKind {
-    pub const ALL: [ProjectKind; 9] = [
+    pub const ALL: [ProjectKind; 10] = [
         ProjectKind::Python,
         ProjectKind::Arduino,
         ProjectKind::Mib,
@@ -46,6 +49,7 @@ impl ProjectKind {
         ProjectKind::Cpp,
         ProjectKind::Node,
         ProjectKind::Go,
+        ProjectKind::Monorepo,
         ProjectKind::Other,
     ];
 
@@ -60,6 +64,7 @@ impl ProjectKind {
             ProjectKind::Cpp => "cpp",
             ProjectKind::Node => "node",
             ProjectKind::Go => "go",
+            ProjectKind::Monorepo => "monorepo",
             ProjectKind::Other => "other",
         }
     }
@@ -88,6 +93,7 @@ impl ProjectKind {
             ProjectKind::Cpp => "C++",
             ProjectKind::Node => "JS",
             ProjectKind::Go => "GO",
+            ProjectKind::Monorepo => "MONO",
             ProjectKind::Other => "DIR",
         }
     }
@@ -102,6 +108,7 @@ impl ProjectKind {
             ProjectKind::Cpp => "C/C++",
             ProjectKind::Node => "JavaScript",
             ProjectKind::Go => "Go",
+            ProjectKind::Monorepo => "Monorepo",
             ProjectKind::Other => "Project",
         }
     }
@@ -117,7 +124,7 @@ pub fn detect_kind(root: &Path) -> ProjectKind {
 /// What `root`'s files say it is, whatever `project.ini` declares -- what
 /// the settings page offers as "detect".
 pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
-    if crate::root::is_sketch(root) {
+    if crate::root::is_sketch(root) || root.join("library.properties").is_file() {
         return ProjectKind::Arduino;
     }
     if holds_mib_tables(root) || holds_mib_tables(&root.join("mib")) {
@@ -153,7 +160,7 @@ pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
         found.into_iter().next()
     };
     let candidates: Vec<std::path::PathBuf> = match kind {
-        ProjectKind::Arduino => vec![root.join(format!("{name}.ino")), root.join(format!("{name}.pde"))],
+        ProjectKind::Arduino => vec![root.join(format!("{name}.ino")), root.join(format!("{name}.pde")), root.join(format!("src/{name}.cpp")), root.join(format!("src/{name}.h"))],
         ProjectKind::Rust => vec![root.join("src/main.rs"), root.join("src/lib.rs")],
         ProjectKind::Python => {
             let mut c = vec![root.join("main.py"), root.join("app.py")];
@@ -168,7 +175,7 @@ pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
         ProjectKind::Cpp => vec![root.join("src/main.cpp"), root.join("main.cpp"), root.join("src/main.c"), root.join("main.c")],
         ProjectKind::Tcl => vec![root.join("main.tcl")],
         ProjectKind::Mib => ["ccf.dat", "pcf.dat", "vdf.dat"].iter().flat_map(|t| [root.join(t), root.join("mib").join(t)]).collect(),
-        ProjectKind::Other => Vec::new(),
+        ProjectKind::Monorepo | ProjectKind::Other => Vec::new(),
     };
     candidates.into_iter().find(|p| p.is_file()).or_else(|| if kind == ProjectKind::Tcl { first_in(root, "tcl") } else { None })
 }
