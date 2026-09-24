@@ -503,7 +503,34 @@ for anyone curious to poke around or build on it.
   never wrap, so they stay aligned. `SPC d b` builds an image from the
   current project root's `Dockerfile`; `SPC d q` closes the whole
   session.
-- **Git panel** (Lazygit-style): `SPC g g` opens a real, seven-pane
+- **Git status page** (`SPC g g`): one page for the repository the
+  focused file is in. The header says where the branch stands -- its
+  upstream (ahead/behind, when it was last fetched, or "not pushed yet")
+  and its base branch (`[git] base_branch`, else `main`/`master`,
+  preferring `origin`'s copy) -- and a suspended rebase or merge leads
+  the page with its keys. Below: Conflicted, Untracked, Unstaged,
+  Staged, Stashes, Unpulled, Unpushed and Recent commits, each folding
+  with `Tab`. `Tab` on a file opens its diff inline, under its name;
+  `s`/`S` stage and unstage a file, a hunk, or -- with `V` over some
+  diff lines -- just those lines, and `d` discards (asking first; an
+  untracked file is named as deleted). `Enter` opens the file at the
+  line. Every verb with more than one form is a menu that opens under
+  the row you're on: `c` commit (commit, amend, extend, reword, fixup,
+  fixup-and-squash; flags `-a` all tracked, `-s` sign-off, `-n` skip
+  hooks), `P` push (a new branch's first push sets its upstream; a push
+  that would replace commits on the remote shows exactly which, and
+  offers `--force-with-lease`), `p` pull (rebase, merge, fetch), `b`
+  branch (switch, create, rename, merge in, rebase onto, delete branches
+  whose upstream is gone), `z` stash (everything, with untracked, staged
+  only, this file), `l` log, `r` rebase (continue/skip/abort while one
+  is suspended). `Enter` on a commit is its own menu: fix it up with
+  what's staged (folded in at once by an autosquash rebase), reword,
+  revert, branch or tag there, reset to it. Operations run off the UI
+  thread, one at a time; the page says what's running and how it ended,
+  and `$` shows the full output. It refreshes itself every couple of
+  seconds while it's visible. `[git] layout = panes` keeps the older
+  panel below.
+- **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
   the left (each its own real, Vim-navigable buffer with a title bar),
   Main on the right showing a diff of whatever's under the cursor in
@@ -1150,7 +1177,7 @@ popup shows what keys continue it.
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
-| `SPC g g` | Open (or refocus/refresh) the Git panel |
+| `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
 | `SPC g q` | Close the Git panel session |
 | `SPC g l` | Open the History view (commit graph, refs, commit diff) |
 | `SPC g L` | Close the History view |
@@ -1361,7 +1388,7 @@ Only these are special, and only on the pane named:
 | `u` | any | Refresh the whole session |
 | `x` | Containers, Images, Volumes, Networks | Show this pane's available keys |
 
-### Git panel (`SPC g g`)
+### Git panel (`SPC g g` with `[git] layout = panes`)
 
 Opens its own workspace with six real, titled panes -- Status, Files,
 Branches, Commits, and Stash stacked on the left, Main on the right.
@@ -1737,6 +1764,7 @@ window2 = 4480,0,1920,1040|true
 | `gitlab` | `token` | A GitLab personal access token with `api` scope. There is deliberately no project setting: it's read from each repo's `origin` remote |
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
+| `git` | `layout` | `page` (default) or `panes` -- what `SPC g g` opens: the Git status page, or the older seven-pane panel |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
 | `windows` | `workspace_per_project` | `true`/`false` -- whether opening a project from the hub gives it its own workspace (and returns to it); unset defaults to `true` |

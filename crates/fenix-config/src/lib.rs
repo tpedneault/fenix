@@ -213,6 +213,9 @@ pub struct Config {
     /// different advance width knocks every row out of alignment, which
     /// is why it isn't the default (see `graph_view::GraphStyle`).
     pub git_graph_style: Option<String>,
+    /// `SPC g g`: `page` (default) opens the Git status page; `panes`
+    /// keeps the older seven-pane panel.
+    pub git_layout: Option<String>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -349,6 +352,7 @@ impl Config {
             gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
             gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
             git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
+            git_layout: git.and_then(|s| s.get("layout")).cloned(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
@@ -398,6 +402,7 @@ impl Config {
             gitlab_base_url: None,
             gitlab_token: None,
             git_graph_style: None,
+            git_layout: None,
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
             windows: Vec::new(),
@@ -555,6 +560,12 @@ impl Config {
         }
         if let Some(base) = &self.git_base_branch {
             out.push_str(&format!("base_branch = {}\n", ini::quote_if_needed(base)));
+        }
+        if let Some(style) = &self.git_graph_style {
+            out.push_str(&format!("graph_style = {}\n", ini::quote_if_needed(style)));
+        }
+        if let Some(layout) = &self.git_layout {
+            out.push_str(&format!("layout = {}\n", ini::quote_if_needed(layout)));
         }
         out.push('\n');
         out.push_str("[gitlab]\n");

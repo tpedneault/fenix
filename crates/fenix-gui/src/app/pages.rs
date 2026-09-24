@@ -9,6 +9,7 @@
 
 use super::projects::kind_color;
 use super::*;
+use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
 use crate::project_hub::{self, Hub, HubProject};
@@ -25,6 +26,7 @@ pub(super) enum PageModel {
     Hub(Hub),
     Doctor(DoctorPage),
     Settings(Settings),
+    Git(Box<GitStatus>),
 }
 
 pub(super) struct PageState {
@@ -33,7 +35,7 @@ pub(super) struct PageState {
     /// The pane width `page` was laid out for, and whether the model has
     /// changed since.
     cols: usize,
-    stale: bool,
+    pub(super) stale: bool,
     /// Bumped for every background job started, so what a superseded job
     /// sends (a step since retried, a check since restarted) is dropped.
     generation: u64,
@@ -53,6 +55,7 @@ impl PageState {
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
             PageModel::Doctor(_) => false,
             PageModel::Settings(s) => s.editing.is_some(),
+            PageModel::Git(g) => g.typing(),
         }
     }
 
@@ -75,6 +78,7 @@ impl PageState {
                 target.extend(text.chars().filter(|c| !c.is_control()));
             }
             PageModel::Doctor(_) => {}
+            PageModel::Git(g) => g.type_text(text),
         }
         self.stale = true;
     }
@@ -88,9 +92,12 @@ pub enum PageEvent {
     Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
     HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
     Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
+    GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
+    GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
+    GitDone { buffer: BufferId, label: String, result: Result<String, String> },
 }
 
-type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
+pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
 
 /// Sends every line `stream` prints. Progress bars rewrite a line with
 /// `\r`; only the last state of each is worth a line in the log.
@@ -197,6 +204,7 @@ impl App {
             Some(PageModel::Hub(_)) => "*projects*".to_string(),
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
             Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
+            Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
         }
     }
 
@@ -206,19 +214,19 @@ impl App {
 
     /// The open page of one kind, if there is one -- the wizard, the hub
     /// and the settings page each exist at most once.
-    fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
+    pub(super) fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
         self.pages.iter().find(|(_, s)| is(&s.model)).map(|(id, _)| *id)
     }
 
     /// Opens `model` as a page in the focused pane.
-    fn open_page(&mut self, model: PageModel) -> BufferId {
+    pub(super) fn open_page(&mut self, model: PageModel) -> BufferId {
         let buffer = self.buffers.open_page("");
         self.pages.insert(buffer, PageState::new(model));
         self.show_page(buffer);
         buffer
     }
 
-    fn show_page(&mut self, buffer: BufferId) {
+    pub(super) fn show_page(&mut self, buffer: BufferId) {
         self.open_buffer_in_focused_pane(buffer);
         self.main_view = MainView::Editor;
         self.refresh_project_root();
@@ -241,7 +249,7 @@ impl App {
     /// Runs `job` off the UI thread, handing it a way to send events back
     /// -- or, with no event loop (tests), runs it here and applies what
     /// it sent.
-    fn page_spawn(&mut self, job: impl FnOnce(Sender) + Send + 'static) {
+    pub(super) fn page_spawn(&mut self, job: impl FnOnce(Sender) + Send + 'static) {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 let proxy = Mutex::new(proxy);
@@ -293,6 +301,7 @@ impl App {
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
             PageModel::Settings(s) => project_settings::layout(s, cols),
+            PageModel::Git(g) => git_status::layout(g, cols),
         };
         state.cols = cols;
         state.stale = false;
@@ -368,6 +377,10 @@ impl App {
                 let action = s.key(key);
                 self.settings_action(id, action);
             }
+            PageModel::Git(g) => {
+                let action = g.key(key);
+                self.git_page_action(id, action);
+            }
         }
         self.wake_caret();
         true
@@ -376,6 +389,7 @@ impl App {
     /// A background job's news for its page.
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
+            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. }) => self.apply_git_page_event(event),
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
                 state.stale = true;

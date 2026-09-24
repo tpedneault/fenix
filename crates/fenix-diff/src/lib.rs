@@ -24,7 +24,7 @@ mod parse;
 mod patch;
 
 pub use parse::parse;
-pub use patch::hunk_patch;
+pub use patch::{hunk_patch, lines_patch};
 
 /// What happened to a file in this diff, as its own `diff --git` header
 /// declares it -- `Modified` is the default because that's the case git

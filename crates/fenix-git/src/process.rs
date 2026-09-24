@@ -59,6 +59,12 @@ pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String>
     }
 }
 
+/// Whether `git args...` exits 0 -- for the commands whose answer *is*
+/// the exit status (`merge-base --is-ancestor`).
+pub(crate) fn run_status(repo: &Path, args: &[&str]) -> bool {
+    git_command(repo, args).output().is_ok_and(|out| out.status.success())
+}
+
 /// `run_action`, but with `stdin` piped into the child -- what `git
 /// apply` needs, since a patch arrives as text this process built in
 /// memory (see `apply::apply_patch`) rather than as a file on disk.

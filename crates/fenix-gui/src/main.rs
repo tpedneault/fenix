@@ -12,6 +12,7 @@ mod diff_view;
 mod docker_panel;
 mod forge_panel;
 mod git_panel;
+mod git_status;
 mod graph_view;
 mod gpu;
 mod icon;

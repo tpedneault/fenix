@@ -653,7 +653,7 @@ fn cmd_pdf_search(ctx: &mut CommandCtx) {
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {
-    ctx.app.open_git_panel();
+    ctx.app.open_git();
 }
 
 fn cmd_git_close(ctx: &mut CommandCtx) {

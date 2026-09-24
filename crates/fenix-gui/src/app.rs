@@ -11,6 +11,7 @@ mod local_leader;
 mod xml;
 mod projects;
 mod pages;
+mod git_page;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -636,6 +637,9 @@ enum ComposePurpose {
     /// single-line prompt means no body, no bullet list, and no way to
     /// see what you have written.
     CommitMessage { repo_root: PathBuf },
+    /// A commit, amend or reword from the Git status page -- the mode
+    /// and flags its commit menu chose.
+    GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
     /// An agenda task's description (`E`), seeded with the current one --
     /// saved locally and, on a linked task, sent to Jira.
     TaskDescription { task: TaskId },
@@ -661,6 +665,11 @@ impl ComposePurpose {
                 (format!("Comment on !{number} {}:{line}", position.new_path), "send")
             }
             ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
+            ComposePurpose::GitCommit { compose, .. } => match compose {
+                crate::git_status::Compose::New(_) => ("Commit message".to_string(), "commit"),
+                crate::git_status::Compose::Amend(_) => ("Amend the last commit".to_string(), "amend"),
+                crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
+            },
             ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
             ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
             ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
@@ -2627,6 +2636,9 @@ enum ActivePicker {
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
     MergeFrom(fenix_picker::PickerState<String>),
+    /// The Git status page's `b b`: a branch to switch to -- local ones
+    /// first, then remote branches with no local counterpart.
+    SwitchBranch(fenix_picker::PickerState<String>),
     /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
     /// subsystem, confirming opens its detail view (`mib_show_
     /// telecommand`). Same candidate list as `MibTelecommandInsert`,
@@ -2779,6 +2791,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::CompareBase(s) => s.push_char(c),
         ActivePicker::RebaseOnto(s) => s.push_char(c),
         ActivePicker::MergeFrom(s) => s.push_char(c),
+        ActivePicker::SwitchBranch(s) => s.push_char(c),
         ActivePicker::AgendaStatus(s) => s.push_char(c),
         ActivePicker::AgendaPriority(s) => s.push_char(c),
         ActivePicker::AgendaCategory(s) => s.push_char(c),
@@ -2829,6 +2842,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.backspace(),
         ActivePicker::RebaseOnto(s) => s.backspace(),
         ActivePicker::MergeFrom(s) => s.backspace(),
+        ActivePicker::SwitchBranch(s) => s.backspace(),
         ActivePicker::AgendaStatus(s) => s.backspace(),
         ActivePicker::AgendaPriority(s) => s.backspace(),
         ActivePicker::AgendaCategory(s) => s.backspace(),
@@ -2879,6 +2893,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::CompareBase(s) => s.move_selection(delta),
         ActivePicker::RebaseOnto(s) => s.move_selection(delta),
         ActivePicker::MergeFrom(s) => s.move_selection(delta),
+        ActivePicker::SwitchBranch(s) => s.move_selection(delta),
         ActivePicker::AgendaStatus(s) => s.move_selection(delta),
         ActivePicker::AgendaPriority(s) => s.move_selection(delta),
         ActivePicker::AgendaCategory(s) => s.move_selection(delta),
@@ -2932,6 +2947,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.toggle_mark(),
         ActivePicker::RebaseOnto(s) => s.toggle_mark(),
         ActivePicker::MergeFrom(s) => s.toggle_mark(),
+        ActivePicker::SwitchBranch(s) => s.toggle_mark(),
         ActivePicker::AgendaStatus(s) => s.toggle_mark(),
         ActivePicker::AgendaPriority(s) => s.toggle_mark(),
         ActivePicker::AgendaCategory(s) => s.toggle_mark(),
@@ -2982,6 +2998,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::CompareBase(s) => s.query(),
         ActivePicker::RebaseOnto(s) => s.query(),
         ActivePicker::MergeFrom(s) => s.query(),
+        ActivePicker::SwitchBranch(s) => s.query(),
         ActivePicker::AgendaStatus(s) => s.query(),
         ActivePicker::AgendaPriority(s) => s.query(),
         ActivePicker::AgendaCategory(s) => s.query(),
@@ -3032,6 +3049,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.len(),
         ActivePicker::RebaseOnto(s) => s.len(),
         ActivePicker::MergeFrom(s) => s.len(),
+        ActivePicker::SwitchBranch(s) => s.len(),
         ActivePicker::AgendaStatus(s) => s.len(),
         ActivePicker::AgendaPriority(s) => s.len(),
         ActivePicker::AgendaCategory(s) => s.len(),
@@ -3082,6 +3100,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.selected_row(),
         ActivePicker::RebaseOnto(s) => s.selected_row(),
         ActivePicker::MergeFrom(s) => s.selected_row(),
+        ActivePicker::SwitchBranch(s) => s.selected_row(),
         ActivePicker::AgendaStatus(s) => s.selected_row(),
         ActivePicker::AgendaPriority(s) => s.selected_row(),
         ActivePicker::AgendaCategory(s) => s.selected_row(),
@@ -3148,6 +3167,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SwitchBranch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaStatus(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaPriority(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaCategory(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -16473,6 +16493,9 @@ impl App {
     /// The repo any Git action should target: whichever Git-ish view is
     /// open, else the focused buffer's project.
     fn git_action_repo_root(&self) -> PathBuf {
+        if let Some(root) = self.focused_git_page_root() {
+            return root;
+        }
         self.git_session
             .as_ref()
             .map(|s| s.repo_root.clone())
@@ -16720,6 +16743,7 @@ impl App {
         self.checkpoint_session();
         self.tick_home();
         self.refresh_python_environments();
+        self.refresh_git_pages(true);
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -16942,6 +16966,7 @@ impl App {
         if self.merge_session.is_some() {
             self.merge_refresh();
         }
+        self.refresh_git_pages(false);
     }
 
     // -- Merge Requests view (`SPC g M`) -------------------------------
@@ -17628,6 +17653,11 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
+        if let ComposePurpose::GitCommit { repo_root, compose } = &purpose {
+            self.git_page_commit(repo_root.clone(), compose.clone(), body);
+            self.wake_caret();
+            return;
+        }
         if let ComposePurpose::CommitMessage { repo_root } = &purpose {
             match fenix_git::commit(repo_root, &body) {
                 Ok(_) => {
@@ -17665,6 +17695,7 @@ impl App {
                 (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
             }
             ComposePurpose::CommitMessage { .. }
+            | ComposePurpose::GitCommit { .. }
             | ComposePurpose::TaskDescription { .. }
             | ComposePurpose::TaskComment { .. }
             | ComposePurpose::IssueDescription { .. }
@@ -20619,6 +20650,12 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.git_merge_from(&branch);
             }
+            Some(ActivePicker::SwitchBranch(state)) => {
+                let Some(branch) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.git_switch_to(&branch);
+            }
             Some(ActivePicker::MibTelecommandLookup(state)) => {
                 let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -22624,7 +22661,7 @@ impl App {
         // whatever workspace merely happened to be active at the time.
         let before = self.workspaces.active_index();
         match parse_workspace_action(action) {
-            WorkspaceAction::Git => self.open_git_panel(),
+            WorkspaceAction::Git => self.open_git(),
             WorkspaceAction::Jira => self.open_jira_panel(),
             WorkspaceAction::Docker => self.open_docker_panel(),
             WorkspaceAction::Vnc(host) => self.open_vnc_session(&host),
@@ -24810,6 +24847,7 @@ impl App {
                 Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::RebaseOnto(_)) => ("REBASE ONTO", picker_len(picker)),
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
+                Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaStatus(_)) => ("AGENDA STATUS", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaPriority(_)) => ("AGENDA PRIORITY", picker_len(picker)),
