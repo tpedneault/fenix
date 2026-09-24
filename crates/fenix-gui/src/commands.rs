@@ -151,6 +151,7 @@ impl CommandRegistry {
         registry.register("git.history_close", "Close the History view", cmd_git_history_close);
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
+        registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
         registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
         registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
         registry.register("git.continue", "Continue the suspended rebase/merge", cmd_git_continue);
@@ -997,6 +998,10 @@ fn cmd_git_history_close(ctx: &mut CommandCtx) {
 
 fn cmd_git_fetch(ctx: &mut CommandCtx) {
     ctx.app.git_fetch();
+}
+
+fn cmd_git_operations(ctx: &mut CommandCtx) {
+    ctx.app.open_git_operations();
 }
 
 fn cmd_git_compare(ctx: &mut CommandCtx) {

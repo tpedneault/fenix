@@ -528,7 +528,17 @@ for anyone curious to poke around or build on it.
   revert, branch or tag there, reset to it. Operations run off the UI
   thread, one at a time; the page says what's running and how it ended,
   and `$` shows the full output. It refreshes itself every couple of
-  seconds while it's visible. `[git] layout = panes` keeps the older
+  seconds while it's visible.
+  **Every operation is logged, and `U` takes the last one back** --
+  after showing what it will do ("feature goes back to d42f6e1 ... brings
+  back 3 commits and the uncommitted changes saved before it"). Before
+  anything that throws work away runs (a discard, a hard reset, a
+  dropped stash), Fenix saves that work as git objects first, so it
+  can come back. Undoing a commit leaves its changes staged; undoing an
+  undo redoes it. The log lives in the repository's own git dir
+  (`.git/fenix/oplog`, never committed); `SPC g z` opens the page on
+  its Operations section, where `U` on any entry undoes that one. A
+  push can't be taken back, and says so. `[git] layout = panes` keeps the older
   panel below.
 - **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
@@ -1183,6 +1193,7 @@ popup shows what keys continue it.
 | `SPC g L` | Close the History view |
 | `SPC g f` | Fetch all remotes and prune deleted branches |
 | `SPC g c` | Compare two refs (pick base, then head) |
+| `SPC g z` | The operation log -- undo what Fenix ran on the repository |
 | `SPC g C` | Close the Compare view |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
 | `SPC g p` / `SPC g F` | Pull with `--rebase` / push `--force-with-lease` |

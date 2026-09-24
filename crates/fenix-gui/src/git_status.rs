@@ -44,6 +44,23 @@ pub struct Snapshot {
     pub in_progress: Option<String>,
     /// Local branches whose upstream was deleted.
     pub gone: Vec<String>,
+    /// The operation log, newest first.
+    pub ops: Vec<Op>,
+}
+
+/// One entry of the operation log, as the page lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Op {
+    /// The log's id for it: milliseconds since the epoch.
+    pub time: u64,
+    pub label: String,
+    pub ok: bool,
+    /// Whether it can be taken back from here.
+    pub undoable: bool,
+    /// Whether a later entry already took it back.
+    pub undone: bool,
+    /// Seconds ago, when it was read.
+    pub age: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -56,6 +73,7 @@ pub enum Section {
     Unpulled,
     Unpushed,
     Recent,
+    Operations,
 }
 
 impl Section {
@@ -69,6 +87,7 @@ impl Section {
             Section::Unpulled => "Unpulled",
             Section::Unpushed => "Unpushed",
             Section::Recent => "Recent commits",
+            Section::Operations => "Operations",
         }
     }
 
@@ -114,6 +133,8 @@ pub enum Row {
     Line { section: Section, path: String, hunk: usize, line: usize },
     Stash(usize),
     Commit { section: Section, hash: String },
+    /// An operation-log entry, by its time.
+    Op(u64),
 }
 
 impl Row {
@@ -123,6 +144,7 @@ impl Row {
                 Some(*s)
             }
             Row::Stash(_) => Some(Section::Stashes),
+            Row::Op(_) => Some(Section::Operations),
         }
     }
 
@@ -172,6 +194,8 @@ pub enum Job {
     Continue,
     Abort,
     Skip,
+    /// Take back the logged operation of this time.
+    Undo { time: u64, label: String },
 }
 
 impl Job {
@@ -205,6 +229,7 @@ impl Job {
             Job::Continue => "continue".to_string(),
             Job::Abort => "abort".to_string(),
             Job::Skip => "skip".to_string(),
+            Job::Undo { label, .. } => format!("undo {label}"),
         }
     }
 
@@ -255,6 +280,9 @@ pub enum Action {
     OpenMergeView,
     Copy(String),
     ShowOutput,
+    /// Work out what undoing an operation would do -- the latest that
+    /// can be, or the one of this time -- and ask.
+    PlanUndo(Option<u64>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +396,9 @@ pub struct GitStatus {
     pub output: Vec<String>,
     /// A snapshot is being read; the timed refresh waits for it.
     pub loading: bool,
+    /// Open the operation log once the next snapshot lands (`SPC g z`
+    /// on a page still reading).
+    pub reveal_operations: bool,
     pending_g: bool,
 }
 
@@ -379,7 +410,7 @@ impl GitStatus {
             name,
             snap: None,
             diffs: HashMap::new(),
-            folded: [Section::Stashes, Section::Recent].into_iter().collect(),
+            folded: [Section::Stashes, Section::Recent, Section::Operations].into_iter().collect(),
             expanded: HashSet::new(),
             cursor: 0,
             anchor: None,
@@ -391,6 +422,7 @@ impl GitStatus {
             busy: None,
             output: Vec::new(),
             loading: false,
+            reveal_operations: false,
             pending_g: false,
         }
     }
@@ -412,6 +444,10 @@ impl GitStatus {
         let old_rows = self.rows();
         let before = old_rows.get(self.cursor).cloned();
         self.snap = Some(snap);
+        if std::mem::take(&mut self.reveal_operations) {
+            self.show_operations();
+            return;
+        }
         let rows = self.rows();
         if rows == old_rows {
             // The timed refresh, with nothing changed: leave the cursor
@@ -473,7 +509,18 @@ impl GitStatus {
         if !snap.recent.is_empty() {
             out.push(Section::Recent);
         }
+        if !snap.ops.is_empty() {
+            out.push(Section::Operations);
+        }
         out
+    }
+
+    /// Unfolds the operation log and puts the cursor on it (`SPC g z`).
+    pub fn show_operations(&mut self) {
+        self.folded.remove(&Section::Operations);
+        if let Some(i) = self.rows().iter().position(|r| *r == Row::Section(Section::Operations)) {
+            self.cursor = i;
+        }
     }
 
     fn commits(&self, section: Section) -> &[Commit] {
@@ -497,6 +544,7 @@ impl GitStatus {
             }
             match section {
                 Section::Stashes => rows.extend(snap.stashes.iter().map(|s| Row::Stash(s.index))),
+                Section::Operations => rows.extend(snap.ops.iter().map(|o| Row::Op(o.time))),
                 Section::Unpulled | Section::Unpushed | Section::Recent => {
                     rows.extend(self.commits(section).iter().map(|c| Row::Commit { section, hash: c.hash.clone() }))
                 }
@@ -623,6 +671,10 @@ impl GitStatus {
                 None => Action::None,
             },
             Key::Char('u') => Action::Refresh,
+            Key::Char('U') => match rows.get(self.cursor) {
+                Some(Row::Op(time)) => Action::PlanUndo(Some(*time)),
+                _ => Action::PlanUndo(None),
+            },
             Key::Char('$') => Action::ShowOutput,
             Key::Char('q') => Action::Close,
             _ => Action::None,
@@ -700,6 +752,7 @@ impl GitStatus {
             }
             Some(Row::Commit { hash, .. }) => self.open_menu(MenuKind::CommitRow, Some(hash)),
             Some(Row::Stash(i)) => self.open_menu(MenuKind::StashRow, Some(i.to_string())),
+            Some(Row::Op(time)) => Action::PlanUndo(Some(time)),
             None => Action::None,
         }
     }
@@ -1002,6 +1055,7 @@ impl GitStatus {
                             verb("V", "select lines", "in a diff"),
                             verb("a A", "stage all / unstage all", ""),
                             verb("Enter", "open / commit menu", ""),
+                            verb("U", "undo", "the last operation, or the one under the cursor"),
                             verb("u", "refresh", ""),
                             verb("$", "last output", ""),
                             verb("q", "close", ""),
@@ -1437,6 +1491,7 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     Section::Unpulled => snap.unpulled.len(),
                     Section::Unpushed => snap.unpushed.len(),
                     Section::Recent => snap.recent.len(),
+                    Section::Operations => snap.ops.len(),
                     s => files_in(snap, *s).len(),
                 };
                 let x = g.put(y, left, if folded { "▸" } else { "▾" }, Role::Muted) + 1;
@@ -1516,6 +1571,23 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                 let x = g.put(y, left + 4, &format!("stash@{{{index}}}"), Role::Accent) + 2;
                 g.put(y, x, &fit(message, (left + width).saturating_sub(x)), Role::Text);
             }
+            Row::Op(time) => {
+                if let Some(op) = snap.ops.iter().find(|o| o.time == *time) {
+                    let when = ago(op.age);
+                    let x = g.put(y, left + 4, if op.ok { "✓" } else { "✗" }, if op.ok { Role::Good } else { Role::Bad }) + 2;
+                    let tail = if op.undone {
+                        "undone"
+                    } else if op.undoable && op.ok {
+                        "U undoes"
+                    } else {
+                        ""
+                    };
+                    let room = (left + width).saturating_sub(x + when.chars().count() + tail.chars().count() + 4);
+                    g.put(y, x, &fit(&op.label, room), if op.undone { Role::Muted } else { Role::Text });
+                    let x = g.put(y, (left + width).saturating_sub(when.chars().count() + tail.chars().count() + 2), tail, Role::Accent);
+                    g.put(y, (left + width).saturating_sub(when.chars().count()).max(x + 1), &when, Role::Muted);
+                }
+            }
             Row::Commit { section, hash } => {
                 if let Some(c) = page.commits(*section).iter().find(|c| &c.hash == hash) {
                     let x = g.put(y, left + 4, &c.short_hash, Role::Accent) + 2;
@@ -1562,6 +1634,7 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
             ("z", "stash…"),
             ("l", "log…"),
             ("r", "rebase…"),
+            ("U", "undo"),
             ("?", "all keys"),
         ]
     };
@@ -1665,6 +1738,7 @@ mod tests {
             recent: vec![commit("4d1e9a0aaaa", "sections fold"), commit("b72c311bbbb", "a status page"), commit("7d35b6fcccc", "older")],
             in_progress: None,
             gone: vec!["feature/old".into()],
+            ops: Vec::new(),
         }
     }
 
@@ -1881,6 +1955,24 @@ mod tests {
         assert!(layout(&p, 120).text.contains("REBASING 3/7  r c continue"));
         p.key(Key::Char('r'));
         assert_eq!(p.key(Key::Char('c')), Action::Run(Job::Continue));
+    }
+
+    #[test]
+    fn the_operation_log_lists_what_ran_and_u_undoes_the_one_under_the_cursor() {
+        let mut p = page();
+        let mut snap = snapshot();
+        snap.ops = vec![
+            Op { time: 20, label: "reset --hard to e81a4f2".into(), ok: true, undoable: true, undone: false, age: 40 },
+            Op { time: 10, label: "push to origin/feature/git".into(), ok: true, undoable: false, undone: false, age: 600 },
+        ];
+        p.set_snapshot(snap);
+        assert_eq!(p.key(Key::Char('U')), Action::PlanUndo(None), "U anywhere else: the latest");
+        p.show_operations();
+        let text = layout(&p, 120).text;
+        assert!(text.contains("OPERATIONS 2") && text.contains("reset --hard to e81a4f2") && text.contains("U undoes"), "{text}");
+        p.key(Key::Char('j'));
+        p.key(Key::Char('j'));
+        assert_eq!(p.key(Key::Char('U')), Action::PlanUndo(Some(10)));
     }
 
     #[test]

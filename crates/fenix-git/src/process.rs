@@ -59,6 +59,15 @@ pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String>
     }
 }
 
+/// `git args...`'s stdout as raw bytes -- a blob's exact content.
+pub(crate) fn run_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    match git_command(repo, args).output() {
+        Ok(out) if out.status.success() => Ok(out.stdout),
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+        Err(err) => Err(format!("couldn't run git: {err}")),
+    }
+}
+
 /// Whether `git args...` exits 0 -- for the commands whose answer *is*
 /// the exit status (`merge-base --is-ancestor`).
 pub(crate) fn run_status(repo: &Path, args: &[&str]) -> bool {

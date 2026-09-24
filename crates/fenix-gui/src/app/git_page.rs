@@ -6,8 +6,10 @@
 
 use super::pages::{PageEvent, PageModel};
 use super::*;
-use crate::git_status::{Action, Compose, DiffState, GitStatus, Job, PickRef, Section, Snapshot};
-use fenix_git::CommitKind;
+use crate::git_status::{Action, Compose, Confirm, DiffState, GitStatus, Job, Op, PickRef, Section, Snapshot};
+use crate::page::Role as PageRole;
+use fenix_git::oplog::{self, Undo};
+use fenix_git::{ApplyTarget, CommitKind, ResetMode};
 
 /// Commits listed in the Unpushed/Unpulled sections at most.
 const COMMIT_LIMIT: usize = 50;
@@ -30,7 +32,15 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
         },
     };
     let recent = fenix_git::list_commits(root, RECENT);
+    let log = oplog::entries(root, 30);
+    let now = now_millis();
+    let undone = undone_times(&oplog::entries(root, 200));
+    let ops = log
+        .into_iter()
+        .map(|e| Op { age: now.saturating_sub(e.time) / 1000, undoable: e.undo.possible(), undone: undone.contains(&e.time), ok: e.ok, time: e.time, label: e.label })
+        .collect();
     Snapshot {
+        ops,
         head_subject: recent.first().map(|c| c.message.clone()),
         push_remote: fenix_git::default_remote(root),
         base,
@@ -55,6 +65,127 @@ fn read_diff(root: &Path, section: Section, path: &str) -> DiffState {
         },
         Err(e) => DiffState::Empty(first_line(&e)),
     }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The times of the entries a later "undo #time: ..." entry took back.
+fn undone_times(entries: &[oplog::Entry]) -> Vec<u64> {
+    entries.iter().filter_map(|e| e.label.strip_prefix("undo #")?.split(':').next()?.parse().ok()).collect()
+}
+
+/// What `U` with nothing chosen undoes: the newest operation that
+/// worked, can be taken back, and hasn't been.
+fn latest_undoable(entries: &[oplog::Entry]) -> Option<&oplog::Entry> {
+    let undone = undone_times(entries);
+    entries.iter().find(|e| e.ok && e.undo.possible() && !undone.contains(&e.time))
+}
+
+/// The question to ask before undoing: what it'll do, from the log.
+fn plan_undo(root: &Path, time: Option<u64>) -> Result<Confirm, String> {
+    let entries = oplog::entries(root, 200);
+    let entry = match time {
+        Some(t) => entries.iter().find(|e| e.time == t).ok_or("that operation isn't in the log any more")?,
+        None => latest_undoable(&entries).ok_or("nothing Fenix ran here can be undone")?,
+    };
+    if let Undo::Not(why) = &entry.undo {
+        return Err(format!("{} can't be undone: {why}", entry.label));
+    }
+    if !entry.ok {
+        return Err(format!("{} failed, so there's nothing to undo", entry.label));
+    }
+    let now = now_millis();
+    let detail = oplog::preview(root, &entry.undo)
+        .into_iter()
+        .map(|line| {
+            let role = if line.starts_with('+') {
+                PageRole::Good
+            } else if line.starts_with('-') {
+                PageRole::Bad
+            } else {
+                PageRole::Muted
+            };
+            (role, line)
+        })
+        .collect();
+    Ok(Confirm {
+        question: format!("Undo \"{}\" ({})?", entry.label, crate::git_status::ago(now.saturating_sub(entry.time) / 1000)),
+        detail,
+        choices: vec![('y', "undo it".to_string(), Job::Undo { time: entry.time, label: entry.label.clone() })],
+    })
+}
+
+/// Takes an operation back -- logged too, with how to put it back again.
+fn run_undo(root: &Path, time: u64) -> Result<String, String> {
+    let entry = oplog::entries(root, 200).into_iter().find(|e| e.time == time).ok_or("that operation isn't in the log any more")?;
+    let head = oplog::rev(root, "HEAD");
+    let redo = match &entry.undo {
+        Undo::Reset { .. } | Undo::Restore { .. } => Undo::Reset { to: head, soft: false, saved: None },
+        Undo::Switch(_) | Undo::Unbranch { back_to: Some(_), .. } => match oplog::current_branch(root) {
+            Some(branch) => Undo::Switch(branch),
+            None => Undo::Not("HEAD was detached".to_string()),
+        },
+        Undo::Rename { from, to } => Undo::Rename { from: to.clone(), to: from.clone() },
+        Undo::DeleteBranch(name) => Undo::CreateBranches(vec![(name.clone(), oplog::rev(root, name))]),
+        Undo::CreateBranches(branches) if branches.len() == 1 => Undo::DeleteBranch(branches[0].0.clone()),
+        _ => Undo::Not("redo it by hand".to_string()),
+    };
+    let label = format!("undo #{}: {}", entry.time, entry.label);
+    oplog::logged(root, &label, || oplog::apply(root, &entry.undo), move |_| redo)
+}
+
+/// How to take a job back, given how it went.
+type UndoFor = Box<dyn FnOnce(&Result<String, String>) -> Undo>;
+
+/// Runs `job`, logged with how to take it back -- worked out before it
+/// runs, from what it's about to change.
+fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
+    if let Job::Undo { time, .. } = job {
+        return run_undo(root, *time);
+    }
+    let head = oplog::rev(root, "HEAD");
+    let branch = oplog::current_branch(root);
+    let not = |why: &str| -> UndoFor {
+        let why = why.to_string();
+        Box::new(move |_| Undo::Not(why))
+    };
+    let fixed = |undo: Undo| -> UndoFor { Box::new(move |_| undo) };
+    let undo: UndoFor = match job {
+        Job::Stage(_) | Job::Unstage(_) | Job::Apply { target: ApplyTarget::Stage | ApplyTarget::Unstage, .. } => not("stage or unstage it back (s / S)"),
+        Job::Apply { target: ApplyTarget::Discard, .. } => fixed(Undo::Restore { saved: oplog::save_changes(root), files: Vec::new() }),
+        Job::Discard(files) => {
+            let saved = files.iter().any(|f| !f.1).then(|| oplog::save_changes(root)).flatten();
+            let blobs = files.iter().filter(|f| f.1).filter_map(|(p, _)| oplog::save_file(root, p).map(|b| (p.clone(), b))).collect();
+            fixed(Undo::Restore { saved, files: blobs })
+        }
+        // Undoing a commit gives its changes back, staged.
+        Job::Commit(..) | Job::FixupNow { .. } | Job::Reset { mode: ResetMode::Soft | ResetMode::Mixed, .. } => fixed(Undo::Reset { to: head, soft: true, saved: None }),
+        Job::Reset { mode: ResetMode::Hard, .. } => fixed(Undo::Reset { to: head, soft: false, saved: oplog::save_changes(root) }),
+        Job::Pull { .. } | Job::Revert(_) => fixed(Undo::Reset { to: head, soft: false, saved: None }),
+        Job::Push(_) | Job::PushTags(_) => not("a push can't be taken back from here -- push the old commit with --force-with-lease if nobody has pulled it"),
+        Job::Fetch => not("a fetch only updates what Fenix knows about the remote"),
+        Job::Branch { name, switch, .. } => fixed(Undo::Unbranch { name: name.clone(), back_to: if *switch { branch } else { None } }),
+        Job::Rename { old, new } => fixed(Undo::Rename { from: new.clone(), to: old.clone() }),
+        Job::DeleteBranches(names) => fixed(Undo::CreateBranches(names.iter().map(|n| (n.clone(), oplog::rev(root, n))).collect())),
+        Job::Tag { name, .. } => fixed(Undo::DeleteTag(name.clone())),
+        Job::Stash(_) => {
+            let root = root.to_path_buf();
+            Box::new(move |result| match result {
+                Ok(_) => Undo::PopStash(oplog::rev(&root, "stash@{0}")),
+                Err(_) => Undo::Not("nothing was stashed".to_string()),
+            })
+        }
+        Job::StashDrop(i) => {
+            let message = fenix_git::list_stashes(root).into_iter().find(|s| s.index == *i).map(|s| s.message).unwrap_or_default();
+            fixed(Undo::StoreStash { commit: oplog::rev(root, &format!("stash@{{{i}}}")), message })
+        }
+        Job::StashApply(_) | Job::StashPop(_) => not("the stash went into your files -- discard them to take it back"),
+        Job::Continue | Job::Abort | Job::Skip => not("a rebase or merge step -- undo the whole rebase or merge instead"),
+        Job::Undo { .. } => unreachable!("handled above"),
+    };
+    oplog::logged(root, &job.label(), || run_job(root, job), undo)
 }
 
 /// The line of git's output worth showing: the first that isn't a hint.
@@ -118,6 +249,7 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
             None => Err("nothing in progress to abort".to_string()),
         },
         Job::Skip => fenix_git::rebase_skip(root),
+        Job::Undo { time, .. } => run_undo(root, *time),
     }
 }
 
@@ -156,6 +288,19 @@ impl App {
             None => self.open_page(PageModel::Git(Box::new(GitStatus::new(root)))),
         };
         self.git_page_refresh(id);
+    }
+
+    /// `SPC g z`: the status page, open on its operation log.
+    pub(crate) fn open_git_operations(&mut self) {
+        self.open_git_status();
+        let id = self.focused_buffer_id();
+        if let Some(g) = self.git_page(id) {
+            if g.snap.is_some() && !g.loading {
+                g.show_operations();
+            } else {
+                g.reveal_operations = true;
+            }
+        }
     }
 
     fn git_page(&mut self, id: BufferId) -> Option<&mut GitStatus> {
@@ -258,6 +403,12 @@ impl App {
                     g.message = Some((format!("copied {}", crate::page::fit(&text, 60)), false));
                 }
             }
+            Action::PlanUndo(time) => {
+                self.page_spawn(move |send| {
+                    let confirm = plan_undo(&root, time);
+                    send(PageEvent::GitConfirm { buffer: id, confirm });
+                });
+            }
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
                 let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };
@@ -279,7 +430,7 @@ impl App {
         g.message = None;
         let root = g.root.clone();
         self.page_spawn(move |send| {
-            let result = run_job(&root, &job);
+            let result = run_logged(&root, &job);
             send(PageEvent::GitDone { buffer: id, label, result });
         });
     }
@@ -312,7 +463,11 @@ impl App {
             Some((remote, rest)) if remotes.iter().any(|r| r == remote) => rest,
             _ => branch,
         };
-        let result = fenix_git::checkout_branch(&root, local);
+        let back = oplog::current_branch(&root);
+        let result = oplog::logged(&root, &format!("switch to {local}"), || fenix_git::checkout_branch(&root, local), move |_| match back {
+            Some(branch) => Undo::Switch(branch),
+            None => Undo::Not("HEAD was detached".to_string()),
+        });
         self.run_git_operation(&format!("switch to {local}"), result);
     }
 
@@ -324,7 +479,16 @@ impl App {
             Compose::Amend(flags) => (CommitKind::Amend(body.clone()), flags),
             Compose::Reword(flags) => (CommitKind::Reword(body.clone()), flags),
         };
-        match fenix_git::commit_with(&root, &kind, flags) {
+        let head = oplog::rev(&root, "HEAD");
+        let label = match &kind {
+            CommitKind::Amend(_) => "amend",
+            CommitKind::Reword(_) => "reword",
+            _ => "commit",
+        };
+        let result = oplog::logged(&root, &format!("{label}: {}", body.lines().next().unwrap_or_default()), || fenix_git::commit_with(&root, &kind, flags), move |_| {
+            Undo::Reset { to: head, soft: true, saved: None }
+        });
+        match result {
             Ok(_) => {
                 self.close_compose();
                 let summary = body.lines().next().unwrap_or_default().to_string();
@@ -369,6 +533,13 @@ impl App {
                     (false, _) => (format!("{label} ✓"), false),
                 });
                 self.git_refresh_all_views();
+            }
+            PageEvent::GitConfirm { buffer, confirm } => {
+                let Some(g) = self.git_page(buffer) else { return };
+                match confirm {
+                    Ok(confirm) => g.confirm = Some(confirm),
+                    Err(why) => g.message = Some((why, true)),
+                }
             }
             _ => {}
         }
@@ -568,6 +739,65 @@ mod tests {
         assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "review");
         assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "review@{upstream}"]), "origin/review");
         assert!(text(&mut app).contains("Head    review"));
+    }
+
+    #[test]
+    fn a_hard_reset_is_undone_with_u_and_the_undo_is_undone_again() {
+        let repo = Repo::new("undo");
+        repo.write("b.txt", "b\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-q", "-m", "second"]);
+        repo.write("a.txt", "one\nedited\nthree\n");
+        let second = repo.git(&["rev-parse", "HEAD"]);
+        let first = repo.git(&["rev-parse", "HEAD~1"]);
+        let mut app = app_on(&repo, "a.txt");
+        page_mut(&mut app).folded.clear();
+        goto(&mut app, |r| matches!(r, Row::Commit { hash, section: Section::Recent } if *hash == first));
+        press(&mut app, "\nrhy");
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), first, "reset --hard ran");
+        assert_eq!(std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+
+        press(&mut app, "U");
+        let shown = text(&mut app);
+        assert!(shown.contains("Undo \"reset --hard to") && shown.contains("brings back 1 commit") && shown.contains("uncommitted changes"), "{shown}");
+        press(&mut app, "y");
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), second, "the commit is back");
+        assert_eq!(std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(), "one\nedited\nthree\n", "and the edit");
+
+        app.open_git_operations();
+        let shown = text(&mut app);
+        assert!(shown.contains("OPERATIONS") && shown.contains("undo #") && shown.contains("undone"), "{shown}");
+    }
+
+    #[test]
+    fn undoing_a_commit_leaves_its_changes_staged() {
+        let repo = Repo::new("undo_commit");
+        repo.write("b.txt", "b\n");
+        repo.git(&["add", "b.txt"]);
+        let before = repo.git(&["rev-parse", "HEAD"]);
+        let mut app = app_on(&repo, "a.txt");
+        press(&mut app, "cc");
+        let compose = app.compose.as_ref().unwrap().buffer;
+        if let Some(ob) = app.buffers.get_mut(compose) {
+            let mut c = Cursor::at_start();
+            ob.buffer.replace_range(&mut c, 0, 0, "Add b");
+        }
+        app.compose_submit();
+        assert_ne!(repo.git(&["rev-parse", "HEAD"]), before);
+        press(&mut app, "Uy");
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
+        assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "b.txt");
+    }
+
+    #[test]
+    fn a_push_says_why_it_cannot_be_undone() {
+        let repo = Repo::new("undo_push");
+        let mut app = app_on(&repo, "a.txt");
+        press(&mut app, "Pp");
+        app.open_git_operations();
+        goto(&mut app, |r| matches!(r, Row::Op(_)));
+        press(&mut app, "U");
+        assert!(page_mut(&mut app).message.as_ref().unwrap().0.contains("can't be taken back"));
     }
 
     #[test]

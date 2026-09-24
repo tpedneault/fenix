@@ -318,6 +318,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch (--all --prune)", "git.fetch");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('C')], "close compare", "git.compare_close");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
 
         // Operations that rewrite history, and the two keys that end one
         // that stopped for a conflict. `R`/`A` are deliberately one pair

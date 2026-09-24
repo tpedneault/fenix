@@ -18045,13 +18045,19 @@ impl App {
 
     pub(crate) fn git_rebase_onto(&mut self, onto: &str) {
         let repo_root = self.git_action_repo_root();
-        let result = fenix_git::rebase(&repo_root, onto);
+        let before = fenix_git::oplog::rev(&repo_root, "HEAD");
+        let result = fenix_git::oplog::logged(&repo_root, &format!("rebase onto {onto}"), || fenix_git::rebase(&repo_root, onto), |_| {
+            fenix_git::oplog::Undo::Reset { to: before, soft: false, saved: None }
+        });
         self.run_git_operation(&format!("rebase onto {onto}"), result);
     }
 
     pub(crate) fn git_merge_from(&mut self, branch: &str) {
         let repo_root = self.git_action_repo_root();
-        let result = fenix_git::merge(&repo_root, branch);
+        let before = fenix_git::oplog::rev(&repo_root, "HEAD");
+        let result = fenix_git::oplog::logged(&repo_root, &format!("merge {branch}"), || fenix_git::merge(&repo_root, branch), |_| {
+            fenix_git::oplog::Undo::Reset { to: before, soft: false, saved: None }
+        });
         self.run_git_operation(&format!("merge {branch}"), result);
     }
 

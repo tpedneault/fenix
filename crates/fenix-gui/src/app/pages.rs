@@ -95,6 +95,8 @@ pub enum PageEvent {
     GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
     GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
     GitDone { buffer: BufferId, label: String, result: Result<String, String> },
+    /// A question for the page to ask -- an undo's preview.
+    GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -389,7 +391,9 @@ impl App {
     /// A background job's news for its page.
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
-            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. }) => self.apply_git_page_event(event),
+            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
+                self.apply_git_page_event(event)
+            }
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
                 state.stale = true;

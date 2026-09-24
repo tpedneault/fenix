@@ -6,6 +6,7 @@ mod conflict;
 mod diff;
 mod files;
 mod graph;
+pub mod oplog;
 mod process;
 mod stash;
 mod state;
