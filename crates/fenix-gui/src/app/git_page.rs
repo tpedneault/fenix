@@ -360,7 +360,9 @@ impl App {
     /// or on the disk poll's tick, when only the visible ones that
     /// aren't already reading or running something are.
     pub(super) fn refresh_git_pages(&mut self, timed: bool) {
+        self.refresh_chrome_git();
         if timed {
+            self.auto_fetch();
             self.refresh_stale_blames();
         } else {
             self.refresh_git_logs();

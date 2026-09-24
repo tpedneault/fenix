@@ -216,6 +216,10 @@ pub struct Config {
     /// `SPC g g`: `page` (default) opens the Git status page; `panes`
     /// keeps the older seven-pane panel.
     pub git_layout: Option<String>,
+    /// `[git] auto_fetch = 5m`: fetch the focused repository in the
+    /// background when its last fetch is older than this many minutes.
+    /// Off unless set.
+    pub git_auto_fetch_minutes: Option<u64>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -353,6 +357,7 @@ impl Config {
             gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
             git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
             git_layout: git.and_then(|s| s.get("layout")).cloned(),
+            git_auto_fetch_minutes: git.and_then(|s| s.get("auto_fetch")).and_then(|v| v.trim().trim_end_matches('m').trim().parse().ok()).filter(|m| *m > 0),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
@@ -403,6 +408,7 @@ impl Config {
             gitlab_token: None,
             git_graph_style: None,
             git_layout: None,
+            git_auto_fetch_minutes: None,
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
             windows: Vec::new(),
@@ -566,6 +572,9 @@ impl Config {
         }
         if let Some(layout) = &self.git_layout {
             out.push_str(&format!("layout = {}\n", ini::quote_if_needed(layout)));
+        }
+        if let Some(minutes) = self.git_auto_fetch_minutes {
+            out.push_str(&format!("auto_fetch = {minutes}m\n"));
         }
         out.push('\n');
         out.push_str("[gitlab]\n");
@@ -1265,11 +1274,17 @@ mod tests {
         let mut config = Config::load_or_default(path.clone());
         config.git_graph_limit = Some(500);
         config.git_base_branch = Some("develop".to_string());
+        config.git_graph_style = Some("unicode".to_string());
+        config.git_layout = Some("panes".to_string());
+        config.git_auto_fetch_minutes = Some(5);
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.git_graph_limit, Some(500));
         assert_eq!(reloaded.git_base_branch, Some("develop".to_string()));
+        assert_eq!(reloaded.git_graph_style, Some("unicode".to_string()), "graph_style used to be dropped on save");
+        assert_eq!(reloaded.git_layout, Some("panes".to_string()));
+        assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
         std::fs::remove_file(&path).ok();
     }
 

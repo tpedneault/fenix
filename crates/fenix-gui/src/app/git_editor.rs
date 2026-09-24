@@ -8,6 +8,45 @@ use super::pages::PageEvent;
 use super::*;
 use fenix_git::oplog::{self, Undo};
 
+/// Where the focused file's repository stands, for the modeline --
+/// read on the disk poll's tick, never per frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChromeGit {
+    pub root: PathBuf,
+    /// The buffer it was read for.
+    pub buffer: BufferId,
+    pub branch: String,
+    /// Ahead/behind its upstream, when it has one.
+    pub tracking: Option<(usize, usize)>,
+    /// Files with changes, staged or not.
+    pub dirty: usize,
+    /// A suspended operation: `REBASING 3/7`.
+    pub op: Option<String>,
+}
+
+impl ChromeGit {
+    /// The modeline's segment: `feature/x ↑2 •3`, or loudly, the
+    /// operation that's waiting and its keys.
+    pub fn segment(&self) -> String {
+        if let Some(op) = &self.op {
+            return format!("   {op} -- SPC g R continue, SPC g A abort");
+        }
+        let mut out = format!("   {}", self.branch);
+        if let Some((ahead, behind)) = self.tracking {
+            if ahead > 0 {
+                out.push_str(&format!(" ↑{ahead}"));
+            }
+            if behind > 0 {
+                out.push_str(&format!(" ↓{behind}"));
+            }
+        }
+        if self.dirty > 0 {
+            out.push_str(&format!(" •{}", self.dirty));
+        }
+        out
+    }
+}
+
 /// How wide the blame column is, in cells.
 const BLAME_WIDTH: usize = 30;
 
@@ -177,6 +216,65 @@ impl App {
         text.push_str("\nSPC g a stage · SPC g d discard · ]h next");
         self.lsp_hover = Some(text);
         self.wake_caret();
+    }
+
+    /// Reads where the focused file's repository stands, off the UI
+    /// thread, for the modeline.
+    pub(super) fn refresh_chrome_git(&mut self) {
+        let buffer = self.focused_buffer_id();
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.chrome_git = None;
+            return;
+        };
+        let Some(root) = repository_of(&path) else {
+            self.chrome_git = None;
+            return;
+        };
+        self.page_spawn(move |send| {
+            let (status, files) = fenix_git::status_and_files(&root);
+            let Some(status) = status else { return };
+            let state = ChromeGit {
+                buffer,
+                branch: status.branch,
+                tracking: status.upstream.is_some().then_some((status.ahead, status.behind)),
+                dirty: files.len(),
+                op: fenix_git::in_progress(&root).map(|op| op.label()),
+                root,
+            };
+            send(PageEvent::ChromeGit(Box::new(state)));
+        });
+    }
+
+    /// `[git] auto_fetch`: fetches the focused file's repository in the
+    /// background when it was last fetched longer ago than configured --
+    /// and waits that long again after trying, whether it worked or not,
+    /// so a remote that wants a password isn't asked every tick.
+    pub(super) fn auto_fetch(&mut self) {
+        let Some(minutes) = self.config.git_auto_fetch_minutes else { return };
+        let Some(root) = self.chrome_git.as_ref().map(|c| c.root.clone()) else { return };
+        let every = Duration::from_secs(minutes * 60);
+        if self.fetch_attempts.get(&root).is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        if fenix_git::seconds_since_fetch(&root).is_some_and(|s| s < every.as_secs()) || fenix_git::remotes(&root).is_empty() {
+            return;
+        }
+        self.fetch_attempts.insert(root.clone(), Instant::now());
+        self.page_spawn(move |send| {
+            let result = fenix_git::oplog::logged(&root, "fetch --all --prune (automatic)", || fenix_git::fetch(&root), |_| {
+                fenix_git::oplog::Undo::Not("a fetch only updates what Fenix knows about the remote".to_string())
+            });
+            send(PageEvent::AutoFetched { ok: result.is_ok() });
+        });
+    }
+
+    /// The modeline's git segment for the focused buffer, when it's the
+    /// one last read.
+    pub(super) fn chrome_git_segment(&self) -> String {
+        match &self.chrome_git {
+            Some(state) if state.buffer == self.focused_buffer_id() => state.segment(),
+            _ => String::new(),
+        }
     }
 
     // -- Blame --------------------------------------------------------------
@@ -559,6 +657,44 @@ mod tests {
         assert_eq!(git(&repo.0, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
         assert_eq!(std::fs::read_to_string(repo.0.join("a.txt")).unwrap(), "main, in progress\n", "the work came back");
         assert!(git(&repo.0, &["stash", "list"]).is_empty());
+    }
+
+    #[test]
+    fn the_modeline_says_where_the_branch_stands_and_what_is_waiting() {
+        let repo = Repo::new("chrome");
+        std::fs::write(repo.0.join("a.txt"), "changed\n").unwrap();
+        let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
+        app.refresh_chrome_git();
+        assert_eq!(app.chrome_git_segment(), "   main •1");
+        let (_, suffix) = app.modeline_pieces();
+        assert!(suffix.contains("main •1"), "{suffix}");
+        let mut state = app.chrome_git.clone().unwrap();
+        state.op = Some("REBASING 2/3".into());
+        assert!(state.segment().contains("REBASING 2/3 -- SPC g R continue"));
+        state.op = None;
+        state.tracking = Some((2, 1));
+        assert_eq!(state.segment(), "   main ↑2 ↓1 •1");
+    }
+
+    #[test]
+    fn auto_fetch_runs_when_the_last_fetch_is_old_and_not_again_right_away() {
+        let repo = Repo::new("fetch");
+        let remote = repo.0.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        git(&repo.0, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&repo.0, &["push", "-q", "origin", "main"]);
+        let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
+        app.config.git_auto_fetch_minutes = Some(5);
+        app.refresh_chrome_git();
+        app.auto_fetch();
+        assert!(repo.0.join(".git").join("FETCH_HEAD").exists(), "fetched");
+        let log = fenix_git::oplog::entries(&repo.0, 5);
+        assert!(log[0].label.contains("automatic"));
+        app.auto_fetch();
+        assert_eq!(fenix_git::oplog::entries(&repo.0, 5).len(), log.len(), "not again right away");
+        let _ = std::fs::remove_dir_all(&remote);
     }
 
     #[test]

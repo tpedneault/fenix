@@ -6365,6 +6365,10 @@ pub struct App {
     gutter_diffs: HashMap<BufferId, (PathBuf, fenix_diff::FileDiff)>,
     /// Blame shown beside a file (`SPC g B`), by path.
     blames: HashMap<PathBuf, git_editor::Blame>,
+    /// Where the focused file's repository stands, for the modeline.
+    chrome_git: Option<git_editor::ChromeGit>,
+    /// When `[git] auto_fetch` last tried each repository.
+    fetch_attempts: HashMap<PathBuf, Instant>,
     /// Collapsed structural scope headers, keyed by buffer. The rendered
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
@@ -7461,6 +7465,8 @@ impl App {
             gutter_hunks: HashMap::new(),
             gutter_diffs: HashMap::new(),
             blames: HashMap::new(),
+            chrome_git: None,
+            fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
             docker_session: None,
             task_session: None,
@@ -25024,8 +25030,9 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let embedded_indicator = self.embedded.indicator.as_deref().unwrap_or_default();
+        let git_indicator = self.chrome_git_segment();
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );

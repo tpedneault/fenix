@@ -551,6 +551,12 @@ for anyone curious to poke around or build on it.
   the reflog), with ahead/behind and age; a remote-only branch becomes a
   local one tracking it. When local changes are in the way it offers to
   stash them, and they come back when you switch back to that branch.
+  The modeline carries the focused file's branch, how far it is ahead
+  and behind its upstream, and how many files have changes
+  (`feature/x ↑2 •3`) -- and while a rebase or merge is stopped, says so
+  loudly, with its keys, in every window. `[git] auto_fetch = 5m` fetches
+  in the background when the last fetch is older than that, so those
+  numbers are true.
 - **Git log** (`SPC g l`): history that acts. The current branch, or
   every branch as a graph (`a`); `SPC g h` is the focused file's history
   (following renames) and `SPC g H` the history of the lines last
@@ -1816,6 +1822,7 @@ window2 = 4480,0,1920,1040|true
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `git` | `layout` | `page` (default) or `panes` -- what `SPC g g` opens: the Git status page, or the older seven-pane panel |
+| `git` | `auto_fetch` | e.g. `5m` -- fetch the focused repository in the background when its last fetch is older than that. Off unless set; a remote that asks for a password is tried once per interval, never prompted |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
 | `windows` | `workspace_per_project` | `true`/`false` -- whether opening a project from the hub gives it its own workspace (and returns to it); unset defaults to `true` |

@@ -110,6 +110,10 @@ pub enum PageEvent {
     GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
     GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
     GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
+    /// Where the focused file's repository stands, for the modeline.
+    ChromeGit(Box<super::git_editor::ChromeGit>),
+    /// A background fetch finished.
+    AutoFetched { ok: bool },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -425,6 +429,12 @@ impl App {
             }
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
+            PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            PageEvent::AutoFetched { ok } => {
+                if ok {
+                    self.refresh_git_pages(false);
+                }
+            }
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
                 state.stale = true;
