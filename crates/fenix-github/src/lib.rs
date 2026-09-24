@@ -28,11 +28,7 @@ pub struct GitHub {
 /// or `None` when it isn't one.
 pub fn repository(remote_url: &str) -> Option<(String, String)> {
     let url = remote_url.trim();
-    let rest = if let Some(rest) = url.split_once("github.com").map(|(_, rest)| rest) {
-        rest.trim_start_matches([':', '/'])
-    } else {
-        return None;
-    };
+    let rest = url.split_once("github.com")?.1.trim_start_matches([':', '/']);
     let path = rest.trim_end_matches('/').trim_end_matches(".git");
     let (owner, repo) = path.split_once('/')?;
     (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
