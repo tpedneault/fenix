@@ -34,8 +34,18 @@ pub fn repository(remote_url: &str) -> Option<(String, String)> {
     (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
 }
 
-/// The GitHub CLI's token, when it's signed in.
+/// The GitHub CLI's token, when it's signed in -- asked once, then
+/// remembered (a sign-in after a failed ask is still picked up).
 pub fn gh_token() -> Option<String> {
+    static TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut known = TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    if known.is_none() {
+        *known = ask_gh();
+    }
+    known.clone()
+}
+
+fn ask_gh() -> Option<String> {
     #[allow(unused_mut)]
     let mut command = std::process::Command::new("gh");
     command.args(["auth", "token"]);
@@ -273,7 +283,13 @@ impl Forge for GitHub {
             "draft": request.draft,
         });
         let value = self.send("POST", &self.repo_path("/pulls"), &body)?;
-        parse::pull_request(&value).ok_or_else(|| "GitHub didn't say what it made".to_string())
+        let made = parse::pull_request(&value).ok_or_else(|| "GitHub didn't say what it made".to_string())?;
+        // A pull request's labels are its issue's.
+        if !request.labels.is_empty() {
+            self.send("POST", &self.repo_path(&format!("/issues/{}/labels", made.number)), &json!({ "labels": request.labels }))
+                .map_err(|e| format!("opened {}, but the labels didn't go on: {e}", made.reference()))?;
+        }
+        Ok(made)
     }
 
     fn submit_review(&self, number: u64, head_sha: &str, verdict: Verdict, body: &str, comments: &[DraftComment]) -> Result<(), String> {

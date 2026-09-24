@@ -11,6 +11,7 @@ use super::projects::kind_color;
 use super::*;
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
+use crate::git_request::{self, RequestPage};
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -33,6 +34,7 @@ pub(super) enum PageModel {
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
     Rebase(Box<RebasePage>),
+    Request(Box<RequestPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
 }
@@ -65,6 +67,7 @@ impl PageState {
             PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
+            PageModel::Request(r) => r.editing.is_some(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -75,6 +78,7 @@ impl PageState {
             || match &self.model {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Settings(s) => s.claims_space(),
+                PageModel::Request(r) => r.field == git_request::Field::Draft,
                 _ => false,
             }
     }
@@ -90,6 +94,7 @@ impl PageState {
             PageModel::Doctor(_) => {}
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
+            PageModel::Request(r) => r.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -123,6 +128,13 @@ pub enum PageEvent {
     ReviewSince { buffer: BufferId, result: Result<Vec<review_page::FileView>, String> },
     ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
     ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
+    /// The request already open for the new request page's branch.
+    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String> },
+    /// The new request was opened -- with a word about what didn't go
+    /// on it -- or wasn't.
+    RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
+    /// The status page's branch's request.
+    GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -235,6 +247,7 @@ impl App {
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
+            Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
         }
@@ -336,6 +349,7 @@ impl App {
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
+            PageModel::Request(r) => git_request::layout(r, cols),
             PageModel::Inbox(i) => review_inbox::layout(i, cols),
             PageModel::Review(r) => review_page::layout(r, cols),
         };
@@ -425,6 +439,10 @@ impl App {
                 let action = r.key(key);
                 self.git_rebase_action(id, action);
             }
+            PageModel::Request(r) => {
+                let action = r.key(key);
+                self.request_action(id, action);
+            }
             PageModel::Inbox(i) => {
                 let action = i.key(key);
                 self.inbox_action(id, action);
@@ -451,6 +469,7 @@ impl App {
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
             }

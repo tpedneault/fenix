@@ -44,6 +44,6 @@ pub use status::{status, status_and_files, RepoStatus};
 pub use worktree::{add_worktree, checked_out_elsewhere, default_worktree_path, list_worktrees, prune_worktrees, remove_worktree, Worktree};
 pub use verbs::{
     ahead_behind, autosquash, autosquash_args, branch_args, commit_args, commit_message, commit_with, contains, create_branch_at,
-    default_remote, merge_base, pull_merge, push_args, push_tags, push_with, remotes, rename_branch, resolve_base, stash_args, stash_with, tag,
+    default_remote, merge_base, merges_cleanly, pull_merge, push_args, push_tags, push_with, remotes, rename_branch, resolve_base, shortstat, stash_args, stash_with, tag,
     CommitFlags, CommitKind, PushOptions, StashOptions,
 };

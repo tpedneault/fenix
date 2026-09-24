@@ -195,6 +195,38 @@ pub fn merge_base(repo: &Path, a: &str, b: &str) -> Option<String> {
     run_lines(repo, &["merge-base", a, b]).into_iter().next()
 }
 
+/// Files changed, lines added and lines removed from `base` to `head`
+/// (`git diff --shortstat base...head`: since they last shared history).
+pub fn shortstat(repo: &Path, base: &str, head: &str) -> (usize, usize, usize) {
+    let range = format!("{base}...{head}");
+    let line = run_lines(repo, &["diff", "--shortstat", &range]).into_iter().next().unwrap_or_default();
+    let mut out = (0, 0, 0);
+    for part in line.split(',') {
+        let n = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        if part.contains("file") {
+            out.0 = n;
+        } else if part.contains("insertion") {
+            out.1 = n;
+        } else if part.contains("deletion") {
+            out.2 = n;
+        }
+    }
+    out
+}
+
+/// Whether merging `head` into `base` would go through without a
+/// conflict, worked out without touching the working tree (`git
+/// merge-tree`); `None` when git couldn't say.
+pub fn merges_cleanly(repo: &Path, base: &str, head: &str) -> Option<bool> {
+    let out = crate::process::git_command(repo, &["merge-tree", "--write-tree", "--name-only", "--no-messages", base, head]).output().ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        // A bad revision exits 1 too, but says so on stderr.
+        Some(1) if out.stderr.is_empty() => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether `commit` is already contained in `rev` (an upstream, say).
 pub fn contains(repo: &Path, rev: &str, commit: &str) -> bool {
     crate::process::run_status(repo, &["merge-base", "--is-ancestor", commit, rev])
@@ -282,6 +314,28 @@ mod tests {
 
     fn staged(dir: &Path) -> Vec<String> {
         run_lines(dir, &["diff", "--cached", "--name-only"])
+    }
+
+    #[test]
+    fn a_branch_is_measured_and_checked_against_its_base_for_conflicts() {
+        let dir = repo("verbs_shortstat");
+        git(dir.path(), &["switch", "-q", "-c", "topic"]);
+        dir.write("a.txt", "one, changed
+two
+");
+        dir.write("b.txt", "b
+");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "topic"]);
+        let main = run_lines(dir.path(), &["rev-parse", "HEAD~1"]).remove(0);
+        assert_eq!(shortstat(dir.path(), &main, "HEAD"), (2, 3, 1));
+        assert_eq!(merges_cleanly(dir.path(), &main, "HEAD"), Some(true));
+        git(dir.path(), &["switch", "-q", "--detach", &main]);
+        dir.write("a.txt", "one, differently
+");
+        git(dir.path(), &["commit", "-q", "-am", "elsewhere"]);
+        assert_eq!(merges_cleanly(dir.path(), "HEAD", "topic"), Some(false));
+        assert_eq!(merges_cleanly(dir.path(), "HEAD", "no-such-branch"), None);
     }
 
     #[test]

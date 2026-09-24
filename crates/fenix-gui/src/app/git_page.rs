@@ -316,6 +316,7 @@ impl App {
             None => self.open_page(PageModel::Git(Box::new(GitStatus::new(root)))),
         };
         self.git_page_refresh(id);
+        self.git_page_request(id);
     }
 
     /// `SPC g z`: the status page, open on its operation log.
@@ -397,7 +398,10 @@ impl App {
         let Some(root) = self.git_page(id).map(|g| g.root.clone()) else { return };
         match action {
             Action::None => {}
-            Action::Refresh => self.git_page_refresh(id),
+            Action::Refresh => {
+                self.git_page_refresh(id);
+                self.git_page_request(id);
+            }
             Action::LoadDiff { section, path } => {
                 self.page_spawn(move |send| {
                     let diff = read_diff(&root, section, &path);
@@ -452,6 +456,11 @@ impl App {
                 }
                 self.open_project(path, None, false);
             }
+            Action::PullRequest => match self.git_page(id).and_then(|g| g.request.clone()) {
+                Some(Some(line)) => self.open_review(root, line.number, false),
+                _ => self.open_new_request_at(root),
+            },
+            Action::Reviews => self.open_reviews(),
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
                 let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };
@@ -543,9 +552,14 @@ impl App {
                 g.message = Some(match (failed, stopped) {
                     (true, Some(op)) => (format!("{label} stopped: {op} -- resolve the conflicts (r x), then r c"), true),
                     (true, None) => (format!("{label} failed: {}  ($ shows everything)", first_line(&text)), true),
+                    (false, _) if label.starts_with("push ") && matches!(g.request, Some(None)) => (format!("{label} ✓ · o opens a pull request"), false),
                     (false, _) => (format!("{label} ✓"), false),
                 });
+                let pushed = !failed && label.starts_with("push ");
                 self.git_refresh_all_views();
+                if pushed {
+                    self.git_page_request(buffer);
+                }
                 if let Some(path) = opened {
                     self.open_project(path, None, false);
                 }

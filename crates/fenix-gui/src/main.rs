@@ -14,6 +14,7 @@ mod forge_panel;
 mod git_panel;
 mod git_log;
 mod git_rebase;
+mod git_request;
 mod git_status;
 mod review_inbox;
 mod review_page;

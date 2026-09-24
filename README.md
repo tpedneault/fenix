@@ -709,7 +709,47 @@ for anyone curious to poke around or build on it.
   (`kept develop`, `o = keep myfeature`) and spell out its role. Opening
   a conflicted file directly still works, and its markers are colored
   with the same two colors the columns use.
-- **GitLab merge requests** (`SPC g M`): the project's open merge
+- **Pull requests, on GitHub and GitLab**. Which forge a repository is
+  on is read from its `origin` remote: `github.com` is GitHub, anything
+  else the GitLab of `[gitlab] base_url`. GitHub signs in through the
+  GitHub CLI (`gh auth login`) when it's installed, else `[github]
+  token`; nothing is configured per repository.
+  - **Opening one** (`SPC g P`, or `o` on the Git page): a page
+    prefilled from the branch -- the title from its one commit or its
+    name as a sentence, the description a summary of its commits, the
+    base from `[git] base_branch`, a Jira key in the branch name
+    (`feature/FNX-58-...`) linked as `Refs FNX-58`, and the reviewers
+    from `[git] reviewers` (or the project's own `.fenix/project.ini`).
+    `Enter` edits a field in place, `e` writes the description in a
+    buffer, `d` toggles draft. Under the form are the commits it brings
+    and what's worth knowing first: whether it's pushed, whether it
+    merges into the base without conflicts, how far the base moved, and
+    `fixup!` commits not folded in yet. `C-c C-c` opens it -- pushing the
+    branch first when it isn't, and never asking you to review your own.
+    From then on the Git page's header says how it stands: draft,
+    checks, who approved, how many threads are still open.
+  - **The inbox** (`SPC g M`): what's waiting on your review first, then
+    yours and every open one (`Tab`), with a dot on the ones that moved
+    since you last looked. `Enter` reviews one here, `w` in a worktree
+    of its own beside the repository, so your own work stays where it
+    is.
+  - **The review page**: every changed file, with the ones you've
+    marked viewed folded away until they change again. Comments are
+    held as **pending** until you submit the review -- approve, request
+    changes or just comment -- in one go, with a summary; a `suggestion`
+    block proposes the exact lines. Replies and resolving a thread go
+    straight away. `i` shows only what changed since your last review.
+    The checks are listed with how long each took; `Enter` on a failed
+    one opens its log and puts every `file:line` in it in the quickfix
+    list, and `r` runs it again. `m` merges -- squashed, rebased, or
+    once the checks pass.
+
+  Tested against real forges: `cargo test -p fenix-github --test live
+  -- --ignored` on a GitHub repository of your own (`FENIX_GITHUB_SANDBOX`)
+  and the containerised GitLab below, and `cargo test -p fenix-gui
+  live_ -- --ignored` drives the pages end to end on both.
+- **GitLab merge requests, the older panel** (`SPC g M` with `[git]
+  layout = panes`): the project's open merge
   requests on the left, the selected one in full on the right --
   author, source -> target, state, pipeline result, approvals, comment
   count, description, and the list of changed files. `f` cycles the
@@ -1256,7 +1296,11 @@ popup shows what keys continue it.
 | `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
 | `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
 | `SPC g x` / `SPC g X` | Open / close the Merge view (conflicts side by side) |
-| `SPC g M` / `SPC g Q` | Open / close the GitLab Merge Requests view |
+| `SPC g P` | Open a pull request for this branch, prefilled from its commits |
+| `SPC g M` | The review inbox (the older Merge Requests view with `[git] layout = panes`) |
+| `o` / `M` (Git page) | This branch's pull request -- review it, or open one / the review inbox |
+| `C-c C-c` / `Enter` / `e` / `d` (New pull request) | Open it (press twice) / edit a field / write the description / toggle draft |
+| `SPC g Q` | Close the older Merge Requests view |
 | `1` / `2` (Merge Requests) | Jump to the list / detail pane |
 | `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
 | `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
@@ -1831,6 +1875,8 @@ window2 = 4480,0,1920,1040|true
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `git` | `layout` | `page` (default) or `panes` -- what `SPC g g` opens: the Git status page, or the older seven-pane panel |
+| `git` | `reviewers` | e.g. `alex, sam` -- who a new pull request (`SPC g P`) asks for a review, prefilled on its page. A project's own `.fenix/project.ini` `[git] reviewers` takes its place; you're left out of it when it's you |
+| `github` | `token` | A GitHub token, for when the GitHub CLI isn't signed in (`gh auth login` is used first) |
 | `git` | `auto_fetch` | e.g. `5m` -- fetch the focused repository in the background when its last fetch is older than that. Off unless set; a remote that asks for a password is tried once per interval, never prompted |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |

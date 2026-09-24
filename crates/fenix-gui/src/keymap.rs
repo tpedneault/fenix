@@ -361,6 +361,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // *operation*, and the two are asked for in completely
         // different moods.
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('M')], "merge requests", "git.merge_requests");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('P')], "open a pull request", "git.pull_request");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('Q')], "close merge requests", "git.merge_requests_close");
 
         // Jira dashboard -- read-only browsing this phase (see the Jira

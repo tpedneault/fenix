@@ -6,7 +6,7 @@ use std::process::Command;
 /// reasoning as `fenix-completion::ctags::run`'s own use of this flag.
 /// Purely cosmetic (no bearing on why a run fails), but real spam
 /// reduction given how often this crate's callers shell out.
-fn git_command(repo: &Path, args: &[&str]) -> Command {
+pub(crate) fn git_command(repo: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo).args(args);
     // Fenix has no terminal for git to hand an interactive prompt to, so

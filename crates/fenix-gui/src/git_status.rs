@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use fenix_diff::{FileDiff, LineKind};
+use fenix_forge::{Check, PipelineStatus};
 use fenix_git::{ApplyTarget, Commit, CommitFlags, CommitKind, FileEntry, PushOptions, RepoStatus, ResetMode, Stash, StashOptions};
 
 use crate::page::{fit, frame, Grid, Key, Page, Role};
@@ -48,6 +49,37 @@ pub struct Snapshot {
     pub ops: Vec<Op>,
     /// The repository's worktrees -- listed when there's more than one.
     pub worktrees: Vec<fenix_git::Worktree>,
+}
+
+/// The branch's pull request, as the header shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestLine {
+    pub number: u64,
+    pub reference: String,
+    pub title: String,
+    pub draft: bool,
+    pub checks: Option<PipelineStatus>,
+    pub approved_by: Vec<String>,
+    /// Review threads nobody has resolved yet.
+    pub unresolved: usize,
+}
+
+/// All of a request's checks as one: failed if any did, running while
+/// any is, passed once they all have.
+pub fn overall(checks: &[Check]) -> Option<PipelineStatus> {
+    if checks.is_empty() {
+        return None;
+    }
+    let any = |f: &dyn Fn(&PipelineStatus) -> bool| checks.iter().any(|c| f(&c.status));
+    Some(if any(&|s| s.is_bad()) {
+        PipelineStatus::Failed
+    } else if any(&|s| matches!(s, PipelineStatus::Running | PipelineStatus::Pending)) {
+        PipelineStatus::Running
+    } else if any(&|s| *s == PipelineStatus::Manual) {
+        PipelineStatus::Manual
+    } else {
+        PipelineStatus::Success
+    })
 }
 
 /// One entry of the operation log, as the page lists it.
@@ -309,6 +341,10 @@ pub enum Action {
     Rebase(Option<String>),
     /// Open a worktree as a workspace of its own.
     OpenWorktree(PathBuf),
+    /// Review the branch's pull request, or open one.
+    PullRequest,
+    /// The review inbox.
+    Reviews,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +465,9 @@ pub struct GitStatus {
     pub reveal_operations: bool,
     /// A worktree to open once the job adding it has worked.
     pub open_after: Option<PathBuf>,
+    /// The branch's pull request, once the forge has been asked --
+    /// `Some(None)` when there's none; `None` with no forge to ask.
+    pub request: Option<Option<RequestLine>>,
     pending_g: bool,
 }
 
@@ -454,6 +493,7 @@ impl GitStatus {
             loading: false,
             reveal_operations: false,
             open_after: None,
+            request: None,
             pending_g: false,
         }
     }
@@ -712,6 +752,8 @@ impl GitStatus {
                 _ => Action::PlanUndo(None),
             },
             Key::Char('$') => Action::ShowOutput,
+            Key::Char('o') => Action::PullRequest,
+            Key::Char('M') => Action::Reviews,
             Key::Char('q') => Action::Close,
             _ => Action::None,
         }
@@ -1103,6 +1145,8 @@ impl GitStatus {
                             verb("l", "log…", ""),
                             verb("r", "rebase…", ""),
                             verb("w", "worktrees…", ""),
+                            verb("o", "pull request", "review it, or open one"),
+                            verb("M", "reviews", "the inbox"),
                         ],
                     ),
                     (
@@ -1532,6 +1576,40 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
             y += 1;
         }
     }
+    let on_base = snap.base.as_ref().is_some_and(|(base, ..)| status.is_some_and(|s| &s.branch == base));
+    match &page.request {
+        Some(Some(r)) => {
+            let x = key(&mut g, y, "Review");
+            let mut x = g.put(y, x, &r.reference, Role::Accent) + 1;
+            let mut facts: Vec<(String, Role)> = Vec::new();
+            if r.draft {
+                facts.push(("draft".to_string(), Role::Warn));
+            }
+            if let Some(c) = &r.checks {
+                facts.push((format!("checks {}", c.label()), if c.is_bad() { Role::Bad } else if *c == PipelineStatus::Success { Role::Good } else { Role::Warn }));
+            }
+            if !r.approved_by.is_empty() {
+                facts.push((format!("approved by {}", r.approved_by.join(", ")), Role::Good));
+            }
+            if r.unresolved > 0 {
+                facts.push((count(r.unresolved, "open thread"), Role::Warn));
+            }
+            let tail: usize = facts.iter().map(|(t, _)| t.chars().count() + 3).sum::<usize>() + 12;
+            x = g.put(y, x, &fit(&r.title, (left + width).saturating_sub(x + tail).max(12)), Role::Text);
+            for (text, role) in facts {
+                x = g.put(y, x, " · ", Role::Muted);
+                x = g.put(y, x, &text, role);
+            }
+            g.put(y, x + 2, "o reviews it", Role::Muted);
+            y += 1;
+        }
+        Some(None) if !on_base && status.is_some() => {
+            let x = key(&mut g, y, "Review");
+            g.put(y, x, "no pull request yet · o opens one", Role::Muted);
+            y += 1;
+        }
+        _ => {}
+    }
     if let Some(op) = &snap.in_progress {
         y += 1;
         let x = g.put(y, left, op, Role::Bad) + 2;
@@ -1866,6 +1944,39 @@ mod tests {
 
     fn goto(p: &mut GitStatus, row: Row) {
         p.cursor = p.rows().iter().position(|r| *r == row).unwrap_or_else(|| panic!("{row:?} not in {:?}", p.rows()));
+    }
+
+    fn check(status: PipelineStatus) -> Check {
+        Check { id: "1".into(), name: "ci".into(), group: String::new(), status, url: String::new(), seconds: None }
+    }
+
+    #[test]
+    fn checks_add_up_to_the_worst_of_them() {
+        assert_eq!(overall(&[]), None);
+        assert_eq!(overall(&[check(PipelineStatus::Success), check(PipelineStatus::Skipped)]), Some(PipelineStatus::Success));
+        assert_eq!(overall(&[check(PipelineStatus::Success), check(PipelineStatus::Pending)]), Some(PipelineStatus::Running));
+        assert_eq!(overall(&[check(PipelineStatus::Running), check(PipelineStatus::Canceled)]), Some(PipelineStatus::Failed));
+    }
+
+    #[test]
+    fn the_header_says_how_the_branchs_pull_request_stands_and_o_goes_to_it() {
+        let mut p = page();
+        assert!(!layout(&p, 120).text.contains("Review"), "nothing until the forge has been asked");
+        p.request = Some(None);
+        assert!(layout(&p, 120).text.contains("Review  no pull request yet · o opens one"));
+        p.request = Some(Some(RequestLine {
+            number: 22,
+            reference: "#22".into(),
+            title: "Git: a daily driver".into(),
+            draft: true,
+            checks: Some(PipelineStatus::Failed),
+            approved_by: vec!["alex".into()],
+            unresolved: 2,
+        }));
+        let text = layout(&p, 140).text;
+        assert!(text.contains("Review  #22 Git: a daily driver · draft · checks failed · approved by alex · 2 open threads  o reviews it"), "{text}");
+        assert_eq!(p.key(Key::Char('o')), Action::PullRequest);
+        assert_eq!(p.key(Key::Char('M')), Action::Reviews);
     }
 
     #[test]

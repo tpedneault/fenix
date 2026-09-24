@@ -276,6 +276,7 @@ impl Forge for GitLab {
             "target_branch": request.target_branch,
             "title": title,
             "description": request.description,
+            "labels": request.labels.join(","),
         });
         let value = self.send_json("POST", &format!("/projects/{}/merge_requests", self.encoded), &body)?;
         parse::merge_request(&value).ok_or_else(|| "GitLab didn't say what it made".to_string())

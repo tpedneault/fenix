@@ -36,6 +36,7 @@ fn pull() -> fenix_forge::MergeRequest {
         title: "Decode PUS-17 connection tests".into(),
         description: "Opened by Fenix's live tests.".into(),
         draft: false,
+        labels: Vec::new(),
     };
     let created = gh.create_request(&request).unwrap();
     gh.merge_request(created.number).unwrap()
@@ -120,4 +121,37 @@ fn a_failing_check_has_a_log_and_can_be_rerun() {
     let log = gh.job_log(pytest).unwrap();
     assert!(log.contains("test_decoder.py") && log.contains("ValueError"), "{}", &log[log.len().saturating_sub(2000)..]);
     gh.retry(pytest).unwrap();
+}
+
+fn gh(args: &[&str]) -> String {
+    let out = std::process::Command::new("gh").args(args).output().expect("gh");
+    assert!(out.status.success(), "gh {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+#[ignore]
+fn a_draft_opens_with_its_labels() {
+    let gh_client = client();
+    let repo = std::env::var("FENIX_GITHUB_SANDBOX").unwrap_or_else(|_| "tpedneault/fenix-review-sandbox".to_string());
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let branch = format!("live/open-{stamp}");
+    let main = gh(&["api", &format!("repos/{repo}/git/ref/heads/main"), "--jq", ".object.sha"]);
+    gh(&["api", "-X", "POST", &format!("repos/{repo}/git/refs"), "-f", &format!("ref=refs/heads/{branch}"), "-f", &format!("sha={}", main.trim())]);
+    gh(&["api", "-X", "PUT", &format!("repos/{repo}/contents/notes-{stamp}.md"), "-f", "message=A change to open a request from", "-f", "content=aGVsbG8K", "-f", &format!("branch={branch}")]);
+    let request = NewRequest {
+        source_branch: branch.clone(),
+        target_branch: "main".into(),
+        title: "Opened by Fenix".into(),
+        description: "From the live tests.".into(),
+        draft: true,
+        labels: vec!["fenix".into()],
+    };
+    let made = gh_client.create_request(&request).unwrap();
+    let labels = gh(&["api", &format!("repos/{repo}/issues/{}/labels", made.number), "--jq", ".[].name"]);
+    let found = gh_client.request_for_branch(&branch).unwrap().expect("found by its branch");
+    gh(&["api", "-X", "PATCH", &format!("repos/{repo}/pulls/{}", made.number), "-f", "state=closed"]);
+    gh(&["api", "-X", "DELETE", &format!("repos/{repo}/git/refs/heads/{branch}")]);
+    assert!(made.draft && found.draft && found.number == made.number, "{made:?}");
+    assert_eq!(labels.trim(), "fenix");
 }

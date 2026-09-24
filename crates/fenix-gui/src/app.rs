@@ -15,6 +15,7 @@ mod git_page;
 mod git_editor;
 mod git_log_page;
 mod git_rebase_page;
+mod git_request_page;
 mod review_host;
 use tool_sessions::LspKey;
 
@@ -653,6 +654,8 @@ enum ComposePurpose {
     ReviewReply { page: BufferId, thread: String },
     /// The summary a review is submitted with.
     ReviewSummary { page: BufferId },
+    /// The description of the request on new request page `page`.
+    RequestDescription { page: BufferId },
     /// An agenda task's description (`E`), seeded with the current one --
     /// saved locally and, on a linked task, sent to Jira.
     TaskDescription { task: TaskId },
@@ -687,6 +690,7 @@ impl ComposePurpose {
             ComposePurpose::ReviewPending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
             ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
             ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
+            ComposePurpose::RequestDescription { .. } => ("Description".to_string(), "keep"),
             ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
             ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
             ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
@@ -17712,6 +17716,11 @@ impl App {
             self.wake_caret();
             return;
         }
+        if let ComposePurpose::RequestDescription { page } = &purpose {
+            self.request_description(*page, body);
+            self.wake_caret();
+            return;
+        }
         if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
             self.git_rebase_message(*page, hash.clone(), body);
             self.wake_caret();
@@ -17764,6 +17773,7 @@ impl App {
             | ComposePurpose::ReviewPending { .. }
             | ComposePurpose::ReviewReply { .. }
             | ComposePurpose::ReviewSummary { .. }
+            | ComposePurpose::RequestDescription { .. }
             | ComposePurpose::TaskDescription { .. }
             | ComposePurpose::TaskComment { .. }
             | ComposePurpose::IssueDescription { .. }

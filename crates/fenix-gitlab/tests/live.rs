@@ -381,9 +381,12 @@ fn a_request_is_opened_from_a_new_branch() {
         title: "Opened by Fenix".to_string(),
         description: "From the live tests.".to_string(),
         draft: true,
+        labels: vec!["fenix".to_string()],
     };
     let created = gl.create_request(&request).unwrap();
     assert!(created.draft && created.title.contains("Opened by Fenix"), "{created:?}");
+    let labels = ureq::get(&format!("{url}/api/v4/projects/fenix-dev%2Fwidget/merge_requests/{}", created.number)).set("PRIVATE-TOKEN", &token).call().unwrap().into_string().unwrap();
+    assert!(labels.contains(r#""labels":["fenix"]"#), "{labels}");
     assert_eq!(created.source_branch, branch);
     ureq::put(&format!("{url}/api/v4/projects/fenix-dev%2Fwidget/merge_requests/{}", created.number))
         .set("PRIVATE-TOKEN", &token)

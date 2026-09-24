@@ -424,13 +424,15 @@ pub struct Check {
 }
 
 /// A request to open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewRequest {
     pub source_branch: String,
     pub target_branch: String,
     pub title: String,
     pub description: String,
     pub draft: bool,
+    /// Labels to put on it; ones the project doesn't have yet are made.
+    pub labels: Vec<String>,
 }
 
 /// Which merge requests to list.

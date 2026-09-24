@@ -20,7 +20,7 @@ pub enum After {
 }
 
 /// "GitHub" or "GitLab", for a heading.
-fn forge_name(root: &Path) -> String {
+pub(super) fn forge_name(root: &Path) -> String {
     match fenix_git::remote_url(root, "origin") {
         Some(url) if fenix_github::repository(&url).is_some() => "GitHub".to_string(),
         _ => "GitLab".to_string(),
@@ -112,9 +112,12 @@ impl App {
     }
 
     /// The repository the review pages act on: the focused file's.
-    fn review_root(&self) -> Option<PathBuf> {
-        let start = match self.open().buffer.path() {
-            Some(path) => path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.git_action_repo_root()),
+    pub(super) fn review_root(&self) -> Option<PathBuf> {
+        // Resolved first: a file opened as `decoder.py` has an empty
+        // parent, which names no folder at all.
+        let file = self.open().buffer.path().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        let start = match file.as_deref().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()) {
+            Some(folder) => folder.to_path_buf(),
             None => self.git_action_repo_root(),
         };
         super::git_editor::repository_of(&start).map(fenix_lsp::normalize)
@@ -559,6 +562,14 @@ mod tests {
         let status = std::process::Command::new("git").args(["clone", "-q", &format!("https://github.com/{repo}.git"), &dir.to_string_lossy()]).status().unwrap();
         assert!(status.success(), "clone {repo}");
         fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    #[test]
+    fn a_file_opened_by_a_relative_path_still_names_its_repository() {
+        // Tests run in the crate's folder, inside Fenix's own repository.
+        let app = App::with_file(Some("Cargo.toml".to_string()));
+        let root = app.review_root().expect("the repository");
+        assert!(root.join("crates").join("fenix-gui").is_dir(), "{}", root.display());
     }
 
     #[test]
