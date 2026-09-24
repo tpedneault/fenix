@@ -1,0 +1,5 @@
+[template]
+name = "Empty folder"
+kind = "other"
+group = "Start from"
+description = "A folder with a README. Pair it with git init on the Location step."

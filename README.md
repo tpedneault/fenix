@@ -275,8 +275,82 @@ for anyone curious to poke around or build on it.
   ripgrep (`SPC p s`) with the result list kept around afterward as a
   quickfix list -- `SPC p n`/`SPC p N` step to the next/previous match
   directly in the editor without reopening the picker or re-running the
-  search, clamping (not wrapping) at either end -- switch between known
-  projects (`SPC p p`).
+  search, clamping (not wrapping) at either end.
+- **Project hub** (`SPC p p`): every known project with its kind tag,
+  branch, uncommitted changes and a health dot, pinned ones first, then
+  by group. Typing filters (a folder path typed in adds it), `Tab`
+  filters by kind, and the right column previews the selected project's
+  health, git state, linked Jira work and tasks. `Enter` opens it, `P`
+  pins, `g` sets its group, `d d` removes it from the list (the folder
+  is untouched), `c` creates a new one, `h` and `,` open its doctor and
+  settings. Opening a project gives it a workspace of its own and
+  returns there next time -- `[windows] workspace_per_project = false`
+  turns that off. `SPC p P` is the old path-only quick switcher.
+- **New projects** (`SPC p c`, or Home's *new project* row): a four-step
+  wizard -- template, location (typed, or `b` to pick the folder in the
+  explorer), the template's own questions, then a review of every file it
+  will write and every command it will run (literal arguments, no shell)
+  before anything touches the disk. Built-in templates:
+  - *Python* (uv): an app or library; data processing (pandas or polars,
+    matplotlib or plotly, optional notebooks); a desktop GUI (PySide6 or
+    tkinter); a command-line tool (typer, click or argparse); a FastAPI
+    web API (optional Dockerfile).
+  - *Systems*: a Rust crate (binary -- optionally a clap CLI -- or
+    library); a Cargo workspace; a C or C++ CMake project -- executable,
+    static or shared library -- with presets, `.clangd` and GoogleTest,
+    Catch2 or plain CTest.
+  - *Web*: a Vite app (React, Vue, Svelte, Preact, Solid, Lit or vanilla,
+    all TypeScript).
+  - *Embedded*: an Arduino sketch, or an Arduino library with an example.
+  - *Mission*: an SCOS-2000 MIB -- only the chosen `.dat` tables,
+    registered as a `[mib]` root.
+  - *Scripting*: a Tcl package with a tcltest suite.
+  - *Start from*: a monorepo (optionally a Cargo, uv and/or npm
+    workspace at its root) or an empty folder.
+
+  Each writes a `.fenix/tools.json` with its build/run/test tasks, and
+  offers `git init` with a first commit -- off by default when the
+  location is already inside a repository. A template is a folder --
+  `template.toml` plus a `files/` tree -- so your own go in
+  `<config dir>/fenix/templates/`, and a repository can offer its own in
+  `.fenix/templates/`. Files can hold `{{#if key}}`/`{{else}}`/`{{/if}}`
+  line blocks; a `when` (on a file, a command, a task or a question) is
+  `key`, `!key`, `key == value`, `key != value` or a list of them that
+  must all hold; `after = true` writes a file once the commands have run
+  (for scaffolders like `npm create` that want an empty folder). A failed
+  step stops the run and keeps what's done: `r` retries it, `s` skips
+  it, `o` opens what's there.
+  `:project-new [template] [name] [key=value ...]` skips the pages --
+  `:project-new python-uv orbit python=3.13 dev=pytest,ruff` lands on the
+  review.
+- **Monorepos and nested projects**: a project inside another
+  repository is its own project -- its git summary and the doctor are
+  scoped to its folder ("part of the X repository"). Tasks and the
+  modeline use the project; the language server starts at the enclosing
+  Cargo/uv/npm/pnpm/Go workspace, so navigation crosses crates. The hub
+  lists a project's subprojects (up to four levels down, skipping build
+  and dependency folders) indented beneath it, and opening one doesn't
+  add it to the list. A project created inside a Cargo or uv workspace
+  joins it.
+- **Project doctor** (`SPC p h`): every check the project's kind needs --
+  uv and whether the venv matches `uv.lock`, the language server (found
+  even when installed off PATH), debugpy; `arduino-cli`, the board's
+  core and whether its port is connected; a MIB's tables, over-long rows
+  and whether it's registered -- each with its fix. `f` runs the fix
+  under the cursor, `F` every fix that's safe to run unasked (syncing a
+  venv, `git init`; never an install), `Enter` opens a check's file, `y`
+  copies a report.
+- **Project settings** (`SPC p ,`): `.fenix/tools.json` as rows -- tasks,
+  language servers, the debug launch and its environment -- plus the
+  project's kind, group, pin and Jira key. Commands are typed as one line
+  (quotes group, backslashes stay literal); every edit is validated
+  before it's written, `t` runs a task, `e` opens the raw JSON.
+- **Project identity**: every project has a kind (Python, Arduino, MIB,
+  Rust, Tcl, ...), detected from its files or declared as `[project]
+  kind = ...` in `.fenix/project.ini`. Its two- or three-letter tag
+  leads the modeline (`PY orbit-tools · decoder.py`) and Home's project
+  rows (with the doctor's health dot), and the window is titled after
+  the project.
 - **Files changing on disk**: every open file is checked against what's
   actually on disk a couple of times a second, and whenever the window
   regains focus. Both are needed -- focus catches editing in another
@@ -708,7 +782,11 @@ for anyone curious to poke around or build on it.
   and JavaScript/TypeScript/TSX
   ([`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)) --
   anything else (or an override for one of these) via a `[lsp]` command
-  you configure -- see [Configuration](#configuration). Live
+  you configure -- see [Configuration](#configuration). A Python server
+  is pointed at the project's environment (uv's `.venv`, Poetry's, a
+  plain `venv`, else the `python` on PATH) and told again whenever it
+  changes -- `uv add`, `uv sync` or a venv created after the server
+  started -- so new packages resolve without a restart. Live
   diagnostics (inline severity-colored markup, modeline error/warning
   counts), `gd` go-to-definition, `gr` find-references (populates the
   quickfix list -- `SPC p n`/`SPC p N` steps through it the same way a
@@ -1046,7 +1124,11 @@ popup shows what keys continue it.
 | `SPC p f` | Find file in project |
 | `SPC p s` | Search project (ripgrep) |
 | `SPC p n` / `SPC p N` | Next / previous match in the last project search (quickfix) |
-| `SPC p p` | Switch project |
+| `SPC p p` | Project hub |
+| `SPC p P` | Quick switch project (path picker) |
+| `SPC p c` | New project from a template |
+| `SPC p h` | Project doctor |
+| `SPC p ,` | Project settings |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
@@ -1657,6 +1739,7 @@ window2 = 4480,0,1920,1040|true
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
+| `windows` | `workspace_per_project` | `true`/`false` -- whether opening a project from the hub gives it its own workspace (and returns to it); unset defaults to `true` |
 | `windows` | `window1`, `window2`, ... | One remembered OS window, as `X,Y,WIDTH,HEIGHT\|MAXIMIZED`. Written by Fenix on exit, not hand-authored -- `X,Y` is the outer frame's desktop position and `WIDTH,HEIGHT` the client area, which is the pair a window can actually be restored from. A window whose saved rectangle no longer lands on a connected monitor is placed by the window manager instead of opening off-screen |
 
 Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by

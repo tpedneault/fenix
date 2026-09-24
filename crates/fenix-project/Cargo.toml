@@ -5,10 +5,12 @@ edition.workspace = true
 
 [dependencies]
 dirs = "6"
+fenix-mib = { path = "../fenix-mib" }
 fenix-picker = { path = "../fenix-picker" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"

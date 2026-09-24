@@ -9,6 +9,8 @@ mod agenda_sync;
 mod embedded;
 mod local_leader;
 mod xml;
+mod projects;
+mod pages;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -1577,6 +1579,21 @@ struct LspSession {
     /// "remember what I asked" side channel. Removed once answered
     /// (or once the connection that would have answered it is gone).
     pending: HashMap<i64, PendingLspRequest>,
+    /// For a Python server: the environment it was last told about and
+    /// the stamp it had then -- `refresh_python_environments` tells it
+    /// again when the stamp moves (a package added, the venv created).
+    python_env: Option<fenix_lsp::per_language::python::EnvironmentStamp>,
+}
+
+/// Tells a Python server which interpreter the project uses (so it
+/// looks in that venv's `site-packages`), and remembers the stamp it
+/// was told at.
+fn push_python_environment(session: &mut LspSession) {
+    use fenix_lsp::per_language::python;
+    let env = python::resolve(&session.root);
+    session.python_env = Some(python::environment_stamp(&session.root, &env));
+    let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
+    let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -2246,6 +2263,9 @@ pub enum FenixUserEvent {
     /// A microcontroller toolchain query's answer -- see
     /// `embedded::EmbeddedEvent`.
     Embedded(EmbeddedEvent),
+    /// A project page's background job reporting in -- see
+    /// `pages::PageEvent`.
+    Page(pages::PageEvent),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -2341,6 +2361,8 @@ enum ExplorerPurpose {
     PickProjectDir,
     PickMibRootDir,
     FindFrom,
+    /// The new-project wizard's "In" folder: `S` hands it back.
+    PickWizardParent,
 }
 
 /// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
@@ -3312,6 +3334,23 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
 /// without this they land in the user's actual list, which is how the
 /// crash-recovery work found the same mistake in itself. A test suite
 /// must not leave its temp directories in the user's history.
+/// Under test, a file of `name` no other `App` shares: tests run in
+/// parallel, and one that saves a MIB root or a project must not leak it
+/// into another -- or into the Fenix you actually use.
+fn isolated_test_path(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("fenix-test-state-{}", std::process::id())).join(format!("{n}-{name}"))
+}
+
+fn default_project_meta_path() -> PathBuf {
+    if cfg!(test) {
+        isolated_test_path("project_meta.json")
+    } else {
+        fenix_project::meta::ProjectMeta::default_path().unwrap_or_else(|| PathBuf::from("project_meta.json"))
+    }
+}
+
 fn default_recent_dirs_path() -> PathBuf {
     if cfg!(test) {
         std::env::temp_dir().join(format!("fenix-test-recent-dirs-{}.txt", std::process::id()))
@@ -5382,6 +5421,9 @@ struct Workspace {
     /// switching *to* a tabbed theme mid-session already has real tab
     /// history instead of a blank strip.
     pane_tabs: HashMap<fenix_window::WindowId, Vec<BufferId>>,
+    /// The project this workspace belongs to, once one's been opened
+    /// into it from the hub -- where opening that project again returns.
+    project: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -5390,7 +5432,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None }
     }
 }
 
@@ -5664,6 +5706,8 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             // wholesale-regenerated on every mutation, never typed into
             // directly.
             | BufferKind::Agenda
+            // Laid out from the wizard's state on every change.
+            | BufferKind::Page
     )
 }
 
@@ -6091,6 +6135,21 @@ pub struct App {
     /// else computed from buffer state). `None` outside any recognized
     /// project.
     project_root: Option<PathBuf>,
+    /// Each project root's kind (`fenix_project::detect_kind`), looked up
+    /// once -- the modeline and the window title ask every frame. Behind
+    /// a `RefCell` so `&self` readers like `modeline_pieces` can fill it.
+    /// Cleared when a project is created, the one time a kind can change
+    /// under Fenix's own hands.
+    project_kinds: RefCell<HashMap<PathBuf, fenix_project::ProjectKind>>,
+    /// The project pages open right now (wizard, hub, doctor, settings),
+    /// by their buffer -- see `pages`.
+    pages: HashMap<BufferId, pages::PageState>,
+    /// Pins and groups -- yours, not the projects', so kept beside
+    /// `projects.txt`.
+    project_meta: fenix_project::meta::ProjectMeta,
+    /// The doctor's last word on each project (worst health, problems),
+    /// for the hub's health dot.
+    project_health: HashMap<PathBuf, (fenix_project::doctor::Health, usize)>,
     active_picker: Option<ActivePicker>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
@@ -7185,11 +7244,19 @@ impl App {
     fn with_file(file_arg: Option<String>) -> Self {
         // Loaded before the initial buffer so a no-argument launch can
         // build the dashboard from them.
-        let known_projects_path =
-            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
+        // Tests get their own lists, so running them never edits the
+        // project list or recent files of the Fenix you use.
+        let known_projects_path = if cfg!(test) {
+            isolated_test_path("projects.txt")
+        } else {
+            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"))
+        };
         let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
-        let recent_files_path = fenix_project::RecentFiles::default_path()
-            .unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"));
+        let recent_files_path = if cfg!(test) {
+            isolated_test_path("recent_files.txt")
+        } else {
+            fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
+        };
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
         // Read-only here, same posture as `known_projects`/`recent_files`
         // just above: a test that constructs `App` via `with_file` reads
@@ -7243,7 +7310,11 @@ impl App {
         // path, so this correctly comes out `None`.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
-        let config_path = fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"));
+        let config_path = if cfg!(test) {
+            isolated_test_path("config.ini")
+        } else {
+            fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"))
+        };
         let config_existed = config_path.exists();
         let config = fenix_config::Config::load_or_default(config_path);
         // First launch on this machine: write the file immediately
@@ -7326,6 +7397,10 @@ impl App {
             sidebar_scroll: 0,
             picker_scroll: 0,
             project_root,
+            project_kinds: RefCell::new(HashMap::new()),
+            pages: HashMap::new(),
+            project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
+            project_health: HashMap::new(),
             active_picker: None,
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
@@ -8125,6 +8200,19 @@ impl App {
     /// that list is explicitly curated via `SPC p a`/`SPC p d` now, not
     /// auto-populated from wherever you happen to open a file -- see
     /// `picker_add_project_prompt`'s own doc comment for why.
+    /// `root`'s kind, detected the first time it's asked for.
+    fn project_kind_of(&self, root: &Path) -> fenix_project::ProjectKind {
+        *self.project_kinds.borrow_mut().entry(root.to_path_buf()).or_insert_with(|| fenix_project::detect_kind(root))
+    }
+
+    /// The focused buffer's project, as (kind, folder name) -- `None` for
+    /// a buffer outside any project, which the chrome then doesn't name.
+    fn focused_project_identity(&self) -> Option<(fenix_project::ProjectKind, String)> {
+        let root = self.project_root.as_deref()?;
+        let name = root.file_name()?.to_string_lossy().into_owned();
+        Some((self.project_kind_of(root), name))
+    }
+
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
         self.refresh_embedded_indicator();
@@ -8152,7 +8240,7 @@ impl App {
         let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
-        let cwd = tool_sessions::root_for_path(&path);
+        let cwd = tool_sessions::lsp_root_for_path(&path);
         self.ensure_lsp_session(language, &cwd);
         let language = LspKey { language, root: cwd };
 
@@ -8242,7 +8330,7 @@ impl App {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new() });
+                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None });
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => { self.lsp_unavailable.insert(key); self.set_error(format!("couldn't start {} for {}: {err}", spec.executable, cwd.display())); },
@@ -8286,7 +8374,7 @@ impl App {
             fenix_lsp::LspEvent::Notification { method, params } => {
                 if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
                     if let Ok(diagnostics) = serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
-                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
+                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::lsp_root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
                     }
                 }
             }
@@ -8332,10 +8420,10 @@ impl App {
                         // client never declared `workspace/configuration`
                         // pull support, so a push right after `initialized`
                         // is the one required step, not just an optimization.
+                        // Pushed again whenever the environment changes --
+                        // see `refresh_python_environments`.
                         if language.language == fenix_syntax::LanguageId::Python {
-                            let env = fenix_lsp::per_language::python::resolve(&session.root);
-                            let settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
-                            let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
+                            push_python_environment(session);
                         }
                     }
                     // Now that the session is actually initialized,
@@ -8432,7 +8520,7 @@ impl App {
         let path = ob.buffer.path()?;
         let language = fenix_syntax::detect_language_from_path(path)?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
-        let language = LspKey { language, root: tool_sessions::root_for_path(path) };
+        let language = LspKey { language, root: tool_sessions::lsp_root_for_path(path) };
         let session = self.lsp_sessions.get(&language)?;
         session.capabilities.as_ref()?;
         if !session.open_documents.contains_key(&canonical) {
@@ -13879,6 +13967,7 @@ impl App {
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
         self.close_terminal_buffer(id);
+        self.pages.remove(&id);
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -16602,6 +16691,23 @@ impl App {
     /// window regains focus. Both are needed: focus catches editing in
     /// another application, and the timer catches Fenix's own terminal
     /// panel, which never takes focus away from the window at all.
+    /// Tells each Python language server about its environment again
+    /// when it has changed since the last time: `uv add`/`uv sync` (from
+    /// the terminal, a task, the wizard or the doctor's fix) installing
+    /// or removing a package, or the venv being created after the server
+    /// started. pyright doesn't watch `site-packages`, and a new
+    /// `workspace/didChangeConfiguration` is what makes it look again.
+    fn refresh_python_environments(&mut self) {
+        for (key, session) in &mut self.lsp_sessions {
+            if key.language != fenix_syntax::LanguageId::Python || session.capabilities.is_none() {
+                continue;
+            }
+            if session.python_env.as_ref().is_some_and(|last| last.is_stale(&session.root)) {
+                push_python_environment(session);
+            }
+        }
+    }
+
     pub(crate) fn poll_files_changed_on_disk(&mut self) {
         let _profile = crate::profile::Scope::new("poll disk");
         // Advance the maintenance deadline even when watching is disabled.
@@ -16613,6 +16719,7 @@ impl App {
         self.snapshot_dirty_buffers();
         self.checkpoint_session();
         self.tick_home();
+        self.refresh_python_environments();
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -21261,6 +21368,9 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::FindFrom {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.start_find_from_here(&cwd);
+                } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.wizard_parent_picked(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
                 // `S` only means something while picking a project/MIB dir,
@@ -21288,7 +21398,7 @@ impl App {
 
         if !is_dir
             && self.main_view == MainView::Explorer
-            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir)
+            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir | ExplorerPurpose::PickWizardParent)
         {
             return;
         }
@@ -22791,6 +22901,7 @@ impl App {
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
+            FenixUserEvent::Page(event) => self.apply_page_event(event),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             // Deferred rather than handled here: opening a window needs
             // an `&ActiveEventLoop`, which `handle_user_event` doesn't
@@ -23113,6 +23224,12 @@ impl App {
         // tier as the other capturing prompts above.
         if self.replace_wizard.is_some() {
             self.replace_wizard_key(keypress);
+            return;
+        }
+        // The new-project wizard's page: ahead of the leader, so a space
+        // typed into one of its fields is a space.
+        if self.main_view == MainView::Editor && !self.sidebar_focused && self.page_key(keypress) {
+            self.wake_caret();
             return;
         }
 
@@ -24176,6 +24293,7 @@ impl App {
         }
         match vim_event {
             VimEvent::RequestSessionSave => { self.save_session_explicit(); }
+            VimEvent::RequestProjectNew(args) => self.project_new_with(&args),
             VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
             VimEvent::RequestRestartLsp => { self.restart_project_lsp(); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
@@ -24561,6 +24679,8 @@ impl App {
                 self.terminal_buffer_labels.get(&buffer_id).cloned().unwrap_or_else(|| "*terminal*".to_string())
             } else if ob.kind == BufferKind::Agenda {
                 "*agenda*".to_string()
+            } else if ob.kind == BufferKind::Page {
+                self.page_title(buffer_id)
             } else {
                 "[No Name]".to_string()
             }
@@ -24633,6 +24753,9 @@ impl App {
                         ExplorerPurpose::PickMibRootDir => {
                             format!("{}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::PickWizardParent => {
+                            format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
+                        }
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
                         }
@@ -24644,6 +24767,7 @@ impl App {
                 ExplorerPurpose::Browse => "EXPLORE",
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
                 ExplorerPurpose::PickMibRootDir => "ADDMIB",
+                ExplorerPurpose::PickWizardParent => "NEWIN",
                 ExplorerPurpose::FindFrom => "FINDFROM",
             };
             return (badge, suffix);
@@ -25102,6 +25226,7 @@ impl App {
             // shift every one of them out from under what the shell
             // thinks it drew.
             || ob.kind == BufferKind::Terminal
+            || ob.kind == BufferKind::Page
         {
             return 0;
         }
@@ -25312,6 +25437,9 @@ impl App {
 
         if ob.kind == BufferKind::Dashboard {
             return self.home_highlights(id, render_base_line, rows);
+        }
+        if ob.kind == BufferKind::Page {
+            return self.page_highlights(id, render_base_line, rows);
         }
         if ob.kind == BufferKind::Docker {
             return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
@@ -26727,6 +26855,7 @@ impl App {
         // focus changes do (`refresh_project_root`), so this is checked
         // here instead, once per rendered frame.
         self.sync_lsp_for_focused_buffer();
+        self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
         // reconfigure -- see `GpuState::pending_resize`'s own doc
@@ -27329,13 +27458,20 @@ impl App {
             // Plain buffer content -- every pane not currently showing an
             // overlay, focused or not. `buffer_id` was already looked up
             // above, alongside `pane_title`.
-            let is_dashboard = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
-            if is_dashboard {
+            let is_home = self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Dashboard);
+            if is_home {
                 if self.home_data.date.is_empty() {
                     self.refresh_home_data(true);
                 }
                 self.ensure_home_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width), pane_visible_lines);
             }
+            // The wizard's page is drawn the way Home is: laid-out text,
+            // its own selection, no caret.
+            let is_page = self.is_page_buffer(buffer_id);
+            if is_page {
+                self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
+            }
+            let is_dashboard = is_home || is_page;
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -27649,7 +27785,13 @@ impl App {
             };
 
             let (home_segments, home_overlay) =
-                if is_dashboard { self.home_backgrounds(buffer_id, pane, render_base_line, pane_visible_lines) } else { Default::default() };
+                if is_page {
+                    self.page_backgrounds(buffer_id, render_base_line, pane_visible_lines)
+                } else if is_home {
+                    self.home_backgrounds(buffer_id, pane, render_base_line, pane_visible_lines)
+                } else {
+                    Default::default()
+                };
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -27682,6 +27824,14 @@ impl App {
         }
 
         let modeline_pieces = self.modeline_pieces();
+        // Which project owns the focused buffer, ahead of everything else
+        // on the modeline -- one language server runs per project root,
+        // so this answers "which one am I talking to?".
+        let project_spans = if self.main_view == MainView::Editor {
+            self.focused_project_identity().map(|(kind, name)| projects::modeline_project_spans(kind, &name, theme)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         _profile.mark("CPU pane preparation complete");
         let (badge_bg, _badge_fg) = self.mode_colors();
         // Top-right corner, clear of both the content the user is actively
@@ -27845,7 +27995,8 @@ impl App {
             // narrower than `PAD_LEFT`, so it never touches this text.
             let badge = modeline_mode_segment(mode_label);
             let mode_segment_chars = badge.chars().count();
-            let existing_chars = mode_segment_chars + suffix.chars().count();
+            let project_chars: usize = project_spans.iter().map(|(text, _)| text.chars().count()).sum();
+            let existing_chars = mode_segment_chars + project_chars + suffix.chars().count();
             // An unexpired error message tints the suffix red (`git_
             // conflicted`'s accent -- no dedicated error color exists
             // yet, and this reads as a reasonable semantic reuse
@@ -27861,6 +28012,7 @@ impl App {
             // over a filled box -- `badge_fg` (`mode_text_dark`/`_light`)
             // was that box's own contrast color and is unused here now.
             spans.push((badge, rgba_to_glyphon(badge_bg)));
+            spans.extend(project_spans);
             spans.extend(suffix_spans);
             let refs: Vec<(&str, glyphon::Color)> = spans.iter().map(|(text, color)| (text.as_str(), *color)).collect();
             text.set_modeline_text(&refs);
@@ -42559,7 +42711,7 @@ configure_board stm32
         let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
         let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
         let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
-        let content_rect = pane_content_rect(rect, text::LINE_HEIGHT, true);
+        let content_rect = pane_content_rect(rect, text::LINE_HEIGHT, app.pane_has_breadcrumb(pane));
         let visible_lines = text::lines_that_fit(content_rect.h, text::LINE_HEIGHT);
 
         app.scroll_window_at(VimScrollTarget::Center, 800.0, 600.0);
@@ -45070,6 +45222,40 @@ configure_board stm32
         assert!(app.pdf_search_source.is_empty());
     }
 
+    #[test]
+    fn a_python_server_is_told_again_when_the_venv_changes() {
+        let dir = TempDir::new("python_env_refresh");
+        dir.write("pyproject.toml", "[project]
+name = \"orbit\"
+");
+        dir.write("uv.lock", "");
+        let path = dir.write("main.py", "import pandas
+");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = LspKey { language: fenix_syntax::LanguageId::Python, root: tool_sessions::lsp_root_for_path(&path) };
+        let (program, args) = echo_command("fixture");
+        let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
+        let mut session = LspSession {
+            generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
+            capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
+        };
+        push_python_environment(&mut session);
+        app.lsp_sessions.insert(key.clone(), session);
+        let first = app.lsp_sessions[&key].python_env.clone().unwrap();
+
+        app.refresh_python_environments();
+        assert_eq!(app.lsp_sessions[&key].python_env.as_ref(), Some(&first), "nothing changed: not told again");
+
+        // `uv sync` creates the venv after the server started.
+        let exe = if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" };
+        dir.write(exe, "");
+        assert!(first.is_stale(&key.root));
+        app.refresh_python_environments();
+        let second = app.lsp_sessions[&key].python_env.clone().unwrap();
+        assert_ne!(second, first, "told about the new venv");
+        assert!(!second.is_stale(&key.root));
+    }
+
     fn project_scope_fixture(name: &str) -> (TempDir, PathBuf) {
         let dir = TempDir::new(name);
         dir.write(".fenix/project.ini", "");
@@ -45078,13 +45264,13 @@ configure_board stm32
     }
 
     fn install_test_lsp(app: &mut App, path: &Path) -> LspKey {
-        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::root_for_path(path) };
+        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::lsp_root_for_path(path) };
         let (program, args) = echo_command("fixture");
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(),
+            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
         });
         key
     }

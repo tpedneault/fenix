@@ -236,6 +236,9 @@ pub struct Config {
     pub restore_windows: Option<bool>,
     /// Restore documents and layouts; enabled unless explicitly disabled.
     pub restore_session: Option<bool>,
+    /// Whether opening a project from the hub gives it a workspace of
+    /// its own (and returns to it next time). `None` means on.
+    pub workspace_per_project: Option<bool>,
     /// Named workspace launchers, `(display name, action)`, in the
     /// order they appear in `config.ini`'s `[workspaces]` section --
     /// what `SPC TAB f` picks from. `action` is one of `git`, `jira`,
@@ -350,6 +353,7 @@ impl Config {
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
             restore_session: windows.and_then(|s| s.get("restore_session")).and_then(|v| v.parse().ok()),
+            workspace_per_project: windows.and_then(|s| s.get("workspace_per_project")).and_then(|v| v.parse().ok()),
             restore_windows: windows.and_then(|s| s.get("restore_windows")).and_then(|v| v.parse().ok()),
             workspaces: workspaces.map(|s| parse_pair_list(s, "ws")).unwrap_or_default(),
         })
@@ -399,6 +403,7 @@ impl Config {
             windows: Vec::new(),
             restore_windows: None,
             restore_session: None,
+            workspace_per_project: None,
             workspaces: Vec::new(),
         })
     }
@@ -581,6 +586,9 @@ impl Config {
         }
         if let Some(restore) = self.restore_windows {
             out.push_str(&format!("restore_windows = {restore}\n"));
+        }
+        if let Some(per_project) = self.workspace_per_project {
+            out.push_str(&format!("workspace_per_project = {per_project}\n"));
         }
         for (i, window) in self.windows.iter().enumerate() {
             out.push_str(&format!(
@@ -818,6 +826,7 @@ mod tests {
         ];
         config.restore_windows = Some(false);
         config.restore_session = Some(false);
+        config.workspace_per_project = Some(false);
 
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
@@ -825,6 +834,7 @@ mod tests {
         assert_eq!(reloaded.windows, config.windows);
         assert_eq!(reloaded.restore_windows, Some(false));
         assert_eq!(reloaded.restore_session, Some(false));
+        assert_eq!(reloaded.workspace_per_project, Some(false));
         let _ = std::fs::remove_file(path);
     }
 

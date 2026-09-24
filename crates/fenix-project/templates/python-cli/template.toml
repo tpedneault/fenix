@@ -1,0 +1,49 @@
+[template]
+name = "Python · command-line tool"
+kind = "python"
+group = "Python"
+description = "A command-line tool packaged with uv, installable as a command, with tests that run it."
+needs = ["uv"]
+open = ["src/{{name_snake}}/cli.py"]
+
+[[ask]]
+key = "framework"
+label = "Arguments"
+choices = ["typer", "click", "argparse"]
+default = "typer"
+hint = "typer: from type hints · click: decorators · argparse: the standard library"
+
+[[ask]]
+key = "python"
+label = "Python"
+choices = ["3.13", "3.12", "3.11"]
+default = "3.12"
+hint = "uv downloads it if it isn't installed"
+
+[[run]]
+exec = "uv"
+args = ["init", "--app", "--package", "--python", "{{python}}", "--name", "{{name_kebab}}", "--vcs", "none", "--no-readme"]
+
+[[run]]
+exec = "uv"
+args = ["add", "{{framework}}"]
+when = "framework != argparse"
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "pytest", "ruff"]
+
+[[task]]
+name = "run"
+exec = "uv"
+args = ["run", "{{name_kebab}}", "--help"]
+
+[[task]]
+name = "test"
+exec = "uv"
+args = ["run", "pytest"]
+
+[[task]]
+name = "lint"
+exec = "uv"
+args = ["run", "ruff", "check"]

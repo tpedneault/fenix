@@ -47,27 +47,7 @@ fn age(modified: Option<std::time::SystemTime>) -> String {
     }
 }
 
-/// The branch checked out in `root`, read straight from `.git/HEAD` (a
-/// worktree's `.git` file is followed to its real git dir) -- no `git`
-/// process for something shown on every start. A detached HEAD reads
-/// as its short commit.
-pub(super) fn git_branch(root: &Path) -> Option<String> {
-    let dot_git = root.join(".git");
-    let git_dir = if dot_git.is_file() {
-        let pointer = std::fs::read_to_string(&dot_git).ok()?;
-        let dir = pointer.trim().strip_prefix("gitdir:")?.trim();
-        let dir = PathBuf::from(dir);
-        if dir.is_absolute() { dir } else { root.join(dir) }
-    } else {
-        dot_git
-    };
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-    match head.strip_prefix("ref: refs/heads/") {
-        Some(branch) => Some(branch.to_string()),
-        None => (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..7].to_string()),
-    }
-}
+use fenix_project::vcs::git_branch;
 
 fn format_elapsed(duration: chrono::Duration) -> String {
     let minutes = duration.num_minutes().max(0);
@@ -115,7 +95,15 @@ impl App {
                 age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
             })
             .collect();
-        let projects = self
+        let probe = self.app_probe();
+        for root in self.known_projects.roots().iter().take(5) {
+            if !self.project_health.contains_key(root) && root.is_dir() {
+                let checks = fenix_project::doctor::diagnose(root, self.project_kind_of(root), &probe, false);
+                let health = (fenix_project::doctor::worst(&checks), checks.iter().filter(|c| c.health >= fenix_project::doctor::Health::Warn).count());
+                self.project_health.insert(root.clone(), health);
+            }
+        }
+        let mut projects: Vec<dashboard::ProjectItem> = self
             .known_projects
             .roots()
             .iter()
@@ -124,8 +112,13 @@ impl App {
                 root: root.clone(),
                 name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string()),
                 branch: git_branch(root),
+                kind: self.project_kind_of(root),
+                health: None,
             })
             .collect();
+        for item in &mut projects {
+            item.health = self.project_health.get(&item.root).map(|(health, _)| *health);
+        }
 
         // Open tasks: the one on the clock first, then in progress, then
         // by priority -- the agenda has no due dates, so "today" is what's
@@ -230,7 +223,7 @@ impl App {
         }
     }
 
-    fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
+    pub(super) fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
         let Some(ob) = self.buffers.get(id) else { return };
         let line = line.min(ob.buffer.line_count().saturating_sub(1));
         let char_idx = ob.buffer.line_start_char(line) + col.min(ob.buffer.line_len(line));
@@ -292,6 +285,7 @@ impl App {
             HomeEntry::Find => self.picker_find_file(),
             HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
             HomeEntry::Project(root) => self.switch_to_project(root),
+            HomeEntry::NewProject => self.cmd_project_new(),
             HomeEntry::Agenda => self.cmd_agenda_open(),
             HomeEntry::Todo { path, line, col } => {
                 self.open_file_from_picker(&path);
@@ -314,6 +308,13 @@ impl App {
             Role::Ember => glyphon::Color::rgb(fenix_brand::EMBER[0], fenix_brand::EMBER[1], fenix_brand::EMBER[2]),
             Role::Warn => theme.git_modified,
             Role::Todo(kind) => theme.todo_color(kind),
+            Role::Kind(kind) => super::projects::kind_color(kind, theme),
+            Role::Health(health) => match health {
+                fenix_project::doctor::Health::Ok => theme.git_staged,
+                fenix_project::doctor::Health::Info => theme.gutter_fg,
+                fenix_project::doctor::Health::Warn => theme.git_modified,
+                fenix_project::doctor::Health::Bad => theme.git_conflicted,
+            },
         };
         let last = first_line + rows;
         let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = view
@@ -391,26 +392,6 @@ pub(super) fn home_rule(theme: &Theme) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn git_branch_reads_head_and_follows_a_worktree_pointer() {
-        let dir = std::env::temp_dir().join(format!("fenix-home-branch-{}", std::process::id()));
-        let main = dir.join("main");
-        std::fs::create_dir_all(main.join(".git")).unwrap();
-        std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
-        assert_eq!(git_branch(&main).as_deref(), Some("feature/x"));
-
-        let worktree = dir.join("wt");
-        let real = dir.join("realgit");
-        std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join("HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
-        assert_eq!(git_branch(&worktree).as_deref(), Some("0123456"));
-
-        assert_eq!(git_branch(&dir.join("nowhere")), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn ages_read_the_way_the_design_writes_them() {

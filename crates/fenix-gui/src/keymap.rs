@@ -227,11 +227,12 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "prev match",
             "project.quickfix_prev",
         );
-        t.insert(
-            &[spc, KeyPress::char('p'), KeyPress::char('p')],
-            "switch project",
-            "project.switch_project",
-        );
+        // The hub; the quick path-only switcher stays on `P`.
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('p')], "projects", "project.hub");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('P')], "quick switch", "project.switch_project");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('h')], "doctor", "project.doctor");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char(',')], "settings", "project.settings");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('c')], "new project", "project.new");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
         // `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
@@ -679,12 +680,14 @@ mod tests {
             _ => panic!("expected SPC p N to resolve to project.quickfix_prev"),
         }
 
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('p'));
-        match m.feed(KeyPress::char('p')) {
-            fenix_keymap::Step::Matched(&"project.switch_project") => {}
-            _ => panic!("expected SPC p p to resolve to project.switch_project"),
+        for (key, id) in [('p', "project.hub"), ('P', "project.switch_project"), ('c', "project.new"), ('h', "project.doctor"), (',', "project.settings")] {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('p'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&found) => assert_eq!(found, id, "SPC p {key}"),
+                _ => panic!("expected SPC p {key} to resolve to {id}"),
+            }
         }
 
         let mut m = trie.matcher();

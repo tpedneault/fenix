@@ -55,7 +55,10 @@ impl App {
             });
             revisions.insert(identity(path), Revision { buffer: id, edits: ob.buffer.edit_count(), version });
         }
-        Context { started: SystemTime::now(), root: self.integration_root(), revisions }
+        // The language server's root -- a whole Cargo/uv workspace in a
+        // monorepo -- since that's what a rename can reach across.
+        let root = self.open().buffer.path().map(tool_sessions::lsp_root_for_path).unwrap_or_else(|| self.integration_root());
+        Context { started: SystemTime::now(), root, revisions }
     }
 
     pub(super) fn preview_lsp_edit(&mut self, edit: lsp_types::WorkspaceEdit, context: Context) {
@@ -66,7 +69,7 @@ impl App {
         let mut targets = HashMap::new();
         let plan = fenix_lsp::workspace_edit::prepare(edit, |path| {
             let path = identity(path);
-            if tool_sessions::root_for_path(&path) != context.root { return Err(format!("{} belongs to another project", path.display())); }
+            if tool_sessions::lsp_root_for_path(&path) != context.root { return Err(format!("{} belongs to another project", path.display())); }
             let metadata = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             if !metadata.is_file() || metadata.permissions().readonly() {
                 return Err(format!("{} is not a writable file", path.display()));
@@ -317,7 +320,7 @@ impl App {
                             content_changes: vec![change],
                         })
                         .map(|_| version + 1)
-                } else if language == Some(server_language.language) && tool_sessions::root_for_path(path) == server_language.root {
+                } else if language == Some(server_language.language) && tool_sessions::lsp_root_for_path(path) == server_language.root {
                     session
                         .client
                         .notify::<lsp_types::notification::DidOpenTextDocument>(lsp_types::DidOpenTextDocumentParams {

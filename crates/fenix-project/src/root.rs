@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 /// no particular priority order -- any one of them is enough. `.git` and
 /// `.projectile` are ecosystem-agnostic; the rest are the common
 /// per-language "this is the top of a package" manifest.
-const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt"];
+const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt", "library.properties", "pkgIndex.tcl"];
 
 /// An Arduino sketch folder: `sketch.yaml`, or a main `.ino`/`.pde` named
 /// after the folder itself -- the one rule the Arduino tools hold every
 /// sketch to. A sketch inside a larger repository is its own project, so
 /// a class repo with one folder per lab gets one root per lab.
-fn is_sketch(dir: &Path) -> bool {
+pub(crate) fn is_sketch(dir: &Path) -> bool {
     if dir.join("sketch.yaml").is_file() {
         return true;
     }
@@ -30,6 +30,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             || dir.join(".fenix/project.ini").is_file()
             || MARKERS.iter().any(|marker| dir.join(marker).exists())
             || is_sketch(dir)
+            || crate::kind::holds_mib_tables(dir)
         {
             return Some(dir.to_path_buf());
         }
@@ -67,6 +68,14 @@ mod tests {
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join("scratch.ino"), b"").unwrap();
         assert_eq!(find_project_root(&stray.join("scratch.ino")), Some(dir.path().to_path_buf()), "an .ino not named after its folder isn't a sketch");
+    }
+
+    #[test]
+    fn a_folder_of_mib_tables_is_a_project() {
+        let dir = TempDir::new("mib_marker");
+        fs::write(dir.path().join("vdf.dat"), b"M	m
+").unwrap();
+        assert_eq!(find_project_root(&dir.path().join("vdf.dat")), Some(dir.path().to_path_buf()));
     }
 
     #[test]

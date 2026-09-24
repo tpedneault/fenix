@@ -152,6 +152,11 @@ pub enum BufferKind {
     /// the underlying `fenix_agenda::AgendaStore` changes (see `fenix-gui`'s
     /// `agenda_panel` module).
     Agenda,
+    /// A generated, key-driven page -- the new-project wizard (`SPC p
+    /// c`). Its text is laid out by the host from the page's own state
+    /// on every change, like `Dashboard`'s; every key that means
+    /// something is claimed before Vim sees it.
+    Page,
 }
 
 impl BufferKind {
@@ -214,7 +219,10 @@ impl BufferKind {
             | BufferKind::ToolStatus
             | BufferKind::Merge
             | BufferKind::Terminal
-            | BufferKind::Agenda => true,
+            | BufferKind::Agenda
+            // The wizard's answers and its running commands live in the
+            // host, not in this text.
+            | BufferKind::Page => true,
         }
     }
 }
@@ -300,6 +308,11 @@ impl BufferList {
     /// tagged" shape as `open_dashboard`; the host owns re-rendering
     /// `text` (via `Buffer::replace_range`) whenever the underlying
     /// listing changes (navigating into a directory, a refresh, ...).
+    /// A real buffer tagged `Page` -- see `BufferKind::Page`.
+    pub fn open_page(&mut self, text: &str) -> BufferId {
+        self.insert(Buffer::from_text(text), None, BufferKind::Page)
+    }
+
     pub fn open_explorer(&mut self, text: &str) -> BufferId {
         self.insert(Buffer::from_text(text), None, BufferKind::Explorer)
     }

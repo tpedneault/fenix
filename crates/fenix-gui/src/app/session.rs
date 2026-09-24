@@ -43,6 +43,9 @@ struct SavedWorkspace {
     name: String,
     layout: Layout<Pane>,
     focused: usize,
+    /// The project it belongs to -- absent in sessions from before that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -190,6 +193,7 @@ impl App {
                 .filter(|&(i, _)| keep_all || !ephemeral[i])
                 .map(|(_, workspace)| SavedWorkspace {
                     name: workspace.name.clone(),
+                    project: workspace.project.clone(),
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
@@ -352,7 +356,7 @@ impl App {
                 .map(|w| {
                     let focused = remap_focus(&w.layout, w.focused);
                     let kept = prune_unrestorable(w.layout.clone())
-                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused });
+                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone() });
                     (w, kept)
                 })
                 .collect();
@@ -398,7 +402,7 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
@@ -611,9 +615,10 @@ mod tests {
             frames: vec![SavedFrame {
                 active: 1,
                 workspaces: vec![
-                    SavedWorkspace { name: "workspace-1".into(), focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace { name: "workspace-1".into(), project: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
                     SavedWorkspace {
                         name: "workspace-2".into(),
+                        project: None,
                         focused: 0,
                         layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
                     },
@@ -660,7 +665,7 @@ mod tests {
             }],
             frames: vec![SavedFrame {
                 active: 0,
-                workspaces: vec![SavedWorkspace { name: "panel".into(), focused: 2, layout: panel }],
+                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, focused: 2, layout: panel }],
             }],
             focused_frame: 0,
         };
@@ -726,6 +731,22 @@ mod tests {
         assert_eq!(restored.pane_state(panes[1]).scroll_line, 1);
         assert_eq!(restored.pane_state(panes[1]).scroll_col, 3);
         assert!(restored.checkpoint_session());
+    }
+
+    #[test]
+    fn a_workspace_keeps_its_project_across_a_restart() {
+        let temp = Temp::new();
+        let mut app = temp.app();
+        let project = temp.0.join("demo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("README.md"), "# demo").unwrap();
+        app.open_project(project.clone(), None, false);
+        let project = fenix_lsp::normalize(std::fs::canonicalize(&project).unwrap());
+        assert!(app.checkpoint_session());
+        let saved = std::fs::read_to_string(temp.0.join("session.json")).unwrap();
+        assert!(saved.contains("\"project\""), "{saved}");
+        let restored = temp.restore();
+        assert!(restored.workspaces.workspaces.iter().any(|w| w.project.as_deref() == Some(project.as_path()) && w.name == "demo"));
     }
 
     #[test]

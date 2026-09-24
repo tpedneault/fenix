@@ -1,0 +1,12 @@
+[template]
+name = "Tcl · package"
+kind = "tcl"
+group = "Scripting"
+description = "A Tcl package: a namespace with its pkgIndex.tcl, and tcltest tests run with tclsh."
+needs = ["tclsh"]
+open = ["{{name_snake}}.tcl"]
+
+[[task]]
+name = "test"
+exec = "tclsh"
+args = ["tests/all.tcl"]

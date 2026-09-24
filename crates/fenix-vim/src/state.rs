@@ -28,6 +28,9 @@ pub enum VimEvent {
     RequestSave,
     /// Name and save an unnamed document; path may contain spaces.
     RequestSaveAs(String),
+    /// `:project-new [template] [name] [key=value ...]` -- the new-project
+    /// wizard, as far along as the arguments take it.
+    RequestProjectNew(String),
     /// `:w!` -- write even though the host has a reason not to. Today
     /// that reason is "the file changed on disk since it was read", and
     /// this is the way to say "yes, mine wins". Real Vim's own `!`
