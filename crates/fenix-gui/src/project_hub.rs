@@ -405,9 +405,8 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         }
 
         y += 1;
-        g.heading(y, x, w, "Health");
-        let end = g.put(y, (x + w).saturating_sub(7), "SPC p h", Role::Muted);
-        let _ = end;
+        g.heading(y, x, w.saturating_sub(9), "Health");
+        g.put(y, (x + w).saturating_sub(7), "SPC p h", Role::Muted);
         y += 1;
         match p.health {
             Some((health, problems)) => {

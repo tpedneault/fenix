@@ -136,6 +136,38 @@ pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     }
 }
 
+/// The file a project of `kind` is usually entered through -- a sketch's
+/// `.ino`, `src/main.rs`, a Python package's `__init__.py` -- if it has
+/// one. What opening a project lands on when you've never had a file of
+/// it open.
+pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
+    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let first_in = |dir: &Path, extension: &str| -> Option<std::path::PathBuf> {
+        let mut found: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(extension))).collect();
+        found.sort();
+        found.into_iter().next()
+    };
+    let candidates: Vec<std::path::PathBuf> = match kind {
+        ProjectKind::Arduino => vec![root.join(format!("{name}.ino")), root.join(format!("{name}.pde"))],
+        ProjectKind::Rust => vec![root.join("src/main.rs"), root.join("src/lib.rs")],
+        ProjectKind::Python => {
+            let mut c = vec![root.join("main.py"), root.join("app.py")];
+            // A src-layout package: src/<package>/__init__.py.
+            let mut packages: Vec<_> = std::fs::read_dir(root.join("src")).into_iter().flatten().flatten().map(|e| e.path().join("__init__.py")).collect();
+            packages.sort();
+            c.extend(packages);
+            c
+        }
+        ProjectKind::Go => vec![root.join("main.go")],
+        ProjectKind::Node => vec![root.join("src/index.ts"), root.join("src/index.js"), root.join("index.ts"), root.join("index.js")],
+        ProjectKind::Cpp => vec![root.join("src/main.cpp"), root.join("main.cpp"), root.join("src/main.c"), root.join("main.c")],
+        ProjectKind::Tcl => vec![root.join("main.tcl")],
+        ProjectKind::Mib => first_in(&root.join("procedures"), "tcl").into_iter().collect(),
+        ProjectKind::Other => Vec::new(),
+    };
+    candidates.into_iter().find(|p| p.is_file()).or_else(|| if kind == ProjectKind::Tcl { first_in(root, "tcl") } else { None })
+}
+
 fn has_extension(dir: &Path, extension: &str) -> bool {
     std::fs::read_dir(dir)
         .into_iter()
@@ -207,6 +239,21 @@ mod tests {
         std::fs::write(sketch.join("Blink.ino"), "").unwrap();
         std::fs::write(sketch.join("CMakeLists.txt"), "").unwrap();
         assert_eq!(detect_kind(&sketch), ProjectKind::Arduino);
+    }
+
+    #[test]
+    fn main_files_are_found_by_kind() {
+        let dir = TempDir::new("main_file");
+        dir.write("Lab/Lab.ino", "");
+        assert_eq!(main_file(&dir.path().join("Lab"), ProjectKind::Arduino), Some(dir.path().join("Lab/Lab.ino")));
+        dir.write("py/src/orbit/__init__.py", "");
+        assert_eq!(main_file(&dir.path().join("py"), ProjectKind::Python), Some(dir.path().join("py/src/orbit/__init__.py")));
+        dir.write("rs/src/lib.rs", "");
+        assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Rust), Some(dir.path().join("rs/src/lib.rs")));
+        dir.write("mib/procedures/b.tcl", "");
+        dir.write("mib/procedures/a.tcl", "");
+        assert_eq!(main_file(&dir.path().join("mib"), ProjectKind::Mib), Some(dir.path().join("mib/procedures/a.tcl")));
+        assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Go), None);
     }
 
     #[test]

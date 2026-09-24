@@ -52,6 +52,9 @@ pub enum EditorFix {
     PickBoard,
     PickPort,
     RegisterMibRoot { path: PathBuf, label: String },
+    /// Point this project's `tools.json` at a language server Fenix can't
+    /// find on PATH.
+    UseLanguageServer { language: String, executable: PathBuf, args: Vec<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +120,24 @@ pub trait Probe {
     fn run(&self, program: &Path, args: &[&str], dir: &Path) -> Option<(bool, String)>;
     /// Whether `dir` is a configured `[mib]` root.
     fn mib_registered(&self, dir: &Path) -> bool;
+    /// Where tool installers put programs that may not be on PATH --
+    /// `uv tool install`'s bin folder, for one.
+    fn tool_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(dir) = std::env::var_os("UV_TOOL_BIN_DIR") {
+            dirs.push(PathBuf::from(dir));
+        }
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".local").join("bin"));
+        }
+        dirs
+    }
+}
+
+/// `program` in one of `dirs`, with Windows' executable extensions.
+fn find_in(dirs: &[PathBuf], program: &str) -> Option<PathBuf> {
+    let extensions: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
+    dirs.iter().flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{program}{ext}")))).find(|p| p.is_file())
 }
 
 /// Looks for `program` on PATH (with Windows' PATHEXT), for a `Probe`
@@ -156,7 +177,13 @@ pub fn run_program(program: &Path, args: &[&str], dir: &Path) -> Option<(bool, S
 fn version_in(text: &str) -> Option<String> {
     text.split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .map(|w| w.trim_start_matches('v'))
-        .find(|w| w.contains('.') && w.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|w| w.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .find(|w| {
+            let mut parts = w.split('.');
+            let major = parts.next().unwrap_or_default();
+            let minor = parts.next().unwrap_or_default();
+            !major.is_empty() && major.chars().all(|c| c.is_ascii_digit()) && minor.starts_with(|c: char| c.is_ascii_digit())
+        })
         .map(str::to_string)
 }
 
@@ -176,7 +203,9 @@ impl Doctor<'_> {
                 // Nearly everything answers `--version`; Arduino CLI wants
                 // a subcommand.
                 let args: &[&str] = if program == "arduino-cli" { &["version"] } else { &["--version"] };
-                let version = if self.deep { self.probe.run(&path, args, self.root).and_then(|(_, out)| version_in(&out)) } else { None };
+                // A tool that doesn't know the flag prints its usage and
+                // fails; nothing in that is its version.
+                let version = if self.deep { self.probe.run(&path, args, self.root).filter(|(ok, _)| *ok).and_then(|(_, out)| version_in(&out)) } else { None };
                 let detail = version.unwrap_or_else(|| path.display().to_string());
                 self.checks.push(Check::new(section, program, Health::Ok, detail));
                 Some(path)
@@ -262,7 +291,22 @@ fn python(d: &mut Doctor, tools: Option<&ProjectTools>) {
     // The language server Fenix starts: the project's own, else pyright.
     let server = tools.and_then(|t| t.lsp.get("python")).map(|c| c.executable.clone()).unwrap_or_else(|| "pyright-langserver".to_string());
     if d.probe.locate(&server).is_some() || Path::new(&server).is_absolute() && Path::new(&server).is_file() {
-        d.push(Check::new(Section::Toolchain, server, Health::Ok, "language server"));
+        // A configured full path reads as the program's name, with where
+        // it lives beside it.
+        let path = Path::new(&server);
+        let (label, detail) = match (path.is_absolute(), path.file_stem(), path.parent()) {
+            (true, Some(stem), Some(dir)) => (stem.to_string_lossy().into_owned(), format!("language server · {}", dir.display())),
+            _ => (server.clone(), "language server".to_string()),
+        };
+        d.push(Check::new(Section::Toolchain, label, Health::Ok, detail));
+    } else if let Some(found) = find_in(&d.probe.tool_dirs(), &server) {
+        // Installed, just not where Fenix looks: uv puts tools in a folder
+        // that often isn't on PATH until a new login.
+        let dir = found.parent().map(|p| p.display().to_string()).unwrap_or_default();
+        d.push(
+            Check::new(Section::Toolchain, &server, Health::Warn, format!("installed in {dir}, which isn't on Fenix's PATH"))
+                .fix("use it for this project", FixAction::Editor(EditorFix::UseLanguageServer { language: "python".into(), executable: found, args: vec!["--stdio".into()] }), true),
+        );
     } else {
         let check = Check::new(Section::Toolchain, &server, Health::Bad, "not found -- no completion or errors as you type");
         d.push(if server == "pyright-langserver" { check.run("uv tool install pyright", "uv", &["tool", "install", "pyright"], false) } else { check });
@@ -404,6 +448,7 @@ mod tests {
         programs: Vec<&'static str>,
         outputs: HashMap<String, (bool, String)>,
         mib_roots: Vec<PathBuf>,
+        tool_dirs: Vec<PathBuf>,
     }
 
     impl Probe for FakeProbe {
@@ -416,6 +461,9 @@ mod tests {
         }
         fn mib_registered(&self, dir: &Path) -> bool {
             self.mib_roots.iter().any(|r| r == dir)
+        }
+        fn tool_dirs(&self) -> Vec<PathBuf> {
+            self.tool_dirs.clone()
         }
     }
 
@@ -439,6 +487,27 @@ mod tests {
         assert!(lsp.fix.as_ref().is_some_and(|f| !f.safe), "installing is never safe");
         assert_eq!(find(&checks, "git").health, Health::Info);
         assert_eq!(worst(&checks), Health::Bad);
+    }
+
+    #[test]
+    fn a_server_installed_off_path_is_found_and_can_be_pointed_at() {
+        let dir = TempDir::new("doctor_offpath");
+        dir.write("uv.lock", "");
+        let exe = if cfg!(windows) { "bin/pyright-langserver.exe" } else { "bin/pyright-langserver" };
+        dir.write(exe, "");
+        let probe = FakeProbe { programs: vec!["uv"], tool_dirs: vec![dir.path().join("bin")], ..Default::default() };
+        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
+        let lsp = find(&checks, "pyright-langserver");
+        assert_eq!(lsp.health, Health::Warn);
+        assert!(lsp.detail.contains("isn't on Fenix's PATH"), "{}", lsp.detail);
+        let fix = lsp.fix.as_ref().unwrap();
+        assert!(fix.safe, "it only writes this project's tools.json");
+        assert!(matches!(&fix.action, FixAction::Editor(EditorFix::UseLanguageServer { executable, .. }) if executable == &dir.path().join(exe)));
+        dir.write(".fenix/tools.json", &serde_json::json!({"lsp": {"python": {"executable": dir.path().join(exe)}}}).to_string());
+        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
+        let lsp = find(&checks, "pyright-langserver");
+        assert_eq!(lsp.health, Health::Ok, "once pointed at, it's found");
+        assert!(lsp.detail.starts_with("language server · "));
     }
 
     #[test]
@@ -527,5 +596,7 @@ mod tests {
         assert_eq!(version_in("Python 3.12.14").as_deref(), Some("3.12.14"));
         assert_eq!(version_in("rust-analyzer v0.3.2"), Some("0.3.2".into()));
         assert_eq!(version_in("nothing here"), None);
+        assert_eq!(version_in("Usage: -board-name string  1. the board"), None, "a stray `1.` isn't a version");
+        assert_eq!(version_in("clangd version 22.1.8."), Some("22.1.8".into()));
     }
 }

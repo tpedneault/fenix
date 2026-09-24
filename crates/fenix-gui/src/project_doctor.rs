@@ -42,6 +42,9 @@ pub struct DoctorPage {
     pub fixing: Option<Fixing>,
     /// Safe fixes still to run after the current one (`F`).
     pub queue: Vec<usize>,
+    /// The last fix run and how it went, shown under the header -- a
+    /// fix that worked but didn't change the verdict still says so.
+    pub last_fix: Option<(String, Result<(), String>)>,
 }
 
 const OUTPUT_LINES: usize = 5;
@@ -49,7 +52,7 @@ const OUTPUT_LINES: usize = 5;
 impl DoctorPage {
     pub fn new(root: PathBuf, kind: ProjectKind) -> Self {
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-        DoctorPage { root, name, kind, checks: None, focus: 0, fixing: None, queue: Vec::new() }
+        DoctorPage { root, name, kind, checks: None, focus: 0, fixing: None, queue: Vec::new(), last_fix: None }
     }
 
     /// Checks are in; keeps the cursor on the same row where it can.
@@ -188,8 +191,15 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
     let role = if role == Role::Muted && doctor.checks.is_some() { Role::Good } else { role };
     g.put(1, (left + width).saturating_sub(status.chars().count()), &status, role);
     g.rule(2, left..left + width);
+    if let Some((label, result)) = &doctor.last_fix {
+        let (text, role) = match result {
+            Ok(()) => (format!("{label}: done"), Role::Good),
+            Err(e) => (format!("{label}: {e}"), Role::Bad),
+        };
+        g.put(3, left + 2, &fit(&text, width.saturating_sub(4)), role);
+    }
 
-    let mut y = 4;
+    let mut y = 5;
     if let Some(checks) = &doctor.checks {
         let label_width = 26.min(width / 3);
         let mut section = None;
@@ -267,6 +277,9 @@ mod tests {
         fn mib_registered(&self, _: &Path) -> bool {
             false
         }
+        fn tool_dirs(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
     }
 
     fn page(name: &str) -> (DoctorPage, PathBuf) {
@@ -320,6 +333,9 @@ mod tests {
         let text = layout(&doctor, 100).text;
         assert!(text.contains("running") && text.contains("line 7") && !text.contains("line 2"));
         assert!(doctor.report().contains("BAD "));
+        doctor.fixing = None;
+        doctor.last_fix = Some(("uv sync".into(), Err("exited with code 2".into())));
+        assert!(layout(&doctor, 100).text.contains("uv sync: exited with code 2"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

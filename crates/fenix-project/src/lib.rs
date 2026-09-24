@@ -14,7 +14,7 @@ pub mod vcs;
 
 pub use files::{list_project_files, list_project_files_including_ignored};
 pub use grep::{files_matching, grep_project, GrepMatch};
-pub use kind::{declared_kind, detect_kind, detect_kind_from_files, ProjectKind};
+pub use kind::{declared_kind, detect_kind, detect_kind_from_files, main_file, ProjectKind};
 pub use known::KnownProjects;
 pub use recent::RecentFiles;
 pub use root::find_project_root;

@@ -7218,11 +7218,19 @@ impl App {
     fn with_file(file_arg: Option<String>) -> Self {
         // Loaded before the initial buffer so a no-argument launch can
         // build the dashboard from them.
-        let known_projects_path =
-            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"));
+        // Tests get their own lists, so running them never edits the
+        // project list or recent files of the Fenix you use.
+        let known_projects_path = if cfg!(test) {
+            std::env::temp_dir().join(format!("fenix-test-projects-{}.txt", std::process::id()))
+        } else {
+            fenix_project::KnownProjects::default_path().unwrap_or_else(|| PathBuf::from("fenix-projects.txt"))
+        };
         let known_projects = fenix_project::KnownProjects::load_or_default(known_projects_path);
-        let recent_files_path = fenix_project::RecentFiles::default_path()
-            .unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"));
+        let recent_files_path = if cfg!(test) {
+            std::env::temp_dir().join(format!("fenix-test-recent-files-{}.txt", std::process::id()))
+        } else {
+            fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
+        };
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
         // Read-only here, same posture as `known_projects`/`recent_files`
         // just above: a test that constructs `App` via `with_file` reads
@@ -24621,7 +24629,7 @@ impl App {
             } else if ob.kind == BufferKind::Agenda {
                 "*agenda*".to_string()
             } else if ob.kind == BufferKind::Page {
-                "*new project*".to_string()
+                self.page_title(buffer_id)
             } else {
                 "[No Name]".to_string()
             }

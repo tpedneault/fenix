@@ -189,6 +189,16 @@ impl App {
         self.app_probe().locate(program)
     }
 
+    /// What a page is called in its tab, the modeline and `SPC b b`.
+    pub(super) fn page_title(&self, id: BufferId) -> String {
+        match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Wizard(_)) | None => "*new project*".to_string(),
+            Some(PageModel::Hub(_)) => "*projects*".to_string(),
+            Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
+            Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
+        }
+    }
+
     pub(super) fn is_page_buffer(&self, id: BufferId) -> bool {
         self.pages.contains_key(&id)
     }
@@ -399,6 +409,10 @@ impl App {
                     }
                     PageModel::Doctor(d) => {
                         let ok = result.is_ok();
+                        let label = d.fixing.as_ref().and_then(|f| d.check(f.check)).and_then(|c| c.fix.as_ref()).map(|f| f.label.clone());
+                        if let Some(label) = label {
+                            d.last_fix = Some((label, result.clone()));
+                        }
                         if let Some(fixing) = d.fixing.as_mut() {
                             fixing.result = Some(result);
                         }
@@ -424,7 +438,15 @@ impl App {
                     let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
                     d.set_checks(checks);
                     d.fixing = None;
-                    self.project_health.insert(root, health);
+                    self.project_health.insert(root.clone(), health);
+                    for state in self.pages.values_mut() {
+                        if let PageModel::Hub(hub) = &mut state.model {
+                            if let Some(p) = hub.projects.iter_mut().find(|p| p.root == root) {
+                                p.health = Some(health);
+                                state.stale = true;
+                            }
+                        }
+                    }
                 }
             }
             PageEvent::HubInfo { buffer, root, git, health } => {
@@ -508,9 +530,15 @@ impl App {
     // --------------------------------------------------------------
 
     /// The file to land on in a project: the one you had open most
-    /// recently there, else its README.
+    /// recently there, else its main file, else its README.
     fn project_entry_file(&self, root: &Path) -> Option<PathBuf> {
-        self.recent_files.paths().iter().find(|p| p.starts_with(root) && p.is_file()).cloned().or_else(|| Some(root.join("README.md")).filter(|p| p.is_file()))
+        self.recent_files
+            .paths()
+            .iter()
+            .find(|p| p.starts_with(root) && p.is_file())
+            .cloned()
+            .or_else(|| fenix_project::main_file(root, self.project_kind_of(root)))
+            .or_else(|| Some(root.join("README.md")).filter(|p| p.is_file()))
     }
 
     /// Opens project `root` -- on `file` if given, else where you last
@@ -670,8 +698,10 @@ impl App {
     fn wizard_finish(&mut self, id: BufferId) {
         let Some(state) = self.pages.remove(&id) else { return };
         let PageModel::Wizard(wizard) = state.model else { return };
-        self.close_page(id);
-        let Some(plan) = wizard.plan else { return };
+        let Some(plan) = wizard.plan else {
+            self.close_page(id);
+            return;
+        };
         let dir = std::fs::canonicalize(&plan.dir).map(fenix_lsp::normalize).unwrap_or_else(|_| plan.dir.clone());
         self.project_kinds.borrow_mut().clear();
         for hook in &plan.hooks {
@@ -681,6 +711,7 @@ impl App {
         }
         let steps = wizard.run.as_ref().map(|r| r.steps.len()).unwrap_or(0);
         self.open_project(dir.clone(), plan.file_to_open(), wizard.register);
+        self.close_page(id);
         self.refresh_home_data(false);
         self.set_message(format!("created {} -- {steps} step{}", dir.display(), if steps == 1 { "" } else { "s" }));
     }
@@ -784,9 +815,11 @@ impl App {
         match action {
             Action::None => {}
             Action::Close => self.close_page(id),
+            // Opened while the hub still holds its pane, so a workspace
+            // holding nothing but the hub is reused, not left behind.
             Action::Open(root) => {
-                self.close_page(id);
                 self.open_project(root, None, true);
+                self.close_page(id);
             }
             Action::Add(path) => {
                 self.register_project_dir(&path);
@@ -901,6 +934,19 @@ impl App {
                     EditorFix::RegisterMibRoot { path, label } => {
                         self.add_mib_root(path, label);
                         self.set_message("registered -- SPC m t finds its telecommands now");
+                    }
+                    EditorFix::UseLanguageServer { language, executable, args } => {
+                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
+                            tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
+                            tools.write(&root)
+                        });
+                        if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                            d.last_fix = Some(("use it for this project".to_string(), result.clone()));
+                        }
+                        match result {
+                            Ok(()) => self.set_message("written to .fenix/tools.json -- :lsp-restart to start it"),
+                            Err(e) => self.set_error(e),
+                        }
                     }
                     EditorFix::PickPort | EditorFix::PickBoard => {
                         let Some(project) = self.embedded_project_at(&root) else {
@@ -1188,6 +1234,9 @@ mod tests {
         // Open the first (a).
         press(&mut app, "\n");
         assert!(!app.pages.contains_key(&hub_id), "the hub closes behind it");
+        app.cmd_project_hub();
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*projects*");
+        press(&mut app, "q");
         assert_eq!(app.workspaces.active_name(), a_name);
         assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
         // Back to b: a new workspace; back to a: its own again.
@@ -1205,6 +1254,22 @@ mod tests {
         press(&mut app, "\n");
         assert_eq!(app.workspaces.len(), 2, "no third workspace: a already had one");
         assert_eq!(app.workspaces.active_name(), a_name);
+    }
+
+    #[test]
+    fn opening_from_a_hub_in_its_own_workspace_reuses_that_workspace() {
+        let a = Scratch::new("hub-reuse");
+        std::fs::write(a.0.join("README.md"), "# a").unwrap();
+        let mut app = app_with(&[&a.0]);
+        // A second, empty workspace holding only the hub.
+        let home = app.focused_buffer_id();
+        app.workspaces.new_workspace(home, Cursor::at_start());
+        app.cmd_project_hub();
+        let before = app.workspaces.len();
+        press(&mut app, "
+");
+        assert_eq!(app.workspaces.len(), before, "the hub's workspace became the project's");
+        assert!(app.workspaces.workspaces.iter().all(|w| w.windows.windows().iter().all(|p| w.windows.content(*p).is_some_and(|id| app.buffers.get(*id).is_some()))));
     }
 
     #[test]
@@ -1277,6 +1342,18 @@ mod tests {
         }
         let tools = fenix_project::tools::ProjectTools::read(&dir.0).unwrap();
         assert_eq!(tools.tasks["test"].args, ["run", "pytest", "-q"]);
+    }
+
+    #[test]
+    fn a_sketch_with_no_history_opens_on_its_ino() {
+        let dir = Scratch::new("entry");
+        let sketch = dir.0.join("Blinky");
+        std::fs::create_dir_all(&sketch).unwrap();
+        std::fs::write(sketch.join("Blinky.ino"), "void setup() {}").unwrap();
+        let mut app = App::with_file(None);
+        app.open_project(sketch.clone(), None, false);
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("Blinky.ino")), "not a find-file picker");
+        assert_eq!(app.main_view, MainView::Editor);
     }
 
     #[test]
