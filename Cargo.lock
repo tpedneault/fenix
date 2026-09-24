@@ -792,6 +792,7 @@ dependencies = [
  "fenix-format",
  "fenix-fs",
  "fenix-git",
+ "fenix-github",
  "fenix-gitlab",
  "fenix-jira",
  "fenix-keymap",

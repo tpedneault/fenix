@@ -495,7 +495,7 @@ impl App {
             PageEvent::ReviewLog { buffer, name, result } => match result {
                 Ok(log) => {
                     let root = self.review_page(buffer).map(|r| r.root.clone());
-                    let tail: Vec<&str> = log.lines().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+                    let tail: Vec<&str> = log.lines().rev().take(400).collect::<Vec<_>>().into_iter().rev().map(without_timestamp).collect();
                     // Lines that name a file and line are the quickfix list.
                     let found: Vec<fenix_project::GrepMatch> = tail
                         .iter()
@@ -528,6 +528,18 @@ impl App {
     }
 }
 
+/// A CI log line without the timestamp GitHub Actions puts in front of
+/// every one (`2026-09-24T20:28:05.1234567Z `), which would stop a
+/// `file:line` from being recognised.
+fn without_timestamp(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let stamped = bytes.len() > 20 && bytes[..4].iter().all(u8::is_ascii_digit) && bytes[4] == b'-' && bytes[10] == b'T';
+    match (stamped, line.find("Z ")) {
+        (true, Some(end)) if end < 40 => &line[end + 2..],
+        _ => line,
+    }
+}
+
 fn count_locations(n: usize) -> String {
     if n == 1 { "1 file location".to_string() } else { format!("{n} file locations") }
 }
@@ -547,6 +559,43 @@ mod tests {
         let status = std::process::Command::new("git").args(["clone", "-q", &format!("https://github.com/{repo}.git"), &dir.to_string_lossy()]).status().unwrap();
         assert!(status.success(), "clone {repo}");
         fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap())
+    }
+
+    #[test]
+    fn a_ci_timestamp_comes_off_but_an_ordinary_line_is_left_alone() {
+        assert_eq!(without_timestamp("2026-09-24T20:28:05.1234567Z test_decoder.py:12: in test"), "test_decoder.py:12: in test");
+        assert_eq!(without_timestamp("src/a.rs:3:1: error"), "src/a.rs:3:1: error");
+        assert_eq!(without_timestamp("2026 was a year"), "2026 was a year");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_a_failing_checks_log_fills_the_quickfix_list_and_i_shows_what_changed_since_a_review() {
+        let root = sandbox("checks");
+        let mut app = App::with_file(Some(root.join("decoder.py").to_string_lossy().into_owned()));
+        let client = app.forge_client(&root).unwrap();
+        let pr = client.request_for_branch("feature/pus17").unwrap().expect("the sandbox's pull request");
+        // As if it had been reviewed one commit before the branch's tip.
+        let mut state = review_store::load(&root, client.project(), pr.number);
+        std::process::Command::new("git").current_dir(&root).args(["fetch", "-q", "origin", "feature/pus17"]).status().unwrap();
+        let older = String::from_utf8(std::process::Command::new("git").current_dir(&root).args(["rev-parse", "FETCH_HEAD~1"]).output().unwrap().stdout).unwrap();
+        state.reviewed_head = Some(older.trim().to_string());
+        review_store::save(&root, client.project(), pr.number, &state).unwrap();
+        app.open_review(root.clone(), pr.number, false);
+
+        assert!(app.page_key(KeyPress::char('i')));
+        let shown = text(&mut app);
+        assert!(shown.contains("since your review at") && shown.contains("test.yml"), "the CI workflow came after that review:
+{shown}");
+        assert!(app.page_key(KeyPress::char('i')), "back to the whole change");
+
+        assert!(app.page_key(KeyPress::char('K')));
+        let page = page_mut(&mut app);
+        page.cursor = page.rows().iter().position(|r| matches!(r, Row::Check(_))).expect("a check");
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert!(app.open().buffer.text().contains("pytest -- the last"), "the log opened");
+        assert!(app.quickfix.iter().any(|q| matches!(q, QuickfixEntry::Task(m) if m.path.ends_with("test_decoder.py"))), "{:?}", app.quickfix);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn page_mut(app: &mut App) -> &mut ReviewPage {

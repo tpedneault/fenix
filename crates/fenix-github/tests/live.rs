@@ -108,3 +108,16 @@ fn a_line_comment_posts_straight_away() {
     gh.comment_on_line(pr.number, &position, "A test for a truncated reply too?").unwrap();
     assert!(gh.discussions(pr.number).unwrap().iter().any(|d| d.first().is_some_and(|n| n.body.contains("truncated"))));
 }
+
+#[test]
+#[ignore]
+fn a_failing_check_has_a_log_and_can_be_rerun() {
+    let pr = pull();
+    let gh = client();
+    let checks = gh.checks(pr.number, &pr.sha).unwrap();
+    let pytest = checks.iter().find(|c| c.name == "pytest").expect("the sandbox's CI runs pytest");
+    assert_eq!(pytest.status, fenix_forge::PipelineStatus::Failed, "the truncated-reply test fails on purpose");
+    let log = gh.job_log(pytest).unwrap();
+    assert!(log.contains("test_decoder.py") && log.contains("ValueError"), "{}", &log[log.len().saturating_sub(2000)..]);
+    gh.retry(pytest).unwrap();
+}
