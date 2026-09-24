@@ -9,6 +9,7 @@
 
 use super::projects::kind_color;
 use super::*;
+use crate::git_log::{self, GitLog};
 use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
@@ -27,6 +28,7 @@ pub(super) enum PageModel {
     Doctor(DoctorPage),
     Settings(Settings),
     Git(Box<GitStatus>),
+    Log(Box<GitLog>),
 }
 
 pub(super) struct PageState {
@@ -56,6 +58,7 @@ impl PageState {
             PageModel::Doctor(_) => false,
             PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
+            PageModel::Log(l) => l.typing(),
         }
     }
 
@@ -79,6 +82,7 @@ impl PageState {
             }
             PageModel::Doctor(_) => {}
             PageModel::Git(g) => g.type_text(text),
+            PageModel::Log(l) => l.type_text(text),
         }
         self.stale = true;
     }
@@ -99,6 +103,9 @@ pub enum PageEvent {
     GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
     /// A file's blame, read off the UI thread.
     Blame { path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String> },
+    GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
+    GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
+    GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -209,6 +216,7 @@ impl App {
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
             Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
+            Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
         }
     }
 
@@ -306,6 +314,7 @@ impl App {
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
             PageModel::Settings(s) => project_settings::layout(s, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
+            PageModel::Log(l) => git_log::layout(l, cols),
         };
         state.cols = cols;
         state.stale = false;
@@ -385,6 +394,10 @@ impl App {
                 let action = g.key(key);
                 self.git_page_action(id, action);
             }
+            PageModel::Log(l) => {
+                let action = l.key(key);
+                self.git_log_action(id, action);
+            }
         }
         self.wake_caret();
         true
@@ -393,9 +406,11 @@ impl App {
     /// A background job's news for its page.
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
+            PageEvent::GitDone { buffer, .. } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Log(_))) => self.apply_git_log_event(event),
             event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
                 self.apply_git_page_event(event)
             }
+            event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };

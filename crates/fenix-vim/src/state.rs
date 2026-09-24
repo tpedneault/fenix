@@ -589,6 +589,12 @@ impl VimState {
         self.visual_anchor
     }
 
+    /// The last Visual selection's two ends (char offsets), what `gv`
+    /// would reselect -- `None` before there's been one.
+    pub fn last_visual_range(&self) -> Option<(usize, usize)> {
+        self.last_visual.map(|(_, anchor, cursor)| (anchor.min(cursor), anchor.max(cursor)))
+    }
+
     /// The unnamed register's current contents (text, linewise) -- for a
     /// host UI that wants to mirror it onto the OS clipboard: push this
     /// after any key that may have written the register (yank, delete,

@@ -550,7 +550,17 @@ for anyone curious to poke around or build on it.
   `SPC g w` switches branch, the one you left most recently first (from
   the reflog), with ahead/behind and age; a remote-only branch becomes a
   local one tracking it. When local changes are in the way it offers to
-  stash them, and they come back when you switch back to that branch. `[git] layout = panes` keeps the older
+  stash them, and they come back when you switch back to that branch.
+- **Git log** (`SPC g l`): history that acts. The current branch, or
+  every branch as a graph (`a`); `SPC g h` is the focused file's history
+  (following renames) and `SPC g H` the history of the lines last
+  selected in Visual mode (`git log -L`), each commit with the patch that
+  changed them. `Tab` opens a commit to its files and a file to its diff,
+  inline; `/` filters by words in the message or `author:name`. `Enter`
+  on a commit is its menu -- fix it up with what's staged, reword the
+  last one, revert, cherry-pick one from another branch, check it out,
+  branch or tag there, reset to it -- each logged, so `U` on the Git
+  page takes it back. The graph view with its refs tree is `SPC g G`. `[git] layout = panes` keeps the older
   panel below.
 - **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
@@ -1201,7 +1211,9 @@ popup shows what keys continue it.
 | `SPC d q` | Close the Docker panel session |
 | `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
 | `SPC g q` | Close the Git panel session |
-| `SPC g l` | Open the History view (commit graph, refs, commit diff) |
+| `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
+| `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
+| `SPC g G` | Open the History view (commit graph, refs, commit diff) |
 | `SPC g L` | Close the History view |
 | `SPC g f` | Fetch all remotes and prune deleted branches |
 | `SPC g c` | Compare two refs (pick base, then head) |

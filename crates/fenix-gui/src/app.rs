@@ -13,6 +13,7 @@ mod projects;
 mod pages;
 mod git_page;
 mod git_editor;
+mod git_log_page;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;

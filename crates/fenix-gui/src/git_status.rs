@@ -190,6 +190,9 @@ pub enum Job {
     StashPop(usize),
     StashDrop(usize),
     Revert(String),
+    CherryPick(String),
+    /// Check a commit out, detaching HEAD.
+    Checkout(String),
     Reset { target: String, mode: ResetMode },
     Continue,
     Abort,
@@ -225,6 +228,8 @@ impl Job {
             Job::StashPop(i) => format!("pop stash@{{{i}}}"),
             Job::StashDrop(i) => format!("drop stash@{{{i}}}"),
             Job::Revert(h) => format!("revert {}", short(h)),
+            Job::CherryPick(h) => format!("cherry-pick {}", short(h)),
+            Job::Checkout(h) => format!("check out {}", short(h)),
             Job::Reset { target, mode } => format!("reset {} to {}", mode_name(*mode), short(target)),
             Job::Continue => "continue".to_string(),
             Job::Abort => "abort".to_string(),
@@ -235,7 +240,7 @@ impl Job {
 
 }
 
-fn short(hash: &str) -> &str {
+pub(crate) fn short(hash: &str) -> &str {
     &hash[..hash.len().min(7)]
 }
 
@@ -317,7 +322,7 @@ pub struct Menu {
     pub groups: Vec<(Option<String>, Vec<MenuItem>)>,
 }
 
-fn verb(key: &str, label: &str, detail: impl Into<String>) -> MenuItem {
+pub(crate) fn verb(key: &str, label: &str, detail: impl Into<String>) -> MenuItem {
     MenuItem { key: key.to_string(), label: label.to_string(), detail: detail.into(), flag: None, danger: false }
 }
 
@@ -325,7 +330,7 @@ fn flag(key: &str, label: &str, on: bool) -> MenuItem {
     MenuItem { key: key.to_string(), label: label.to_string(), detail: String::new(), flag: Some(on), danger: false }
 }
 
-fn danger(mut item: MenuItem) -> MenuItem {
+pub(crate) fn danger(mut item: MenuItem) -> MenuItem {
     item.danger = true;
     item
 }
@@ -1374,7 +1379,7 @@ fn capitalise(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-fn count(n: usize, what: &str) -> String {
+pub(crate) fn count(n: usize, what: &str) -> String {
     let plural = if what.ends_with("ch") || what.ends_with('s') { format!("{what}es") } else { format!("{what}s") };
     format!("{n} {}", if n == 1 { what.to_string() } else { plural })
 }
@@ -1645,11 +1650,27 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
 /// Draws the open menu, field or question under the focused row,
 /// starting at line `y`; returns its last line and the cells it spans.
 fn overlay(page: &GitStatus, g: &mut Grid, y: usize, left: usize, width: usize) -> Option<(usize, std::ops::Range<usize>)> {
+    let menu = page.menu.as_ref().map(|state| (page.menu(state), state.typed.clone()));
+    draw_popups(g, y, left, width, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref())
+}
+
+/// Draws a menu (with the keys typed so far), a field or a question at
+/// line `y`, under the row it's about -- shared by every Git page.
+/// Returns its last line and the cells it spans, or `None` when nothing
+/// is open.
+pub(crate) fn draw_popups(
+    g: &mut Grid,
+    y: usize,
+    left: usize,
+    width: usize,
+    menu: Option<(&Menu, &str)>,
+    input: Option<&Input>,
+    confirm: Option<&Confirm>,
+) -> Option<(usize, std::ops::Range<usize>)> {
     let inner = left + 4;
     let w = width.saturating_sub(4).min(76);
     let mut y = y;
-    if let Some(state) = &page.menu {
-        let menu = page.menu(state);
+    if let Some((menu, typed)) = menu {
         g.put(y, inner, &menu.title, Role::Title);
         g.panels.push((y, inner - 1..inner + w));
         y += 1;
@@ -1660,7 +1681,7 @@ fn overlay(page: &GitStatus, g: &mut Grid, y: usize, left: usize, width: usize) 
                 y += 1;
             }
             for item in items {
-                let typed = !state.typed.is_empty() && item.key.starts_with(&state.typed);
+                let typed = !typed.is_empty() && item.key.starts_with(typed);
                 let key_role = if item.danger { Role::Bad } else { Role::Accent };
                 g.put(y, inner, &item.key, if typed { Role::Title } else { key_role });
                 let x = g.put(y, inner + 7, &item.label, Role::Text);
@@ -1681,7 +1702,7 @@ fn overlay(page: &GitStatus, g: &mut Grid, y: usize, left: usize, width: usize) 
         }
         return Some((y - 1, inner - 1..inner + w));
     }
-    if let Some(input) = &page.input {
+    if let Some(input) = input {
         let x = g.put(y, inner, &input.label, Role::Muted) + 1;
         let x = g.put(y, x, "›", Role::Accent) + 1;
         let field = format!("{}▏", input.text);
@@ -1690,7 +1711,7 @@ fn overlay(page: &GitStatus, g: &mut Grid, y: usize, left: usize, width: usize) 
         g.panels.push((y, cols.clone()));
         return Some((y, inner - 1..cols.end));
     }
-    if let Some(confirm) = &page.confirm {
+    if let Some(confirm) = confirm {
         g.put(y, inner, &confirm.question, Role::Warn);
         g.panels.push((y, inner - 1..inner + w));
         y += 1;

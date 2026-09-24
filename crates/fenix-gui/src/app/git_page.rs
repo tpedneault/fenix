@@ -141,7 +141,7 @@ type UndoFor = Box<dyn FnOnce(&Result<String, String>) -> Undo>;
 
 /// Runs `job`, logged with how to take it back -- worked out before it
 /// runs, from what it's about to change.
-fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
+pub(super) fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
     if let Job::Undo { time, .. } = job {
         return run_undo(root, *time);
     }
@@ -172,7 +172,11 @@ fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
         // Undoing a commit gives its changes back, staged.
         Job::Commit(..) | Job::FixupNow { .. } | Job::Reset { mode: ResetMode::Soft | ResetMode::Mixed, .. } => fixed(Undo::Reset { to: head, soft: true, saved: None }),
         Job::Reset { mode: ResetMode::Hard, .. } => fixed(Undo::Reset { to: head, soft: false, saved: oplog::save_changes(root) }),
-        Job::Pull { .. } | Job::Revert(_) => fixed(Undo::Reset { to: head, soft: false, saved: None }),
+        Job::Pull { .. } | Job::Revert(_) | Job::CherryPick(_) => fixed(Undo::Reset { to: head, soft: false, saved: None }),
+        Job::Checkout(_) => fixed(match branch {
+            Some(branch) => Undo::Switch(branch),
+            None => Undo::Reset { to: head, soft: false, saved: None },
+        }),
         Job::Push(_) | Job::PushTags(_) => not("a push can't be taken back from here -- push the old commit with --force-with-lease if nobody has pulled it"),
         Job::Fetch => not("a fetch only updates what Fenix knows about the remote"),
         Job::Branch { name, switch, .. } => fixed(Undo::Unbranch { name: name.clone(), back_to: if *switch { branch } else { None } }),
@@ -244,6 +248,8 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::StashPop(i) => fenix_git::stash_pop(root, *i),
         Job::StashDrop(i) => fenix_git::stash_drop(root, *i),
         Job::Revert(hash) => fenix_git::revert(root, hash),
+        Job::CherryPick(hash) => fenix_git::cherry_pick(root, hash),
+        Job::Checkout(hash) => fenix_git::checkout_detached(root, hash),
         Job::Reset { target, mode } => fenix_git::reset(root, target, *mode),
         Job::Continue => match fenix_git::in_progress(root) {
             Some(fenix_git::InProgress::Rebase { .. }) => fenix_git::rebase_continue(root),
@@ -355,6 +361,8 @@ impl App {
     pub(super) fn refresh_git_pages(&mut self, timed: bool) {
         if timed {
             self.refresh_stale_blames();
+        } else {
+            self.refresh_git_logs();
         }
         let visible: Vec<BufferId> = self.windows().windows().iter().filter_map(|p| self.windows().content(*p).copied()).collect();
         let ids: Vec<BufferId> = self

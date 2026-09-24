@@ -29,7 +29,7 @@ pub(super) fn repository_of(path: &Path) -> Option<PathBuf> {
 }
 
 /// `path` as git names it inside `root`: from the top, with `/`.
-fn relative_to(path: &Path, root: &Path) -> String {
+pub(super) fn relative_to(path: &Path, root: &Path) -> String {
     let absolute = std::fs::canonicalize(path).map(fenix_lsp::normalize).unwrap_or_else(|_| path.to_path_buf());
     absolute.strip_prefix(root).unwrap_or(&absolute).to_string_lossy().replace('\\', "/")
 }

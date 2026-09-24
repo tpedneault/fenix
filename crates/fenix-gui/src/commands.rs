@@ -152,6 +152,9 @@ impl CommandRegistry {
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
+        registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
+        registry.register("git.file_history", "Show the history of the focused file", cmd_git_file_history);
+        registry.register("git.line_history", "Show the history of the selected lines", cmd_git_line_history);
         registry.register("git.hunk_stage", "Stage the changed hunk under the cursor", cmd_git_hunk_stage);
         registry.register("git.hunk_discard", "Discard the changed hunk under the cursor", cmd_git_hunk_discard);
         registry.register("git.hunk_preview", "Show the changed hunk under the cursor", cmd_git_hunk_preview);
@@ -1028,6 +1031,18 @@ fn cmd_git_blame(ctx: &mut CommandCtx) {
 
 fn cmd_git_blame_explain(ctx: &mut CommandCtx) {
     ctx.app.git_blame_explain();
+}
+
+fn cmd_git_log(ctx: &mut CommandCtx) {
+    ctx.app.open_git_log(crate::git_log::Scope::Branch);
+}
+
+fn cmd_git_file_history(ctx: &mut CommandCtx) {
+    ctx.app.open_file_history();
+}
+
+fn cmd_git_line_history(ctx: &mut CommandCtx) {
+    ctx.app.open_line_history();
 }
 
 fn cmd_git_operations(ctx: &mut CommandCtx) {

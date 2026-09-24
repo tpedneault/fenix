@@ -313,7 +313,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close git panel", "git.close");
         // Purpose-built views rather than more panes on one panel: the
         // working tree and the history answer different questions.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "history/graph", "git.history");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log (history that acts)", "git.log");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('H')], "these lines' history", "git.line_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('L')], "close history", "git.history_close");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch (--all --prune)", "git.fetch");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
