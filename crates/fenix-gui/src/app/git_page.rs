@@ -52,6 +52,13 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
         recent,
         in_progress: fenix_git::in_progress(root).map(|op| op.label()),
         gone: fenix_git::list_branches(root).into_iter().filter(|b| b.upstream_gone && !b.current).map(|b| b.name).collect(),
+        worktrees: fenix_git::list_worktrees(root)
+            .into_iter()
+            .map(|mut w| {
+                w.path = std::fs::canonicalize(&w.path).map(fenix_lsp::normalize).unwrap_or(w.path);
+                w
+            })
+            .collect(),
         status,
     }
 }
@@ -196,6 +203,8 @@ pub(super) fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
         }
         Job::StashApply(_) | Job::StashPop(_) => not("the stash went into your files -- discard them to take it back"),
         Job::Continue | Job::Abort | Job::Skip => not("a rebase or merge step -- undo the whole rebase or merge instead"),
+        Job::WorktreeAdd { .. } => not("remove the worktree with w d"),
+        Job::WorktreeRemove(_) | Job::WorktreePrune => not("add it again with w a"),
         Job::Undo { .. } => unreachable!("handled above"),
     };
     oplog::logged(root, &job.label(), || run_job(root, job), undo)
@@ -266,6 +275,9 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::Skip => fenix_git::rebase_skip(root),
         Job::Undo { time, .. } => run_undo(root, *time),
         Job::RebasePlan { base, plan } => fenix_git::rebase_interactive(root, base.as_deref(), plan),
+        Job::WorktreeAdd { branch, path } => fenix_git::add_worktree(root, path, branch, None),
+        Job::WorktreeRemove(path) => fenix_git::remove_worktree(root, path),
+        Job::WorktreePrune => fenix_git::prune_worktrees(root),
     }
 }
 
@@ -433,6 +445,13 @@ impl App {
                 });
             }
             Action::Rebase(from) => self.open_rebase(from),
+            Action::OpenWorktree(path) => {
+                if !path.is_dir() {
+                    self.set_error(format!("{} isn't there any more -- w p prunes it", path.display()));
+                    return;
+                }
+                self.open_project(path, None, false);
+            }
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
                 let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };
@@ -452,6 +471,10 @@ impl App {
         let label = job.label();
         g.busy = Some(label.clone());
         g.message = None;
+        g.open_after = match &job {
+            Job::WorktreeAdd { path, .. } => Some(path.clone()),
+            _ => None,
+        };
         let root = g.root.clone();
         self.page_spawn(move |send| {
             let result = run_logged(&root, &job);
@@ -515,12 +538,17 @@ impl App {
                     Err(err) => (err.clone(), true),
                 };
                 g.output = std::iter::once(format!("$ {label}")).chain(text.lines().map(str::to_string)).collect();
+                // A new worktree opens as its own workspace.
+                let opened = g.open_after.take().filter(|_| !failed);
                 g.message = Some(match (failed, stopped) {
                     (true, Some(op)) => (format!("{label} stopped: {op} -- resolve the conflicts (r x), then r c"), true),
                     (true, None) => (format!("{label} failed: {}  ($ shows everything)", first_line(&text)), true),
                     (false, _) => (format!("{label} ✓"), false),
                 });
                 self.git_refresh_all_views();
+                if let Some(path) = opened {
+                    self.open_project(path, None, false);
+                }
             }
             PageEvent::GitConfirm { buffer, confirm } => {
                 let Some(g) = self.git_page(buffer) else { return };
@@ -786,6 +814,24 @@ mod tests {
         goto(&mut app, |r| matches!(r, Row::Op(_)));
         press(&mut app, "U");
         assert!(page_mut(&mut app).message.as_ref().unwrap().0.contains("can't be taken back"));
+    }
+
+    #[test]
+    fn w_a_checks_a_branch_out_beside_the_repository_as_its_own_workspace() {
+        let repo = Repo::new("worktree");
+        let mut app = app_on(&repo, "a.txt");
+        let workspaces = app.workspaces.len();
+        press(&mut app, "wa");
+        page_mut(&mut app).type_text("hotfix");
+        press(&mut app, "\n");
+        let path = fenix_git::default_worktree_path(&repo.dir, "hotfix");
+        assert!(path.join("a.txt").exists(), "checked out beside the repository");
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap());
+        assert!(app.workspaces.workspaces.iter().any(|w| w.project.as_deref() == Some(canonical.as_path())), "opened as a workspace of its own");
+        assert!(app.workspaces.len() >= workspaces);
+        assert_eq!(fenix_git::list_worktrees(&repo.dir).len(), 2);
+        let _ = std::process::Command::new("git").current_dir(&repo.dir).args(["worktree", "remove", "--force", &path.to_string_lossy()]).output();
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

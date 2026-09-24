@@ -578,7 +578,16 @@ for anyone curious to poke around or build on it.
   Nothing runs until `C-c C-c`; Fenix writes the todo list itself and
   git does the rest, and a stop for `edit` or a conflict hands over to
   the Git page's banner (`r c` / `r a`). The whole rebase is one entry
-  in the operation log -- `U` takes it back. `[git] layout = panes` keeps the older
+  in the operation log -- `U` takes it back.
+- **Worktrees** (`w` on the Git page): `w a` checks a branch out --
+  existing or new -- in a folder beside the repository
+  (`fenix.hotfix` next to `fenix`) and opens it as a workspace of its
+  own, so looking at another branch never means stashing your work.
+  When there's more than one, the Git page lists them; `Enter` opens
+  one, `w d` removes one (refused while it has uncommitted changes), `w
+  p` forgets ones whose folder is gone. Switching to a branch that's
+  checked out in another worktree opens that worktree instead of
+  failing. `[git] layout = panes` keeps the older
   panel below.
 - **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on

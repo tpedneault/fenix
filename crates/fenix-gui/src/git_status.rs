@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub gone: Vec<String>,
     /// The operation log, newest first.
     pub ops: Vec<Op>,
+    /// The repository's worktrees -- listed when there's more than one.
+    pub worktrees: Vec<fenix_git::Worktree>,
 }
 
 /// One entry of the operation log, as the page lists it.
@@ -73,6 +75,7 @@ pub enum Section {
     Unpulled,
     Unpushed,
     Recent,
+    Worktrees,
     Operations,
 }
 
@@ -87,6 +90,7 @@ impl Section {
             Section::Unpulled => "Unpulled",
             Section::Unpushed => "Unpushed",
             Section::Recent => "Recent commits",
+            Section::Worktrees => "Worktrees",
             Section::Operations => "Operations",
         }
     }
@@ -135,6 +139,7 @@ pub enum Row {
     Commit { section: Section, hash: String },
     /// An operation-log entry, by its time.
     Op(u64),
+    Worktree(PathBuf),
 }
 
 impl Row {
@@ -145,6 +150,7 @@ impl Row {
             }
             Row::Stash(_) => Some(Section::Stashes),
             Row::Op(_) => Some(Section::Operations),
+            Row::Worktree(_) => Some(Section::Worktrees),
         }
     }
 
@@ -201,6 +207,10 @@ pub enum Job {
     Undo { time: u64, label: String },
     /// An interactive rebase onto `base` (the root when `None`).
     RebasePlan { base: Option<String>, plan: Vec<fenix_git::Planned> },
+    /// Check `branch` out in a new worktree at `path`.
+    WorktreeAdd { branch: String, path: PathBuf },
+    WorktreeRemove(PathBuf),
+    WorktreePrune,
 }
 
 impl Job {
@@ -238,6 +248,9 @@ impl Job {
             Job::Skip => "skip".to_string(),
             Job::Undo { label, .. } => format!("undo {label}"),
             Job::RebasePlan { plan, .. } => format!("rebase {}", count(plan.len(), "commit")),
+            Job::WorktreeAdd { branch, .. } => format!("check {branch} out in a worktree"),
+            Job::WorktreeRemove(path) => format!("remove the worktree {}", path.display()),
+            Job::WorktreePrune => "prune worktrees".to_string(),
         }
     }
 
@@ -294,6 +307,8 @@ pub enum Action {
     /// Open the interactive rebase page: from this commit on, or (with
     /// `None`) everything not on the upstream or base yet.
     Rebase(Option<String>),
+    /// Open a worktree as a workspace of its own.
+    OpenWorktree(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +323,7 @@ pub enum MenuKind {
     CommitRow,
     Reset,
     StashRow,
+    Worktree,
     Help,
 }
 
@@ -358,6 +374,7 @@ pub enum InputPurpose {
     BranchAt(String),
     TagAt(String),
     PushElsewhere,
+    NewWorktree,
 }
 
 /// A one-line field typed into on the page.
@@ -410,6 +427,8 @@ pub struct GitStatus {
     /// Open the operation log once the next snapshot lands (`SPC g z`
     /// on a page still reading).
     pub reveal_operations: bool,
+    /// A worktree to open once the job adding it has worked.
+    pub open_after: Option<PathBuf>,
     pending_g: bool,
 }
 
@@ -434,6 +453,7 @@ impl GitStatus {
             output: Vec::new(),
             loading: false,
             reveal_operations: false,
+            open_after: None,
             pending_g: false,
         }
     }
@@ -520,6 +540,9 @@ impl GitStatus {
         if !snap.recent.is_empty() {
             out.push(Section::Recent);
         }
+        if snap.worktrees.len() > 1 {
+            out.push(Section::Worktrees);
+        }
         if !snap.ops.is_empty() {
             out.push(Section::Operations);
         }
@@ -556,6 +579,7 @@ impl GitStatus {
             match section {
                 Section::Stashes => rows.extend(snap.stashes.iter().map(|s| Row::Stash(s.index))),
                 Section::Operations => rows.extend(snap.ops.iter().map(|o| Row::Op(o.time))),
+                Section::Worktrees => rows.extend(snap.worktrees.iter().map(|w| Row::Worktree(w.path.clone()))),
                 Section::Unpulled | Section::Unpushed | Section::Recent => {
                     rows.extend(self.commits(section).iter().map(|c| Row::Commit { section, hash: c.hash.clone() }))
                 }
@@ -670,6 +694,7 @@ impl GitStatus {
             Key::Char('z') => self.open_menu(MenuKind::Stash, None),
             Key::Char('l') => self.open_menu(MenuKind::Log, None),
             Key::Char('r') => self.open_menu(MenuKind::Rebase, None),
+            Key::Char('w') => self.open_menu(MenuKind::Worktree, None),
             Key::Char('?') | Key::Char('x') => self.open_menu(MenuKind::Help, None),
             Key::Char('.') => match rows.get(self.cursor) {
                 Some(Row::Commit { hash, .. }) => self.open_menu(MenuKind::CommitRow, Some(hash.clone())),
@@ -764,6 +789,7 @@ impl GitStatus {
             Some(Row::Commit { hash, .. }) => self.open_menu(MenuKind::CommitRow, Some(hash)),
             Some(Row::Stash(i)) => self.open_menu(MenuKind::StashRow, Some(i.to_string())),
             Some(Row::Op(time)) => Action::PlanUndo(Some(time)),
+            Some(Row::Worktree(path)) => Action::OpenWorktree(path),
             None => Action::None,
         }
     }
@@ -1004,6 +1030,23 @@ impl GitStatus {
                 title: format!("stash@{{{target}}}"),
                 groups: vec![(None, vec![verb("a", "apply", "keep it"), verb("p", "pop", "apply and drop"), danger(verb("d", "drop", ""))])],
             },
+            MenuKind::Worktree => {
+                let on = match self.rows().get(self.cursor) {
+                    Some(Row::Worktree(path)) if path != &self.root => Some(path.display().to_string()),
+                    _ => None,
+                };
+                Menu {
+                    title: "Worktrees".to_string(),
+                    groups: vec![(
+                        None,
+                        vec![
+                            verb("a", "add for a branch…", "beside the repository, as its own workspace"),
+                            danger(verb("d", "remove", on.unwrap_or_else(|| "put the cursor on one".to_string()))),
+                            verb("p", "prune", "forget ones whose folder is gone"),
+                        ],
+                    )],
+                }
+            }
             MenuKind::Log => Menu {
                 title: "Log".to_string(),
                 groups: vec![(None, vec![verb("l", "history", "every branch, as a graph"), verb("c", "compare…", "two refs")])],
@@ -1059,6 +1102,7 @@ impl GitStatus {
                             verb("z", "stash…", ""),
                             verb("l", "log…", ""),
                             verb("r", "rebase…", ""),
+                            verb("w", "worktrees…", ""),
                         ],
                     ),
                     (
@@ -1223,6 +1267,23 @@ impl GitStatus {
                     _ => {}
                 }
             }
+            (MenuKind::Worktree, "a") => {
+                self.input = Some(Input { label: "Branch to check out (new or existing)".to_string(), text: String::new(), purpose: InputPurpose::NewWorktree })
+            }
+            (MenuKind::Worktree, "d") => {
+                let Some(Row::Worktree(path)) = self.rows().get(self.cursor).cloned() else {
+                    return self.message("put the cursor on a worktree (the Worktrees section), then w d", false);
+                };
+                if path == self.root {
+                    return self.message("that's the worktree this page is about -- it can't remove itself", false);
+                }
+                self.confirm = Some(Confirm {
+                    question: format!("Remove the worktree at {}? Refused if it has uncommitted changes.", path.display()),
+                    detail: Vec::new(),
+                    choices: vec![('y', "remove it".to_string(), Job::WorktreeRemove(path))],
+                });
+            }
+            (MenuKind::Worktree, "p") => return Action::Run(Job::WorktreePrune),
             (MenuKind::Log, "l") => return Action::OpenHistory,
             (MenuKind::Log, "c") => return Action::OpenCompare,
             (MenuKind::Rebase, "c") => return Action::Run(Job::Continue),
@@ -1339,6 +1400,10 @@ impl GitStatus {
                     InputPurpose::StashMessage(options) => Action::Run(Job::Stash(StashOptions { message: (!text.is_empty()).then_some(text), ..options })),
                     InputPurpose::BranchAt(hash) => Action::Run(Job::Branch { name: text, start: Some(hash), switch: false }),
                     InputPurpose::TagAt(hash) => Action::Run(Job::Tag { name: text, at: hash }),
+                    InputPurpose::NewWorktree => {
+                        let path = fenix_git::default_worktree_path(&self.root, &text);
+                        Action::Run(Job::WorktreeAdd { branch: text, path })
+                    }
                     InputPurpose::PushElsewhere => {
                         let Some((remote, branch)) = text.split_once('/') else {
                             return self.message("write it as remote/branch, e.g. origin/review", true);
@@ -1508,6 +1573,7 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     Section::Unpushed => snap.unpushed.len(),
                     Section::Recent => snap.recent.len(),
                     Section::Operations => snap.ops.len(),
+                    Section::Worktrees => snap.worktrees.len(),
                     s => files_in(snap, *s).len(),
                 };
                 let x = g.put(y, left, if folded { "▸" } else { "▾" }, Role::Muted) + 1;
@@ -1586,6 +1652,21 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                 let message = snap.stashes.iter().find(|s| s.index == *index).map(|s| s.message.as_str()).unwrap_or("");
                 let x = g.put(y, left + 4, &format!("stash@{{{index}}}"), Role::Accent) + 2;
                 g.put(y, x, &fit(message, (left + width).saturating_sub(x)), Role::Text);
+            }
+            Row::Worktree(path) => {
+                if let Some(w) = snap.worktrees.iter().find(|w| &w.path == path) {
+                    let here = fenix_lsp::normalize(path.clone()) == fenix_lsp::normalize(page.root.clone());
+                    let x = g.put(y, left + 4, &fit(&path.display().to_string(), width / 2), if here { Role::Title } else { Role::Text }) + 2;
+                    let what = match (&w.branch, w.prunable) {
+                        (_, true) => "folder gone -- w p prunes it".to_string(),
+                        (Some(b), _) => b.clone(),
+                        (None, _) => format!("detached at {}", short(&w.head)),
+                    };
+                    let x = g.put(y, x, &what, if w.prunable { Role::Warn } else { Role::Accent }) + 2;
+                    if here {
+                        g.put(y, x, "this one", Role::Muted);
+                    }
+                }
             }
             Row::Op(time) => {
                 if let Some(op) = snap.ops.iter().find(|o| o.time == *time) {
@@ -1771,6 +1852,7 @@ mod tests {
             in_progress: None,
             gone: vec!["feature/old".into()],
             ops: Vec::new(),
+            worktrees: Vec::new(),
         }
     }
 

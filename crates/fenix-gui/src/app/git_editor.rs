@@ -478,6 +478,12 @@ impl App {
             Err(err) if err.contains("would be overwritten") || err.contains("commit your changes or stash them") => {
                 self.git_confirm = Some(GitConfirmAction::SwitchWithStash { branch: local });
             }
+            // Checked out in another worktree: go there instead.
+            Err(err) if fenix_git::checked_out_elsewhere(&err).is_some() => {
+                let path = fenix_git::checked_out_elsewhere(&err).unwrap_or_default();
+                self.open_project(path.clone(), None, false);
+                self.set_message(format!("{local} is checked out in {} -- opened that worktree", path.display()));
+            }
             result => {
                 let ok = result.is_ok();
                 self.run_git_operation(&format!("switch to {local}"), result);

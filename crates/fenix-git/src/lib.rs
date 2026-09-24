@@ -15,6 +15,7 @@ mod stash;
 mod state;
 mod status;
 mod verbs;
+mod worktree;
 
 #[cfg(test)]
 mod test_util;
@@ -40,6 +41,7 @@ pub use rebase::{rebase_interactive, replayed, todo as rebase_todo, Planned, Rep
 pub use stash::{list_stashes, Stash};
 pub use state::{conflict_sides, in_progress, ConflictSides, InProgress};
 pub use status::{status, status_and_files, RepoStatus};
+pub use worktree::{add_worktree, checked_out_elsewhere, default_worktree_path, list_worktrees, prune_worktrees, remove_worktree, Worktree};
 pub use verbs::{
     ahead_behind, autosquash, autosquash_args, branch_args, commit_args, commit_message, commit_with, contains, create_branch_at,
     default_remote, merge_base, pull_merge, push_args, push_tags, push_with, remotes, rename_branch, resolve_base, stash_args, stash_with, tag,
