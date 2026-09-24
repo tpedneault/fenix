@@ -46,6 +46,10 @@ pub fn run_ex_command(
         _ => {}
     }
 
+    if cmd == "project-new" || cmd.starts_with("project-new ") {
+        return VimEvent::RequestProjectNew(cmd["project-new".len()..].trim().to_string());
+    }
+
     if let Some(path) = cmd.strip_prefix("w ").map(str::trim).filter(|p| !p.is_empty()) {
         return VimEvent::RequestSaveAs(path.to_string());
     }
@@ -754,6 +758,11 @@ mod tests {
         let mut width = 4;
         assert_eq!(run_ex_command("lsp-restart", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp);
         assert_eq!(run_ex_command("session-save", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestSessionSave);
+        assert_eq!(run_ex_command("project-new", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestProjectNew(String::new()));
+        assert_eq!(
+            run_ex_command("project-new  python-uv orbit python=3.13", &mut b, &mut c, &mut width, &mut vec!['_'], None),
+            VimEvent::RequestProjectNew("python-uv orbit python=3.13".into())
+        );
         assert_eq!(run_ex_command("session-quit", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestSessionQuit);
     }
 

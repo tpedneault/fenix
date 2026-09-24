@@ -10,6 +10,7 @@ mod embedded;
 mod local_leader;
 mod xml;
 mod projects;
+mod pages;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2247,9 +2248,9 @@ pub enum FenixUserEvent {
     /// A microcontroller toolchain query's answer -- see
     /// `embedded::EmbeddedEvent`.
     Embedded(EmbeddedEvent),
-    /// A new-project wizard step's output or its end -- see
-    /// `projects::ProjectCreateEvent`.
-    ProjectCreate(projects::ProjectCreateEvent),
+    /// A project page's background job reporting in -- see
+    /// `pages::PageEvent`.
+    Page(pages::PageEvent),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -3316,6 +3317,14 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
 /// without this they land in the user's actual list, which is how the
 /// crash-recovery work found the same mistake in itself. A test suite
 /// must not leave its temp directories in the user's history.
+fn default_project_meta_path() -> PathBuf {
+    if cfg!(test) {
+        std::env::temp_dir().join(format!("fenix-test-project-meta-{}.json", std::process::id()))
+    } else {
+        fenix_project::meta::ProjectMeta::default_path().unwrap_or_else(|| PathBuf::from("project_meta.json"))
+    }
+}
+
 fn default_recent_dirs_path() -> PathBuf {
     if cfg!(test) {
         std::env::temp_dir().join(format!("fenix-test-recent-dirs-{}.txt", std::process::id()))
@@ -5386,6 +5395,9 @@ struct Workspace {
     /// switching *to* a tabbed theme mid-session already has real tab
     /// history instead of a blank strip.
     pane_tabs: HashMap<fenix_window::WindowId, Vec<BufferId>>,
+    /// The project this workspace belongs to, once one's been opened
+    /// into it from the hub -- where opening that project again returns.
+    project: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -5394,7 +5406,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None }
     }
 }
 
@@ -6103,8 +6115,15 @@ pub struct App {
     /// Cleared when a project is created, the one time a kind can change
     /// under Fenix's own hands.
     project_kinds: RefCell<HashMap<PathBuf, fenix_project::ProjectKind>>,
-    /// `SPC p c`'s wizard, while it's open -- see `projects`.
-    project_wizard: Option<projects::ProjectWizardState>,
+    /// The project pages open right now (wizard, hub, doctor, settings),
+    /// by their buffer -- see `pages`.
+    pages: HashMap<BufferId, pages::PageState>,
+    /// Pins and groups -- yours, not the projects', so kept beside
+    /// `projects.txt`.
+    project_meta: fenix_project::meta::ProjectMeta,
+    /// The doctor's last word on each project (worst health, problems),
+    /// for the hub's health dot.
+    project_health: HashMap<PathBuf, (fenix_project::doctor::Health, usize)>,
     active_picker: Option<ActivePicker>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
@@ -7341,7 +7360,9 @@ impl App {
             picker_scroll: 0,
             project_root,
             project_kinds: RefCell::new(HashMap::new()),
-            project_wizard: None,
+            pages: HashMap::new(),
+            project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
+            project_health: HashMap::new(),
             active_picker: None,
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
@@ -13908,9 +13929,7 @@ impl App {
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
         self.close_terminal_buffer(id);
-        if self.is_project_wizard_buffer(id) {
-            self.project_wizard = None;
-        }
+        self.pages.remove(&id);
         self.buffers.close(id);
         self.table_views.remove(&id);
         self.project_replace_lines.remove(&id);
@@ -22823,7 +22842,7 @@ impl App {
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
-            FenixUserEvent::ProjectCreate(event) => self.apply_project_create_event(event),
+            FenixUserEvent::Page(event) => self.apply_page_event(event),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             // Deferred rather than handled here: opening a window needs
             // an `&ActiveEventLoop`, which `handle_user_event` doesn't
@@ -24215,6 +24234,7 @@ impl App {
         }
         match vim_event {
             VimEvent::RequestSessionSave => { self.save_session_explicit(); }
+            VimEvent::RequestProjectNew(args) => self.project_new_with(&args),
             VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
             VimEvent::RequestRestartLsp => { self.restart_project_lsp(); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
@@ -27384,7 +27404,7 @@ impl App {
             }
             // The wizard's page is drawn the way Home is: laid-out text,
             // its own selection, no caret.
-            let is_page = self.is_project_wizard_buffer(buffer_id);
+            let is_page = self.is_page_buffer(buffer_id);
             if is_page {
                 self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
             }

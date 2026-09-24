@@ -105,7 +105,7 @@ impl App {
     }
 
     /// The embedded project rooted at `root`, if it is one.
-    fn embedded_project_at(&self, root: &Path) -> Option<Box<dyn Platform>> {
+    pub(super) fn embedded_project_at(&self, root: &Path) -> Option<Box<dyn Platform>> {
         fenix_embedded::detect(root, &self.embedded_tools())
     }
 
@@ -121,7 +121,7 @@ impl App {
     }
 
     /// Runs `job` off the UI thread (inline without an event loop).
-    fn embedded_spawn(&mut self, job: impl FnOnce() -> EmbeddedEvent + Send + 'static) {
+    pub(super) fn embedded_spawn(&mut self, job: impl FnOnce() -> EmbeddedEvent + Send + 'static) {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {

@@ -10,12 +10,11 @@
 //! registering and opening the result.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::page::{fit, frame, wrap, Grid, Key, Page, Role};
 use fenix_project::template::{Answer, Answers, AskKind, Hook, Plan, Step as CommandStep, Template};
-use fenix_project::ProjectKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -24,23 +23,6 @@ pub enum Step {
     Options,
     Review,
     Creating,
-}
-
-/// One keypress, already decoded by `App`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Up,
-    Down,
-    Left,
-    Right,
-    Enter,
-    Tab,
-    BackTab,
-    Escape,
-    Space,
-    Backspace,
-    Char(char),
-    CtrlC,
 }
 
 /// What `App` has to do after a key.
@@ -464,6 +446,60 @@ impl Wizard {
         Action::None
     }
 
+    /// `:project-new [template] [name] [key=value ...]`: goes as far as
+    /// the arguments take it. A template alone lands on Location with
+    /// the name being typed; a name too goes straight to Review with
+    /// every other answer at its default (or as given), and Esc walks
+    /// back to change them.
+    pub fn preset(&mut self, args: &str) -> Result<(), String> {
+        let mut words = args.split_whitespace();
+        let Some(id) = words.next() else { return Ok(()) };
+        let Some(i) = self.templates.iter().position(|t| t.id == id) else {
+            let ids: Vec<&str> = self.templates.iter().map(|t| t.id.as_str()).collect();
+            return Err(format!("no template called {id} -- try {}", ids.join(", ")));
+        };
+        self.template = i;
+        let name = words.next().unwrap_or_default().to_string();
+        self.name = name.clone();
+        self.answers = self.templates[i].default_answers(&name);
+        for pair in words {
+            let Some((key, value)) = pair.split_once('=') else { return Err(format!("{pair}: options are key=value")) };
+            let Some(ask) = self.templates[i].asks.iter().find(|a| a.key == key) else {
+                let keys: Vec<&str> = self.templates[i].asks.iter().map(|a| a.key.as_str()).collect();
+                return Err(format!("{id} has no option {key} -- it has {}", keys.join(", ")));
+            };
+            let answer = match &ask.kind {
+                AskKind::Text { .. } => Answer::Text(value.to_string()),
+                AskKind::Choice { choices, .. } if choices.iter().any(|c| c == value) => Answer::Text(value.to_string()),
+                AskKind::Choice { choices, .. } => return Err(format!("{key} is one of {}", choices.join(", "))),
+                AskKind::Toggle { .. } => match value {
+                    "true" | "yes" | "on" | "1" => Answer::Bool(true),
+                    "false" | "no" | "off" | "0" => Answer::Bool(false),
+                    _ => return Err(format!("{key} is true or false")),
+                },
+                AskKind::Many { options, .. } => {
+                    let items: Vec<String> = value.split(',').filter(|v| !v.is_empty()).map(str::to_string).collect();
+                    if let Some(bad) = items.iter().find(|v| !options.contains(v)) {
+                        return Err(format!("{bad} isn't one of {key}'s options ({})", options.join(", ")));
+                    }
+                    Answer::Many(items)
+                }
+            };
+            self.answers.insert(key.to_string(), answer);
+        }
+        self.go_to(Step::Location);
+        if name.is_empty() {
+            self.editing = Some(String::new());
+            return Ok(());
+        }
+        if let Some(problem) = self.location_problem() {
+            self.problem = Some(problem);
+            return Ok(());
+        }
+        self.enter_review();
+        Ok(())
+    }
+
     fn enter_review(&mut self) -> Action {
         match self.build_plan() {
             Ok(plan) => {
@@ -625,135 +661,10 @@ impl Wizard {
 // Layout
 // ------------------------------------------------------------------
 
-/// A colour role, resolved against the theme by `App`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Title,
-    Text,
-    Muted,
-    /// The theme's accent: the current step, keys, `›`.
-    Accent,
-    Good,
-    Warn,
-    Bad,
-    Kind(ProjectKind),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Span {
-    pub line: usize,
-    pub cols: Range<usize>,
-    pub role: Role,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Page {
-    pub text: String,
-    pub spans: Vec<Span>,
-    /// Hairlines, as (line, cells) -- drawn, not typed.
-    pub rules: Vec<(usize, Range<usize>)>,
-    /// The focused row: its line and cells, for the tint and the rail.
-    pub focus: Option<(usize, Range<usize>)>,
-    /// A cell tinted as a panel (the text field being edited).
-    pub panels: Vec<(usize, Range<usize>)>,
-}
-
-impl Page {
-    /// Where the cursor sits: on the focused row, else the top.
-    pub fn cursor(&self) -> (usize, usize) {
-        self.focus.as_ref().map(|(line, cols)| (*line, cols.start + 1)).unwrap_or((0, 0))
-    }
-}
-
-struct Grid {
-    lines: Vec<Vec<char>>,
-    spans: Vec<Span>,
-    rules: Vec<(usize, Range<usize>)>,
-    panels: Vec<(usize, Range<usize>)>,
-    focus: Option<(usize, Range<usize>)>,
-}
-
-fn fit(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('…');
-    out
-}
-
-/// `text` wrapped at word boundaries to lines of at most `width`; a
-/// word longer than that (a path) is broken wherever it has to be.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut words: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        let chars: Vec<char> = word.chars().collect();
-        words.extend(chars.chunks(width).map(|c| c.iter().collect::<String>()));
-    }
-    for word in &words {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-impl Grid {
-    /// Writes `text` at (`line`, `col`); returns the column after it.
-    fn put(&mut self, line: usize, col: usize, text: &str, role: Role) -> usize {
-        let len = text.chars().count();
-        if self.lines.len() <= line {
-            self.lines.resize(line + 1, Vec::new());
-        }
-        if len == 0 {
-            return col;
-        }
-        let row = &mut self.lines[line];
-        if row.len() < col + len {
-            row.resize(col + len, ' ');
-        }
-        for (i, c) in text.chars().enumerate() {
-            row[col + i] = c;
-        }
-        self.spans.push(Span { line, cols: col..col + len, role });
-        col + len
-    }
-
-    fn rule(&mut self, line: usize, cols: Range<usize>) {
-        if self.lines.len() <= line {
-            self.lines.resize(line + 1, Vec::new());
-        }
-        self.rules.push((line, cols));
-    }
-
-    /// A section heading: "FILES · 8 ─────────".
-    fn heading(&mut self, line: usize, x: usize, width: usize, text: &str) {
-        let end = self.put(line, x, &text.to_uppercase(), Role::Muted);
-        if end + 2 < x + width {
-            self.rule(line, end + 1..x + width);
-        }
-    }
-}
-
 /// The page for `wizard` in a pane `cols` cells wide.
 pub fn layout(wizard: &Wizard, cols: usize) -> Page {
-    let cols = cols.max(40);
-    let width = cols.saturating_sub(4).min(104);
-    let left = cols.saturating_sub(width) / 2;
-    let mut g = Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None };
+    let (left, width) = frame(cols, 104);
+    let mut g = Grid::new();
 
     // Header: the title, then the four steps, done ones ticked -- or,
     // where that doesn't fit, just which step this is.
@@ -790,21 +701,9 @@ pub fn layout(wizard: &Wizard, cols: usize) -> Page {
         Step::Creating => layout_creating(wizard, &mut g, left, width, top),
     };
 
-    // The key strip, one blank line under the content.
-    let foot = g.lines.len() + 1;
-    g.rule(foot, left..left + width);
     let keys: &[(&str, &str)] = if wizard.editing.is_some() { &[("Enter", "done"), ("Tab", "next field"), ("Esc", "undo")] } else { keys };
-    let mut x = left;
-    for (key, label) in keys {
-        if x + key.chars().count() + 1 + label.chars().count() > left + width {
-            break;
-        }
-        x = g.put(foot + 1, x, key, Role::Accent) + 1;
-        x = g.put(foot + 1, x, label, Role::Muted) + 3;
-    }
-
-    let text = g.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-    Page { text, spans: g.spans, rules: g.rules, focus: g.focus, panels: g.panels }
+    g.keys(left, width, keys);
+    g.finish()
 }
 
 fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
@@ -830,7 +729,7 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
         g.put(y, left + 7, &fit(&template.name, right.saturating_sub(8)), if focused == Some(Field::Template(i)) { Role::Title } else { Role::Text });
         g.put(y, left + right, &program, Role::Muted);
         if focused == Some(Field::Template(i)) {
-            g.focus = Some((y, left..left + list_width - 2));
+            g.focus(y, left..left + list_width - 2);
         }
         y += 1;
     }
@@ -894,7 +793,7 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
 fn form_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, field: Field, label: &str) -> usize {
     let focused = wizard.focused() == Some(field);
     if focused {
-        g.focus = Some((y, left..left + width));
+        g.focus(y, left..left + width);
     }
     g.put(y, left + 2, label, Role::Muted);
     left + 18
@@ -927,7 +826,7 @@ fn toggle_field(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usi
 fn continue_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, label: &str) {
     let field = if wizard.step == Step::Review { Field::Create } else { Field::Continue };
     if wizard.focused() == Some(field) {
-        g.focus = Some((y, left..left + width));
+        g.focus(y, left..left + width);
     }
     let end = g.put(y, left + 2, label, Role::Title);
     g.put(y, end + 1, "›", Role::Accent);
@@ -1110,7 +1009,7 @@ fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
             g.put(y, left + width - right.chars().count(), &right, Role::Muted);
         }
         if matches!(step.status, Status::Running | Status::Failed(_)) {
-            g.focus = Some((y, left..left + width));
+            g.focus(y, left..left + width);
         }
         y += 1;
         if let Status::Failed(message) = &step.status {
@@ -1132,7 +1031,7 @@ fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
     if run.finished() {
         let text = if run.cancel_requested { "Cancelled. What's been done stays." } else { "Done." };
         g.put(y, left + 2, text, if run.cancel_requested { Role::Warn } else { Role::Good });
-        g.focus = Some((y, left..left + width));
+        g.focus(y, left..left + width);
         return &[("Enter", "open it"), ("q", "close")];
     }
     &[("C-c", "stop after this step")]
@@ -1229,6 +1128,25 @@ mod tests {
     }
 
     #[test]
+    fn preset_goes_as_far_as_its_arguments_take_it() {
+        let dir = std::env::temp_dir().join(format!("fenix-wizard-preset-{}", std::process::id()));
+        let mut w = wizard(&dir);
+        w.preset("python-uv orbit python=3.13 dev=ruff pyright=yes").unwrap();
+        assert_eq!(w.step, Step::Review);
+        let steps: Vec<String> = w.plan.as_ref().unwrap().steps.iter().map(|s| s.display()).collect();
+        assert!(steps[0].contains("--python 3.13") && steps.iter().any(|s| s == "uv add --dev ruff") && steps.iter().any(|s| s == "uv tool install pyright"), "{steps:?}");
+
+        let mut w = wizard(&dir);
+        w.preset("arduino-sketch").unwrap();
+        assert_eq!((w.step, w.editing.is_some()), (Step::Location, true), "no name: it's asked for");
+
+        for (bad, why) in [("cobol", "no template called cobol"), ("python-uv x python=2.7", "python is one of"), ("python-uv x colour=red", "no option colour"), ("python-uv x dev=pip", "isn't one of dev's options")] {
+            let error = wizard(&dir).preset(bad).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
+    }
+
+    #[test]
     fn escape_steps_back_and_closes_from_the_first_step() {
         let mut w = wizard(Path::new("/tmp"));
         w.key(Key::Enter);
@@ -1271,13 +1189,6 @@ mod tests {
         assert!(page.text.contains("exit code 1") && page.text.contains("fatal: nope"));
         assert_eq!(w.key(Key::Char('s')), Action::Skip);
         assert_eq!(w.key(Key::Char('r')), Action::Retry);
-    }
-
-    #[test]
-    fn a_long_path_in_a_problem_is_broken_to_fit() {
-        let lines = wrap(&format!("{} already exists", "x".repeat(50)), 20);
-        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
-        assert_eq!(lines.concat().replace(' ', ""), format!("{}alreadyexists", "x".repeat(50)));
     }
 
     #[test]

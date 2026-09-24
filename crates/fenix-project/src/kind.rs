@@ -106,9 +106,12 @@ impl ProjectKind {
 /// detection that matches, most specific first -- a sketch or a MIB can
 /// live inside anything, so they're checked before the language manifests.
 pub fn detect_kind(root: &Path) -> ProjectKind {
-    if let Some(kind) = declared_kind(root) {
-        return kind;
-    }
+    declared_kind(root).unwrap_or_else(|| detect_kind_from_files(root))
+}
+
+/// What `root`'s files say it is, whatever `project.ini` declares -- what
+/// the settings page offers as "detect".
+pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     if crate::root::is_sketch(root) {
         return ProjectKind::Arduino;
     }

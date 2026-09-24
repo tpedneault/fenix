@@ -94,6 +94,9 @@ impl CommandRegistry {
         );
         registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
         registry.register("project.new", "Create a new project from a template", cmd_project_new);
+        registry.register("project.hub", "Every project: what it is, how it's doing, open one", cmd_project_hub);
+        registry.register("project.doctor", "Check the project's toolchain and offer fixes", cmd_project_doctor);
+        registry.register("project.settings", "The project's tasks, servers, launch and kind", cmd_project_settings);
         registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.register("task.run", "Fuzzy-pick and run a discovered project task", cmd_task_run);
@@ -443,6 +446,18 @@ fn cmd_project_switch(ctx: &mut CommandCtx) {
 
 fn cmd_project_new(ctx: &mut CommandCtx) {
     ctx.app.cmd_project_new();
+}
+
+fn cmd_project_hub(ctx: &mut CommandCtx) {
+    ctx.app.cmd_project_hub();
+}
+
+fn cmd_project_doctor(ctx: &mut CommandCtx) {
+    ctx.app.cmd_project_doctor();
+}
+
+fn cmd_project_settings(ctx: &mut CommandCtx) {
+    ctx.app.cmd_project_settings();
 }
 
 fn cmd_project_add(ctx: &mut CommandCtx) {

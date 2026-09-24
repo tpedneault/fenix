@@ -49,6 +49,8 @@ pub struct ProjectItem {
     pub name: String,
     pub branch: Option<String>,
     pub kind: ProjectKind,
+    /// The doctor's verdict, drawn as a dot at the row's end.
+    pub health: Option<fenix_project::doctor::Health>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +101,8 @@ pub enum Role {
     Todo(TodoKind),
     /// A project's kind tag, in that kind's colour.
     Kind(ProjectKind),
+    /// A project's health dot.
+    Health(fenix_project::doctor::Health),
 }
 
 /// A flat background behind cells.
@@ -369,7 +373,10 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                         // The kind tag in a fixed four-cell field, so names
                         // line up whatever the tag's length.
                         g.put(y, x + 5, item.kind.tag(), Role::Kind(item.kind));
-                        g.put(y, x + 9, &fit(&item.name, col_width.saturating_sub(9)), Role::Title);
+                        g.put(y, x + 9, &fit(&item.name, col_width.saturating_sub(12)), Role::Title);
+                        if let Some(health) = item.health {
+                            g.put(y, x + col_width - 1, "●", Role::Health(health));
+                        }
                         let under = item.branch.clone().unwrap_or_else(|| item.root.display().to_string());
                         g.put(y + 1, x + 9, &fit(&under, col_width.saturating_sub(9)), Role::Muted);
                         slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number, entry: HomeEntry::Project(item.root.clone()) });
@@ -546,8 +553,8 @@ mod tests {
                 FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
             projects: vec![
-                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust },
-                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl },
+                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
+                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
             ],
             today: vec![
                 TaskItem { title: "Pick a dashboard".into(), live: Some("0:18".into()), pressing: false },
@@ -629,6 +636,9 @@ mod tests {
         let fenix = line_of(&view, "fenix");
         assert!(view.text.lines().nth(fenix).unwrap().contains("RS  fenix"));
         assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::Rust)));
+        assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Health(fenix_project::doctor::Health::Warn)), "a health dot");
+        let tcl = line_of(&view, "test-tcl");
+        assert!(!view.spans.iter().any(|s| s.line == tcl && matches!(s.role, Role::Health(_))), "no dot before the doctor has looked");
         let new = view.find(&HomeEntry::NewProject).expect("a new-project slot");
         let last_project = view.find(&HomeEntry::Project("/q".into())).unwrap();
         assert_eq!(view.step(last_project, true), Some(new), "j from the last project reaches it");
