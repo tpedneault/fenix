@@ -15,6 +15,7 @@ mod git_page;
 mod git_editor;
 mod git_log_page;
 mod git_rebase_page;
+mod review_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -645,6 +646,13 @@ enum ComposePurpose {
     GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
     /// A reword's new message, for the rebase page `page`.
     RebaseMessage { page: BufferId, hash: String },
+    /// A comment for the review on page `page`, held until it's
+    /// submitted -- a new one, or pending comment `index` edited.
+    ReviewPending { page: BufferId, pending: Box<crate::review_store::Pending>, index: Option<usize> },
+    /// A reply to a review thread, sent straight away.
+    ReviewReply { page: BufferId, thread: String },
+    /// The summary a review is submitted with.
+    ReviewSummary { page: BufferId },
     /// An agenda task's description (`E`), seeded with the current one --
     /// saved locally and, on a linked task, sent to Jira.
     TaskDescription { task: TaskId },
@@ -676,6 +684,9 @@ impl ComposePurpose {
                 crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
             },
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
+            ComposePurpose::ReviewPending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
+            ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
+            ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
             ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
             ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
             ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
@@ -4164,8 +4175,10 @@ fn forge_thread_annotations(discussions: &[fenix_forge::Discussion]) -> Vec<diff
 /// has to succeed: an instance without approval rules answers 404 on
 /// `/approvals`, and a diff that's too large to return shouldn't take
 /// the description and branch names down with it.
-fn fetch_forge_detail(client: &fenix_gitlab::GitLab, number: u64) -> Result<ForgeDetail, String> {
-    use fenix_forge::Forge;
+/// A forge client, GitHub's or GitLab's.
+pub(crate) type ForgeClient = Box<dyn fenix_forge::Forge + Send + Sync>;
+
+fn fetch_forge_detail(client: &dyn fenix_forge::Forge, number: u64) -> Result<ForgeDetail, String> {
     let request = client.merge_request(number)?;
     let approvals = client.approvals(number).ok();
     let (files, error) = match client.changed_files(number) {
@@ -17007,17 +17020,28 @@ impl App {
     /// `[gitlab] base_url`/`token` in `config.ini`, and an `origin`
     /// remote whose URL names a project. Nothing is configured per
     /// repo -- the checkout already knows which project it came from.
-    fn forge_client(&self, repo_root: &Path) -> Result<fenix_gitlab::GitLab, String> {
+    fn forge_client(&self, repo_root: &Path) -> Result<ForgeClient, String> {
+        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
+            return Err("this repo has no `origin` remote to work out the project from".to_string());
+        };
+        // GitHub by its host; anything else is taken to be GitLab, which
+        // is routinely self-hosted under any name.
+        if fenix_github::repository(&url).is_some() {
+            let token = fenix_github::gh_token().or_else(|| self.config.github_token.clone().filter(|t| !t.trim().is_empty())).ok_or_else(|| {
+                "sign the GitHub CLI in (gh auth login), or set [github] token in config.ini".to_string()
+            })?;
+            return fenix_github::GitHub::from_remote(token, &url)
+                .map(|c| Box::new(c) as ForgeClient)
+                .ok_or_else(|| format!("couldn't read owner/repo out of origin's URL ({url})"));
+        }
         let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
             return Err("set [gitlab] base_url in config.ini first".to_string());
         };
         let Some(token) = self.config.gitlab_token.clone().filter(|t| !t.trim().is_empty()) else {
             return Err("set [gitlab] token in config.ini first (a personal access token with `api` scope)".to_string());
         };
-        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
-            return Err("this repo has no `origin` remote to work out the project from".to_string());
-        };
         fenix_gitlab::GitLab::from_remote(base_url, token, &url)
+            .map(|c| Box::new(c) as ForgeClient)
             .ok_or_else(|| format!("couldn't read a GitLab project path out of origin's URL ({url})"))
     }
 
@@ -17036,7 +17060,7 @@ impl App {
         // Checked before a workspace is opened: a view that can only
         // ever show one error message isn't worth two panes.
         let project = match self.forge_client(&repo_root) {
-            Ok(client) => fenix_forge::Forge::project(&client).to_string(),
+            Ok(client) => fenix_forge::Forge::project(client.as_ref()).to_string(),
             Err(err) => {
                 self.set_error(err);
                 return;
@@ -17196,7 +17220,7 @@ impl App {
                 return;
             }
         };
-        match fenix_forge::Forge::resolve(&client, number, &discussion, !was_resolved) {
+        match fenix_forge::Forge::resolve(client.as_ref(), number, &discussion, !was_resolved) {
             Ok(()) => {
                 self.set_message(if was_resolved { "thread reopened" } else { "thread resolved" });
                 self.forge_select(number);
@@ -17269,9 +17293,9 @@ impl App {
             }
         };
         let result = if approved {
-            fenix_forge::Forge::unapprove(&client, number)
+            fenix_forge::Forge::unapprove(client.as_ref(), number)
         } else {
-            fenix_forge::Forge::approve(&client, number, sha.as_deref())
+            fenix_forge::Forge::approve(client.as_ref(), number, sha.as_deref())
         };
         match result {
             Ok(()) => {
@@ -17331,7 +17355,7 @@ impl App {
             sha: detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty()),
             ..Default::default()
         };
-        match fenix_forge::Forge::merge(&client, number, &options) {
+        match fenix_forge::Forge::merge(client.as_ref(), number, &options) {
             Ok(()) => {
                 self.set_message(format!("merged !{number}"));
                 self.forge_refresh_list();
@@ -17347,7 +17371,6 @@ impl App {
     /// Fetches the merge request list for the current filter.
     fn forge_refresh_list(&mut self) {
         let Some(session) = self.forge_session.as_ref() else { return };
-        use fenix_forge::Forge;
         let (repo_root, filter) = (session.repo_root.clone(), session.filter);
         let client = match self.forge_client(&repo_root) {
             Ok(client) => client,
@@ -17439,12 +17462,12 @@ impl App {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let result = Box::new(fetch_forge_detail(&client, number));
+                    let result = Box::new(fetch_forge_detail(client.as_ref(), number));
                     let _ = proxy.send_event(FenixUserEvent::ForgeDetailReady { request_id, number, result });
                 });
             }
             None => {
-                let result = fetch_forge_detail(&client, number);
+                let result = fetch_forge_detail(client.as_ref(), number);
                 self.apply_forge_detail(request_id, number, result);
             }
         }
@@ -17520,7 +17543,7 @@ impl App {
             }
         };
         let branch = format!("mr-{number}");
-        let refspec = fenix_forge::Forge::checkout_refspec(&client, number);
+        let refspec = fenix_forge::Forge::checkout_refspec(client.as_ref(), number);
         if let Err(err) = fenix_git::fetch_refspec(&repo_root, "origin", &refspec) {
             self.set_error(format!("couldn't fetch !{number}: {err}"));
             return;
@@ -17684,6 +17707,11 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
+        if matches!(purpose, ComposePurpose::ReviewPending { .. } | ComposePurpose::ReviewReply { .. } | ComposePurpose::ReviewSummary { .. }) {
+            self.review_compose(purpose, body);
+            self.wake_caret();
+            return;
+        }
         if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
             self.git_rebase_message(*page, hash.clone(), body);
             self.wake_caret();
@@ -17726,13 +17754,16 @@ impl App {
             }
         };
         let (number, result) = match &purpose {
-            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(&client, *number, discussion, &body)),
+            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(client.as_ref(), *number, discussion, &body)),
             ComposePurpose::NewComment { number, position } => {
-                (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
+                (*number, fenix_forge::Forge::comment_on_line(client.as_ref(), *number, position, &body))
             }
             ComposePurpose::CommitMessage { .. }
             | ComposePurpose::GitCommit { .. }
             | ComposePurpose::RebaseMessage { .. }
+            | ComposePurpose::ReviewPending { .. }
+            | ComposePurpose::ReviewReply { .. }
+            | ComposePurpose::ReviewSummary { .. }
             | ComposePurpose::TaskDescription { .. }
             | ComposePurpose::TaskComment { .. }
             | ComposePurpose::IssueDescription { .. }

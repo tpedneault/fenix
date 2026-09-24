@@ -11,6 +11,8 @@ use super::projects::kind_color;
 use super::*;
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
+use crate::review_inbox::{self, Inbox};
+use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
@@ -31,6 +33,8 @@ pub(super) enum PageModel {
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
     Rebase(Box<RebasePage>),
+    Inbox(Box<Inbox>),
+    Review(Box<ReviewPage>),
 }
 
 pub(super) struct PageState {
@@ -61,7 +65,7 @@ impl PageState {
             PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
-            PageModel::Rebase(_) => false,
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
 
@@ -86,7 +90,7 @@ impl PageState {
             PageModel::Doctor(_) => {}
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
-            PageModel::Rebase(_) => {}
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
     }
@@ -114,6 +118,11 @@ pub enum PageEvent {
     ChromeGit(Box<super::git_editor::ChromeGit>),
     /// A background fetch finished.
     AutoFetched { ok: bool },
+    InboxData { buffer: BufferId, result: Result<Vec<review_inbox::Entry>, String> },
+    ReviewData { buffer: BufferId, result: Result<Box<review_page::ReviewData>, String> },
+    ReviewSince { buffer: BufferId, result: Result<Vec<review_page::FileView>, String> },
+    ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
+    ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -226,6 +235,8 @@ impl App {
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
+            Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
+            Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
         }
     }
 
@@ -325,6 +336,8 @@ impl App {
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
+            PageModel::Inbox(i) => review_inbox::layout(i, cols),
+            PageModel::Review(r) => review_page::layout(r, cols),
         };
         state.cols = cols;
         state.stale = false;
@@ -412,6 +425,14 @@ impl App {
                 let action = r.key(key);
                 self.git_rebase_action(id, action);
             }
+            PageModel::Inbox(i) => {
+                let action = i.key(key);
+                self.inbox_action(id, action);
+            }
+            PageModel::Review(r) => {
+                let action = r.key(key);
+                self.review_action(id, action);
+            }
         }
         self.wake_caret();
         true
@@ -430,6 +451,9 @@ impl App {
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
+                self.apply_review_event(event)
+            }
             PageEvent::AutoFetched { ok } => {
                 if ok {
                     self.refresh_git_pages(false);

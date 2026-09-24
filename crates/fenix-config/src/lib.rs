@@ -155,6 +155,8 @@ pub struct Config {
     /// values covers every repo on the instance.
     pub gitlab_base_url: Option<String>,
     pub gitlab_token: Option<String>,
+    /// `[github] token`: used when the GitHub CLI isn't signed in.
+    pub github_token: Option<String>,
     /// Frequently-read documents, `(display name, path)`, in the order
     /// they appear in `config.ini`'s `[documents]` section -- what the
     /// reader's `SPC r f` index picks from. Same numbered-key `docN =
@@ -355,6 +357,7 @@ impl Config {
             git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
             gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
             gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
+            github_token: sections.get("github").and_then(|s| s.get("token")).cloned(),
             git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
             git_layout: git.and_then(|s| s.get("layout")).cloned(),
             git_auto_fetch_minutes: git.and_then(|s| s.get("auto_fetch")).and_then(|v| v.trim().trim_end_matches('m').trim().parse().ok()).filter(|m| *m > 0),
@@ -406,6 +409,7 @@ impl Config {
             git_base_branch: None,
             gitlab_base_url: None,
             gitlab_token: None,
+            github_token: None,
             git_graph_style: None,
             git_layout: None,
             git_auto_fetch_minutes: None,
@@ -585,6 +589,11 @@ impl Config {
             out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
         }
         out.push('\n');
+        if let Some(token) = &self.github_token {
+            out.push_str("[github]\n");
+            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
+            out.push('\n');
+        }
         out.push_str("[vnc]\n");
         for (i, (name, host, port)) in vnc_hosts.iter().enumerate() {
             out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));

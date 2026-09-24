@@ -1102,7 +1102,7 @@ fn cmd_git_keep_both(ctx: &mut CommandCtx) {
 }
 
 fn cmd_git_merge_requests(ctx: &mut CommandCtx) {
-    ctx.app.open_forge_view();
+    ctx.app.open_reviews();
 }
 
 fn cmd_git_merge_requests_close(ctx: &mut CommandCtx) {
