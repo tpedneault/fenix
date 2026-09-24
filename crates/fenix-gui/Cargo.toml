@@ -40,6 +40,7 @@ fenix-brand = { path = "../fenix-brand" }
 fenix-snippets = { path = "../fenix-snippets" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
+fenix-embedded = { path = "../fenix-embedded" }
 fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-vnc = { path = "../fenix-vnc" }

@@ -117,7 +117,9 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "ts" | "mts" | "cts" => Some(LanguageId::TypeScript),
         "tsx" => Some(LanguageId::Tsx),
         "c" | "h" => Some(LanguageId::C),
-        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" => Some(LanguageId::Cpp),
+        // `.ino`/`.pde` are Arduino sketches: C++ with a few prototypes
+        // the Arduino builder adds for you.
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" | "ino" | "pde" => Some(LanguageId::Cpp),
         "sh" | "bash" => Some(LanguageId::Bash),
         "tcl" | "tm" => Some(LanguageId::Tcl),
         "dockerfile" => Some(LanguageId::Dockerfile),
@@ -191,6 +193,8 @@ mod tests {
         assert_eq!(detect_language("cc"), Some(LanguageId::Cpp));
         assert_eq!(detect_language("cxx"), Some(LanguageId::Cpp));
         assert_eq!(detect_language("hpp"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("ino"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("pde"), Some(LanguageId::Cpp));
         assert_eq!(detect_language("hxx"), Some(LanguageId::Cpp));
         assert_eq!(detect_language("sh"), Some(LanguageId::Bash));
         assert_eq!(detect_language("tcl"), Some(LanguageId::Tcl));

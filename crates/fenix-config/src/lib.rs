@@ -194,6 +194,13 @@ pub struct Config {
     /// minutes (`[agenda] worklog_round = 15`) -- unset means 15, `0`
     /// or `1` sends exact minutes.
     pub agenda_worklog_round: Option<u32>,
+    /// Where the embedded-development tools live, when they aren't where
+    /// Fenix looks on its own (its tools folder, `PATH`, the usual
+    /// install locations) -- `[embedded]`'s `arduino_cli`, `clangd` and
+    /// `arduino_language_server`. Unset means search.
+    pub embedded_arduino_cli: Option<PathBuf>,
+    pub embedded_clangd: Option<PathBuf>,
+    pub embedded_arduino_language_server: Option<PathBuf>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -300,6 +307,7 @@ impl Config {
         let documents = sections.get("documents");
         let windows = sections.get("windows");
         let workspaces = sections.get("workspaces");
+        let embedded = sections.get("embedded");
 
         Ok(Self {
             path,
@@ -319,6 +327,9 @@ impl Config {
                 .unwrap_or_default(),
             agenda_categories: sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default(),
             agenda_worklog_round: sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v)),
+            embedded_arduino_cli: embedded.and_then(|s| s.get("arduino_cli")).map(PathBuf::from),
+            embedded_clangd: embedded.and_then(|s| s.get("clangd")).map(PathBuf::from),
+            embedded_arduino_language_server: embedded.and_then(|s| s.get("arduino_language_server")).map(PathBuf::from),
             mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
             mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
             mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
@@ -364,6 +375,9 @@ impl Config {
             explorer_bookmarks: Vec::new(),
             agenda_categories: Vec::new(),
             agenda_worklog_round: None,
+            embedded_arduino_cli: None,
+            embedded_clangd: None,
+            embedded_arduino_language_server: None,
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -475,6 +489,17 @@ impl Config {
         }
         if let Some(round) = self.agenda_worklog_round {
             out.push_str(&format!("worklog_round = {round}\n"));
+        }
+        out.push('\n');
+        out.push_str("[embedded]\n");
+        for (key, value) in [
+            ("arduino_cli", &self.embedded_arduino_cli),
+            ("clangd", &self.embedded_clangd),
+            ("arduino_language_server", &self.embedded_arduino_language_server),
+        ] {
+            if let Some(path) = value {
+                out.push_str(&format!("{key} = {}\n", path.display()));
+            }
         }
         out.push('\n');
         out.push_str("[mib]\n");
@@ -1428,5 +1453,21 @@ blocked3 = X|weird
         assert_eq!(parse_minutes("30m"), Some(30));
         assert_eq!(parse_minutes("1h"), Some(60));
         assert_eq!(parse_minutes("soon"), None);
+    }
+
+    #[test]
+    fn embedded_tool_paths_round_trip() {
+        let path = temp_path("embedded");
+        std::fs::write(&path, "[embedded]\narduino_cli = C:\\Tools\\arduino-cli.exe\nclangd = /opt/llvm/bin/clangd\n").unwrap();
+        let config = Config::load(path.clone()).unwrap();
+        assert_eq!(config.embedded_arduino_cli, Some(PathBuf::from("C:\\Tools\\arduino-cli.exe")));
+        assert_eq!(config.embedded_clangd, Some(PathBuf::from("/opt/llvm/bin/clangd")));
+        assert_eq!(config.embedded_arduino_language_server, None);
+
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.embedded_arduino_cli, config.embedded_arduino_cli);
+        assert_eq!(reloaded.embedded_clangd, config.embedded_clangd);
+        std::fs::remove_file(&path).ok();
     }
 }

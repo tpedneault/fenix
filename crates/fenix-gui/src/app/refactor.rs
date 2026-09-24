@@ -308,11 +308,13 @@ impl App {
                 }
                 let result = if let Some((_, version)) = session.open_documents.get(&canonical) {
                     let version = *version;
+                    let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
+                    let change = fenix_lsp::change_event(session.synced_text.get(&canonical).map(String::as_str), &text, incremental);
                     session
                         .client
                         .notify::<lsp_types::notification::DidChangeTextDocument>(lsp_types::DidChangeTextDocumentParams {
                             text_document: lsp_types::VersionedTextDocumentIdentifier { uri: uri.clone(), version },
-                            content_changes: vec![lsp_types::TextDocumentContentChangeEvent { range: None, range_length: None, text: text.clone() }],
+                            content_changes: vec![change],
                         })
                         .map(|_| version + 1)
                 } else if language == Some(server_language.language) && tool_sessions::root_for_path(path) == server_language.root {
@@ -332,6 +334,7 @@ impl App {
                 };
                 if let Ok(next) = result {
                     session.open_documents.insert(canonical.clone(), (revision, next));
+                    session.synced_text.insert(canonical.clone(), text.clone());
                 }
             }
         }

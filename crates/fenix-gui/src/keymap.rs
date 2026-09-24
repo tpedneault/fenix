@@ -68,6 +68,76 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
     s
 }
 
+/// A kind of buffer or project `SPC m` has bindings for. A buffer can be
+/// in several at once (a Tcl file in an Arduino sketch would be both);
+/// `App::local_contexts` lists them most specific first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalContext {
+    /// Anything inside an Arduino sketch: build, upload, the serial
+    /// monitor, boards, ports, libraries.
+    Arduino,
+    /// Tcl files: the SCOS-2000 MIB lookups and insertion (letters kept
+    /// from the reference elisp implementation's own `SPC M` scheme),
+    /// plus Tcl's ctags-based symbols.
+    Tcl,
+}
+
+impl LocalContext {
+    /// Shown when `SPC m` opens, so you know which menu you're in.
+    pub fn name(self) -> &'static str {
+        match self {
+            LocalContext::Arduino => "arduino",
+            LocalContext::Tcl => "tcl",
+        }
+    }
+
+    fn bind(self, t: &mut KeyTrie<&'static str>) {
+        match self {
+            LocalContext::Arduino => {
+                t.insert(&[KeyPress::char('b')], "build (verify)", "embedded.build");
+                t.insert(&[KeyPress::char('u')], "upload to board", "embedded.upload");
+                t.insert(&[KeyPress::char('m')], "serial monitor", "embedded.monitor");
+                t.insert(&[KeyPress::char('B')], "serial monitor speed", "embedded.baud");
+                t.insert(&[KeyPress::char('p')], "choose port", "embedded.port");
+                t.insert(&[KeyPress::char('s')], "choose board", "embedded.board");
+                t.insert(&[KeyPress::char('o')], "board options", "embedded.board_options");
+                t.insert(&[KeyPress::char('l')], "install library", "embedded.library");
+                t.insert(&[KeyPress::char('c')], "install board package", "embedded.package");
+                t.insert(&[KeyPress::char('d')], "debug", "embedded.debug");
+                t.insert(&[KeyPress::char('n')], "new sketch", "embedded.new_sketch");
+                t.insert(&[KeyPress::char('i')], "project info", "embedded.info");
+            }
+            LocalContext::Tcl => {
+                t.insert(&[KeyPress::char('i')], "insert telecommand", "mib.insert_telecommand");
+                t.insert(&[KeyPress::char('t')], "lookup telecommand", "mib.lookup_telecommand");
+                t.insert(&[KeyPress::char('k')], "lookup TM packet", "mib.lookup_tm_packet");
+                t.insert(&[KeyPress::char('p')], "lookup TM parameter", "mib.lookup_tm_parameter");
+                t.insert(&[KeyPress::char('c')], "lookup calibration", "mib.lookup_calibration");
+                t.insert(&[KeyPress::char('r')], "refresh MIB index", "mib.refresh_index");
+                t.insert(&[KeyPress::char('a')], "add MIB root", "mib.add_root");
+                t.insert(&[KeyPress::char('d')], "delete MIB root", "mib.delete_root");
+                t.insert(&[KeyPress::char('s')], "symbols", "code.symbols");
+                t.insert(&[KeyPress::char('T')], "refresh tags", "completion.refresh_tags");
+            }
+        }
+    }
+}
+
+/// The `SPC m` menu for `contexts` (most specific first): each context's
+/// bindings, with a more specific context winning a key both bind. Built
+/// once per combination and kept -- there are only ever a handful.
+pub fn local_trie(contexts: &[LocalContext]) -> &'static KeyTrie<&'static str> {
+    static TRIES: OnceLock<std::sync::Mutex<std::collections::HashMap<Vec<LocalContext>, &'static KeyTrie<&'static str>>>> = OnceLock::new();
+    let mut tries = TRIES.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    tries.entry(contexts.to_vec()).or_insert_with(|| {
+        let mut t = KeyTrie::new();
+        for context in contexts.iter().rev() {
+            context.bind(&mut t);
+        }
+        Box::leak(Box::new(t))
+    })
+}
+
 /// The `SPC`-leader menu. Includes the leading space itself as the trie's
 /// first key, so the whole leader interaction -- from the initial `SPC`
 /// through to a resolved command -- is just one uniform walk of this trie.
@@ -91,6 +161,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
+        // Global rather than under `SPC m`: `SPC m` only has the Arduino
+        // menu inside a sketch, and your first sketch has to come from
+        // somewhere.
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('n')], "new Arduino sketch", "embedded.new_sketch");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('f')], "find file", "file.find");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('e')], "explore from home", "file.explore");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('a')], "find file (all)", "file.find_all");
@@ -361,11 +435,6 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "code.lsp_rename",
         );
         t.insert(
-            &[spc, KeyPress::char('c'), KeyPress::char('T')],
-            "refresh tags",
-            "completion.refresh_tags",
-        );
-        t.insert(
             &[spc, KeyPress::char('c'), KeyPress::char('a')],
             "code action",
             "code.lsp_code_action",
@@ -380,7 +449,6 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
             "indent buffer",
             "code.format_buffer",
         );
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('s')], "symbols", "code.symbols");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('x')], "toggle checkbox", "code.toggle_checkbox");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('o')], "outline", "code.outline");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('u')], "enclosing scope", "code.scope_parent");
@@ -395,39 +463,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('v')], "validate XML", "code.xml_validate");
         t.insert(&[spc, KeyPress::char('c'), KeyPress::char('y')], "yank XML path", "code.xml_path");
 
-        // SCOS-2000 MIB lookup/insertion -- letters kept identical to
-        // the reference elisp implementation's own scheme for muscle-
-        // memory continuity (there it's `SPC M`, capitalized, since
-        // Doom Emacs splits a global leader from a mode-local one;
-        // Fenix has one flat leader tree, so this is lowercase `m`,
-        // matching the user's own `SPC m i` example).
-        t.label_group(&[spc, KeyPress::char('m')], "mib");
-        t.insert(
-            &[spc, KeyPress::char('m'), KeyPress::char('i')],
-            "insert telecommand",
-            "mib.insert_telecommand",
-        );
-        t.insert(
-            &[spc, KeyPress::char('m'), KeyPress::char('t')],
-            "lookup telecommand",
-            "mib.lookup_telecommand",
-        );
-        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('k')], "lookup TM packet", "mib.lookup_tm_packet");
-        t.insert(
-            &[spc, KeyPress::char('m'), KeyPress::char('p')],
-            "lookup TM parameter",
-            "mib.lookup_tm_parameter",
-        );
-        t.insert(
-            &[spc, KeyPress::char('m'), KeyPress::char('c')],
-            "lookup calibration",
-            "mib.lookup_calibration",
-        );
-        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('r')], "refresh MIB index", "mib.refresh_index");
-        // Same letters `SPC p a`/`SPC p d` already use for the identical
-        // add/delete-from-a-persisted-list pattern.
-        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('a')], "add MIB root", "mib.add_root");
-        t.insert(&[spc, KeyPress::char('m'), KeyPress::char('d')], "delete MIB root", "mib.delete_root");
+        // The local leader: what's under it depends on the focused buffer
+        // (see `LocalContext`) -- `App::start_local_leader` opens the
+        // matching `local_trie`, the way Doom Emacs' `SPC m` does.
+        t.insert(&[spc, KeyPress::char('m')], "mode", "leader.local");
 
         t.label_group(&[spc, KeyPress::char('w')], "window");
         t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
@@ -819,6 +858,25 @@ mod tests {
     }
 
     #[test]
+    fn a_new_sketch_can_be_made_from_anywhere() {
+        let mut m = leader_trie().matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('f'));
+        assert!(matches!(m.feed(KeyPress::char('n')), fenix_keymap::Step::Matched(&"embedded.new_sketch")));
+    }
+
+    #[test]
+    fn local_trie_resolves_every_arduino_command() {
+        let trie = local_trie(&[LocalContext::Arduino]);
+        for (key, command) in [('b', "embedded.build"), ('u', "embedded.upload"), ('m', "embedded.monitor"), ('B', "embedded.baud"), ('p', "embedded.port"), ('s', "embedded.board"), ('o', "embedded.board_options"), ('l', "embedded.library"), ('c', "embedded.package"), ('d', "embedded.debug"), ('n', "embedded.new_sketch"), ('i', "embedded.info")] {
+            match trie.matcher().feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&c) if c == command => {}
+                _ => panic!("expected SPC m {key} in a sketch to resolve to {command}"),
+            }
+        }
+    }
+
+    #[test]
     fn leader_trie_resolves_vnc_open_close_and_screenshot() {
         let trie = leader_trie();
 
@@ -844,20 +902,6 @@ mod tests {
         match m.feed(KeyPress::char('s')) {
             fenix_keymap::Step::Matched(&"vnc.screenshot") => {}
             _ => panic!("expected SPC v s to resolve to vnc.screenshot"),
-        }
-    }
-
-    #[test]
-    fn leader_trie_resolves_completion_refresh_tags() {
-        // Moved from `SPC c r` to `SPC c T` to free `r` up for LSP
-        // rename -- see `code.lsp_rename`'s own keymap comment.
-        let trie = leader_trie();
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('c'));
-        match m.feed(KeyPress::char('T')) {
-            fenix_keymap::Step::Matched(&"completion.refresh_tags") => {}
-            _ => panic!("expected SPC c T to resolve to completion.refresh_tags"),
         }
     }
 
@@ -904,18 +948,6 @@ mod tests {
     }
 
     #[test]
-    fn leader_trie_resolves_symbols() {
-        let trie = leader_trie();
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('c'));
-        match m.feed(KeyPress::char('s')) {
-            fenix_keymap::Step::Matched(&"code.symbols") => {}
-            _ => panic!("expected SPC c s to resolve to code.symbols"),
-        }
-    }
-
-    #[test]
     fn leader_trie_resolves_toggle_checkbox() {
         let trie = leader_trie();
         let mut m = trie.matcher();
@@ -940,9 +972,29 @@ mod tests {
     }
 
     #[test]
-    fn leader_trie_resolves_mib_commands() {
-        let trie = leader_trie();
+    fn spc_m_is_the_local_leader_and_nothing_else_lives_under_it() {
+        let mut m = leader_trie().matcher();
+        m.feed(KeyPress::char(' '));
+        assert!(matches!(m.feed(KeyPress::char('m')), fenix_keymap::Step::Matched(&"leader.local")));
+    }
+
+    #[test]
+    fn a_more_specific_context_wins_a_shared_key() {
+        let arduino_first = local_trie(&[LocalContext::Arduino, LocalContext::Tcl]);
+        assert!(matches!(arduino_first.matcher().feed(KeyPress::char('b')), fenix_keymap::Step::Matched(&"embedded.build")));
+        assert!(matches!(arduino_first.matcher().feed(KeyPress::char('i')), fenix_keymap::Step::Matched(&"embedded.info")));
+        assert!(matches!(arduino_first.matcher().feed(KeyPress::char('T')), fenix_keymap::Step::Matched(&"completion.refresh_tags")));
+        let tcl_first = local_trie(&[LocalContext::Tcl, LocalContext::Arduino]);
+        assert!(matches!(tcl_first.matcher().feed(KeyPress::char('i')), fenix_keymap::Step::Matched(&"mib.insert_telecommand")));
+        assert!(std::ptr::eq(arduino_first, local_trie(&[LocalContext::Arduino, LocalContext::Tcl])), "built once per combination");
+    }
+
+    #[test]
+    fn local_trie_resolves_tcl_commands() {
+        let trie = local_trie(&[LocalContext::Tcl]);
         let cases: &[(char, &str)] = &[
+            ('s', "code.symbols"),
+            ('T', "completion.refresh_tags"),
             ('i', "mib.insert_telecommand"),
             ('t', "mib.lookup_telecommand"),
             ('k', "mib.lookup_tm_packet"),
@@ -953,12 +1005,9 @@ mod tests {
             ('d', "mib.delete_root"),
         ];
         for &(key, expected) in cases {
-            let mut m = trie.matcher();
-            m.feed(KeyPress::char(' '));
-            m.feed(KeyPress::char('m'));
-            match m.feed(KeyPress::char(key)) {
+            match trie.matcher().feed(KeyPress::char(key)) {
                 fenix_keymap::Step::Matched(&id) if id == expected => {}
-                _ => panic!("expected SPC m {key} to resolve to {expected}"),
+                _ => panic!("expected SPC m {key} in a Tcl file to resolve to {expected}"),
             }
         }
     }

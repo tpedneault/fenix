@@ -45,11 +45,30 @@ impl Terminal {
     /// it the answer is a shell somewhere else, and the first thing
     /// anybody types is a `cd`.
     pub fn spawn_in(rows: u16, cols: u16, cwd: Option<&std::path::Path>) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
+        Self::spawn_command(rows, cols, cwd, shell_command())
+    }
+
+    /// Runs `program args` in a fresh PTY instead of a shell -- for a
+    /// terminal that *is* one tool (a serial monitor, a debugger console)
+    /// rather than a place to type commands. Its exit is the terminal's
+    /// exit, exactly as `exit` is for a shell.
+    pub fn spawn_program(
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        program: &str,
+        args: &[String],
+    ) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
+        let mut command = CommandBuilder::new(program);
+        command.args(args);
+        Self::spawn_command(rows, cols, cwd, command)
+    }
+
+    fn spawn_command(rows: u16, cols: u16, cwd: Option<&std::path::Path>, mut command: CommandBuilder) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let mut command = shell_command();
         if let Some(cwd) = cwd {
             command.cwd(cwd);
         }

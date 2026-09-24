@@ -6,6 +6,8 @@ mod editor_ui;
 mod todos;
 mod home;
 mod agenda_sync;
+mod embedded;
+mod local_leader;
 mod xml;
 use tool_sessions::LspKey;
 
@@ -40,6 +42,7 @@ use fenix_core::{Buffer, Cursor};
 
 use crate::agenda_panel;
 use agenda_sync::{AgendaSyncEvent, AgendaSyncState, SyncPick};
+use embedded::{EmbeddedEvent, EmbeddedPick, EmbeddedState};
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -1561,6 +1564,11 @@ struct LspSession {
     /// buffer for the same path doesn't double-open it, and `didClose`
     /// only fires for a path this server actually knows about.
     open_documents: HashMap<PathBuf, (u64, i32)>,
+    /// The text this server was last sent for each open document -- what
+    /// an incremental `didChange` is worked out against (see
+    /// `fenix_lsp::change_event`). Kept for every server, whichever sync
+    /// kind it asked for, so the choice lives in one place.
+    synced_text: HashMap<PathBuf, String>,
     /// What each still-outstanding request this app sent is actually
     /// *for*, keyed by the id `LspClient::request` returned -- a
     /// response arrives bearing only that id (per JSON-RPC), so this is
@@ -2235,6 +2243,9 @@ pub enum FenixUserEvent {
     /// field: `fenix_pdf::PdfDocKey` already rides along inside every
     /// `PdfResponse` variant, so there's nothing to add out here.
     PdfResponse(fenix_pdf::PdfResponse),
+    /// A microcontroller toolchain query's answer -- see
+    /// `embedded::EmbeddedEvent`.
+    Embedded(EmbeddedEvent),
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -2697,6 +2708,10 @@ enum ActivePicker {
     /// priority, an assignee, a side of a conflict. What it's for lives
     /// in `AgendaSyncState::picker`.
     WorkSync(fenix_picker::PickerState<SyncPick>),
+    /// Every choice the Arduino `SPC m` menu asks for -- board, board option, port, serial
+    /// speed, library, board package. What it's for lives in
+    /// `EmbeddedState::picker`.
+    Embedded(fenix_picker::PickerState<EmbeddedPick>),
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -2748,6 +2763,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::AgendaDependency(s) => s.push_char(c),
         ActivePicker::AgendaClockIn(s) => s.push_char(c),
         ActivePicker::WorkSync(s) => s.push_char(c),
+        ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
     }
 }
@@ -2797,6 +2813,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::AgendaDependency(s) => s.backspace(),
         ActivePicker::AgendaClockIn(s) => s.backspace(),
         ActivePicker::WorkSync(s) => s.backspace(),
+        ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
     }
 }
@@ -2846,6 +2863,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::AgendaDependency(s) => s.move_selection(delta),
         ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
         ActivePicker::WorkSync(s) => s.move_selection(delta),
+        ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
     }
 }
@@ -2898,6 +2916,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::AgendaDependency(s) => s.toggle_mark(),
         ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
         ActivePicker::WorkSync(s) => s.toggle_mark(),
+        ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
     }
 }
@@ -2947,6 +2966,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::AgendaDependency(s) => s.query(),
         ActivePicker::AgendaClockIn(s) => s.query(),
         ActivePicker::WorkSync(s) => s.query(),
+        ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
     }
 }
@@ -2996,6 +3016,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::AgendaDependency(s) => s.len(),
         ActivePicker::AgendaClockIn(s) => s.len(),
         ActivePicker::WorkSync(s) => s.len(),
+        ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
     }
 }
@@ -3045,6 +3066,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::AgendaDependency(s) => s.selected_row(),
         ActivePicker::AgendaClockIn(s) => s.selected_row(),
         ActivePicker::WorkSync(s) => s.selected_row(),
+        ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
     }
 }
@@ -3110,6 +3132,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::AgendaDependency(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
@@ -5968,6 +5991,10 @@ pub struct App {
     /// Where each pane-resident shell was started, for the ones opened
     /// somewhere in particular (`SPC e T`).
     terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
+    /// A terminal buffer that runs one program instead of a shell (a
+    /// serial monitor, a debugger console) -- what `spawn_terminal_for`
+    /// starts, and restarts, in it.
+    terminal_buffer_programs: HashMap<BufferId, (String, Vec<String>)>,
     /// How many pane-resident terminals have ever been opened -- the
     /// source of the numbers in `terminal_buffer_labels`.
     terminal_buffers_opened: usize,
@@ -6401,6 +6428,8 @@ pub struct App {
     agenda_picker_task: Option<fenix_agenda::TaskId>,
     /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
     agenda_sync: AgendaSyncState,
+    /// Microcontroller projects (`SPC m` in a sketch) -- see `embedded`.
+    embedded: EmbeddedState,
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
     /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `docker_session`/`git_session`/
@@ -6643,6 +6672,9 @@ pub struct App {
     /// singleton (see `keymap::leader_trie`), which sidesteps
     /// `Matcher` borrowing from a trie `App` would otherwise also own.
     leader_matcher: Matcher<'static, &'static str>,
+    /// The open `SPC m` menu, if any -- its trie depends on what was
+    /// focused when it opened (see `local_leader`).
+    local_matcher: Option<Matcher<'static, &'static str>>,
     /// Same reasoning as `leader_matcher`, for the explorer's own trie --
     /// persists across keystrokes for its one multi-key sequence (`g r`).
     explorer_matcher: Matcher<'static, ExplorerAction>,
@@ -7273,6 +7305,7 @@ impl App {
             terminal_buffers_spawning: HashSet::new(),
             terminal_buffer_labels: HashMap::new(),
             terminal_buffer_cwds: HashMap::new(),
+            terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
             current_cursor_icon: None,
@@ -7364,6 +7397,7 @@ impl App {
             agenda_confirm_delete: None,
             agenda_picker_task: None,
             agenda_sync: AgendaSyncState::default(),
+            embedded: EmbeddedState::default(),
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
@@ -7416,6 +7450,7 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             clipboard_mirror: String::new(),
             leader_matcher: keymap::leader_trie().matcher(),
+            local_matcher: None,
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             config,
@@ -8092,6 +8127,7 @@ impl App {
     /// `picker_add_project_prompt`'s own doc comment for why.
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        self.refresh_embedded_indicator();
         self.sync_lsp_for_focused_buffer();
     }
 
@@ -8143,19 +8179,23 @@ impl App {
         match session.open_documents.get(&canonical).copied() {
             None => {
                 let params = lsp_types::DidOpenTextDocumentParams {
-                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language.language), version: 0, text },
+                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language.language), version: 0, text: text.clone() },
                 };
                 if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                    session.open_documents.insert(canonical, (edit_count, 1));
+                    session.open_documents.insert(canonical.clone(), (edit_count, 1));
+                    session.synced_text.insert(canonical, text);
                 }
             }
             Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
+                let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
+                let change = fenix_lsp::change_event(session.synced_text.get(&canonical).map(String::as_str), &text, incremental);
                 let params = lsp_types::DidChangeTextDocumentParams {
                     text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version: next_version },
-                    content_changes: vec![lsp_types::TextDocumentContentChangeEvent { range: None, range_length: None, text }],
+                    content_changes: vec![change],
                 };
                 if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                    session.open_documents.insert(canonical, (edit_count, next_version + 1));
+                    session.open_documents.insert(canonical.clone(), (edit_count, next_version + 1));
+                    session.synced_text.insert(canonical, text);
                 }
             }
             Some(_) => {} // already open and already in sync -- the common case, most frames
@@ -8181,7 +8221,19 @@ impl App {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
         };
-        let spec = configured.lsp.get(&crate::lsp::language_config_name(language)).cloned().or_else(|| {
+        // A project's own `.fenix/tools.json` wins; then, for C/C++ in a
+        // microcontroller project, that platform's server (plain clangd
+        // can't make sense of an Arduino sketch); then `[lsp]`/defaults.
+        let embedded = if matches!(language, fenix_syntax::LanguageId::C | fenix_syntax::LanguageId::Cpp) && !configured.lsp.contains_key(&crate::lsp::language_config_name(language)) {
+            match self.embedded_language_server(&key.root) {
+                Some(Ok(spec)) => Some(spec),
+                Some(Err(error)) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let spec = configured.lsp.get(&crate::lsp::language_config_name(language)).cloned().or(embedded).or_else(|| {
             crate::lsp::resolve_server_command(language, &self.config.lsp_servers).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
         });
         let Some(spec) = spec else { self.lsp_unavailable.insert(key); return };
@@ -8190,7 +8242,7 @@ impl App {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), pending: HashMap::new() });
+                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new() });
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => { self.lsp_unavailable.insert(key); self.set_error(format!("couldn't start {} for {}: {err}", spec.executable, cwd.display())); },
@@ -10574,18 +10626,23 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
+        let program = self.terminal_buffer_programs.get(&id).cloned();
+        let spawn = move || match &program {
+            Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
+            None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
+        };
         self.terminal_buffers_spawning.insert(id);
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                    let result = spawn();
                     let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), TerminalSpawnResult(result)));
                 });
             }
             None => {
                 // No event loop to report back through (every test) --
                 // run synchronously, same posture as `toggle_terminal`.
-                let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                let result = spawn();
                 self.apply_terminal_buffer_spawned(id, result);
             }
         }
@@ -10663,7 +10720,11 @@ impl App {
         }
         if self.terminal_buffers.get_mut(&id).is_none_or(|state| !state.session.is_alive()) {
             self.unfocus_terminal_buffer();
-            self.set_message("the shell exited -- SPC o T starts a new one");
+            if self.terminal_buffer_programs.contains_key(&id) {
+                self.set_message("it stopped (unplugged? port busy?) -- SPC m m starts the serial monitor again");
+            } else {
+                self.set_message("the shell exited -- SPC o T starts a new one");
+            }
             return None;
         }
         Some(id)
@@ -10713,6 +10774,8 @@ impl App {
         self.terminal_buffers_spawning.remove(&id);
         self.terminal_buffer_labels.remove(&id);
         self.terminal_buffer_cwds.remove(&id);
+        self.terminal_buffer_programs.remove(&id);
+        self.embedded_forget_terminal(id);
         if self.terminal_buffer_focused == Some(id) {
             self.terminal_buffer_focused = None;
         }
@@ -14360,7 +14423,8 @@ impl App {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
-        let mut tasks = fenix_tasks::discover_tasks(&root);
+        let mut tasks = self.embedded_tasks(&root);
+        tasks.extend(fenix_tasks::discover_tasks(&root));
         let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
         for (name, spec) in tools.tasks {
             tasks.retain(|task| task.name != name);
@@ -14622,6 +14686,9 @@ impl App {
         self.append_task_output_text(buffer_id, marker);
         if let Some(session) = self.task_session.as_mut() {
             session.runner = None;
+        }
+        if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
+            self.embedded_task_finished(&root, success == Some(true));
         }
     }
 
@@ -20229,6 +20296,9 @@ impl App {
         if matches!(self.active_picker, Some(ActivePicker::WorkSync(_))) {
             self.agenda_sync_picker_cancel();
         }
+        if matches!(self.active_picker, Some(ActivePicker::Embedded(_))) {
+            self.embedded_picker_cancel();
+        }
         self.active_picker = None;
         self.main_view = MainView::Editor;
     }
@@ -20569,6 +20639,12 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.agenda_sync_picker_confirm(pick, marked);
+            }
+            Some(ActivePicker::Embedded(state)) => {
+                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.embedded_picker_confirm(pick);
             }
             None => {}
         }
@@ -22714,6 +22790,7 @@ impl App {
             FenixUserEvent::JiraTransitionsReady { request_id, transitions } => self.apply_jira_transitions_ready(request_id, transitions),
             FenixUserEvent::JiraPrioritiesReady { request_id, priorities } => self.apply_jira_priorities_ready(request_id, priorities),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
+            FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
             FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
             // Deferred rather than handled here: opening a window needs
             // an `&ActiveEventLoop`, which `handle_user_event` doesn't
@@ -22962,6 +23039,11 @@ impl App {
             self.agenda_prompt_key(keypress);
             return;
         }
+        // `SPC m n`'s sketch-name prompt.
+        if self.embedded.prompt.is_some() {
+            self.embedded_prompt_key(keypress);
+            return;
+        }
 
         // `SPC f f`/`SPC f R`/`SPC f D` -- same capturing-prompt tier as
         // everything else here.
@@ -23148,6 +23230,12 @@ impl App {
         // never reach `self.vim`, so the selection's anchor/cursor stay
         // exactly as they were until whatever command they resolve to
         // (e.g. `format_selection`) reads them.
+        if let Some(resolved) = self.local_leader_key(keypress) {
+            if let Some(id) = resolved {
+                CommandRegistry::with_builtins().run(self, event_loop, id);
+            }
+            return;
+        }
         if self.leader_matcher.is_pending()
             || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
         {
@@ -24605,6 +24693,7 @@ impl App {
                 Some(picker @ ActivePicker::AgendaDependency(_)) => ("AGENDA DEPENDENCY", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaClockIn(_)) => ("CLOCK IN", picker_len(picker)),
                 Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
+                Some(picker @ ActivePicker::Embedded(_)) => ("EMBEDDED", picker_len(picker)),
                 None => ("PICKER", 0),
             };
             // Which half of a two-step comparison you're on, spelled
@@ -24621,6 +24710,10 @@ impl App {
                 // What this pick is for ("WHAT DOES BLOCKED MEAN IN
                 // PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
                 Some(ActivePicker::WorkSync(_)) => match &self.agenda_sync.picker {
+                    Some(ctx) => format!("{}   {count} matches ", ctx.label),
+                    None => format!("{count} matches "),
+                },
+                Some(ActivePicker::Embedded(_)) => match &self.embedded.picker {
                     Some(ctx) => format!("{}   {count} matches ", ctx.label),
                     None => format!("{count} matches "),
                 },
@@ -24706,8 +24799,11 @@ impl App {
             })
             .unwrap_or_default();
         let details = self.editor_status_details();
+        // The sketch's board and port -- `refresh_embedded_indicator`
+        // keeps this current for whatever buffer is focused.
+        let embedded_indicator = self.embedded.indicator.as_deref().unwrap_or_default();
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -24745,6 +24841,7 @@ impl App {
             .or_else(|| self.jira_prompt_text())
             .or_else(|| self.agenda_confirm_text())
             .or_else(|| self.agenda_prompt_text())
+            .or_else(|| self.embedded_prompt_text())
             .or_else(|| self.mib_insert_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
@@ -25465,7 +25562,9 @@ impl App {
     /// Vim can't be mid-sequence while a leader sequence is in progress).
     /// Empty when nothing is pending.
     fn pending_hints(&self) -> Vec<(KeyPress, &'static str)> {
-        if self.leader_matcher.is_pending() {
+        if let Some(local) = &self.local_matcher {
+            local.pending_children()
+        } else if self.leader_matcher.is_pending() {
             self.leader_matcher.pending_children()
         } else {
             self.vim.pending_children()
@@ -44985,7 +45084,7 @@ configure_board stm32
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), pending: HashMap::new(),
+            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(),
         });
         key
     }

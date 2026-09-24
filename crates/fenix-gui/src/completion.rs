@@ -95,7 +95,9 @@ impl Item {
             None => String::new(),
         };
         Some(Self {
-            label: item.label.clone(),
+            // Some servers pad labels (arduino-language-server's start
+            // with a space); what's inserted comes from the edit anyway.
+            label: item.label.trim().to_string(),
             source: Source::Lsp,
             detail: item.detail.clone().unwrap_or_default(),
             documentation,
