@@ -21,7 +21,7 @@ use fenix_diff::{FileDiff, LineKind};
 use fenix_forge::{Check, PipelineStatus};
 use fenix_git::{ApplyTarget, Commit, CommitFlags, CommitKind, FileEntry, PushOptions, RepoStatus, ResetMode, Stash, StashOptions};
 
-use crate::page::{fit, frame, Grid, Key, Page, Role};
+use crate::page::{fit, frame, Grid, Key, Page, Popup, Role};
 
 /// Everything the page shows, read in one go off the UI thread.
 #[derive(Debug, Clone, Default)]
@@ -1776,13 +1776,7 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
         if i == page.cursor {
             cursor_line = Some(line_y);
             g.focus(line_y, left..left + width);
-            if let Some((end, cols)) = overlay(page, &mut g, line_y + 1, left, width) {
-                // Keep what was opened in view: the cursor goes to its
-                // last line, and the row it's about keeps a tint.
-                g.panels.push((line_y, left..left + width));
-                g.focus(end, cols);
-                y = end;
-            }
+            g.popup = overlay(page, line_y, left + 4);
         }
         y += 1;
     }
@@ -1817,90 +1811,86 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
     g.finish()
 }
 
-/// Draws the open menu, field or question under the focused row,
-/// starting at line `y`; returns its last line and the cells it spans.
-fn overlay(page: &GitStatus, g: &mut Grid, y: usize, left: usize, width: usize) -> Option<(usize, std::ops::Range<usize>)> {
+/// The open menu, field or question, as a popup beside page line
+/// `line`.
+fn overlay(page: &GitStatus, line: usize, col: usize) -> Option<Popup> {
     let menu = page.menu.as_ref().map(|state| (page.menu(state), state.typed.clone()));
-    draw_popups(g, y, left, width, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref())
+    popup(line, col, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref())
 }
 
-/// Draws a menu (with the keys typed so far), a field or a question at
-/// line `y`, under the row it's about -- shared by every Git page.
-/// Returns its last line and the cells it spans, or `None` when nothing
-/// is open.
-pub(crate) fn draw_popups(
-    g: &mut Grid,
-    y: usize,
-    left: usize,
-    width: usize,
-    menu: Option<(&Menu, &str)>,
-    input: Option<&Input>,
-    confirm: Option<&Confirm>,
-) -> Option<(usize, std::ops::Range<usize>)> {
-    let inner = left + 4;
-    let w = width.saturating_sub(4).min(76);
-    let mut y = y;
+/// A menu (with the keys typed so far), a field or a question as a
+/// popup beside page line `line`, its text lined up with column `col`
+/// -- shared by every Git page. `None` when nothing is open.
+pub(crate) fn popup(line: usize, col: usize, menu: Option<(&Menu, &str)>, input: Option<&Input>, confirm: Option<&Confirm>) -> Option<Popup> {
+    let mut rows: Vec<Vec<(String, Role)>> = Vec::new();
     if let Some((menu, typed)) = menu {
-        g.put(y, inner, &menu.title, Role::Title);
-        g.panels.push((y, inner - 1..inner + w));
-        y += 1;
+        // Wide enough for the widest row: key, label, and its detail
+        // pushed to the right edge.
+        const KEY: usize = 7;
+        let widest = menu
+            .groups
+            .iter()
+            .flat_map(|(_, items)| items)
+            .map(|item| {
+                let detail = match item.flag {
+                    Some(_) => 3,
+                    None => item.detail.chars().count(),
+                };
+                KEY + item.label.chars().count() + if detail > 0 { detail + 4 } else { 0 }
+            })
+            .chain([menu.title.chars().count()])
+            .chain(menu.groups.iter().filter_map(|(t, _)| t.as_ref().map(|t| t.chars().count())))
+            .max()
+            .unwrap_or(0);
+        let w = widest.clamp(28, 72);
+        rows.push(vec![(fit(&menu.title, w), Role::Title)]);
         for (title, items) in &menu.groups {
+            rows.push(Vec::new());
             if let Some(title) = title {
-                g.put(y, inner, &title.to_uppercase(), Role::Muted);
-                g.panels.push((y, inner - 1..inner + w));
-                y += 1;
+                rows.push(vec![(title.to_uppercase(), Role::Muted)]);
             }
             for item in items {
                 let typed = !typed.is_empty() && item.key.starts_with(typed);
-                let key_role = if item.danger { Role::Bad } else { Role::Accent };
-                g.put(y, inner, &item.key, if typed { Role::Title } else { key_role });
-                let x = g.put(y, inner + 7, &item.label, Role::Text);
-                let detail = match item.flag {
-                    Some(true) => "on".to_string(),
-                    Some(false) => "off".to_string(),
-                    None => item.detail.clone(),
+                let key_role = if typed { Role::Title } else if item.danger { Role::Bad } else { Role::Accent };
+                let mut row = vec![(format!("{:<KEY$}", item.key), key_role)];
+                let label = fit(&item.label, w.saturating_sub(KEY));
+                let used = KEY + label.chars().count();
+                row.push((label, Role::Text));
+                let (detail, role) = match item.flag {
+                    Some(true) => ("on".to_string(), Role::Good),
+                    Some(false) => ("off".to_string(), Role::Muted),
+                    None => (item.detail.clone(), Role::Muted),
                 };
-                let role = if item.flag == Some(true) { Role::Good } else { Role::Muted };
-                let room = (inner + w).saturating_sub(x + 2);
+                let room = w.saturating_sub(used + 2);
                 if !detail.is_empty() && room > 3 {
                     let d = fit(&detail, room);
-                    g.put(y, inner + w - d.chars().count(), &d, role);
+                    row.push((" ".repeat(w - used - d.chars().count()), Role::Text));
+                    row.push((d, role));
                 }
-                g.panels.push((y, inner - 1..inner + w));
-                y += 1;
+                rows.push(row);
             }
         }
-        return Some((y - 1, inner - 1..inner + w));
-    }
-    if let Some(input) = input {
-        let x = g.put(y, inner, &input.label, Role::Muted) + 1;
-        let x = g.put(y, x, "›", Role::Accent) + 1;
+    } else if let Some(input) = input {
         let field = format!("{}▏", input.text);
-        g.put(y, x, &field, Role::Text);
-        let cols = x - 1..(x + field.chars().count() + 1).max(x + 24).min(left + width);
-        g.panels.push((y, cols.clone()));
-        return Some((y, inner - 1..cols.end));
-    }
-    if let Some(confirm) = confirm {
-        g.put(y, inner, &confirm.question, Role::Warn);
-        g.panels.push((y, inner - 1..inner + w));
-        y += 1;
+        let used = input.label.chars().count() + 3 + field.chars().count();
+        rows.push(vec![(input.label.clone(), Role::Muted), (" › ".to_string(), Role::Accent), (field, Role::Text), (" ".repeat(44usize.saturating_sub(used)), Role::Text)]);
+    } else {
+        let confirm = confirm?;
+        rows.push(vec![(confirm.question.clone(), Role::Warn)]);
         for (role, line) in &confirm.detail {
-            g.put(y, inner + 2, &fit(line, w.saturating_sub(2)), *role);
-            g.panels.push((y, inner - 1..inner + w));
-            y += 1;
+            rows.push(vec![(format!("  {}", fit(line, 72)), *role)]);
         }
-        let mut x = inner;
+        rows.push(Vec::new());
+        let mut choices = Vec::new();
         for (key, label, _) in &confirm.choices {
-            x = g.put(y, x, &key.to_string(), Role::Accent) + 1;
-            x = g.put(y, x, label, Role::Text) + 3;
+            choices.push((key.to_string(), Role::Accent));
+            choices.push((format!(" {label}   "), Role::Text));
         }
-        x = g.put(y, x, "n", Role::Accent) + 1;
-        g.put(y, x, "cancel", Role::Text);
-        g.panels.push((y, inner - 1..inner + w));
-        return Some((y, inner - 1..inner + w));
+        choices.push(("n".to_string(), Role::Accent));
+        choices.push((" cancel".to_string(), Role::Text));
+        rows.push(choices);
     }
-    None
+    Some(Popup { line, col, rows })
 }
 
 #[cfg(test)]
@@ -2071,10 +2061,14 @@ mod tests {
         let mut p = page();
         goto(&mut p, Row::Section(Section::Staged));
         p.key(Key::Char('c'));
-        let text = layout(&p, 120).text;
-        assert!(text.contains("Commit · 2 files staged") && text.contains("amend"), "{text}");
+        let page = layout(&p, 120);
+        let popup = page.popup.as_ref().expect("the menu floats over the page");
+        assert!(popup.text().contains("Commit · 2 files staged") && popup.text().contains("amend"), "{}", popup.text());
+        assert!(!page.text.contains("Commit · 2 files staged"), "and isn't written into it");
+        assert_eq!(popup.line, page.focus.as_ref().unwrap().0, "beside the row it's about");
         assert_eq!(p.key(Key::Char('c')), Action::Compose(Compose::New(CommitFlags::default())));
         assert!(p.menu.is_none());
+        assert!(layout(&p, 120).popup.is_none(), "gone once it's used");
     }
 
     #[test]
@@ -2110,7 +2104,7 @@ mod tests {
         p.set_snapshot(snap);
         p.key(Key::Char('P'));
         assert_eq!(p.key(Key::Char('p')), Action::None);
-        let text = layout(&p, 120).text;
+        let text = layout(&p, 120).all_text();
         assert!(text.contains("have diverged") && text.contains("fixup! old") && text.contains("force-with-lease"), "{text}");
         let Action::Run(Job::Push(options)) = p.key(Key::Char('f')) else { panic!() };
         assert!(options.force_with_lease && !options.set_upstream);
@@ -2148,7 +2142,7 @@ mod tests {
         p.key(Key::Char('c'));
         assert!(p.typing());
         p.type_text("topic");
-        assert!(layout(&p, 120).text.contains("New branch › topic"));
+        assert!(layout(&p, 120).all_text().contains("New branch › topic"));
         assert_eq!(p.key(Key::Enter), Action::Run(Job::Branch { name: "topic".into(), start: None, switch: true }));
     }
 

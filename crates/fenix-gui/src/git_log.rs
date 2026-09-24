@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use fenix_diff::{FileDiff, LineKind};
 use fenix_git::{CommitFlags, GraphCommit, ResetMode};
 
-use crate::git_status::{count, danger, draw_popups, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose, Job, Menu};
+use crate::git_status::{count, danger, popup, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose, Job, Menu};
 use crate::graph_view::GraphSpan;
 use crate::page::{fit, frame, Grid, Key, Page, Role};
 
@@ -635,11 +635,7 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         if i == page.cursor {
             g.focus(line_y, left..left + width);
             let menu = page.menu.as_ref().map(|(kind, typed, hash)| (page.menu(*kind, hash), typed.clone()));
-            if let Some((end, cols)) = draw_popups(&mut g, y + 1, left, width, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref()) {
-                g.panels.push((line_y, left..left + width));
-                g.focus(end, cols);
-                y = end;
-            }
+            g.popup = popup(line_y, left + 4, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref());
         }
         y += 1;
     }
@@ -718,7 +714,7 @@ mod tests {
         let mut p = page();
         p.key(Key::Char('j'));
         p.key(Key::Enter);
-        let text = layout(&p, 120).text;
+        let text = layout(&p, 120).all_text();
         assert!(text.contains("fixup into this") && text.contains("revert") && !text.contains("cherry-pick"), "on this branch: no cherry-pick\n{text}");
         assert!(!text.contains("the last commit's message"), "only the last commit can be reworded");
         assert_eq!(p.key(Key::Char('v')), LogAction::Git(Action::Run(Job::Revert(hash(2)))));
@@ -727,7 +723,7 @@ mod tests {
         p.data.as_mut().unwrap().on_head.remove(&hash(2));
         p.key(Key::Char('j'));
         p.key(Key::Enter);
-        let text = layout(&p, 120).text;
+        let text = layout(&p, 120).all_text();
         assert!(text.contains("cherry-pick") && !text.contains("fixup into this"), "{text}");
         assert_eq!(p.key(Key::Char('c')), LogAction::Git(Action::Run(Job::CherryPick(hash(2)))));
     }

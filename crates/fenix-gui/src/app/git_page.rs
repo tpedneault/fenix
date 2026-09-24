@@ -659,10 +659,11 @@ mod tests {
         }
     }
 
+    /// The page's text, and its popup's when one is open.
     fn text(app: &mut App) -> String {
         let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
         app.ensure_page_layout(id, pane, 120);
-        app.open().buffer.text()
+        app.pages.get(&id).map(|s| s.page.all_text()).unwrap_or_default()
     }
 
     /// Puts the page's cursor on the first row matching `is`.

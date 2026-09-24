@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use fenix_diff::{FileDiff, LineKind};
 use fenix_forge::{Approvals, Check, Discussion, MergeOptions, MergeRequest, PipelineStatus, Verdict};
 
-use crate::git_status::{count, draw_popups, short, Menu, MenuItem};
+use crate::git_status::{count, popup, short, Menu, MenuItem};
 use crate::page::{fit, frame, wrap, Grid, Key, Page, Role};
 use crate::review_store::{fingerprint, Pending, ReviewState};
 
@@ -686,10 +686,7 @@ pub fn layout(page: &ReviewPage, cols: usize) -> Page {
         Mode::Normal => None,
     };
     if let Some(menu) = &panel {
-        if let Some((end, cols)) = draw_popups(&mut g, y + 1, left.saturating_sub(4), width + 4, Some((menu, "")), None, None) {
-            g.focus(end, cols);
-            y = end + 1;
-        }
+        g.popup = popup(y.saturating_sub(1), left, Some((menu, "")), None, None);
     }
 
     let rows = page.rows();
@@ -984,7 +981,7 @@ mod tests {
     fn submitting_takes_a_verdict_and_two_c_c() {
         let mut p = page();
         p.key(Key::Char('s'));
-        let text = layout(&p, 120).text;
+        let text = layout(&p, 120).all_text();
         assert!(text.contains("Submit your review of #1") && text.contains("2 files not viewed"), "{text}");
         p.key(Key::Char('r'));
         assert_eq!(p.key(Key::CtrlC), ReviewAction::None);

@@ -41,7 +41,7 @@ pub(super) enum PageModel {
 
 pub(super) struct PageState {
     pub(super) model: PageModel,
-    page: Page,
+    pub(super) page: Page,
     /// The pane width `page` was laid out for, and whether the model has
     /// changed since.
     cols: usize,

@@ -3508,6 +3508,54 @@ fn ease_out_cubic(t: f32) -> f32 {
 /// coordinates -- shared by the real caret rect and the completion
 /// popup's `BelowPoint` anchor, which both need to land on exactly the
 /// same spot.
+/// Where the focused page is drawn, for placing its popup.
+#[derive(Debug, Clone, Copy)]
+struct PagePopupAt {
+    buffer: BufferId,
+    pane: fenix_window::Rect,
+    /// The first page line in view, and how far into it the pane has
+    /// scrolled.
+    first_line: usize,
+    frac: f32,
+    gutter_px: f32,
+}
+
+/// A `width` x `height` popup beside page line `line`: under it with its
+/// text starting at column `col`, or over it when there's no room below
+/// `bottom` -- kept inside the pane and the window. `None` while the line
+/// is scrolled out of view.
+#[allow(clippy::too_many_arguments)]
+fn popup_beside_row(
+    at: PagePopupAt,
+    line: usize,
+    col: usize,
+    width: f32,
+    height: f32,
+    bottom: f32,
+    window_width: f32,
+    char_width: f32,
+    line_height: f32,
+) -> Option<fenix_window::Rect> {
+    let row = line.checked_sub(at.first_line)?;
+    let (x, top) = caret_pixel_pos(at.pane, row, col, at.gutter_px, at.frac, char_width, line_height);
+    if top >= bottom {
+        return None;
+    }
+    const GAP: f32 = 2.0;
+    let below = top + line_height + GAP;
+    let y = if below + height <= bottom {
+        below
+    } else if top - GAP - height >= at.pane.y {
+        top - GAP - height
+    } else {
+        // Room on neither side: as low as it fits.
+        (bottom - height).max(at.pane.y)
+    };
+    let right = (at.pane.x + at.pane.w).min(window_width);
+    let x = (x - text::PAD_LEFT).min(right - width).max(at.pane.x.max(0.0));
+    Some(fenix_window::Rect { x, y, w: width, h: height })
+}
+
 fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: f32, content_frac: f32, char_width: f32, line_height: f32) -> (f32, f32) {
     let content_x = rect.x + text::PAD_LEFT + gutter_px;
     let x = content_x + col as f32 * char_width;
@@ -26386,6 +26434,47 @@ impl App {
     /// that truncating to `COMPLETION_MAX_ROWS` is enough, matching
     /// `hover_contents_text`'s own "legible enough, not actually
     /// rendered markdown" posture).
+    /// The focused page's popup -- a Git page's menu, field or question
+    /// -- in the same box every other popup here uses: on the panel
+    /// colour, with a border and a shadow. It opens under the row it's
+    /// about with its text lined up with the page's, and over the row
+    /// instead when there isn't room below, kept inside the pane.
+    fn page_popup(&self, at: Option<PagePopupAt>, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        let at = at?;
+        let popup = self.pages.get(&at.buffer)?.page.popup.as_ref()?;
+        let (char_width, line_height) = match &self.text {
+            Some(t) => (t.char_width(), t.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+        let theme = self.theme;
+        let color = |role: crate::page::Role| match role {
+            crate::page::Role::Title | crate::page::Role::Text => theme.fg_modeline,
+            crate::page::Role::Muted => theme.gutter_fg,
+            crate::page::Role::Accent => theme.caret_text,
+            crate::page::Role::Good => theme.git_staged,
+            crate::page::Role::Warn => theme.git_modified,
+            crate::page::Role::Bad => theme.git_conflicted,
+            crate::page::Role::Kind(kind) => projects::kind_color(kind, &theme),
+        };
+        let bottom = modeline_top.min(at.pane.y + at.pane.h);
+        let shown = popup::max_rows(bottom - at.pane.y, 0.0, line_height, WHICH_KEY_PADDING).min(popup.rows.len());
+        let mut spans: RowSpans = Vec::new();
+        for (i, row) in popup.rows[..shown].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            if row.is_empty() {
+                spans.push((" ".to_string(), theme.fg_modeline, false));
+            }
+            for (piece, role) in row {
+                spans.push((piece.clone(), color(*role), false));
+            }
+        }
+        let width = (popup.cols() as f32 * char_width + 2.0 * text::PAD_LEFT).min(window_width);
+        let height = shown as f32 * line_height + WHICH_KEY_PADDING;
+        popup_beside_row(at, popup.line, popup.col, width, height, bottom, window_width, char_width, line_height).map(|rect| (rect, spans))
+    }
+
     fn hover_popup(
         &self,
         window_width: f32,
@@ -27274,6 +27363,8 @@ impl App {
         // that actually knows each pane's real current on-screen pixel
         // size.
         let mut pdf_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        // Where the focused page is scrolled to, for its popup.
+        let mut page_popup_at: Option<PagePopupAt> = None;
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -27686,6 +27777,9 @@ impl App {
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
             let gutter_px = gutter_chars as f32 * char_width;
+            if is_page && is_focused {
+                page_popup_at = Some(PagePopupAt { buffer: buffer_id, pane: rect, first_line: render_base_line, frac: render_frac, gutter_px });
+            }
             // Home's layout is already centred; an empty pad list just
             // keeps `~` off the rows past its last line.
             let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
@@ -28047,6 +28141,7 @@ impl App {
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
+        let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         let caret_alpha = self.caret_alpha();
 
         let (
@@ -28266,6 +28361,11 @@ impl App {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::Prompt, rect.w, &refs);
             popup_rects.push((popup::PopupId::Prompt, *rect));
+        }
+        if let Some((rect, spans)) = &page_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::Page, rect.w, &refs);
+            popup_rects.push((popup::PopupId::Page, *rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
@@ -36311,6 +36411,24 @@ configure_board stm32
 
         app.new_workspace();
         assert!(app.modeline_text().contains("[2/2 workspace-2]"));
+    }
+
+    #[test]
+    fn a_page_popup_opens_under_its_row_or_over_it_near_the_bottom_and_stays_in_the_pane() {
+        let pane = fenix_window::Rect { x: 100.0, y: 50.0, w: 600.0, h: 400.0 };
+        let at = PagePopupAt { buffer: App::with_file(None).focused_buffer_id(), pane, first_line: 10, frac: 0.0, gutter_px: 0.0 };
+        let (cw, lh) = (8.0, 20.0);
+        // Line 12 is the third row: its top at 50 + 4 + 40.
+        let r = popup_beside_row(at, 12, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        assert_eq!((r.x, r.y), (100.0 + 4.0 * cw, 94.0 + lh + 2.0), "under the row, text lined up with column 4");
+        // Line 28 sits near the bottom: the popup goes over it instead.
+        let r = popup_beside_row(at, 28, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        let top = 54.0 + 18.0 * lh;
+        assert_eq!(r.y, top - 2.0 - 100.0);
+        // A wide one far right is kept inside the pane.
+        let r = popup_beside_row(at, 12, 70, 300.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        assert_eq!(r.x + r.w, 700.0);
+        assert!(popup_beside_row(at, 5, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).is_none(), "scrolled out of view above");
     }
 
     #[test]
