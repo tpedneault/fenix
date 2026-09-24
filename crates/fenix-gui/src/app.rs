@@ -14,6 +14,7 @@ mod pages;
 mod git_page;
 mod git_editor;
 mod git_log_page;
+mod git_rebase_page;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -642,6 +643,8 @@ enum ComposePurpose {
     /// A commit, amend or reword from the Git status page -- the mode
     /// and flags its commit menu chose.
     GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
+    /// A reword's new message, for the rebase page `page`.
+    RebaseMessage { page: BufferId, hash: String },
     /// An agenda task's description (`E`), seeded with the current one --
     /// saved locally and, on a linked task, sent to Jira.
     TaskDescription { task: TaskId },
@@ -672,6 +675,7 @@ impl ComposePurpose {
                 crate::git_status::Compose::Amend(_) => ("Amend the last commit".to_string(), "amend"),
                 crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
             },
+            ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
             ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
             ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
             ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
@@ -17673,6 +17677,11 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
+        if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
+            self.git_rebase_message(*page, hash.clone(), body);
+            self.wake_caret();
+            return;
+        }
         if let ComposePurpose::GitCommit { repo_root, compose } = &purpose {
             self.git_page_commit(repo_root.clone(), compose.clone(), body);
             self.wake_caret();
@@ -17716,6 +17725,7 @@ impl App {
             }
             ComposePurpose::CommitMessage { .. }
             | ComposePurpose::GitCommit { .. }
+            | ComposePurpose::RebaseMessage { .. }
             | ComposePurpose::TaskDescription { .. }
             | ComposePurpose::TaskComment { .. }
             | ComposePurpose::IssueDescription { .. }

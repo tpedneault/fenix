@@ -190,6 +190,11 @@ pub fn resolve_base(repo: &Path, configured: Option<&str>) -> Option<String> {
     None
 }
 
+/// Where `a` and `b` last shared history.
+pub fn merge_base(repo: &Path, a: &str, b: &str) -> Option<String> {
+    run_lines(repo, &["merge-base", a, b]).into_iter().next()
+}
+
 /// Whether `commit` is already contained in `rev` (an upstream, say).
 pub fn contains(repo: &Path, rev: &str, commit: &str) -> bool {
     crate::process::run_status(repo, &["merge-base", "--is-ancestor", commit, rev])

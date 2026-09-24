@@ -51,8 +51,18 @@ pub(crate) fn run_lines(repo: &Path, args: &[&str]) -> Vec<String> {
 /// buffer, show as an error, etc.). Same shape as `fenix-docker::process::
 /// run_action`.
 pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String> {
+    run_action_env(repo, args, &[])
+}
+
+/// `run_action` with some environment variables set over the defaults --
+/// an interactive rebase's own `GIT_SEQUENCE_EDITOR`, say.
+pub(crate) fn run_action_env(repo: &Path, args: &[String], env: &[(&str, &str)]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match git_command(repo, &args).output() {
+    let mut command = git_command(repo, &args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    match command.output() {
         Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(err) => Err(format!("couldn't run git: {err}")),

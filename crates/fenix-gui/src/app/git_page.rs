@@ -172,7 +172,7 @@ pub(super) fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
         // Undoing a commit gives its changes back, staged.
         Job::Commit(..) | Job::FixupNow { .. } | Job::Reset { mode: ResetMode::Soft | ResetMode::Mixed, .. } => fixed(Undo::Reset { to: head, soft: true, saved: None }),
         Job::Reset { mode: ResetMode::Hard, .. } => fixed(Undo::Reset { to: head, soft: false, saved: oplog::save_changes(root) }),
-        Job::Pull { .. } | Job::Revert(_) | Job::CherryPick(_) => fixed(Undo::Reset { to: head, soft: false, saved: None }),
+        Job::Pull { .. } | Job::Revert(_) | Job::CherryPick(_) | Job::RebasePlan { .. } => fixed(Undo::Reset { to: head, soft: false, saved: None }),
         Job::Checkout(_) => fixed(match branch {
             Some(branch) => Undo::Switch(branch),
             None => Undo::Reset { to: head, soft: false, saved: None },
@@ -265,6 +265,7 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         },
         Job::Skip => fenix_git::rebase_skip(root),
         Job::Undo { time, .. } => run_undo(root, *time),
+        Job::RebasePlan { base, plan } => fenix_git::rebase_interactive(root, base.as_deref(), plan),
     }
 }
 
@@ -429,6 +430,7 @@ impl App {
                     send(PageEvent::GitConfirm { buffer: id, confirm });
                 });
             }
+            Action::Rebase(from) => self.open_rebase(from),
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
                 let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };

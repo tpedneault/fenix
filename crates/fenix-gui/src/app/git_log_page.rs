@@ -209,6 +209,7 @@ impl App {
                 let buffer = self.buffers.open_text_view(&text);
                 self.open_buffer_in_focused_pane(buffer);
             }
+            LogAction::Git(Action::Rebase(from)) => self.open_rebase(from),
             LogAction::Git(_) => {}
         }
     }

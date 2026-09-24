@@ -13,6 +13,7 @@ mod docker_panel;
 mod forge_panel;
 mod git_panel;
 mod git_log;
+mod git_rebase;
 mod git_status;
 mod graph_view;
 mod gpu;

@@ -560,7 +560,19 @@ for anyone curious to poke around or build on it.
   on a commit is its menu -- fix it up with what's staged, reword the
   last one, revert, cherry-pick one from another branch, check it out,
   branch or tag there, reset to it -- each logged, so `U` on the Git
-  page takes it back. The graph view with its refs tree is `SPC g G`. `[git] layout = panes` keeps the older
+  page takes it back. The graph view with its refs tree is `SPC g G`.
+- **Interactive rebase** (`r i` on the Git page, from the upstream or
+  base; `i` on a commit in the Log page, from that commit): the commits
+  it would replay, newest first, with one key per verb -- `p` pick, `r`
+  reword (the message is written in the compose buffer), `e` edit, `s`
+  squash, `f` fixup, `d` drop -- and `J`/`K` to move one. `fixup!` and
+  `squash!` commits start out next to the commit they name. Below the
+  list, the branch as it will be: which commits survive, what folds into
+  them, what's dropped, and a warning when some are already pushed.
+  Nothing runs until `C-c C-c`; Fenix writes the todo list itself and
+  git does the rest, and a stop for `edit` or a conflict hands over to
+  the Git page's banner (`r c` / `r a`). The whole rebase is one entry
+  in the operation log -- `U` takes it back. `[git] layout = panes` keeps the older
   panel below.
 - **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on

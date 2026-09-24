@@ -199,6 +199,8 @@ pub enum Job {
     Skip,
     /// Take back the logged operation of this time.
     Undo { time: u64, label: String },
+    /// An interactive rebase onto `base` (the root when `None`).
+    RebasePlan { base: Option<String>, plan: Vec<fenix_git::Planned> },
 }
 
 impl Job {
@@ -235,6 +237,7 @@ impl Job {
             Job::Abort => "abort".to_string(),
             Job::Skip => "skip".to_string(),
             Job::Undo { label, .. } => format!("undo {label}"),
+            Job::RebasePlan { plan, .. } => format!("rebase {}", count(plan.len(), "commit")),
         }
     }
 
@@ -288,6 +291,9 @@ pub enum Action {
     /// Work out what undoing an operation would do -- the latest that
     /// can be, or the one of this time -- and ask.
     PlanUndo(Option<u64>),
+    /// Open the interactive rebase page: from this commit on, or (with
+    /// `None`) everything not on the upstream or base yet.
+    Rebase(Option<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1006,7 +1012,11 @@ impl GitStatus {
                 let suspended = self.snap.as_ref().and_then(|s| s.in_progress.clone());
                 let items = match &suspended {
                     Some(_) => vec![verb("c", "continue", "after resolving"), verb("s", "skip", "this commit"), danger(verb("a", "abort", "back to before")), verb("x", "resolve conflicts", "the merge view")],
-                    None => vec![verb("o", "onto…", "pick a ref"), verb("x", "resolve conflicts", "the merge view")],
+                    None => vec![
+                        verb("i", "interactively…", "reorder, reword, squash, drop"),
+                        verb("o", "onto…", "pick a ref"),
+                        verb("x", "resolve conflicts", "the merge view"),
+                    ],
                 };
                 Menu { title: suspended.unwrap_or_else(|| "Rebase".to_string()), groups: vec![(None, items)] }
             }
@@ -1225,6 +1235,7 @@ impl GitStatus {
                 })
             }
             (MenuKind::Rebase, "x") => return Action::OpenMergeView,
+            (MenuKind::Rebase, "i") => return Action::Rebase(None),
             (MenuKind::CommitRow, "w") => {
                 let head = self.snap.as_ref().and_then(|s| s.recent.first()).is_some_and(|c| c.hash == target);
                 if !head {

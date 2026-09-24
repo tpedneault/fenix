@@ -408,6 +408,7 @@ impl GitLog {
                 items.push(verb("b", "branch here…", ""));
                 items.push(verb("t", "tag here…", ""));
                 if on_head {
+                    items.push(verb("i", "rebase from here…", "reorder, reword, squash, drop"));
                     items.push(danger(verb("r", "reset to here…", "soft / mixed / hard")));
                 }
                 items.push(verb("y", "copy hash", ""));
@@ -476,6 +477,7 @@ impl GitLog {
                 none
             }
             (MenuKind::Commit, 'y') => LogAction::Git(Action::Copy(hash)),
+            (MenuKind::Commit, 'i') => LogAction::Git(Action::Rebase(Some(hash))),
             (MenuKind::Reset, 's') => run(Job::Reset { target: hash, mode: ResetMode::Soft }),
             (MenuKind::Reset, 'm') => run(Job::Reset { target: hash, mode: ResetMode::Mixed }),
             (MenuKind::Reset, 'h') => {
@@ -718,7 +720,7 @@ mod tests {
         p.key(Key::Enter);
         let text = layout(&p, 120).text;
         assert!(text.contains("fixup into this") && text.contains("revert") && !text.contains("cherry-pick"), "on this branch: no cherry-pick\n{text}");
-        assert!(!text.contains("reword"), "only the last commit can be reworded");
+        assert!(!text.contains("the last commit's message"), "only the last commit can be reworded");
         assert_eq!(p.key(Key::Char('v')), LogAction::Git(Action::Run(Job::Revert(hash(2)))));
         // A commit from elsewhere can be cherry-picked, not fixed up.
         let mut p = page();

@@ -10,6 +10,7 @@
 use super::projects::kind_color;
 use super::*;
 use crate::git_log::{self, GitLog};
+use crate::git_rebase::{self, RebasePage};
 use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
@@ -29,6 +30,7 @@ pub(super) enum PageModel {
     Settings(Settings),
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
+    Rebase(Box<RebasePage>),
 }
 
 pub(super) struct PageState {
@@ -59,6 +61,7 @@ impl PageState {
             PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
+            PageModel::Rebase(_) => false,
         }
     }
 
@@ -83,6 +86,7 @@ impl PageState {
             PageModel::Doctor(_) => {}
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
+            PageModel::Rebase(_) => {}
         }
         self.stale = true;
     }
@@ -217,6 +221,7 @@ impl App {
             Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
         }
     }
 
@@ -315,6 +320,7 @@ impl App {
             PageModel::Settings(s) => project_settings::layout(s, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
+            PageModel::Rebase(r) => git_rebase::layout(r, cols),
         };
         state.cols = cols;
         state.stale = false;
@@ -398,6 +404,10 @@ impl App {
                 let action = l.key(key);
                 self.git_log_action(id, action);
             }
+            PageModel::Rebase(r) => {
+                let action = r.key(key);
+                self.git_rebase_action(id, action);
+            }
         }
         self.wake_caret();
         true
@@ -407,6 +417,9 @@ impl App {
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
             PageEvent::GitDone { buffer, .. } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Log(_))) => self.apply_git_log_event(event),
+            PageEvent::GitDone { buffer, label, result } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Rebase(_))) => {
+                self.apply_git_rebase_done(buffer, label, result)
+            }
             event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
                 self.apply_git_page_event(event)
             }
