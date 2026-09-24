@@ -1,5 +1,6 @@
 mod actions;
 mod apply;
+mod blame;
 mod branch;
 mod commit;
 mod conflict;
@@ -25,6 +26,7 @@ pub use actions::{
     unstage_all, unstage_file, ResetMode,
 };
 pub use apply::{apply_patch, ApplyTarget};
+pub use blame::{blame, branch_ages, branches_by_recency, BlameLine};
 pub use branch::{list_branches, list_remote_branches, list_tags, Branch};
 pub use commit::{commit_meta, commits_between, list_commits, Commit, CommitMeta};
 pub use conflict::{find_conflicts, resolve_conflict, Conflict, Resolution};

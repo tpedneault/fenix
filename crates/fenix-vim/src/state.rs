@@ -161,6 +161,8 @@ pub enum VimEvent {
 pub enum BracketTarget {
     /// `]t`/`[t`: a TODO/FIXME/NOTE-style comment keyword.
     Todo,
+    /// `]h`/`[h`: a changed hunk, from the git gutter.
+    Hunk,
 }
 
 /// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::

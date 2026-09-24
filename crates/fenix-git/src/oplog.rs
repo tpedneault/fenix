@@ -40,8 +40,12 @@ pub enum Undo {
     /// Put a dropped stash commit back on the list.
     StoreStash { commit: String, message: String },
     /// Bring back discarded changes: tracked ones from a `stash create`
-    /// commit, untracked files from their blobs.
+    /// commit, and whole files from their blobs.
     Restore { saved: Option<String>, files: Vec<(String, String)> },
+    /// Put back lines a hunk or line discard took out: the patch that was
+    /// reversed, saved as a blob, applied forward again -- so other edits
+    /// to the same file since don't get in the way.
+    ApplyPatch(String),
     /// Nothing to undo locally, and why.
     Not(String),
 }
@@ -90,6 +94,7 @@ impl Undo {
                 }
                 v
             }
+            Undo::ApplyPatch(blob) => vec!["apply-patch".into(), blob.clone()],
             Undo::Not(why) => vec!["not".into(), why.clone()],
         };
         parts.iter().map(|p| clean(p)).collect::<Vec<_>>().join(&SUB.to_string())
@@ -110,6 +115,7 @@ impl Undo {
             "pop-stash" => Undo::PopStash(arg(1)?),
             "store-stash" => Undo::StoreStash { commit: arg(1)?, message: arg(2).unwrap_or_default() },
             "restore" => Undo::Restore { saved: opt(1), files: parts[2..].chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].to_string(), c[1].to_string())).collect() },
+            "apply-patch" => Undo::ApplyPatch(arg(1)?),
             "not" => Undo::Not(arg(1).unwrap_or_default()),
             _ => return None,
         })
@@ -175,6 +181,11 @@ pub fn save_changes(repo: &Path) -> Option<String> {
 /// An untracked file's content saved as a blob.
 pub fn save_file(repo: &Path, path: &str) -> Option<String> {
     run_lines(repo, &["hash-object", "-w", "--", path]).into_iter().next()
+}
+
+/// A patch saved as a blob, for `Undo::ApplyPatch`.
+pub fn save_patch(repo: &Path, patch: &str) -> Option<String> {
+    crate::process::run_action_stdin(repo, &["hash-object".into(), "-w".into(), "--stdin".into()], patch).ok().map(|out| out.trim().to_string()).filter(|h| !h.is_empty())
 }
 
 /// Appends `entry` to the log.
@@ -265,6 +276,7 @@ pub fn preview(repo: &Path, undo: &Undo) -> Vec<String> {
                 out.push(format!("+ bring back {path}"));
             }
         }
+        Undo::ApplyPatch(_) => out.push("+ put the discarded lines back".to_string()),
         Undo::Not(why) => out.push(why.clone()),
     }
     out
@@ -319,6 +331,10 @@ pub fn apply(repo: &Path, undo: &Undo) -> Result<String, String> {
                 std::fs::write(&target, content).map_err(|e| format!("{path}: {e}"))?;
             }
             Ok(out)
+        }
+        Undo::ApplyPatch(blob) => {
+            let patch = String::from_utf8(run_action_bytes(repo, blob)?).map_err(|e| e.to_string())?;
+            crate::process::run_action_stdin(repo, &s(&["apply", "--whitespace=nowarn", "-"]), &patch)
         }
         Undo::Not(why) => Err(why.clone()),
     }

@@ -152,6 +152,12 @@ impl CommandRegistry {
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
+        registry.register("git.hunk_stage", "Stage the changed hunk under the cursor", cmd_git_hunk_stage);
+        registry.register("git.hunk_discard", "Discard the changed hunk under the cursor", cmd_git_hunk_discard);
+        registry.register("git.hunk_preview", "Show the changed hunk under the cursor", cmd_git_hunk_preview);
+        registry.register("git.switch", "Switch branch, most recently used first", cmd_git_switch);
+        registry.register("git.blame", "Show or hide who last changed each line", cmd_git_blame);
+        registry.register("git.blame_explain", "Show the commit that last changed this line", cmd_git_blame_explain);
         registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
         registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
         registry.register("git.continue", "Continue the suspended rebase/merge", cmd_git_continue);
@@ -998,6 +1004,30 @@ fn cmd_git_history_close(ctx: &mut CommandCtx) {
 
 fn cmd_git_fetch(ctx: &mut CommandCtx) {
     ctx.app.git_fetch();
+}
+
+fn cmd_git_hunk_stage(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_stage();
+}
+
+fn cmd_git_hunk_discard(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_discard_prompt();
+}
+
+fn cmd_git_hunk_preview(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_preview();
+}
+
+fn cmd_git_switch(ctx: &mut CommandCtx) {
+    ctx.app.start_switch_picker();
+}
+
+fn cmd_git_blame(ctx: &mut CommandCtx) {
+    ctx.app.git_blame_toggle();
+}
+
+fn cmd_git_blame_explain(ctx: &mut CommandCtx) {
+    ctx.app.git_blame_explain();
 }
 
 fn cmd_git_operations(ctx: &mut CommandCtx) {

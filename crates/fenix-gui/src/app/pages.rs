@@ -97,6 +97,8 @@ pub enum PageEvent {
     GitDone { buffer: BufferId, label: String, result: Result<String, String> },
     /// A question for the page to ask -- an undo's preview.
     GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
+    /// A file's blame, read off the UI thread.
+    Blame { path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -394,6 +396,7 @@ impl App {
             event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
                 self.apply_git_page_event(event)
             }
+            PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
                 state.stale = true;

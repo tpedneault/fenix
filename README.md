@@ -538,7 +538,19 @@ for anyone curious to poke around or build on it.
   undo redoes it. The log lives in the repository's own git dir
   (`.git/fenix/oplog`, never committed); `SPC g z` opens the page on
   its Operations section, where `U` on any entry undoes that one. A
-  push can't be taken back, and says so. `[git] layout = panes` keeps the older
+  push can't be taken back, and says so.
+- **Git in the file you're editing**: `]h`/`[h` move between the
+  changed hunks the gutter marks, `SPC g a` stages the one under the
+  cursor, `SPC g d` discards it (asking first; `U` brings it back), and
+  `SPC g i` shows it in a popup. `SPC g B` puts blame beside the text --
+  commit, author and age on the first line of each run from one commit,
+  coloured by how recent the change is -- read from the buffer as it
+  stands, so unsaved lines read "not committed yet" and it follows your
+  edits; `SPC g e` shows the full commit behind the cursor's line.
+  `SPC g w` switches branch, the one you left most recently first (from
+  the reflog), with ahead/behind and age; a remote-only branch becomes a
+  local one tracking it. When local changes are in the way it offers to
+  stash them, and they come back when you switch back to that branch. `[git] layout = panes` keeps the older
   panel below.
 - **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
@@ -1194,6 +1206,10 @@ popup shows what keys continue it.
 | `SPC g f` | Fetch all remotes and prune deleted branches |
 | `SPC g c` | Compare two refs (pick base, then head) |
 | `SPC g z` | The operation log -- undo what Fenix ran on the repository |
+| `]h` / `[h` | Next / previous changed hunk in the file |
+| `SPC g a` / `SPC g d` / `SPC g i` | Stage / discard / preview the hunk under the cursor |
+| `SPC g w` | Switch branch, most recently used first |
+| `SPC g B` / `SPC g e` | Blame beside the text / the commit behind this line |
 | `SPC g C` | Close the Compare view |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
 | `SPC g p` / `SPC g F` | Pull with `--rebase` / push `--force-with-lease` |

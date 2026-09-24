@@ -12,6 +12,7 @@ mod xml;
 mod projects;
 mod pages;
 mod git_page;
+mod git_editor;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -1909,6 +1910,11 @@ enum GitConfirmAction {
     /// `--force-with-lease`, but still confirmed: it changes history
     /// someone else may already have.
     ForcePush,
+    /// Throw away the hunk under the cursor in a file buffer (`SPC g d`),
+    /// by the file line it covers.
+    DiscardEditorHunk { buffer: BufferId, line: usize },
+    /// Local changes stop a branch switch: stash them, then switch.
+    SwitchWithStash { branch: String },
     /// Throw away one hunk of the working tree (`d` in the diff pane).
     /// Carries the buffer and anchor rather than a rebuilt patch so the
     /// patch is regenerated from the model at confirm time -- one less
@@ -6349,6 +6355,11 @@ pub struct App {
     /// not any particular view of it, same reasoning `BufferList`'s own
     /// dirty-tracking is buffer-scoped rather than per-pane.
     gutter_hunks: HashMap<BufferId, Vec<GutterMark>>,
+    /// The diff each buffer's gutter marks came from, with its
+    /// repository's root -- what `]h`, `SPC g a`/`d`/`i` act on.
+    gutter_diffs: HashMap<BufferId, (PathBuf, fenix_diff::FileDiff)>,
+    /// Blame shown beside a file (`SPC g B`), by path.
+    blames: HashMap<PathBuf, git_editor::Blame>,
     /// Collapsed structural scope headers, keyed by buffer. The rendered
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
@@ -7443,6 +7454,8 @@ impl App {
             docker_menu_open: false,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
+            gutter_diffs: HashMap::new(),
+            blames: HashMap::new(),
             code_folds: HashMap::new(),
             docker_session: None,
             task_session: None,
@@ -8101,16 +8114,18 @@ impl App {
     /// already no-op there.
     fn refresh_gutter_hunks(&mut self, buffer_id: BufferId) {
         match self.compute_gutter_hunks(buffer_id) {
-            Some(marks) if !marks.is_empty() => {
-                self.gutter_hunks.insert(buffer_id, marks);
+            Some((root, file)) if !file.hunks.is_empty() => {
+                self.gutter_hunks.insert(buffer_id, gutter_marks_from_hunks(&file.hunks));
+                self.gutter_diffs.insert(buffer_id, (root, file));
             }
             _ => {
                 self.gutter_hunks.remove(&buffer_id);
+                self.gutter_diffs.remove(&buffer_id);
             }
         }
     }
 
-    fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<Vec<GutterMark>> {
+    fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<(PathBuf, fenix_diff::FileDiff)> {
         let path = self.buffers.get(buffer_id)?.buffer.path()?.to_path_buf();
         // Resolved from `path` itself, not `self.project_root` -- that
         // field tracks a single global "current project" derived from
@@ -8120,10 +8135,14 @@ impl App {
         // `None` while one of those is focused). Every open buffer's own
         // gutter marks need its own file's real repo root, independent of
         // what else happens to be focused when this runs.
-        let repo_root = fenix_project::find_project_root(&path)?;
-        let diff_text = fenix_git::file_diff(&repo_root, &path.to_string_lossy(), false).ok()?;
+        // The repository's own root, not the project's: a patch built
+        // from this diff names paths from the top of the repository,
+        // which is where `git apply` has to run.
+        let repo_root = git_editor::repository_of(&path)?;
+        let absolute = std::fs::canonicalize(&path).unwrap_or(path);
+        let diff_text = fenix_git::file_diff(&repo_root, &absolute.to_string_lossy(), false).ok()?;
         let file = fenix_diff::parse(&diff_text).into_iter().next()?;
-        Some(gutter_marks_from_hunks(&file.hunks))
+        Some((repo_root, file))
     }
 
     /// `refresh_gutter_hunks` for every currently open buffer -- restoring
@@ -18726,6 +18745,10 @@ impl App {
     fn git_confirm_text(&self) -> Option<String> {
         let action = self.git_confirm.as_ref()?;
         Some(match action {
+            GitConfirmAction::DiscardEditorHunk { .. } => "Discard this hunk? It goes back to what's staged -- U on the Git page undoes it (y/n)".to_string(),
+            GitConfirmAction::SwitchWithStash { branch } => {
+                format!("Your changes would be overwritten by switching to {branch} -- stash them and switch? They come back when you return (y/n)")
+            }
             GitConfirmAction::DiscardFile { path, .. } => format!("Discard changes to {path}? (y/n)"),
             GitConfirmAction::DiscardDir { path } => format!("Discard all changes under {path}/? (y/n)"),
             GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
@@ -18747,6 +18770,24 @@ impl App {
     /// it, anything else cancels. Mirrors `docker_confirm_key`.
     fn git_confirm_key(&mut self, keypress: KeyPress) {
         let action = self.git_confirm.take();
+        match (keypress.code == KeyCode::Char('y'), action) {
+            (true, Some(GitConfirmAction::DiscardEditorHunk { buffer, line })) => {
+                self.git_hunk_discard(buffer, line);
+                self.wake_caret();
+                return;
+            }
+            (true, Some(GitConfirmAction::SwitchWithStash { branch })) => {
+                self.git_switch_stashing(&branch);
+                self.wake_caret();
+                return;
+            }
+            (_, Some(GitConfirmAction::DiscardEditorHunk { .. } | GitConfirmAction::SwitchWithStash { .. })) => {
+                self.wake_caret();
+                return;
+            }
+            (_, action) => self.git_confirm = action,
+        }
+        let action = self.git_confirm.take();
         if keypress.code == KeyCode::Char('y') {
             if let (Some(action), Some(session)) = (action, self.git_session.as_ref()) {
                 let repo_root = session.repo_root.clone();
@@ -18760,6 +18801,7 @@ impl App {
                         || Err("that hunk is no longer in the diff".to_string()),
                         |patch| fenix_git::apply_patch(&repo_root, &patch, fenix_git::ApplyTarget::Discard),
                     ),
+                    GitConfirmAction::DiscardEditorHunk { .. } | GitConfirmAction::SwitchWithStash { .. } => unreachable!("handled above"),
                 };
                 if let Err(err) = result {
                     self.set_error(format!("git action failed: {err}"));
@@ -24431,6 +24473,7 @@ impl App {
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -25241,8 +25284,7 @@ impl App {
     /// buffer) so a split's every visible pane gets a gutter sized to
     /// *its own* buffer's line count, not just the focused one's.
     fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
-        if self.line_number_mode == LineNumberMode::Off
-            || ob.kind == BufferKind::Dashboard
+        if ob.kind == BufferKind::Dashboard
             || ob.kind == BufferKind::Explorer
             || ob.kind == BufferKind::Docker
             || ob.kind == BufferKind::Git
@@ -25274,7 +25316,11 @@ impl App {
         {
             return 0;
         }
-        ob.buffer.visual_line_count().max(1).to_string().len() + 1
+        let blame = self.blame_width(ob);
+        if self.line_number_mode == LineNumberMode::Off {
+            return blame;
+        }
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame
     }
 
     /// Rich-text spans for one pane's content area covering `rows` screen
@@ -25347,17 +25393,24 @@ impl App {
                     spans.push((" ".repeat(n), theme.fg));
                 }
             } else if gutter_chars > 0 {
-                let gutter = if has_line {
-                    let n = match self.line_number_mode {
-                        LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
-                        _ => buffer_line + 1,
+                let blame = self.blame_width(ob);
+                if blame > 0 {
+                    spans.push(self.blame_cell(ob, buffer_line, blame));
+                }
+                let numbers = gutter_chars - blame;
+                if numbers > 0 {
+                    let gutter = if has_line {
+                        let n = match self.line_number_mode {
+                            LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
+                            _ => buffer_line + 1,
+                        };
+                        format!("{:>width$} ", n, width = numbers - 1)
+                    } else {
+                        format!("{:<width$}", "~", width = numbers)
                     };
-                    format!("{:>width$} ", n, width = gutter_chars - 1)
-                } else {
-                    format!("{:<width$}", "~", width = gutter_chars)
-                };
-                let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
-                spans.push((gutter, color));
+                    let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
+                    spans.push((gutter, color));
+                }
             } else if !has_line {
                 spans.push(("~".to_string(), theme.gutter_fg));
             }
@@ -29269,6 +29322,7 @@ impl App {
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             _ => {}
         }
         self.after_vim_key(kp);

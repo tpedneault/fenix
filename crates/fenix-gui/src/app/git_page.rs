@@ -154,11 +154,20 @@ fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
     let fixed = |undo: Undo| -> UndoFor { Box::new(move |_| undo) };
     let undo: UndoFor = match job {
         Job::Stage(_) | Job::Unstage(_) | Job::Apply { target: ApplyTarget::Stage | ApplyTarget::Unstage, .. } => not("stage or unstage it back (s / S)"),
-        Job::Apply { target: ApplyTarget::Discard, .. } => fixed(Undo::Restore { saved: oplog::save_changes(root), files: Vec::new() }),
+        Job::Apply { patch, target: ApplyTarget::Discard, .. } => fixed(match oplog::save_patch(root, patch) {
+            Some(blob) => Undo::ApplyPatch(blob),
+            None => Undo::Not("the discarded lines couldn't be saved".to_string()),
+        }),
+        // Each file as it stands, so bringing it back doesn't depend on
+        // what else has changed since. A folder (an untracked one) can't
+        // be saved this way, and is said to be gone for good.
         Job::Discard(files) => {
-            let saved = files.iter().any(|f| !f.1).then(|| oplog::save_changes(root)).flatten();
-            let blobs = files.iter().filter(|f| f.1).filter_map(|(p, _)| oplog::save_file(root, p).map(|b| (p.clone(), b))).collect();
-            fixed(Undo::Restore { saved, files: blobs })
+            let blobs: Vec<(String, String)> = files.iter().filter_map(|(p, _)| oplog::save_file(root, p).map(|b| (p.clone(), b))).collect();
+            if blobs.is_empty() {
+                not("a folder can't be saved before it's deleted")
+            } else {
+                fixed(Undo::Restore { saved: None, files: blobs })
+            }
         }
         // Undoing a commit gives its changes back, staged.
         Job::Commit(..) | Job::FixupNow { .. } | Job::Reset { mode: ResetMode::Soft | ResetMode::Mixed, .. } => fixed(Undo::Reset { to: head, soft: true, saved: None }),
@@ -344,6 +353,9 @@ impl App {
     /// or on the disk poll's tick, when only the visible ones that
     /// aren't already reading or running something are.
     pub(super) fn refresh_git_pages(&mut self, timed: bool) {
+        if timed {
+            self.refresh_stale_blames();
+        }
         let visible: Vec<BufferId> = self.windows().windows().iter().filter_map(|p| self.windows().content(*p).copied()).collect();
         let ids: Vec<BufferId> = self
             .pages
@@ -433,42 +445,6 @@ impl App {
             let result = run_logged(&root, &job);
             send(PageEvent::GitDone { buffer: id, label, result });
         });
-    }
-
-    /// `b b` on the status page: switch to a branch you pick.
-    pub(crate) fn start_switch_picker(&mut self) {
-        let root = self.git_action_repo_root();
-        let local = fenix_git::list_branches(&root);
-        let mut names: Vec<String> = local.iter().filter(|b| !b.current).map(|b| b.name.clone()).collect();
-        for remote in fenix_git::list_remote_branches(&root) {
-            let short = remote.split_once('/').map(|(_, b)| b.to_string()).unwrap_or_default();
-            if short != "HEAD" && !short.is_empty() && !local.iter().any(|b| b.name == short) {
-                names.push(remote);
-            }
-        }
-        if names.is_empty() {
-            self.set_error("no other branch to switch to".to_string());
-            return;
-        }
-        let candidates = names.into_iter().map(|n| fenix_picker::Candidate::new(n.clone(), n)).collect();
-        self.enter_picker(ActivePicker::SwitchBranch(fenix_picker::PickerState::new(candidates)));
-    }
-
-    /// Switches to `branch`; a remote branch (`origin/x`) becomes a local
-    /// `x` tracking it.
-    pub(crate) fn git_switch_to(&mut self, branch: &str) {
-        let root = self.git_action_repo_root();
-        let remotes = fenix_git::remotes(&root);
-        let local = match branch.split_once('/') {
-            Some((remote, rest)) if remotes.iter().any(|r| r == remote) => rest,
-            _ => branch,
-        };
-        let back = oplog::current_branch(&root);
-        let result = oplog::logged(&root, &format!("switch to {local}"), || fenix_git::checkout_branch(&root, local), move |_| match back {
-            Some(branch) => Undo::Switch(branch),
-            None => Undo::Not("HEAD was detached".to_string()),
-        });
-        self.run_git_operation(&format!("switch to {local}"), result);
     }
 
     /// A message written in the compose buffer, committed the way the

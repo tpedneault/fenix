@@ -319,6 +319,14 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('C')], "close compare", "git.compare_close");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
+        // The hunk under the cursor, in the file being edited -- `]h`/`[h`
+        // move between them.
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('a')], "stage hunk", "git.hunk_stage");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('d')], "discard hunk", "git.hunk_discard");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('i')], "preview hunk", "git.hunk_preview");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('B')], "blame", "git.blame");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('e')], "explain this line", "git.blame_explain");
 
         // Operations that rewrite history, and the two keys that end one
         // that stopped for a conflict. `R`/`A` are deliberately one pair
