@@ -749,6 +749,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-github"
+version = "0.0.1"
+dependencies = [
+ "fenix-diff",
+ "fenix-forge",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "fenix-gitlab"
 version = "0.0.1"
 dependencies = [

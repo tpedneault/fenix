@@ -21,7 +21,7 @@
 pub mod parse;
 pub mod remote;
 
-use fenix_forge::{Approvals, ChangedFile, Discussion, Forge, MergeOptions, MergeRequest, MrFilter, Position};
+use fenix_forge::{Approvals, ChangedFile, Check, DraftComment, Discussion, Forge, MergeOptions, MergeRequest, MrFilter, NewRequest, Position, Verdict};
 use serde_json::Value;
 
 /// How many merge requests one listing asks for. Past this the pane
@@ -90,6 +90,28 @@ impl GitLab {
             .map_err(|err| describe_error(&err))
     }
 
+    /// `send`, keeping what came back -- for a write that answers with
+    /// the thing it made.
+    fn send_json(&self, method: &str, path: &str, body: &Value) -> Result<Value, String> {
+        let url = format!("{}/api/v4{path}", self.base_url);
+        let payload = serde_json::to_string(body).map_err(|err| format!("couldn't encode request body: {err}"))?;
+        let response = ureq::request(method, &url)
+            .set("PRIVATE-TOKEN", &self.token)
+            .set("Accept", "application/json")
+            .set("Content-Type", "application/json")
+            .send_string(&payload)
+            .map_err(|err| describe_error(&err))?;
+        let text = response.into_string().map_err(|err| format!("couldn't read response body: {err}"))?;
+        serde_json::from_str(&text).map_err(|err| format!("couldn't parse response as JSON: {err}"))
+    }
+
+    /// A plain-text endpoint (a job's trace).
+    fn get_text(&self, path: &str) -> Result<String, String> {
+        let url = format!("{}/api/v4{path}", self.base_url);
+        let response = ureq::get(&url).set("PRIVATE-TOKEN", &self.token).call().map_err(|err| describe_error(&err))?;
+        response.into_string().map_err(|err| format!("couldn't read response body: {err}"))
+    }
+
     fn mr_path(&self, number: u64, suffix: &str) -> String {
         format!("/projects/{}/merge_requests/{number}{suffix}", self.encoded)
     }
@@ -111,6 +133,12 @@ impl Forge for GitLab {
             MrFilter::Mine => query.push(("scope", "created_by_me")),
             MrFilter::ForMe => query.push(("scope", "assigned_to_me")),
             MrFilter::AllOpen => query.push(("scope", "all")),
+            MrFilter::ReviewRequested => query.push(("scope", "all")),
+        }
+        let me;
+        if filter == MrFilter::ReviewRequested {
+            me = self.current_user()?;
+            query.push(("reviewer_username", me.as_str()));
         }
         let value = self.get(&format!("/projects/{}/merge_requests", self.encoded), &query)?;
         let entries = value.as_array().ok_or_else(|| "expected a list of merge requests".to_string())?;
@@ -217,7 +245,97 @@ impl Forge for GitLab {
         if let Some(sha) = &options.sha {
             body["sha"] = serde_json::json!(sha);
         }
+        if options.when_checks_pass {
+            // The older name and the newer; an instance ignores the one
+            // it doesn't know.
+            body["merge_when_pipeline_succeeds"] = serde_json::json!(true);
+            body["auto_merge"] = serde_json::json!(true);
+        }
         self.send("PUT", &self.mr_path(number, "/merge"), &body)
+    }
+
+    fn current_user(&self) -> Result<String, String> {
+        let user = self.get("/user", &[])?;
+        user.get("username").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "GitLab didn't say who the token belongs to".to_string())
+    }
+
+    fn request_for_branch(&self, branch: &str) -> Result<Option<MergeRequest>, String> {
+        let value = self.get(&format!("/projects/{}/merge_requests", self.encoded), &[("state", "opened"), ("source_branch", branch)])?;
+        match value.as_array().and_then(|list| list.first()).and_then(parse::merge_request) {
+            // The listing carries no diff refs; fetch it whole.
+            Some(found) => self.merge_request(found.number).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn create_request(&self, request: &NewRequest) -> Result<MergeRequest, String> {
+        // GitLab marks a draft by its title.
+        let title = if request.draft { format!("Draft: {}", request.title) } else { request.title.clone() };
+        let body = serde_json::json!({
+            "source_branch": request.source_branch,
+            "target_branch": request.target_branch,
+            "title": title,
+            "description": request.description,
+        });
+        let value = self.send_json("POST", &format!("/projects/{}/merge_requests", self.encoded), &body)?;
+        parse::merge_request(&value).ok_or_else(|| "GitLab didn't say what it made".to_string())
+    }
+
+    fn submit_review(&self, number: u64, head_sha: &str, verdict: Verdict, body: &str, comments: &[DraftComment]) -> Result<(), String> {
+        // The comments first, each its own thread; a range is anchored on
+        // its last line and says which lines it's about.
+        for comment in comments {
+            let text = match (comment.start_line, comment.position.new_line.or(comment.position.old_line)) {
+                (Some(start), Some(end)) if start < end => format!("Lines {start}–{end}:\n\n{}", comment.body),
+                _ => comment.body.clone(),
+            };
+            self.comment_on_line(number, &comment.position, &text)?;
+        }
+        let summary = match (verdict, body.trim().is_empty()) {
+            (Verdict::RequestChanges, true) => "Requesting changes -- see the comments.".to_string(),
+            (_, true) => String::new(),
+            (_, false) => body.to_string(),
+        };
+        if !summary.is_empty() {
+            self.send("POST", &self.mr_path(number, "/notes"), &serde_json::json!({ "body": summary }))?;
+        }
+        match verdict {
+            Verdict::Approve => self.approve(number, Some(head_sha)),
+            // GitLab's REST API has no "request changes" state of its
+            // own: withdraw an approval, if there was one.
+            Verdict::RequestChanges => {
+                let _ = self.unapprove(number);
+                Ok(())
+            }
+            Verdict::Comment => Ok(()),
+        }
+    }
+
+    fn request_review(&self, number: u64, users: &[String]) -> Result<(), String> {
+        let mut ids = Vec::new();
+        for user in users {
+            let found = self.get("/users", &[("username", user.as_str())])?;
+            let id = found.as_array().and_then(|l| l.first()).and_then(|u| u.get("id")).and_then(Value::as_u64).ok_or_else(|| format!("no GitLab user called {user}"))?;
+            ids.push(id);
+        }
+        self.send("PUT", &self.mr_path(number, ""), &serde_json::json!({ "reviewer_ids": ids }))
+    }
+
+    fn checks(&self, number: u64, _head_sha: &str) -> Result<Vec<Check>, String> {
+        let pipelines = self.get(&self.mr_path(number, "/pipelines"), &[])?;
+        let Some(id) = pipelines.as_array().and_then(|l| l.first()).and_then(|p| p.get("id")).and_then(Value::as_u64) else {
+            return Ok(Vec::new());
+        };
+        let jobs = self.get(&format!("/projects/{}/pipelines/{id}/jobs", self.encoded), &[("per_page", "100")])?;
+        Ok(jobs.as_array().map(|list| list.iter().filter_map(parse::job).collect()).unwrap_or_default())
+    }
+
+    fn job_log(&self, check: &Check) -> Result<String, String> {
+        self.get_text(&format!("/projects/{}/jobs/{}/trace", self.encoded, check.id))
+    }
+
+    fn retry(&self, check: &Check) -> Result<(), String> {
+        self.send("POST", &format!("/projects/{}/jobs/{}/retry", self.encoded, check.id), &serde_json::json!({}))
     }
 
     fn checkout_refspec(&self, number: u64) -> String {

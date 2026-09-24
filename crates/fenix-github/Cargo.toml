@@ -1,0 +1,14 @@
+[package]
+name = "fenix-github"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fenix-forge = { path = "../fenix-forge" }
+serde_json = "1"
+ureq = { version = "2", features = ["tls", "native-certs"] }
+
+# The live tests check that GitHub's patches, with a header put back,
+# are something Fenix's own diff parser reads.
+[dev-dependencies]
+fenix-diff = { path = "../fenix-diff" }

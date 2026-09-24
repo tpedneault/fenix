@@ -17329,6 +17329,7 @@ impl App {
             // Sent so the forge refuses rather than merging something
             // that moved between reading the diff and pressing the key.
             sha: detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty()),
+            ..Default::default()
         };
         match fenix_forge::Forge::merge(&client, number, &options) {
             Ok(()) => {

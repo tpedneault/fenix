@@ -310,7 +310,92 @@ fn a_merge_that_cannot_go_through_reports_the_forges_own_reason() {
         squash: false,
         remove_source_branch: false,
         sha: Some("0000000000000000000000000000000000000000".to_string()),
+        ..Default::default()
     };
     let err = gl.merge(mr.number, &options).expect_err("a stale sha must not merge");
     assert!(err.starts_with("HTTP "), "the forge's own status and text, not a rewritten one: {err}");
+}
+
+// -- The whole review, and the rest of a request's life ------------------
+
+#[test]
+#[ignore]
+fn the_token_knows_who_it_is_and_a_request_is_found_by_its_branch() {
+    let gl = client();
+    assert_eq!(gl.current_user().unwrap(), "root");
+    let found = gl.request_for_branch("feature/configurable-timeout").unwrap().expect("seed.sh opens one from that branch");
+    assert!(found.title.contains("timeout"));
+    assert!(!found.diff_refs.head_sha.is_empty(), "fetched whole, with its diff refs");
+    assert!(gl.request_for_branch("no/such-branch").unwrap().is_none());
+}
+
+#[test]
+#[ignore]
+fn a_requested_review_shows_in_the_needs_your_review_list() {
+    let gl = client();
+    let mr = timeout_mr();
+    gl.request_review(mr.number, &["root".to_string()]).unwrap();
+    let waiting = gl.list_merge_requests(MrFilter::ReviewRequested).unwrap();
+    assert!(waiting.iter().any(|m| m.number == mr.number), "{waiting:?}");
+}
+
+#[test]
+#[ignore]
+fn a_review_posts_its_comments_and_summary_together() {
+    let gl = client();
+    let mr = timeout_mr();
+    let before = gl.discussions(mr.number).unwrap().len();
+    let comments = vec![fenix_forge::DraftComment {
+        position: Position::on_new_line(&mr.diff_refs, "widget.rs", "widget.rs", 7),
+        start_line: Some(6),
+        body: "Reject a zero timeout?".to_string(),
+    }];
+    gl.submit_review(mr.number, &mr.sha, fenix_forge::Verdict::Comment, "One question.", &comments).unwrap();
+    let after = gl.discussions(mr.number).unwrap();
+    assert_eq!(after.len(), before + 2, "the line thread and the summary");
+    let thread = after.iter().find(|d| d.first().is_some_and(|n| n.body.contains("zero timeout"))).unwrap();
+    assert!(thread.first().unwrap().body.starts_with("Lines 6–7:"), "a range says which lines");
+    assert_eq!(thread.position.as_ref().unwrap().new_line, Some(7));
+}
+
+#[test]
+#[ignore]
+fn a_request_is_opened_from_a_new_branch() {
+    let gl = client();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let branch = format!("fenix-live/open-{stamp}");
+    let url = std::env::var("GITLAB_URL").unwrap_or_else(|_| "http://localhost:8929".to_string());
+    let token = std::env::var("GITLAB_TOKEN").unwrap_or_else(|_| "fenix-dev-token-0123456789".to_string());
+    let commit = serde_json::json!({
+        "branch": branch, "start_branch": "main", "commit_message": "A change to open a request from",
+        "actions": [{"action": "create", "file_path": format!("notes-{stamp}.md"), "content": "hello\n"}]
+    });
+    ureq::post(&format!("{url}/api/v4/projects/fenix-dev%2Fwidget/repository/commits"))
+        .set("PRIVATE-TOKEN", &token)
+        .set("Content-Type", "application/json")
+        .send_string(&commit.to_string())
+        .unwrap();
+    let request = fenix_forge::NewRequest {
+        source_branch: branch.clone(),
+        target_branch: "main".to_string(),
+        title: "Opened by Fenix".to_string(),
+        description: "From the live tests.".to_string(),
+        draft: true,
+    };
+    let created = gl.create_request(&request).unwrap();
+    assert!(created.draft && created.title.contains("Opened by Fenix"), "{created:?}");
+    assert_eq!(created.source_branch, branch);
+    ureq::put(&format!("{url}/api/v4/projects/fenix-dev%2Fwidget/merge_requests/{}", created.number))
+        .set("PRIVATE-TOKEN", &token)
+        .set("Content-Type", "application/json")
+        .send_string(r#"{"state_event":"close"}"#)
+        .unwrap();
+}
+
+#[test]
+#[ignore]
+fn a_request_with_no_pipeline_has_no_checks() {
+    let gl = client();
+    let mr = timeout_mr();
+    assert!(gl.checks(mr.number, &mr.sha).unwrap().is_empty(), "the dev instance runs no CI");
 }
