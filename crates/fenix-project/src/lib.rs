@@ -5,9 +5,12 @@ mod root;
 #[cfg(test)]
 mod test_util;
 
+pub mod doctor;
 mod kind;
 mod known;
+pub mod meta;
 mod recent;
+pub mod vcs;
 
 pub use files::{list_project_files, list_project_files_including_ignored};
 pub use grep::{files_matching, grep_project, GrepMatch};

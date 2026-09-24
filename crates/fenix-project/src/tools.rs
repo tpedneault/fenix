@@ -1,5 +1,5 @@
 //! Structured, project-local process settings. Strings are literal, never shell split.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io,
@@ -7,14 +7,15 @@ use std::{
     process::Command,
 };
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandSpec {
     pub executable: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
 
@@ -91,26 +92,35 @@ impl CommandSpec {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Launch {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub program: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl Launch {
+    pub fn is_empty(&self) -> bool {
+        *self == Launch::default()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectTools {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lsp: BTreeMap<String, CommandSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dap: BTreeMap<String, CommandSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tasks: BTreeMap<String, CommandSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Launch::is_empty")]
     pub launch: Launch,
 }
 
@@ -123,6 +133,25 @@ impl ProjectTools {
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
         Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The JSON `write` puts in `.fenix/tools.json`, validated first --
+    /// what's written is always something `read` accepts.
+    pub fn to_json(&self) -> Result<String, String> {
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
+        Self::parse(&text)?;
+        Ok(text)
+    }
+
+    /// Writes `root/.fenix/tools.json`. Keys come out sorted and the file
+    /// pretty-printed, so hand formatting doesn't survive a write; every
+    /// setting does.
+    pub fn write(&self, root: &Path) -> Result<(), String> {
+        let text = self.to_json()?;
+        let dir = root.join(".fenix");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = dir.join("tools.json");
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// Parses and validates `tools.json` text -- `read`'s checks, for
@@ -142,9 +171,92 @@ impl ProjectTools {
     }
 }
 
+/// Splits a command line typed on one line into its literal arguments:
+/// whitespace separates, double quotes group (`"My Tool.exe" "a b"`),
+/// and `\"` is a quote inside quotes. Backslashes are otherwise literal,
+/// so Windows paths need no doubling. No variables, no globs -- the
+/// result is exactly the argument vector that will run.
+pub fn split_command_line(line: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            '\\' if quoted && chars.peek() == Some(&'"') => {
+                current.push('"');
+                chars.next();
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            c => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if quoted {
+        return Err("a quote isn't closed".to_string());
+    }
+    if started {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+/// The inverse of `split_command_line`: each argument quoted where it
+/// has to be, so splitting the result gives the same arguments back.
+pub fn join_command_line(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || c == '"') {
+                arg.clone()
+            } else {
+                format!("\"{}\"", arg.replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_lines_split_on_spaces_and_group_on_quotes() {
+        assert_eq!(split_command_line("uv run pytest -q").unwrap(), ["uv", "run", "pytest", "-q"]);
+        assert_eq!(split_command_line(r#""C:\My Tools\x.exe" "a b" "" c"#).unwrap(), [r"C:\My Tools\x.exe", "a b", "", "c"]);
+        assert_eq!(split_command_line(r#"say "he said \"hi\"""#).unwrap(), ["say", r#"he said "hi""#]);
+        assert!(split_command_line(r#"open "never closed"#).is_err());
+        let args: Vec<String> = ["a", "b c", "", r#"q"t"#, r"C:\x"].map(String::from).to_vec();
+        assert_eq!(split_command_line(&join_command_line(&args)).unwrap(), args);
+    }
+
+    #[test]
+    fn tools_write_and_read_back_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tools = ProjectTools::default();
+        tools.tasks.insert("test".into(), CommandSpec::new("uv".into(), vec!["run".into(), "pytest".into()]));
+        tools.launch.program = Some(PathBuf::from("src/main.py"));
+        tools.write(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(".fenix/tools.json")).unwrap();
+        assert!(!text.contains("lsp") && !text.contains("env"), "empty sections aren't written: {text}");
+        assert_eq!(ProjectTools::read(dir.path()).unwrap(), tools);
+        tools.tasks.insert("bad".into(), CommandSpec::new(String::new(), vec![]));
+        assert!(tools.write(dir.path()).is_err(), "an invalid setting is refused, not written");
+        assert_eq!(ProjectTools::read(dir.path()).unwrap().tasks.len(), 1);
+    }
+
     #[test]
     fn preserves_literal_windows_paths_arguments_and_environment() {
         let spec: CommandSpec =

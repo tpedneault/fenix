@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dirs = "6"
+fenix-mib = { path = "../fenix-mib" }
 fenix-picker = { path = "../fenix-picker" }
 
 serde = { version = "1", features = ["derive"] }

@@ -856,6 +856,7 @@ name = "fenix-project"
 version = "0.0.1"
 dependencies = [
  "dirs",
+ "fenix-mib",
  "fenix-picker",
  "serde",
  "serde_json",
