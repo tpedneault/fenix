@@ -709,6 +709,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-embedded"
+version = "0.0.1"
+dependencies = [
+ "dirs",
+ "fenix-lsp",
+ "lsp-types",
+ "serde_json",
+]
+
+[[package]]
 name = "fenix-explorer"
 version = "0.0.1"
 dependencies = [
@@ -766,6 +776,7 @@ dependencies = [
  "fenix-dap",
  "fenix-diff",
  "fenix-docker",
+ "fenix-embedded",
  "fenix-explorer",
  "fenix-forge",
  "fenix-format",

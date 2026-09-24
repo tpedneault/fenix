@@ -173,6 +173,19 @@ impl CommandRegistry {
         registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
         registry.register("jira.delete_user", "Stop tracking a Jira user", cmd_jira_delete_user);
         registry.register("jira.create_issue", "Create a new Jira issue in a tracked project", cmd_jira_create_issue);
+        registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
+        registry.register("embedded.build", "Compile the sketch for its board", cmd_embedded_build);
+        registry.register("embedded.upload", "Compile and flash the sketch to the board", cmd_embedded_upload);
+        registry.register("embedded.monitor", "Open the serial monitor for the sketch's port", cmd_embedded_monitor);
+        registry.register("embedded.baud", "Choose the serial monitor's speed", cmd_embedded_baud);
+        registry.register("embedded.port", "Choose the port the board is on", cmd_embedded_port);
+        registry.register("embedded.board", "Choose the board the sketch is built for", cmd_embedded_board);
+        registry.register("embedded.board_options", "Choose the board's options (processor, clock...)", cmd_embedded_board_options);
+        registry.register("embedded.library", "Install a library from the library index", cmd_embedded_library);
+        registry.register("embedded.package", "Install board support (a core)", cmd_embedded_package);
+        registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
+        registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
+        registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
         registry.register("agenda.open", "Open the agenda (last view shown)", cmd_agenda_open);
         registry.register("agenda.board", "Show the agenda as a Kanban board", cmd_agenda_board);
         registry.register("agenda.list", "Show the agenda as a list", cmd_agenda_list);
@@ -645,6 +658,58 @@ fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
 
 fn cmd_jira_add_project(ctx: &mut CommandCtx) {
     ctx.app.jira_start_add_project_prompt();
+}
+
+fn cmd_embedded_build(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_build();
+}
+
+fn cmd_embedded_upload(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_upload();
+}
+
+fn cmd_embedded_monitor(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_monitor();
+}
+
+fn cmd_embedded_baud(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_baud();
+}
+
+fn cmd_embedded_port(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_port();
+}
+
+fn cmd_embedded_board(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_board();
+}
+
+fn cmd_embedded_board_options(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_board_options();
+}
+
+fn cmd_embedded_library(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_library();
+}
+
+fn cmd_embedded_package(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_package();
+}
+
+fn cmd_embedded_debug(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_debug();
+}
+
+fn cmd_embedded_new_sketch(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_new_sketch();
+}
+
+fn cmd_embedded_info(ctx: &mut CommandCtx) {
+    ctx.app.cmd_embedded_info();
+}
+
+fn cmd_leader_local(ctx: &mut CommandCtx) {
+    ctx.app.start_local_leader();
 }
 
 fn cmd_agenda_open(ctx: &mut CommandCtx) {
