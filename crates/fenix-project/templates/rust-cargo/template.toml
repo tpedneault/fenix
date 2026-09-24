@@ -4,6 +4,7 @@ kind = "rust"
 group = "Languages"
 description = "A cargo package, created by cargo init so it matches the installed toolchain."
 needs = ["cargo"]
+open = ["src/main.rs", "src/lib.rs"]
 
 [[ask]]
 key = "crate_type"

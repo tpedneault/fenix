@@ -15,6 +15,7 @@
 //! description = "..."
 //! needs = ["uv"]             # programs looked up on PATH
 //! name_rule = "sketch"       # optional: Arduino's stricter naming
+//! open = ["src/main.rs", "README.md"]   # first that exists is opened
 //!
 //! [[ask]]                    # text, unless one of the below
 //! key = "python"
@@ -180,6 +181,8 @@ pub struct Template {
     /// commit to it.
     pub needs: Vec<String>,
     pub name_rule: NameRule,
+    /// Files to open once it's created, first existing one wins.
+    open: Vec<String>,
     pub origin: Origin,
     pub asks: Vec<Ask>,
     files: Vec<FileEntry>,
@@ -221,6 +224,8 @@ struct RawMeta {
     #[serde(default)]
     needs: Vec<String>,
     name_rule: Option<String>,
+    #[serde(default)]
+    open: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -338,6 +343,7 @@ impl Template {
             description: raw.template.description,
             needs: raw.template.needs,
             name_rule,
+            open: raw.template.open,
             origin,
             asks,
             files: Vec::new(),
@@ -347,6 +353,10 @@ impl Template {
             tools: None,
         };
 
+        for path in &template.open {
+            template.check_relative(path)?;
+            template.check_vars(path, false)?;
+        }
         // Files named by a `[[file]]` entry's `from` are only written
         // where an entry says; every other file under `files/` is copied.
         let referenced: Vec<&str> = raw.file.iter().filter_map(|f| f.from.as_deref()).collect();
@@ -569,7 +579,8 @@ impl Template {
             }
         }
 
-        Ok(Plan { dir: parent.join(name), kind: self.kind, files, steps, hooks })
+        let open = self.open.iter().map(|p| ctx.text(p)).collect::<Result<_, _>>()?;
+        Ok(Plan { dir: parent.join(name), kind: self.kind, files, steps, hooks, open })
     }
 }
 
@@ -876,6 +887,15 @@ pub struct Plan {
     pub files: Vec<PlannedFile>,
     pub steps: Vec<Step>,
     pub hooks: Vec<Hook>,
+    /// Candidates to open when it's done, relative to `dir`.
+    pub open: Vec<String>,
+}
+
+impl Plan {
+    /// The first of `open` that exists now, else a README, else `None`.
+    pub fn file_to_open(&self) -> Option<PathBuf> {
+        self.open.iter().map(String::as_str).chain(["README.md"]).map(|p| self.dir.join(p)).find(|p| p.is_file())
+    }
 }
 
 impl Plan {

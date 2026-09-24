@@ -2,6 +2,7 @@
 name = "SCOS-2000 MIB workspace"
 kind = "mib"
 group = "Mission"
+open = ["procedures/{{name_snake}}.tcl"]
 description = "An ICD 7.2 MIB database as tab-separated .dat tables under mib/, a Tcl procedures folder, and the database registered for SPC m lookups."
 
 [[ask]]

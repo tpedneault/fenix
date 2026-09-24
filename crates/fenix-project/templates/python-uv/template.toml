@@ -4,6 +4,7 @@ kind = "python"
 group = "Languages"
 description = "A uv-managed project: pyproject.toml, a locked .venv, and test and lint tasks wired up."
 needs = ["uv"]
+open = ["src/{{name_snake}}/__init__.py"]
 
 [[ask]]
 key = "layout"

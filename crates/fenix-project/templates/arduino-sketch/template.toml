@@ -5,6 +5,7 @@ group = "Embedded"
 description = "A sketch folder with its board and port saved in sketch.yaml, ready for SPC m b to build and SPC m u to upload."
 needs = ["arduino-cli"]
 name_rule = "sketch"
+open = ["{{name}}.ino"]
 
 [[ask]]
 key = "board"
