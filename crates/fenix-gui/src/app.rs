@@ -14975,12 +14975,11 @@ impl App {
             crate::dap::default_adapter_command(language).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
         });
         let Some(spec) = spec else { self.set_error(format!("no known debug adapter for {language:?}")); return; };
-        let legacy = fenix_dap::read_launch_config(&root);
-        let program = tools.launch.program.clone().map(|p| if p.is_absolute() { p } else { root.join(p) }).or(legacy.program)
+        let program = tools.launch.program.clone().map(|p| if p.is_absolute() { p } else { root.join(p) })
             .or_else(|| self.open().buffer.path().map(Path::to_path_buf));
         let Some(program) = program else { self.set_error("no file to debug -- configure a launch program"); return; };
         let mut launch_attributes = crate::dap::launch_arguments(language, &program);
-        launch_attributes.insert("args".into(), serde_json::json!(tools.launch.args.unwrap_or(legacy.args)));
+        launch_attributes.insert("args".into(), serde_json::json!(tools.launch.args.unwrap_or_default()));
         let cwd = tools.launch.cwd.map(|p| if p.is_absolute() { p } else { root.join(p) }).unwrap_or_else(|| root.clone());
         launch_attributes.insert("cwd".into(), serde_json::json!(cwd));
         launch_attributes.insert("env".into(), serde_json::json!(tools.launch.env));

@@ -22,7 +22,7 @@ pub struct ProjectSettings {
     pub problems: Vec<Problem>,
 }
 
-const HEADER: &str = "# This project's own Fenix settings, used instead of each person's for\n# this project. SPC p , edits them. Meant to be committed.\n\n";
+const HEADER: &str = fenix_storage::project_file::HEADER;
 
 impl ProjectSettings {
     /// `.fenix/settings.toml` under `root`.

@@ -188,10 +188,15 @@ fn has_extension(dir: &Path, extension: &str) -> bool {
         .any(|entry| entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case(extension)) && entry.path().is_file())
 }
 
-/// `[project] kind = ...` from `.fenix/project.ini`, if present and known.
+/// `[project] kind = ...` from the project's `.fenix/settings.toml` --
+/// or from the `.fenix/project.ini` it used to be kept in, for a project
+/// not opened since -- if present and known.
 pub fn declared_kind(root: &Path) -> Option<ProjectKind> {
-    let text = std::fs::read_to_string(root.join(".fenix").join("project.ini")).ok()?;
-    ini_value(&text, "project", "kind").and_then(|v| ProjectKind::from_id(&v))
+    let value = fenix_storage::project_file::get(root, "project.kind").or_else(|| {
+        let text = std::fs::read_to_string(root.join(".fenix").join("project.ini")).ok()?;
+        ini_value(&text, "project", "kind")
+    })?;
+    ProjectKind::from_id(&value)
 }
 
 /// One `key = value` from one `[section]` of an INI text -- the same

@@ -9,19 +9,11 @@ use super::*;
 use crate::git_request::{self, Commit, Pushed, RequestAction, RequestPage, Standing};
 use crate::git_status::{overall, Job, RequestLine};
 
-/// Who a new request asks for a review: the project's own
-/// `.fenix/project.ini` `[git] reviewers` when it names anyone, else
-/// `[git] reviewers` from the config.
+/// Who a new request asks for a review: the project's own reviewers
+/// (`.fenix/settings.toml`, or the `project.ini` it replaced) when it
+/// names anyone, else yours.
 fn default_reviewers(root: &Path, configured: &[String]) -> Vec<String> {
-    if let Some(fenix_config::Value::List(names)) = fenix_config::ProjectSettings::load(root).get("git.reviewers") {
-        if !names.is_empty() {
-            return names.clone();
-        }
-    }
-    match fenix_project::meta::reviewers(root).map(|v| fenix_config::names(&v)).filter(|n| !n.is_empty()) {
-        Some(names) => names,
-        None => configured.to_vec(),
-    }
+    fenix_project::meta::reviewers(root).unwrap_or_else(|| configured.to_vec())
 }
 
 impl App {
@@ -323,14 +315,12 @@ mod tests {
         std::fs::create_dir_all(dir.join(".fenix")).unwrap();
         let configured = vec!["alex".to_string()];
         assert_eq!(default_reviewers(&dir, &configured), ["alex"]);
-        std::fs::write(dir.join(".fenix").join("project.ini"), "[project]
-jira = FNX
-").unwrap();
-        assert_eq!(default_reviewers(&dir, &configured), ["alex"], "a project.ini that names nobody");
-        std::fs::write(dir.join(".fenix").join("project.ini"), "[git]
-reviewers = @sam, jo
-").unwrap();
-        assert_eq!(default_reviewers(&dir, &configured), ["sam", "jo"]);
+        std::fs::write(dir.join(".fenix").join("settings.toml"), "[project]\njira = \"FNX\"\n").unwrap();
+        assert_eq!(default_reviewers(&dir, &configured), ["alex"], "a project that names nobody");
+        std::fs::write(dir.join(".fenix").join("project.ini"), "[git]\nreviewers = @sam, jo\n").unwrap();
+        assert_eq!(default_reviewers(&dir, &configured), ["sam", "jo"], "a project not moved yet");
+        std::fs::write(dir.join(".fenix").join("settings.toml"), "[git]\nreviewers = [\"kim\"]\n").unwrap();
+        assert_eq!(default_reviewers(&dir, &configured), ["kim"], "its settings.toml wins");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

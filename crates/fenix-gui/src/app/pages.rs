@@ -1222,7 +1222,6 @@ impl App {
         use project_settings::Action;
         let Some(PageModel::Settings(s)) = self.pages.get(&id).map(|s| &s.model) else { return };
         let root = s.root.clone();
-        let ini = fenix_project::meta::project_ini(&root);
         match action {
             Action::None => {}
             Action::Close => self.close_page(id),
@@ -1231,16 +1230,15 @@ impl App {
                 Err(e) => self.set_error(e),
             },
             Action::SetKind(kind) => {
-                match fenix_project::meta::set_ini_value(&ini, "project", "kind", kind.map(|k| k.id())) {
-                    Ok(()) => self.set_message("saved .fenix/project.ini"),
-                    Err(e) => self.set_error(format!("{}: {e}", ini.display())),
+                match fenix_project::meta::set_kind(&root, kind) {
+                    Ok(()) => self.set_message("saved .fenix/settings.toml"),
+                    Err(e) => self.set_error(e.to_string()),
                 }
                 self.project_kinds.borrow_mut().clear();
             }
             Action::SetJira(key) => {
-                let value = (!key.is_empty()).then_some(key.as_str());
-                if let Err(e) = fenix_project::meta::set_ini_value(&ini, "project", "jira", value) {
-                    self.set_error(format!("{}: {e}", ini.display()));
+                if let Err(e) = fenix_project::meta::set_jira_key(&root, Some(key.as_str())) {
+                    self.set_error(e.to_string());
                 }
             }
             Action::SetGroup(group) => {
@@ -1551,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_edits_write_tools_json_and_project_ini() {
+    fn settings_edits_write_tools_json_and_the_projects_settings() {
         let dir = Scratch::new("settings");
         std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
         let mut app = App::with_file(None);
@@ -1561,7 +1559,7 @@ mod tests {
         assert!(text.contains("detect: Python") && text.contains("TASKS · 0"), "{text}");
         // Kind -> declared Python, then Jira.
         press(&mut app, "l");
-        assert!(std::fs::read_to_string(dir.0.join(".fenix/project.ini")).unwrap().contains("kind = python"));
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"python\""));
         press(&mut app, "jjj\nfnx\n");
         assert_eq!(fenix_project::meta::jira_key(&dir.0).as_deref(), Some("FNX"));
         // Add a task.

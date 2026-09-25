@@ -10,7 +10,6 @@ pub use supervisor::{OutputLine, OutputStream, RunId, TaskEvent, TaskOutcome, Ta
 
 mod defs;
 mod output;
-mod project_ini;
 
 pub use defs::TaskDef;
 pub use output::{parse_line, ParsedLine, TaskLocation};
@@ -18,19 +17,11 @@ pub use output::{parse_line, ParsedLine, TaskLocation};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-/// Every runnable task for `root` -- `defs::default_tasks`' built-ins
-/// (whichever project markers are actually present) followed by
-/// `project_ini::project_tasks`' hand-authored `.fenix/project.ini`
-/// `[tasks]` entries. Appended, not merged/deduplicated by name: a
-/// project-local task sharing a built-in's name (redefining `cargo
-/// build` with extra flags, say) simply shows up as a second, separate
-/// entry in the picker -- simpler than silent-override semantics, and
-/// the two are still visually distinguishable by whichever one the
-/// picker's fuzzy match actually favors.
+/// The built-in tasks for `root` -- `defs::default_tasks`, for whichever
+/// project markers are actually present. A project's own tasks are in
+/// its `.fenix/tools.json`, which the editor adds to these.
 pub fn discover_tasks(root: &Path) -> Vec<TaskDef> {
-    let mut tasks = defs::default_tasks(root);
-    tasks.extend(project_ini::project_tasks(root));
-    tasks
+    defs::default_tasks(root)
 }
 
 /// Spawns `task` as a genuinely long-lived child (stdout/stderr both
@@ -72,15 +63,12 @@ mod tests {
     }
 
     #[test]
-    fn discover_tasks_combines_built_ins_with_project_ini_entries() {
+    fn discover_tasks_offers_the_built_ins_a_projects_markers_call_for() {
         let dir = TempDir::new("combined");
         std::fs::write(dir.path().join("Cargo.toml"), b"[package]\nname=\"x\"").unwrap();
-        std::fs::create_dir_all(dir.path().join(".fenix")).unwrap();
-        std::fs::write(dir.path().join(".fenix").join("project.ini"), b"[tasks]\ntask1 = Format|cargo fmt --all\n").unwrap();
-
         let tasks = discover_tasks(dir.path());
         let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["cargo build", "cargo test", "cargo clippy", "Format"]);
+        assert_eq!(names, vec!["cargo build", "cargo test", "cargo clippy"]);
     }
 
     #[test]

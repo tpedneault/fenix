@@ -276,6 +276,20 @@ impl App {
         if same && !poll {
             return;
         }
+        // A project from before `.fenix/settings.toml` moves over the
+        // first time it's opened.
+        if !same {
+            if let Some(r) = &root {
+                match fenix_project::meta::migrate_project_ini(r) {
+                    Some(Ok(moved)) => self.set_message(format!(
+                        "moved .fenix/project.ini into .fenix/settings.toml{} -- review it in git",
+                        if moved.is_empty() { String::new() } else { format!(" ({})", moved.join(", ")) }
+                    )),
+                    Some(Err(why)) => self.set_error(format!("couldn't move .fenix/project.ini: {why}")),
+                    None => {}
+                }
+            }
+        }
         let before = self.project_settings.as_ref().map(|(_, p)| p.values());
         self.project_settings = root.map(|r| {
             let settings = fenix_config::ProjectSettings::load(&r);
