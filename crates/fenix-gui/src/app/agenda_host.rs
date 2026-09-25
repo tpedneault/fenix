@@ -9,6 +9,23 @@ use super::*;
 use crate::agenda_page::{self, Action as AgendaAction, AgendaPage, NewTask, Project, Tab};
 use fenix_agenda::{CodeRef, OpKind, Status};
 
+/// One row of the clock picker (`SPC a t`), or of the question asked
+/// when the clock ran on while you were away.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ClockPick {
+    Stop,
+    Start(TaskId),
+    /// Keep the time up to when you were last seen, and stop there.
+    KeepUntil(chrono::DateTime<chrono::Local>),
+    /// It was all work: carry on.
+    KeepAll,
+    /// Drop this sitting.
+    Drop,
+}
+
+/// How often a running clock's last-seen time is saved.
+const SEEN_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// What `SPC a h` captured, waiting for the new-task form to finish.
 pub(super) struct Capture {
     pub(super) code: CodeRef,
@@ -137,6 +154,135 @@ impl App {
         self.agenda_capture = Some(Capture { code: CodeRef { path, line: first_line }, text });
         let id = self.open_agenda_page(None);
         self.agenda_page_key_now(id, crate::page::Key::Char('n'));
+    }
+
+    /// `SPC a t`: stop the running clock, resume what you worked on last,
+    /// or switch -- recent tasks first, then what's in progress.
+    pub(crate) fn cmd_agenda_toggle_clock(&mut self) {
+        let store = &self.agenda_store;
+        let running = store.active_timer.as_ref().map(|t| t.task_id);
+        let label = |t: &fenix_agenda::Task| match t.jira_key() {
+            Some(key) => format!("{key} {}", t.title),
+            None => t.title.clone(),
+        };
+        let mut candidates: Vec<fenix_picker::Candidate<ClockPick>> = Vec::new();
+        if let Some(timer) = &store.active_timer {
+            let name = store.task(timer.task_id).map(label).unwrap_or_default();
+            let minutes = (chrono::Local::now() - timer.started_at).num_minutes();
+            candidates.push(fenix_picker::Candidate::new(format!("Stop  ·  {name}  ·  {}", agenda_page::format_minutes(minutes)), ClockPick::Stop));
+        }
+        let mut seen: Vec<TaskId> = running.into_iter().collect();
+        let mut add = |t: &fenix_agenda::Task, prefix: &str, candidates: &mut Vec<fenix_picker::Candidate<ClockPick>>| {
+            if seen.contains(&t.id) {
+                return;
+            }
+            seen.push(t.id);
+            candidates.push(fenix_picker::Candidate::new(format!("{prefix}{}", label(t)), ClockPick::Start(t.id)));
+        };
+        for (i, (id, _)) in store.recently_worked().into_iter().enumerate() {
+            if let Some(t) = store.task(id).filter(|t| t.status != Status::Done) {
+                let prefix = if i == 0 && running.is_none() { "Resume  ·  " } else { "" };
+                add(t, prefix, &mut candidates);
+            }
+        }
+        let mut rest: Vec<&fenix_agenda::Task> = store.tasks.iter().filter(|t| !t.archived && t.status != Status::Done).collect();
+        rest.sort_by_key(|t| (t.status != Status::InProgress, std::cmp::Reverse(t.priority), t.order));
+        for t in rest {
+            add(t, "", &mut candidates);
+        }
+        if candidates.is_empty() {
+            self.set_error("no agenda tasks to clock in on yet -- SPC a n to add one");
+            return;
+        }
+        self.agenda_gap_asked = false;
+        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC a T`: the clock back on what you worked on last.
+    pub(crate) fn cmd_agenda_resume(&mut self) {
+        if let Some(timer) = &self.agenda_store.active_timer {
+            let name = self.agenda_store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
+            self.set_message(format!("The clock is already on \"{name}\""));
+            return;
+        }
+        let Some((id, _)) = self.agenda_store.recently_worked().into_iter().next() else {
+            self.set_error("nothing worked on yet to resume -- SPC a t picks a task");
+            return;
+        };
+        self.agenda_clock_pick(ClockPick::Start(id));
+    }
+
+    pub(super) fn agenda_clock_pick(&mut self, pick: ClockPick) {
+        self.agenda_gap_asked = false;
+        match pick {
+            ClockPick::Stop => self.agenda_store.clock_out(),
+            ClockPick::Start(id) => {
+                self.agenda_store.clock_in(id);
+                let name = self.agenda_store.task(id).map(|t| t.title.clone()).unwrap_or_default();
+                self.set_message(format!("Clock on \"{name}\""));
+            }
+            ClockPick::KeepUntil(at) => {
+                self.agenda_store.clock_out_at(at);
+                self.set_message(format!("Kept the time until {} -- SPC a T starts the clock again", at.format("%H:%M")));
+            }
+            ClockPick::KeepAll => {
+                if let Some(timer) = &mut self.agenda_store.active_timer {
+                    timer.last_seen = Some(chrono::Local::now());
+                }
+            }
+            ClockPick::Drop => {
+                self.agenda_store.drop_timer();
+                self.set_message("Dropped that sitting -- SPC a T starts the clock again");
+            }
+        }
+        self.agenda_seen_saved = Some(std::time::Instant::now());
+        self.agenda_save_and_refresh();
+    }
+
+    /// Called on every key press: notes that you're here while the clock
+    /// runs, and when you've been away longer than `agenda.idle_minutes`,
+    /// asks what to keep instead -- returns true when it asked (that key
+    /// is spent on bringing the question up).
+    pub(super) fn agenda_note_activity(&mut self) -> bool {
+        let Some(timer) = &self.agenda_store.active_timer else { return false };
+        if self.agenda_gap_asked {
+            return false;
+        }
+        let now = chrono::Local::now();
+        let last = timer.last_seen.unwrap_or(timer.started_at).max(timer.started_at);
+        let idle = self.config.agenda_idle_minutes.unwrap_or(60);
+        if idle > 0 && now - last > chrono::Duration::minutes(i64::from(idle)) {
+            self.agenda_ask_about_gap(last);
+            return true;
+        }
+        if let Some(timer) = &mut self.agenda_store.active_timer {
+            timer.last_seen = Some(now);
+        }
+        if self.agenda_seen_saved.is_none_or(|at| at.elapsed() >= SEEN_SAVE_EVERY) {
+            self.agenda_seen_saved = Some(std::time::Instant::now());
+            self.save_agenda();
+        }
+        false
+    }
+
+    fn agenda_ask_about_gap(&mut self, last: chrono::DateTime<chrono::Local>) {
+        let Some(timer) = &self.agenda_store.active_timer else { return };
+        let now = chrono::Local::now();
+        let name = self.agenda_store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
+        let kept = agenda_page::format_minutes((last - timer.started_at).num_minutes());
+        let all = agenda_page::format_minutes((now - timer.started_at).num_minutes());
+        let candidates = vec![
+            fenix_picker::Candidate::new(format!("Keep until {}  ·  {kept}", last.format("%H:%M")), ClockPick::KeepUntil(last)),
+            fenix_picker::Candidate::new(format!("Keep all of it  ·  {all}"), ClockPick::KeepAll),
+            fenix_picker::Candidate::new("Drop this sitting", ClockPick::Drop),
+        ];
+        self.set_message(format!(
+            "The clock ran on \"{name}\" while you were away -- nothing happened in Fenix from {} to {}",
+            last.format("%H:%M"),
+            now.format("%H:%M")
+        ));
+        self.agenda_gap_asked = true;
+        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC a /`: the page, searching.
@@ -438,6 +584,45 @@ mod tests {
         let task = &app.agenda_store.tasks[0];
         assert_eq!(task.code.as_ref().map(|c| c.line), Some(2));
         assert!(task.description.contains("todo!()") && task.description.contains("main.rs:2"), "{}", task.description);
+    }
+
+    #[test]
+    fn a_clock_left_running_while_away_asks_what_to_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let id = app.agenda_store.create_task("Long one".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.agenda_store.clock_in(id);
+        let now = chrono::Local::now();
+        let timer = app.agenda_store.active_timer.as_mut().unwrap();
+        timer.started_at = now - chrono::Duration::hours(5);
+        timer.last_seen = Some(now - chrono::Duration::hours(4));
+
+        assert!(app.agenda_note_activity(), "the key brings up the question");
+        assert!(app.agenda_gap_asked);
+        app.picker_confirm();
+        assert!(app.agenda_store.active_timer.is_none());
+        let entry = app.agenda_store.task(id).unwrap().time_entries[0];
+        assert_eq!(entry.duration().num_minutes(), 60, "kept until last seen");
+
+        app.cmd_agenda_resume();
+        assert_eq!(app.agenda_store.active_timer.as_ref().map(|t| t.task_id), Some(id));
+        assert!(!app.agenda_note_activity(), "just started: nothing to ask");
+    }
+
+    #[test]
+    fn the_clock_picker_offers_stop_then_recent_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let a = app.agenda_store.create_task("Older".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let b = app.agenda_store.create_task("Recent".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let now = chrono::Local::now();
+        app.agenda_store.log_span(a, now - chrono::Duration::hours(5), now - chrono::Duration::hours(4));
+        app.agenda_store.log_span(b, now - chrono::Duration::hours(2), now - chrono::Duration::hours(1));
+        app.cmd_agenda_toggle_clock();
+        let Some(ActivePicker::AgendaClockIn(state)) = &app.active_picker else { panic!() };
+        let labels: Vec<String> = state.visible_rows(0, 5).map(|(_, c)| c.label.clone()).collect();
+        assert_eq!(labels[0], "Resume  ·  Recent");
+        assert_eq!(labels[1], "Older");
     }
 
     #[test]

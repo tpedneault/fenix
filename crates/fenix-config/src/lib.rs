@@ -222,6 +222,10 @@ pub struct Config {
     /// minutes (`[agenda] worklog_round = 15`) -- unset means 15, `0`
     /// or `1` sends exact minutes.
     pub agenda_worklog_round: Option<u32>,
+    /// How long without a key press, with the clock running, before Fenix
+    /// asks what to keep (`[agenda] idle_minutes = 60`) -- unset means
+    /// 60, `0` never asks.
+    pub agenda_idle_minutes: Option<u32>,
     /// Where the embedded-development tools live, when they aren't where
     /// Fenix looks on its own (its tools folder, `PATH`, the usual
     /// install locations) -- `[embedded]`'s `arduino_cli`, `clangd` and
@@ -417,6 +421,7 @@ impl Config {
             explorer_bookmarks: Vec::new(),
             agenda_categories: Vec::new(),
             agenda_worklog_round: None,
+            agenda_idle_minutes: None,
             embedded_arduino_cli: None,
             embedded_clangd: None,
             embedded_arduino_language_server: None,

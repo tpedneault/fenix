@@ -348,6 +348,10 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             c.agenda_worklog_round = int_set(v)?;
             Ok(())
         })).default("15"),
+        s("agenda.idle_minutes", Jira, "Ask after idle", Kind::Minutes, "With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks.", (|c: &Config| int(&c.agenda_idle_minutes), |c: &mut Config, v| {
+            c.agenda_idle_minutes = int_set(v)?;
+            Ok(())
+        })).default("60"),
         // Embedded & MIB
         s("embedded.arduino_cli", Embedded, "arduino-cli", Kind::Path, "Where arduino-cli is, when it isn't found by itself.", field!(embedded_arduino_cli, path_get, path_set)).default("found on PATH"),
         s("embedded.clangd", Embedded, "clangd", Kind::Path, "Where clangd is, when it isn't found by itself.", field!(embedded_clangd, path_get, path_set)).default("found on PATH"),

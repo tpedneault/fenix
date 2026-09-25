@@ -1897,6 +1897,7 @@ when it's out of date).
 | `jira.priorities` | jira priority = agenda priority | – | How a Jira priority maps onto the agenda's. |
 | `agenda.categories` | a list | – | Categories offered when you file a task. |
 | `agenda.worklog_round` | minutes | 15 | Time logged to Jira is rounded to this many minutes. |
+| `agenda.idle_minutes` | minutes | 60 | With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks. |
 | **Embedded & MIB** | | | |
 | `embedded.arduino_cli` | a path | found on PATH | Where arduino-cli is, when it isn't found by itself. |
 | `embedded.clangd` | a path | found on PATH | Where clangd is, when it isn't found by itself. |

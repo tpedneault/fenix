@@ -399,7 +399,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('n')], "agenda: new task", "agenda.new_task");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('h')], "agenda: task from here", "agenda.from_here");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('/')], "agenda: find a task", "agenda.find");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: start/stop clock", "agenda.toggle_clock");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: clock -- stop, resume, switch", "agenda.toggle_clock");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('T')], "agenda: resume the clock", "agenda.resume");
         // The Jira side: pick which of your issues to track, refresh the
         // ones you track, and review/send time as worklogs.
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('i')], "agenda: import Jira issues", "agenda.import");

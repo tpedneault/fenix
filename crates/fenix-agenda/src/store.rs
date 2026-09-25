@@ -7,6 +7,10 @@ use crate::task::{NoteEntry, Priority, Status, Subtask, Task, TaskId, TimeEntry,
 pub struct ActiveTimer {
     pub task_id: TaskId,
     pub started_at: DateTime<Local>,
+    /// When you were last seen doing anything while it ran -- saved now
+    /// and then, so a clock left running over a closed laptop is noticed.
+    #[serde(default)]
+    pub last_seen: Option<DateTime<Local>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -257,7 +261,36 @@ impl AgendaStore {
     /// so it should never require remembering to clock out first.
     pub fn clock_in(&mut self, id: TaskId) {
         self.clock_out();
-        self.active_timer = Some(ActiveTimer { task_id: id, started_at: Local::now() });
+        self.active_timer = Some(ActiveTimer { task_id: id, started_at: Local::now(), last_seen: None });
+    }
+
+    /// Stops the timer as of `end` (clamped to its start and now) -- for
+    /// time that ran on while you were away. A span that comes out empty
+    /// records nothing.
+    pub fn clock_out_at(&mut self, end: DateTime<Local>) {
+        let Some(timer) = self.active_timer.take() else { return };
+        let end = end.min(Local::now());
+        if end <= timer.started_at {
+            return;
+        }
+        if let Some(task) = self.task_mut(timer.task_id) {
+            task.time_entries.push(TimeEntry { start: timer.started_at, end, source: TimeSource::Timer, sent: false });
+            task.updated_at = Local::now();
+        }
+    }
+
+    /// Stops the timer without recording anything.
+    pub fn drop_timer(&mut self) {
+        self.active_timer = None;
+    }
+
+    /// Tasks by when they were last worked on, most recent first; ones
+    /// never worked on aren't included.
+    pub fn recently_worked(&self) -> Vec<(TaskId, DateTime<Local>)> {
+        let mut out: Vec<(TaskId, DateTime<Local>)> =
+            self.tasks.iter().filter(|t| !t.archived).filter_map(|t| t.time_entries.iter().map(|e| e.end).max().map(|at| (t.id, at))).collect();
+        out.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+        out
     }
 
     /// Stops whatever timer is running, if any, recording the elapsed span
@@ -432,6 +465,22 @@ mod tests {
         store.link(other, "FEN-12".to_string(), update);
         assert!(store.task(other).unwrap().in_project("fenix", Some("FEN")));
         assert!(!store.task(other).unwrap().in_project("fenix", Some("OPS")));
+    }
+
+    #[test]
+    fn a_clock_left_running_can_be_cut_back_or_dropped() {
+        let (mut store, id) = store_with_task();
+        store.clock_in(id);
+        let started = store.active_timer.as_ref().unwrap().started_at;
+        store.active_timer.as_mut().unwrap().started_at = started - chrono::Duration::hours(3);
+        store.clock_out_at(started - chrono::Duration::hours(2));
+        assert_eq!(store.task(id).unwrap().time_entries[0].duration(), chrono::Duration::hours(1));
+        assert_eq!(store.recently_worked()[0].0, id);
+
+        store.clock_in(id);
+        store.drop_timer();
+        assert!(store.active_timer.is_none());
+        assert_eq!(store.task(id).unwrap().time_entries.len(), 1, "nothing recorded");
     }
 
     #[test]

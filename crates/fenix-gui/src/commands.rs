@@ -220,7 +220,8 @@ impl CommandRegistry {
         registry.register("agenda.new_task", "Add a task to the agenda", cmd_agenda_new_task);
         registry.register("agenda.from_here", "Add a task about the selection or line here", cmd_agenda_from_here);
         registry.register("agenda.find", "Search every task", cmd_agenda_find);
-        registry.register("agenda.toggle_clock", "Start, stop, or switch the agenda's running timer", cmd_agenda_toggle_clock);
+        registry.register("agenda.toggle_clock", "Stop the clock, resume the last task, or switch to another", cmd_agenda_toggle_clock);
+        registry.register("agenda.resume", "Start the clock again on what you worked on last", cmd_agenda_resume);
         registry.register("agenda.import", "Pick Jira issues assigned to you to add to the agenda", cmd_agenda_import);
         registry.register("agenda.sync", "Refresh linked tasks from Jira and send pending changes", cmd_agenda_sync);
         registry.register("agenda.worklogs", "Review unsent time on linked tasks and send it to Jira", cmd_agenda_worklogs);
@@ -778,6 +779,10 @@ fn cmd_agenda_new_task(ctx: &mut CommandCtx) {
 
 fn cmd_agenda_from_here(ctx: &mut CommandCtx) {
     ctx.app.cmd_agenda_task_from_here();
+}
+
+fn cmd_agenda_resume(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_resume();
 }
 
 fn cmd_agenda_find(ctx: &mut CommandCtx) {

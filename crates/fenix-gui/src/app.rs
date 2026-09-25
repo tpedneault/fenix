@@ -2725,7 +2725,7 @@ enum ActivePicker {
     /// (see `App::cmd_agenda_toggle_clock`), since switching tasks via a
     /// picker while one is already running is exactly what `clock_in`
     /// already does for free the moment you start the next one.
-    AgendaClockIn(fenix_picker::PickerState<TaskId>),
+    AgendaClockIn(fenix_picker::PickerState<agenda_host::ClockPick>),
     /// Everything the agenda's Jira side asks you to pick -- an issue to
     /// link or import, a transition, what Blocked means in a project, a
     /// priority, an assignee, a side of a conflict. What it's for lives
@@ -6378,6 +6378,10 @@ pub struct App {
     agenda_prompt: Option<AgendaPrompt>,
     /// What `SPC a h` captured for the new-task form it opened.
     agenda_capture: Option<agenda_host::Capture>,
+    /// The clock picker open is asking about time away, not switching.
+    agenda_gap_asked: bool,
+    /// When the running clock's last-seen time was last saved.
+    agenda_seen_saved: Option<Instant>,
     /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
     agenda_sync: AgendaSyncState,
     /// Microcontroller projects (`SPC m` in a sketch) -- see `embedded`.
@@ -7394,6 +7398,8 @@ impl App {
             agenda_path,
             agenda_prompt: None,
             agenda_capture: None,
+            agenda_gap_asked: false,
+            agenda_seen_saved: None,
             agenda_sync: AgendaSyncState::default(),
             embedded: EmbeddedState::default(),
             vnc_sessions: HashMap::new(),
@@ -19038,33 +19044,6 @@ impl App {
         self.refresh_agenda_pages();
     }
 
-    /// `SPC a t` when nothing is currently running: candidates are every
-    /// non-archived task, grouped by status in `Status::ALL` order.
-    fn agenda_start_clock_in_picker(&mut self) {
-        let mut tasks: Vec<&fenix_agenda::Task> = self.agenda_store.tasks.iter().filter(|t| !t.archived).collect();
-        tasks.sort_by_key(|t| {
-            (fenix_agenda::Status::ALL.iter().position(|&s| s == t.status).unwrap_or(0), std::cmp::Reverse(t.priority), t.order)
-        });
-        let candidates: Vec<_> =
-            tasks.into_iter().map(|t| fenix_picker::Candidate::new(format!("[{}] {}", t.status.label(), t.title), t.id)).collect();
-        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
-    }
-
-    /// `SPC a t`: stops whatever timer is running, if any; otherwise opens
-    /// a picker to start one. Reachable from anywhere, not just the agenda:
-    /// the common case is clocking in and then going to edit the code the
-    /// task is about.
-    pub(crate) fn cmd_agenda_toggle_clock(&mut self) {
-        if self.agenda_store.active_timer.is_some() {
-            self.agenda_store.clock_out();
-            self.agenda_save_and_refresh();
-        } else if self.agenda_store.tasks.iter().any(|t| !t.archived) {
-            self.agenda_start_clock_in_picker();
-        } else {
-            self.set_error("no agenda tasks to clock in on yet -- SPC a n to add one");
-        }
-    }
-
     fn agenda_clock_toggle(&mut self, id: TaskId) {
         let already_running_here = matches!(&self.agenda_store.active_timer, Some(t) if t.task_id == id);
         if already_running_here {
@@ -20084,11 +20063,10 @@ impl App {
                 cursor.sticky_col = col;
             }
             Some(ActivePicker::AgendaClockIn(state)) => {
-                let Some(id) = state.selected().map(|c| c.payload) else { return };
+                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                self.agenda_store.clock_in(id);
-                self.agenda_save_and_refresh();
+                self.agenda_clock_pick(pick);
             }
             Some(ActivePicker::WorkSync(state)) => {
                 let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -22322,6 +22300,10 @@ impl App {
         }
 
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+        // Back after a while with the clock running: that's asked first.
+        if self.agenda_note_activity() {
+            return;
+        }
         self.dispatch_keypress(keypress, event_loop);
     }
 
@@ -24150,7 +24132,7 @@ impl App {
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
-                Some(picker @ ActivePicker::AgendaClockIn(_)) => ("CLOCK IN", picker_len(picker)),
+                Some(picker @ ActivePicker::AgendaClockIn(_)) => (if self.agenda_gap_asked { "AWAY" } else { "CLOCK" }, picker_len(picker)),
                 Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
                 Some(picker @ ActivePicker::Embedded(_)) => ("EMBEDDED", picker_len(picker)),
                 None => ("PICKER", 0),
@@ -44868,13 +44850,14 @@ name = \"orbit\"
     }
 
     #[test]
-    fn toggle_clock_with_a_timer_running_stops_it_directly_without_a_picker() {
+    fn toggle_clock_with_a_timer_running_offers_stop_first() {
         let dir = TempDir::new("toggle_clock_with_a_timer_running_stops_");
         let mut app = app_with_isolated_agenda(&dir);
         let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
         app.agenda_store.clock_in(a);
 
         app.cmd_agenda_toggle_clock();
+        app.picker_confirm();
 
         assert!(app.agenda_store.active_timer.is_none());
         assert!(app.active_picker.is_none());
