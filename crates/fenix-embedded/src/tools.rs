@@ -89,9 +89,9 @@ impl Tools {
     }
 }
 
-/// `<config dir>/fenix/tools` -- next to `config.ini`.
+/// `tools`, with this machine's state: downloads, so they don't roam.
 pub fn fenix_tools_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("tools"))
+    fenix_storage::paths::tools_dir()
 }
 
 fn exe_name(base: &str) -> String {

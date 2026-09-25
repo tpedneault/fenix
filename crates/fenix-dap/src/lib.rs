@@ -8,8 +8,6 @@
 //! breakpoints, stepping, panel wiring) lives in `fenix-gui`.
 
 mod client;
-mod launch_config;
 
 pub use client::{DapClient, DapEvent};
 pub use debug_adapter_protocol::{events, requests, responses, types};
-pub use launch_config::{read_launch_config, LaunchConfig};

@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 fenix-storage = { path = "../fenix-storage" }
 dirs = "6"
+serde = { version = "1", features = ["derive"] }
+toml_edit = "0.22"
+

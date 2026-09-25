@@ -27,6 +27,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = if start.is_dir() { start } else { start.parent()? };
     loop {
         if dir.join(".fenix/tools.json").is_file()
+            || dir.join(".fenix/settings.toml").is_file()
             || dir.join(".fenix/project.ini").is_file()
             || MARKERS.iter().any(|marker| dir.join(marker).exists())
             || is_sketch(dir)

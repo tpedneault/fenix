@@ -354,10 +354,10 @@ impl App {
     /// Reads the repository again for page `id`, and the diffs it has
     /// open.
     pub(super) fn git_page_refresh(&mut self, id: BufferId) {
-        let base = self.config.git_base_branch.clone();
+        let Some(root) = self.git_page(id).map(|g| g.root.clone()) else { return };
+        let base = self.base_branch_for(&root);
         let Some(g) = self.git_page(id) else { return };
         g.loading = true;
-        let root = g.root.clone();
         let expanded = g.expanded_files();
         self.page_spawn(move |send| {
             let snapshot = read_snapshot(&root, base.as_deref());

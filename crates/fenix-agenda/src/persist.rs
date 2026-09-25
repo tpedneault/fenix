@@ -2,12 +2,11 @@ use std::path::PathBuf;
 
 use crate::store::AgendaStore;
 
-/// `dirs::config_dir()/fenix/agenda.json` -- same location convention
-/// `fenix-config`'s own `Config::default_path` established for
-/// `config.ini`. `None` only on a platform with no notion of a config
-/// directory.
+/// `data/agenda.json` -- your own tasks, so beside your settings rather
+/// than with this machine's state. `None` only on a platform with no
+/// notion of a config directory.
 pub fn default_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("agenda.json"))
+    fenix_storage::paths::data_file("agenda.json")
 }
 
 /// Loads the store from `path`. A missing or corrupt file loads as an

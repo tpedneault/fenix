@@ -19,6 +19,8 @@ mod git_status;
 mod review_inbox;
 mod review_page;
 mod review_store;
+mod settings_page;
+mod snippets_page;
 mod graph_view;
 mod gpu;
 mod icon;

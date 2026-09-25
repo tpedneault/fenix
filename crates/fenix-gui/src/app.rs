@@ -16,6 +16,9 @@ mod git_editor;
 mod git_log_page;
 mod git_rebase_page;
 mod git_request_page;
+mod migrate;
+mod settings_host;
+mod snippets_host;
 mod review_host;
 use tool_sessions::LspKey;
 
@@ -6855,6 +6858,19 @@ pub struct App {
     /// this one struct on every change (`apply_theme`, `adjust_font_
     /// size`, `VimEvent::IndentWidthChanged`).
     config: fenix_config::Config,
+    /// When `settings.toml` last changed, as the disk poll last saw it:
+    /// a change it didn't make is read again.
+    settings_stamp: Option<std::time::SystemTime>,
+    /// The focused project's own settings (`.fenix/settings.toml`),
+    /// with the root they're for.
+    project_settings: Option<(PathBuf, fenix_config::ProjectSettings)>,
+    /// Your snippets' folder (a throwaway one in tests).
+    snippets_dir: PathBuf,
+    /// The buffer and pane the snippets page was opened from, to try a
+    /// snippet in.
+    snippets_origin: Option<(BufferId, fenix_window::WindowId)>,
+    /// The project the snippets page is showing, while it's in front.
+    snippets_project: Option<PathBuf>,
 
     /// Configured SCOS-2000 MIB roots (`config.mib_roots`), rebuilt
     /// (`persist_mib_roots`) whenever `SPC m a`/`SPC m d` changes the
@@ -7306,9 +7322,15 @@ impl App {
     /// from `env::args()` here, because `fenix --new-window notes.md`
     /// would otherwise try to open a file called `--new-window`.
     pub fn new(event_proxy: winit::event_loop::EventLoopProxy<FenixUserEvent>, file_arg: Option<String>) -> Self {
+        // Before anything is read: an installation from before the
+        // settings revamp moves to where things live now.
+        let migrated = match (fenix_storage::paths::legacy_dir(), fenix_storage::paths::Roots::current()) {
+            (Some(legacy), Some(roots)) => Some((migrate::run(&legacy, &roots), roots.backup())),
+            _ => None,
+        };
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
-        app.session.path = fenix_config::Config::default_path().map(|p| p.with_file_name("session.json"));
+        app.session.path = fenix_storage::paths::state_file("session.json");
         app.restore_session(file_arg.is_some());
         // Recording lives here, not inside `with_file` -- `with_file` is
         // what the test suite calls directly to simulate "opened with
@@ -7337,6 +7359,20 @@ impl App {
             }
         }
         app.announce_recoverable_work();
+        if let Some(problem) = app.config.problems.first() {
+            let more = match app.config.problems.len() {
+                1 => String::new(),
+                n => format!(" (and {} more)", n - 1),
+            };
+            app.set_error(format!("{problem}{more} -- SPC , shows them"));
+        }
+        if let Some((report, backup)) = migrated {
+            if let Some(failed) = report.failed.first() {
+                app.set_error(format!("couldn't move {failed} -- it's left where it was and tried again next time"));
+            } else if !report.moved.is_empty() {
+                app.set_message(format!("Moved Fenix's files to where they live now: your settings are in settings.toml. The old files are in {}", backup.display()));
+            }
+        }
         // Linked agenda tasks stay current while Fenix runs, and changes
         // queued before the last exit go out now.
         if app.agenda_store.tasks.iter().any(|t| t.jira.is_some()) {
@@ -7415,22 +7451,20 @@ impl App {
         // path, so this correctly comes out `None`.
         let project_root =
             buffers.get(initial_id).and_then(|ob| ob.buffer.path()).and_then(fenix_project::find_project_root);
-        let config_path = if cfg!(test) {
-            isolated_test_path("config.ini")
-        } else {
-            fenix_config::Config::default_path().unwrap_or_else(|| PathBuf::from("fenix-config.ini"))
+        // Tests get their own settings and a token store that forgets,
+        // so running them never touches the Fenix you use.
+        let (config_path, state_dir) = match fenix_storage::paths::Roots::current() {
+            _ if cfg!(test) => (isolated_test_path("settings.toml"), isolated_test_path("state")),
+            Some(roots) => (roots.settings_file(), roots.local.join("state")),
+            None => (PathBuf::from("settings.toml"), PathBuf::from("state")),
         };
         let config_existed = config_path.exists();
-        let config = fenix_config::Config::load_or_default(config_path);
-        // First launch on this machine: write the file immediately
-        // instead of waiting for the user to change some setting (theme
-        // cycle, font size, ...) before it ever appears on disk -- same
-        // "only `Some` fields get written" shape `save` always had, just
-        // triggered eagerly once so `config.ini` exists (and is
-        // discoverable/hand-editable) from the very first run.
+        let config = fenix_config::Config::load_at_or_default(config_path, state_dir);
+        // First launch on this machine: write the file straight away, so
+        // `settings.toml` is there to find (and hand-edit) from the start.
         if !config_existed {
             if let Err(err) = config.save() {
-                eprintln!("fenix: couldn't create default config.ini ({err})");
+                eprintln!("fenix: couldn't create settings.toml ({err})");
             }
         }
         let theme = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
@@ -7496,7 +7530,7 @@ impl App {
             rename_mode: HashMap::new(),
             volumes: Vec::new(),
             volumes_loading: false,
-            recent_dirs: fenix_project::RecentFiles::load_or_default(default_recent_dirs_path()),
+            recent_dirs: fenix_project::RecentFiles::dirs_or_default(default_recent_dirs_path()),
             explorer_delete_permanently: false,
             explorer_scroll: 0,
             sidebar_scroll: 0,
@@ -7638,6 +7672,11 @@ impl App {
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             config,
+            settings_stamp: None,
+            project_settings: None,
+            snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
+            snippets_origin: None,
+            snippets_project: None,
             mib_roots,
             mib_index: None,
             mib_root_prompt: None,
@@ -8330,6 +8369,7 @@ impl App {
 
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        self.refresh_project_settings(false);
         self.refresh_embedded_indicator();
         self.sync_lsp_for_focused_buffer();
     }
@@ -9847,9 +9887,11 @@ impl App {
                 // "recover" it on the next start.
                 self.discard_recovery_for(id);
                 self.refresh_gutter_hunks(id);
-                match self.xml_save_problem(&path) {
-                    Some(problem) => self.set_error(format!("saved {} -- {problem}", path.display())),
-                    None => self.set_message(format!("saved {}", path.display())),
+                match (self.xml_save_problem(&path), Self::snippet_save_note(&path)) {
+                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", path.display())),
+                    (None, Some(Ok(note))) => self.set_message(format!("saved -- {note}")),
+                    (None, Some(Err(why))) => self.set_error(format!("saved -- {why}")),
+                    (None, None) => self.set_message(format!("saved {}", path.display())),
                 }
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
@@ -11055,11 +11097,11 @@ impl App {
     ///
     /// An empty index says so rather than opening a picker over nothing:
     /// this is the one list in the app that can only be populated by
-    /// hand-editing `config.ini`, so "no matches" would be indis-
+    /// hand-editing `settings.toml`, so "no matches" would be indis-
     /// tinguishable from "you haven't set this up yet".
     pub(crate) fn start_document_picker(&mut self) {
         if self.config.documents.is_empty() {
-            self.set_error("no documents configured -- add a [documents] section to config.ini (doc1 = Name|path)".to_string());
+            self.set_error("no documents yet -- add them in SPC , (Documents & workspaces)".to_string());
             return;
         }
         let candidates = self
@@ -11085,7 +11127,7 @@ impl App {
     /// empty.
     fn open_document(&mut self, path: &Path) {
         if !path.exists() {
-            self.set_error(format!("{} no longer exists -- check its [documents] entry in config.ini", path.display()));
+            self.set_error(format!("{} no longer exists -- check its entry in SPC , (Documents & workspaces)", path.display()));
             return;
         }
         if Self::looks_like_pdf(path) {
@@ -12873,7 +12915,7 @@ impl App {
     /// all -- there'd be nothing to index.
     fn mib_index(&mut self) -> Option<&mut fenix_mib::MibIndex> {
         if self.mib_roots.is_empty() {
-            self.set_error("no MIB roots configured (see [mib] in config.ini)");
+            self.set_error("no MIB roots yet -- add one in SPC , (Embedded & MIB)");
             return None;
         }
         if self.mib_index.is_none() {
@@ -14933,12 +14975,11 @@ impl App {
             crate::dap::default_adapter_command(language).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
         });
         let Some(spec) = spec else { self.set_error(format!("no known debug adapter for {language:?}")); return; };
-        let legacy = fenix_dap::read_launch_config(&root);
-        let program = tools.launch.program.clone().map(|p| if p.is_absolute() { p } else { root.join(p) }).or(legacy.program)
+        let program = tools.launch.program.clone().map(|p| if p.is_absolute() { p } else { root.join(p) })
             .or_else(|| self.open().buffer.path().map(Path::to_path_buf));
         let Some(program) = program else { self.set_error("no file to debug -- configure a launch program"); return; };
         let mut launch_attributes = crate::dap::launch_arguments(language, &program);
-        launch_attributes.insert("args".into(), serde_json::json!(tools.launch.args.unwrap_or(legacy.args)));
+        launch_attributes.insert("args".into(), serde_json::json!(tools.launch.args.unwrap_or_default()));
         let cwd = tools.launch.cwd.map(|p| if p.is_absolute() { p } else { root.join(p) }).unwrap_or_else(|| root.clone());
         launch_attributes.insert("cwd".into(), serde_json::json!(cwd));
         launch_attributes.insert("env".into(), serde_json::json!(tools.launch.env));
@@ -16839,6 +16880,8 @@ impl App {
         self.tick_home();
         self.refresh_python_environments();
         self.refresh_git_pages(true);
+        self.reload_settings_if_changed();
+        self.refresh_project_settings(true);
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -17079,18 +17122,18 @@ impl App {
         // GitHub by its host; anything else is taken to be GitLab, which
         // is routinely self-hosted under any name.
         if fenix_github::repository(&url).is_some() {
-            let token = fenix_github::gh_token().or_else(|| self.config.github_token.clone().filter(|t| !t.trim().is_empty())).ok_or_else(|| {
-                "sign the GitHub CLI in (gh auth login), or set [github] token in config.ini".to_string()
+            let token = self.config.token(fenix_config::Secret::GitHub).or_else(fenix_github::gh_token).ok_or_else(|| {
+                "sign the GitHub CLI in (gh auth login), or set the GitHub token in SPC , (Forges)".to_string()
             })?;
             return fenix_github::GitHub::from_remote(token, &url)
                 .map(|c| Box::new(c) as ForgeClient)
                 .ok_or_else(|| format!("couldn't read owner/repo out of origin's URL ({url})"));
         }
         let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
-            return Err("set [gitlab] base_url in config.ini first".to_string());
+            return Err("set the GitLab server in SPC , (Forges) first".to_string());
         };
-        let Some(token) = self.config.gitlab_token.clone().filter(|t| !t.trim().is_empty()) else {
-            return Err("set [gitlab] token in config.ini first (a personal access token with `api` scope)".to_string());
+        let Some(token) = self.config.token(fenix_config::Secret::GitLab) else {
+            return Err("set the GitLab token in SPC , (Forges) first -- a personal access token with the api scope".to_string());
         };
         fenix_gitlab::GitLab::from_remote(base_url, token, &url)
             .map(|c| Box::new(c) as ForgeClient)
@@ -19919,7 +19962,7 @@ impl App {
                 }
                 self.config.agenda_categories.push(value);
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
             }
             AgendaPromptKind::LinkKey { id } => {
@@ -19979,11 +20022,11 @@ impl App {
     /// `base_url` or `token` isn't configured yet.
     fn jira_client(&mut self) -> Option<fenix_jira::JiraClient> {
         let base_url = self.config.jira_base_url.clone();
-        let token = self.config.jira_token.clone();
+        let token = self.config.token(fenix_config::Secret::Jira);
         match (base_url, token) {
             (Some(base_url), Some(token)) => Some(fenix_jira::JiraClient::new(base_url, token)),
             _ => {
-                self.set_error("Jira isn't configured yet: set base_url/token in the [jira] section of config.ini");
+                self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
                 None
             }
         }
@@ -20251,7 +20294,7 @@ impl App {
             JiraPromptKind::ProjectName { key } => {
                 self.config.jira_projects.push((key, value));
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
                 let projects = self.config.jira_projects.clone();
                 if let Some(session) = self.jira_session.as_mut() {
@@ -20268,7 +20311,7 @@ impl App {
             JiraPromptKind::UserName { id } => {
                 self.config.jira_users.push((id, value));
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
                 let users = self.config.jira_users.clone();
                 if let Some(session) = self.jira_session.as_mut() {
@@ -20419,7 +20462,7 @@ impl App {
     pub(crate) fn jira_copy_issue_url(&mut self) {
         let Some(key) = self.jira_current_issue_key() else { return };
         let Some(base_url) = self.config.jira_base_url.clone() else {
-            self.set_error("Jira isn't configured yet: set base_url in the [jira] section of config.ini");
+            self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
             return;
         };
         let url = format!("{}/browse/{key}", base_url.trim_end_matches('/'));
@@ -20686,7 +20729,7 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.config.jira_projects.retain(|entry| entry != &target);
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
                 let projects = self.config.jira_projects.clone();
                 if let Some(session) = self.jira_session.as_mut() {
@@ -20703,7 +20746,7 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.config.jira_users.retain(|entry| entry != &target);
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
                 let users = self.config.jira_users.clone();
                 if let Some(session) = self.jira_session.as_mut() {
@@ -22799,7 +22842,7 @@ impl App {
     pub(crate) fn start_workspace_launcher_picker(&mut self) {
         if self.config.workspaces.is_empty() {
             self.set_error(
-                "no workspaces configured -- add a [workspaces] section to config.ini (ws1 = Name|action)".to_string(),
+                "no workspaces on the shelf yet -- add them in SPC , (Documents & workspaces)".to_string(),
             );
             return;
         }
@@ -23032,7 +23075,7 @@ impl App {
         let enabled = !self.animations_enabled();
         self.config.animations = Some(enabled);
         if let Err(err) = self.config.save() {
-            self.set_error(format!("couldn't save config.ini: {err}"));
+            self.set_error(format!("couldn't save settings.toml: {err}"));
         } else {
             self.set_message(if enabled { "Animations on" } else { "Animations off" });
         }
@@ -25247,7 +25290,7 @@ impl App {
     fn tab_stops_for(&self, id: BufferId) -> TabStops {
         match self.table_views.get(&id) {
             Some(view) => TabStops::Custom(view.stops.clone()),
-            None => TabStops::Fixed(self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH)),
+            None => TabStops::Fixed(self.effective_tab_width()),
         }
     }
 
@@ -30520,7 +30563,7 @@ index 0000000..1111111 100644
         assert!(layout_worth_saving(&[one], &[]), "first run, nothing recorded yet");
         assert!(layout_worth_saving(&[moved], &[one]), "the window moved");
         assert!(layout_worth_saving(&[one, moved], &[one]), "a second window was opened");
-        assert!(!layout_worth_saving(&[one], &[one]), "nothing moved -- don't reformat config.ini for nothing");
+        assert!(!layout_worth_saving(&[one], &[one]), "nothing moved -- don't rewrite the state file for nothing");
         assert!(!layout_worth_saving(&[], &[one]), "nothing measured must never wipe a real arrangement");
     }
 
@@ -30554,12 +30597,12 @@ index 0000000..1111111 100644
         // config.ini.
         let dir = TempDir::new("toggle_animations_persists");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         assert!(app.animations_enabled());
 
         app.toggle_animations();
         assert!(!app.animations_enabled());
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         assert_eq!(reloaded.animations, Some(false));
 
         app.toggle_animations();
@@ -31210,11 +31253,11 @@ index 0000000..1111111 100644
         // this exercises the same pipeline (a loaded `Config` feeding
         // `VimState::set_indent_width`) directly instead.
         let dir = TempDir::new("persisted_indent_width_applies");
-        let mut config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        let mut config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         config.indent_width = Some(3);
         config.save().unwrap();
 
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         let mut vim = VimState::new();
         vim.set_indent_width(reloaded.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
         assert_eq!(vim.indent_width(), 3);
@@ -31224,7 +31267,7 @@ index 0000000..1111111 100644
     fn set_shiftwidth_command_persists_the_new_width() {
         let dir = TempDir::new("set_shiftwidth_persists");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
 
         let event = app.test_vim_key(KeyPress::char(':'));
         assert_eq!(event, VimEvent::None);
@@ -31242,7 +31285,7 @@ index 0000000..1111111 100644
             app.config.indent_width = Some(width);
             app.config.save().unwrap();
         }
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         assert_eq!(reloaded.indent_width, Some(3));
     }
 
@@ -31252,11 +31295,11 @@ index 0000000..1111111 100644
     #[test]
     fn a_persisted_iskeyword_extra_applies_to_vim() {
         let dir = TempDir::new("persisted_iskeyword_applies");
-        let mut config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        let mut config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         config.iskeyword_extra = Some(String::new());
         config.save().unwrap();
 
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         let mut vim = VimState::new();
         vim.set_iskeyword_extra(
             reloaded.iskeyword_extra.as_deref().map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec()),
@@ -31267,7 +31310,7 @@ index 0000000..1111111 100644
     #[test]
     fn no_persisted_iskeyword_extra_falls_back_to_real_vims_own_default() {
         let dir = TempDir::new("unset_iskeyword_falls_back");
-        let config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        let config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         assert!(config.iskeyword_extra.is_none());
 
         let mut vim = VimState::new();
@@ -31281,7 +31324,7 @@ index 0000000..1111111 100644
     fn set_iskeyword_command_persists_the_new_setting() {
         let dir = TempDir::new("set_iskeyword_persists");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         // `App::with_file` still seeds `app.vim` from *this machine's*
         // real, already-on-disk config (deliberately not swapped out
         // above, the same shape `set_shiftwidth_command_persists_the_
@@ -31305,7 +31348,7 @@ index 0000000..1111111 100644
             app.config.iskeyword_extra = Some(chars.into_iter().collect());
             app.config.save().unwrap();
         }
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         assert_eq!(reloaded.iskeyword_extra, Some(String::new()));
     }
 
@@ -34043,7 +34086,7 @@ configure_board stm32
         // Otherwise it would be a key you can only press once you have
         // already done the thing it is for.
         let mut app = App::with_file(None);
-        app.recent_dirs = fenix_project::RecentFiles::load_or_default(
+        app.recent_dirs = fenix_project::RecentFiles::dirs_or_default(
             std::env::temp_dir().join(format!("fenix-places-test-dual-any-{}.txt", std::process::id())),
         );
         assert!(app.focused_dired_buffer().is_none());
@@ -34320,7 +34363,7 @@ configure_board stm32
     /// throwaway files rather than the real config directory.
     fn app_with_places(name: &str, dir: &Path) -> App {
         let mut app = App::with_file(None);
-        app.recent_dirs = fenix_project::RecentFiles::load_or_default(
+        app.recent_dirs = fenix_project::RecentFiles::dirs_or_default(
             std::env::temp_dir().join(format!("fenix-places-test-{name}-{}.txt", std::process::id())),
         );
         app.open_dired_at(dir);
@@ -34587,7 +34630,7 @@ configure_board stm32
         let dir = TempDir::new("places_bookmark");
         let sub = dir.mkdir("interesting");
         let mut app = app_with_places("bookmark", &sub);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
 
         app.bookmark_current_directory();
 
@@ -34600,7 +34643,7 @@ configure_board stm32
         let dir = TempDir::new("places_bookmark_twice");
         let sub = dir.mkdir("interesting");
         let mut app = app_with_places("bookmark_twice", &sub);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
 
         app.bookmark_current_directory();
         app.bookmark_current_directory();
@@ -36304,7 +36347,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.start_workspace_launcher_picker();
         assert!(app.active_picker.is_none());
-        assert!(app.modeline_pieces().1.contains("no workspaces configured"));
+        assert!(app.modeline_pieces().1.contains("no workspaces on the shelf"));
     }
 
     #[test]
@@ -37370,7 +37413,7 @@ configure_board stm32
         let mib_dir = TempDir::new("select_cwd_mib_target");
         let config_dir = TempDir::new("select_cwd_mib_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.project_root = Some(mib_dir.path().to_path_buf());
 
         app.picker_add_mib_root_prompt();
@@ -37444,7 +37487,7 @@ configure_board stm32
         let mib_dir = TempDir::new("mib_root_prompt_enter_target");
         let config_dir = TempDir::new("mib_root_prompt_enter_config");
         let mut app = App::with_file(None);
-        let config_path = config_dir.path().join("config.ini");
+        let config_path = config_dir.path().join("settings.toml");
         app.config = fenix_config::Config::load_or_default(config_path.clone());
         app.project_root = Some(mib_dir.path().to_path_buf());
 
@@ -37471,7 +37514,7 @@ configure_board stm32
         let mib_dir_a = TempDir::new("mib_two_roots_a");
         let mib_dir_b = TempDir::new("mib_two_roots_b");
         let config_dir = TempDir::new("mib_two_roots_config");
-        let config_path = config_dir.path().join("config.ini");
+        let config_path = config_dir.path().join("settings.toml");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(config_path.clone());
 
@@ -37511,7 +37554,7 @@ configure_board stm32
         let mib_dir_a = TempDir::new("mib_preexisting_a");
         let mib_dir_b = TempDir::new("mib_preexisting_b");
         let config_dir = TempDir::new("mib_preexisting_config");
-        let config_path = config_dir.path().join("config.ini");
+        let config_path = config_dir.path().join("settings.toml");
 
         let mut seed = fenix_config::Config::load_or_default(config_path.clone());
         let canonical_a = std::fs::canonicalize(mib_dir_a.path()).unwrap();
@@ -37549,7 +37592,7 @@ configure_board stm32
         let mib_dir = TempDir::new("mib_root_prompt_empty_target");
         let config_dir = TempDir::new("mib_root_prompt_empty_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.project_root = Some(mib_dir.path().to_path_buf());
 
         app.picker_add_mib_root_prompt();
@@ -37565,7 +37608,7 @@ configure_board stm32
         let mib_dir = TempDir::new("mib_root_prompt_escape_target");
         let config_dir = TempDir::new("mib_root_prompt_escape_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.project_root = Some(mib_dir.path().to_path_buf());
 
         app.picker_add_mib_root_prompt();
@@ -37582,7 +37625,7 @@ configure_board stm32
         let mib_dir = TempDir::new("mib_root_prompt_paste_target");
         let config_dir = TempDir::new("mib_root_prompt_paste_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.project_root = Some(mib_dir.path().to_path_buf());
         app.picker_add_mib_root_prompt();
         app.explorer_handle_action(ExplorerAction::SelectCwd);
@@ -37597,7 +37640,7 @@ configure_board stm32
     fn picker_delete_mib_root_lists_configured_roots() {
         let config_dir = TempDir::new("delete_mib_root_list_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
 
         app.picker_delete_mib_root();
@@ -37612,7 +37655,7 @@ configure_board stm32
     fn picker_confirm_on_delete_mib_root_removes_it_and_persists() {
         let config_dir = TempDir::new("delete_mib_root_confirm_config");
         let mut app = App::with_file(None);
-        let config_path = config_dir.path().join("config.ini");
+        let config_path = config_dir.path().join("settings.toml");
         app.config = fenix_config::Config::load_or_default(config_path.clone());
         app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
         app.mib_roots =
@@ -37667,7 +37710,7 @@ configure_board stm32
     fn picker_confirm_on_theme_applies_it_persists_and_returns_to_the_editor() {
         let dir = TempDir::new("picker_confirm_theme");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         app.theme = &theme::ORBIT_DARK;
 
         app.picker_pick_theme();
@@ -37679,7 +37722,7 @@ configure_board stm32
         assert_eq!(app.theme.name, "Nord");
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.active_picker.is_none());
-        let reloaded = fenix_config::Config::load(dir.path().join("config.ini")).unwrap();
+        let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
         assert_eq!(reloaded.theme, Some("Nord".to_string())); // persisted
     }
 
@@ -39465,7 +39508,7 @@ configure_board stm32
         app.open_forge_view();
 
         assert!(app.forge_session.is_none(), "no workspace should have been opened");
-        assert!(app.modeline_pieces().1.contains("[gitlab] base_url"), "got: {}", app.modeline_pieces().1);
+        assert!(app.modeline_pieces().1.contains("GitLab server"), "got: {}", app.modeline_pieces().1);
     }
 
     #[test]
@@ -43764,7 +43807,7 @@ configure_board stm32
         // already established.
         let config_dir = TempDir::new("jira_add_project_prompt_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.open_jira_panel();
 
         app.jira_start_add_project_prompt();
@@ -43795,7 +43838,7 @@ configure_board stm32
     fn jira_prompt_add_user_two_step_flow_appends_and_persists() {
         let config_dir = TempDir::new("jira_add_user_prompt_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.open_jira_panel();
 
         app.jira_start_add_user_prompt();
@@ -43816,7 +43859,7 @@ configure_board stm32
     fn jira_prompt_escape_cancels_without_tracking_anything() {
         let config_dir = TempDir::new("jira_prompt_escape_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.open_jira_panel();
         app.jira_start_add_project_prompt();
         app.jira_prompt_key(KeyPress::char('X'));
@@ -43831,7 +43874,7 @@ configure_board stm32
     fn jira_prompt_empty_field_cancels_the_whole_prompt() {
         let config_dir = TempDir::new("jira_prompt_empty_field_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.open_jira_panel();
         app.jira_start_add_project_prompt();
 
@@ -43845,7 +43888,7 @@ configure_board stm32
     fn picker_confirm_on_delete_jira_project_removes_it_and_persists() {
         let config_dir = TempDir::new("delete_jira_project_confirm_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other".to_string())];
         app.open_jira_panel();
 
@@ -43866,7 +43909,7 @@ configure_board stm32
     fn picker_confirm_on_delete_jira_user_removes_it_and_persists() {
         let config_dir = TempDir::new("delete_jira_user_confirm_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
         app.open_jira_panel();
 
@@ -44088,7 +44131,7 @@ configure_board stm32
     fn picker_create_jira_issue_lists_tracked_projects() {
         let config_dir = TempDir::new("create_jira_issue_picker_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other".to_string())];
         app.open_jira_panel();
 
@@ -44104,7 +44147,7 @@ configure_board stm32
     fn picker_confirm_on_create_jira_issue_starts_the_new_issue_type_prompt() {
         let config_dir = TempDir::new("create_jira_issue_confirm_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
         app.open_jira_panel();
         app.picker_create_jira_issue();
@@ -44130,7 +44173,7 @@ configure_board stm32
         // surfaces_an_error_instead_of_panicking` already established).
         let config_dir = TempDir::new("create_jira_issue_chain_config");
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
         app.config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
         app.open_jira_panel();
         app.picker_create_jira_issue();
@@ -44824,7 +44867,7 @@ configure_board stm32
 
         assert!(app.active_picker.is_none());
         assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("[documents]")));
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("Documents & workspaces")));
     }
 
     #[test]

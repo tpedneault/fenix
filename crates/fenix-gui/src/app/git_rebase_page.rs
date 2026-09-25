@@ -41,7 +41,7 @@ impl App {
                 (Some(parent).filter(|p| !p.is_empty()), label)
             }
             None => {
-                let target = upstream.clone().or_else(|| fenix_git::resolve_base(&root, self.config.git_base_branch.as_deref()));
+                let target = upstream.clone().or_else(|| fenix_git::resolve_base(&root, self.base_branch_for(&root).as_deref()));
                 let Some(target) = target else {
                     self.set_error("no upstream or base branch to rebase from -- use i on a commit in the Log page (SPC g l)");
                     return;

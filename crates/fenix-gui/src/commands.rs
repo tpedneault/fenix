@@ -11,6 +11,14 @@ pub struct CommandCtx<'a> {
 
 type CommandFn = fn(&mut CommandCtx);
 
+fn cmd_snippets_open(ctx: &mut CommandCtx) {
+    ctx.app.open_snippets_page(None);
+}
+
+fn cmd_snippets_from_selection(ctx: &mut CommandCtx) {
+    ctx.app.snippet_from_selection();
+}
+
 fn cmd_insert_snippet(ctx: &mut CommandCtx) {
     ctx.app.start_snippet_picker();
 }
@@ -33,6 +41,8 @@ pub struct CommandRegistry {
 impl CommandRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self { commands: Vec::new() };
+        registry.register("snippets.open", "Every snippet: make, edit, copy, delete and try them", cmd_snippets_open);
+        registry.register("snippets.from_selection", "Make a snippet from the last Visual selection", cmd_snippets_from_selection);
         registry.register("insert.snippet", "Choose a snippet for the current document", cmd_insert_snippet);
         registry.register("file.save", "Save the current file", cmd_save);
         registry.register("file.save_force", "Save, overwriting a file that changed on disk (:w!)", cmd_save_force);
@@ -135,7 +145,7 @@ impl CommandRegistry {
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
         registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
-        registry.register("pdf.documents", "Open a document from the config.ini [documents] index", cmd_pdf_documents);
+        registry.register("pdf.documents", "Open a document from the document index (SPC , Documents)", cmd_pdf_documents);
         registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
         registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
         registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
@@ -152,6 +162,7 @@ impl CommandRegistry {
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
+        registry.register("settings.open", "Every setting, on one page: search, change, reset", cmd_settings_open);
         registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
         registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
@@ -1041,6 +1052,10 @@ fn cmd_git_close_view(ctx: &mut CommandCtx) {
 
 fn cmd_git_pull_request(ctx: &mut CommandCtx) {
     ctx.app.open_new_request();
+}
+
+fn cmd_settings_open(ctx: &mut CommandCtx) {
+    ctx.app.open_settings_page(crate::settings_page::Scope::You, None);
 }
 
 fn cmd_git_log(ctx: &mut CommandCtx) {

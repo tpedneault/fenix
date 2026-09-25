@@ -744,7 +744,7 @@ mod tests {
     /// depends on (or runs) a real arduino-cli.
     fn app_in(dir: &Path) -> App {
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.join("settings.toml"));
         let fake = |name: &str| {
             let path = dir.join("tools").join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -762,6 +762,9 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("fenix-gui-embedded-{name}-{}-{n}", std::process::id()));
+        // Process ids come round again: start from nothing, not from what
+        // an earlier run with the same id left.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

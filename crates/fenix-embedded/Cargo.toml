@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dirs = "6"
+fenix-storage = { path = "../fenix-storage" }
 serde_json = "1"
 
 [dev-dependencies]

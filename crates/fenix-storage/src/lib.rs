@@ -4,6 +4,10 @@
 //! file replaces it only after serialization succeeds. This protects against
 //! interrupted writes; it does not promise survival of every hardware failure.
 
+pub mod paths;
+pub mod project_file;
+pub mod state;
+
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;

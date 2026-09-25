@@ -1172,9 +1172,9 @@ pub fn builtin_templates() -> Vec<Template> {
         .collect()
 }
 
-/// `config_dir/fenix/templates` -- where your own templates live.
+/// `templates`, beside your settings -- where your own templates live.
 pub fn user_templates_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("templates"))
+    fenix_storage::paths::templates_dir()
 }
 
 /// Reads one template folder.

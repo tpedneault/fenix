@@ -33,15 +33,22 @@ completion-item resolve requests are not supported.
 
 ## Your snippet files
 
-Create a `snippets` directory beside Fenix's `config.ini`:
+`SPC i S` makes, edits, copies and deletes snippets for you; `SPC i n`
+makes one from the last Visual selection. The files it manages are plain
+text you can also edit by hand, one `.snippet` file each, in a folder per
+language (`all` for snippets that work everywhere):
 
-- Windows: `%APPDATA%\fenix\snippets`
-- Linux: `~/.config/fenix/snippets` (or your platform's configured config directory)
-- macOS: `~/Library/Application Support/fenix/snippets`
+- yours: `%APPDATA%\fenix\snippets\<language>\` on Windows,
+  `~/.config/fenix/snippets/<language>/` on Linux,
+  `~/Library/Application Support/fenix/snippets/<language>/` on macOS
+- a project's: `.fenix/snippets/<language>/` in its root, meant to be
+  committed -- it wins over yours, and yours over a built-in snippet, for
+  the same trigger
 
-Each UTF-8 `.snippet` file contains one snippet. Files are read on expansion,
-so saving an edit makes it available on the next trigger without a restart.
-Fenix never writes these files. Copy the [bundled examples](../crates/fenix-snippets/examples)
+Files are read on expansion, so saving an edit makes it available on the
+next trigger without a restart; saving one in Fenix also says whether it
+parses. `[snippets] builtin = false` in `settings.toml` hides the built-in
+ones. Copy the [bundled examples](../crates/fenix-snippets/examples)
 as starting points. For example, `function.snippet`:
 
 ```text

@@ -19,15 +19,11 @@ pub(super) struct SnippetChoice {
 }
 
 impl App {
+    /// Every snippet that applies here: the built-in ones, yours and the
+    /// focused project's (`snippets_host`).
     pub(super) fn snippet_catalog(&self) -> Catalog {
-        Catalog::load(
-            &self
-                .config
-                .path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("snippets"),
-        )
+        let project = self.project_root.as_ref().map(|r| r.join(".fenix").join("snippets"));
+        self.snippet_layers(project.as_deref())
     }
 
     pub(super) fn snippet_scope(&self) -> String {
@@ -285,7 +281,7 @@ mod tests {
         let file = dir.path().join("test.tcl");
         std::fs::write(&file, text).unwrap();
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         app.test_vim_key(KeyPress::char('i'));
         app.focused_buffer_and_cursor_mut().1.char_idx = text.chars().count();
         (dir, app)

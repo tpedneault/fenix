@@ -1,26 +1,37 @@
-//! Fenix's unified settings file -- `dirs::config_dir()/fenix/config.ini`
-//! (`%AppData%\fenix\config.ini` on Windows, `~/.config/fenix/config.ini`
-//! on Unix). Replaces what used to be three separate flat files (theme
-//! choice, font size, indent width), each with its own free-function
-//! trio, now that there's more than one setting worth persisting -- one
-//! shared file, one struct, the same `load`/`save` shape `fenix_project::
-//! KnownProjects`/`RecentFiles` already established for multi-field
-//! persisted state.
+//! Fenix's settings: `settings.toml` (`%AppData%\fenix\settings.toml` on
+//! Windows, `~/.config/fenix/settings.toml` on Linux), API tokens
+//! included, with window placement and explorer bookmarks in state files
+//! beside the other things Fenix remembers about this machine (see
+//! `fenix_storage::paths`).
 //!
-//! Every field is `Option<T>`: "this key was present and parsed" vs.
-//! not. `Config` itself has no notion of what a *sane default* is for
-//! any of them -- those constants (`theme::ORBIT_DARK`, `text::
-//! FONT_SIZE`, `fenix_vim::DEFAULT_INDENT_WIDTH`) live in crates that
-//! would create a dependency cycle if `fenix-config` depended on them,
-//! so each real consumer in `fenix-gui` supplies its own already-
-//! existing default via `.unwrap_or(...)`. This also means a corrupted
-//! or missing individual key only ever loses *that* setting, not every
-//! setting in the file.
+//! Every field is `Option<T>` (or an empty list): "set in the file" vs
+//! not. What a default *is* lives with the code that uses the setting,
+//! in crates this one can't depend on, so each consumer supplies its own
+//! with `.unwrap_or(...)`; `schema` only says how the default reads on
+//! the settings page. A bad value costs only that setting, and says why
+//! in `problems`.
+//!
+//! `schema` declares every setting once; loading, saving, the settings
+//! page and the README's table all come from it. Saving changes only the
+//! lines of the settings that changed (`toml_edit`), so comments and hand
+//! edits survive it.
 
 mod ini;
+mod legacy;
+mod project;
+pub mod schema;
+pub mod secrets;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
+pub use project::ProjectSettings;
+pub use secrets::Secret;
 
 /// What "Blocked" means for one Jira project -- see `Config::jira_blocked`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +61,17 @@ impl Config {
 
 pub struct Config {
     path: PathBuf,
+    /// Where window placement and explorer bookmarks are kept.
+    state_dir: PathBuf,
+    /// The file as last read or written, comments and all.
+    doc: RefCell<toml_edit::DocumentMut>,
+    /// Each setting's value when the file was last read or written, so a
+    /// save writes only what Fenix changed.
+    baseline: RefCell<HashMap<&'static str, Option<schema::Value>>>,
+    /// The file couldn't be parsed, so it mustn't be written over.
+    broken: bool,
+    /// What's wrong in the file, if anything.
+    pub problems: Vec<Problem>,
     pub theme: Option<String>,
     pub font_size: Option<f32>,
     pub font_family: Option<String>,
@@ -77,6 +99,9 @@ pub struct Config {
     /// complaint, or who just prefers snappier motion.
     pub animations: Option<bool>,
     pub completion_symbols_file: Option<PathBuf>,
+    /// Whether the snippets that come with Fenix are offered; yours and
+    /// a project's always are.
+    pub snippets_builtin: Option<bool>,
     /// Configured language server commands, `(language, command_line)`
     /// -- `[lsp]`'s `serverN = LANGUAGE|COMMAND_LINE`, same numbered-key
     /// list convention `mib_roots`/`jira_projects` already established.
@@ -117,7 +142,8 @@ pub struct Config {
     /// `https://jira.mycompany.com`), and a personal access token for
     /// it -- plaintext, same as every other setting in this file (a
     /// deliberate choice, not an oversight: `fenix-jira`'s own design
-    /// notes cover the tradeoff against an OS credential store).
+    /// notes cover the tradeoff against an OS credential store, which is
+    /// planned).
     pub jira_base_url: Option<String>,
     pub jira_token: Option<String>,
     /// Tracked projects, `(key, display name)` -- same numbered-key
@@ -285,7 +311,7 @@ pub struct Config {
 /// longer lands on any connected monitor just gets placed by the
 /// window manager instead of opening off-screen (see
 /// `App::restore_windows`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowLayout {
     pub x: i32,
     pub y: i32,
@@ -294,95 +320,89 @@ pub struct WindowLayout {
     pub maximized: bool,
 }
 
+/// Something wrong in `settings.toml`, as the settings page and the
+/// modeline report it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// The setting it's about, when it's about one.
+    pub key: Option<String>,
+    /// 1-based.
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.line, &self.key) {
+            (Some(line), Some(key)) => write!(f, "settings.toml:{line} -- {key}: {}", self.message),
+            (Some(line), None) => write!(f, "settings.toml:{line} -- {}", self.message),
+            (None, Some(key)) => write!(f, "{key}: {}", self.message),
+            (None, None) => f.write_str(&self.message),
+        }
+    }
+}
+
+/// Walks `key`'s dotted path in `doc`.
+pub(crate) fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
+    let mut item = doc.as_item();
+    for part in key.split('.') {
+        item = item.as_table_like()?.get(part)?;
+    }
+    Some(item)
+}
+
+/// Sets (or, with `None`, removes) `key`'s dotted path in `doc`, making
+/// the tables on the way as it goes.
+pub(crate) fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_edit::Item>) {
+    let parts: Vec<&str> = key.split('.').collect();
+    let (last, parents) = parts.split_last().expect("a key");
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for part in parents {
+        if table.get(part).and_then(|i| i.as_table_like()).is_none() {
+            if item.is_none() {
+                return;
+            }
+            // Implicit: a table that only holds tables (`[lsp]` above
+            // `[lsp.servers]`) gets no header of its own.
+            let mut new = toml_edit::Table::new();
+            new.set_implicit(true);
+            table.insert(part, toml_edit::Item::Table(new));
+        }
+        table = table.get_mut(part).and_then(|i| i.as_table_like_mut()).expect("just made");
+    }
+    match item {
+        Some(item) => {
+            table.insert(last, item);
+        }
+        None => {
+            table.remove(last);
+        }
+    }
+}
+
+/// The 1-based line `offset` falls on in `text`.
+pub(crate) fn line_of(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())].matches('\n').count() + 1
+}
+
+const HEADER: &str = "# Fenix settings. SPC , edits them; so can you -- Fenix keeps your\n# comments and only ever changes the lines of the settings it changes.\n# Only what differs from the defaults needs to be here.\n\n";
+
 impl Config {
-    /// `dirs::config_dir()/fenix/config.ini` -- same location convention
-    /// every other persisted file in this project already established.
-    /// `None` only on a platform with no notion of a config directory.
+    /// `settings.toml`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fenix").join("config.ini"))
+        fenix_storage::paths::settings_file()
     }
 
-    /// Loads settings from `path`. A missing file means "nothing
-    /// configured yet," not an error -- every field comes back `None`,
-    /// same as `KnownProjects::load` starting with an empty list.
-    pub fn load(path: PathBuf) -> io::Result<Self> {
-        let sections = match std::fs::read_to_string(&path) {
-            Ok(contents) => ini::parse(&contents),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Default::default(),
-            Err(e) => return Err(e),
-        };
-
-        let editor = sections.get("editor");
-        let completion = sections.get("completion");
-        let lsp = sections.get("lsp");
-        let mib = sections.get("mib");
-        let jira = sections.get("jira");
-        let git = sections.get("git");
-        let gitlab = sections.get("gitlab");
-        let vnc = sections.get("vnc");
-        let documents = sections.get("documents");
-        let windows = sections.get("windows");
-        let workspaces = sections.get("workspaces");
-        let embedded = sections.get("embedded");
-
-        Ok(Self {
+    /// Nothing set, reading from and saving to `path`, with state files
+    /// in `state_dir`.
+    pub fn empty(path: PathBuf, state_dir: PathBuf) -> Self {
+        Config {
             path,
-            theme: editor.and_then(|s| s.get("theme")).cloned(),
-            font_size: editor.and_then(|s| s.get("font_size")).and_then(|v| v.parse().ok()),
-            font_family: editor.and_then(|s| s.get("font_family")).cloned(),
-            indent_width: editor.and_then(|s| s.get("indent_width")).and_then(|v| v.parse().ok()),
-            iskeyword_extra: editor.and_then(|s| s.get("iskeyword_extra")).cloned(),
-            tab_width: editor.and_then(|s| s.get("tab_width")).and_then(|v| v.parse().ok()),
-            animations: editor.and_then(|s| s.get("animations")).and_then(|v| v.parse().ok()),
-            completion_symbols_file: completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from),
-            lsp_servers: lsp.map(|s| parse_pair_list(s, "server")).unwrap_or_default(),
-            mib_roots: mib.map(parse_mib_roots).unwrap_or_default(),
-            explorer_bookmarks: sections
-                .get("explorer")
-                .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
-                .unwrap_or_default(),
-            agenda_categories: sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default(),
-            agenda_worklog_round: sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v)),
-            embedded_arduino_cli: embedded.and_then(|s| s.get("arduino_cli")).map(PathBuf::from),
-            embedded_clangd: embedded.and_then(|s| s.get("clangd")).map(PathBuf::from),
-            embedded_arduino_language_server: embedded.and_then(|s| s.get("arduino_language_server")).map(PathBuf::from),
-            mib_telecommand_template: mib.and_then(|s| s.get("telecommand_template")).cloned(),
-            mib_telecommand_argument_template: mib.and_then(|s| s.get("telecommand_argument_template")).cloned(),
-            mib_telecommand_argument_separator: mib.and_then(|s| s.get("telecommand_argument_separator")).cloned(),
-            watch_files: editor.and_then(|s| s.get("watch_files")).and_then(|v| v.parse().ok()),
-            jira_base_url: jira.and_then(|s| s.get("base_url")).cloned(),
-            jira_token: jira.and_then(|s| s.get("token")).cloned(),
-            jira_projects: jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default(),
-            jira_users: jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default(),
-            jira_blocked: jira.map(parse_jira_blocked).unwrap_or_default(),
-            jira_priority_map: jira.map(|s| parse_pair_list(s, "priority")).unwrap_or_default(),
-            jira_sync_minutes: jira.and_then(|s| s.get("sync_minutes")).and_then(|v| v.trim().parse().ok()),
-            git_graph_limit: git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok()),
-            git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
-            gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
-            gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
-            github_token: sections.get("github").and_then(|s| s.get("token")).cloned(),
-            git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
-            git_layout: git.and_then(|s| s.get("layout")).cloned(),
-            git_auto_fetch_minutes: git.and_then(|s| s.get("auto_fetch")).and_then(|v| v.trim().trim_end_matches('m').trim().parse().ok()).filter(|m| *m > 0),
-            git_reviewers: git.and_then(|s| s.get("reviewers")).map(|v| names(v)).unwrap_or_default(),
-            vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
-            documents: documents.map(parse_documents).unwrap_or_default(),
-            windows: windows.map(parse_windows).unwrap_or_default(),
-            restore_session: windows.and_then(|s| s.get("restore_session")).and_then(|v| v.parse().ok()),
-            workspace_per_project: windows.and_then(|s| s.get("workspace_per_project")).and_then(|v| v.parse().ok()),
-            restore_windows: windows.and_then(|s| s.get("restore_windows")).and_then(|v| v.parse().ok()),
-            workspaces: workspaces.map(|s| parse_pair_list(s, "ws")).unwrap_or_default(),
-        })
-    }
-
-    /// Same as `load`, but never fails -- any read error (not just a
-    /// missing file) just starts with every field `None`. A convenience
-    /// preference, not critical data, same posture as `KnownProjects::
-    /// load_or_default`.
-    pub fn load_or_default(path: PathBuf) -> Self {
-        Self::load(path.clone()).unwrap_or(Self {
-            path,
+            state_dir,
+            doc: RefCell::new(toml_edit::DocumentMut::new()),
+            baseline: RefCell::new(HashMap::new()),
+            broken: false,
+            problems: Vec::new(),
             theme: None,
             font_size: None,
             font_family: None,
@@ -391,6 +411,7 @@ impl Config {
             tab_width: None,
             animations: None,
             completion_symbols_file: None,
+            snippets_builtin: None,
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),
@@ -426,372 +447,242 @@ impl Config {
             restore_session: None,
             workspace_per_project: None,
             workspaces: Vec::new(),
+        }
+    }
+
+    /// Reads `path`, with the state files beside it in `state/`. A file
+    /// that isn't there is every setting at its default; a file that
+    /// can't be parsed is the same, with the reason in `problems` -- and
+    /// is never written over until it's fixed.
+    pub fn load(path: PathBuf) -> io::Result<Self> {
+        let state_dir = path.parent().map(|p| p.join("state")).unwrap_or_else(|| PathBuf::from("state"));
+        Self::load_at(path, state_dir)
+    }
+
+    /// Reads `path`, with the state files in `state_dir`.
+    pub fn load_at(path: PathBuf, state_dir: PathBuf) -> io::Result<Self> {
+        let mut config = Self::empty(path, state_dir);
+        match std::fs::read_to_string(&config.path) {
+            Ok(text) => config.read_toml(&text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        config.read_state();
+        config.remember();
+        Ok(config)
+    }
+
+    /// Same as `load`, but never fails: a file that can't be read at all
+    /// is every setting at its default.
+    pub fn load_or_default(path: PathBuf) -> Self {
+        Self::load(path.clone()).unwrap_or_else(|e| {
+            let state_dir = path.parent().map(|p| p.join("state")).unwrap_or_default();
+            let mut config = Self::empty(path, state_dir);
+            config.broken = true;
+            config.problems.push(Problem { key: None, line: None, message: e.to_string() });
+            config
         })
     }
 
-    /// Writes the known two-section, five-key layout, creating parent
-    /// directories as needed -- only `Some` fields are written, so a
-    /// setting cleared back to `None` doesn't leave a stale empty line
-    /// behind on the next save. Not a generic INI writer: there's only
-    /// ever this one shape to write, so building one would be unused
-    /// machinery.
-    pub fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // `[vnc]`/`[documents]`/`[workspaces]`/`[lsp]` are hand-edit-only
-        // -- nothing in this app ever assigns to `vnc_hosts`/`documents`/
-        // `workspaces`/`lsp_servers` itself (unlike `mib_roots`/
-        // `jira_projects`/`jira_users`, which really do have an in-app
-        // add/delete flow and so stay driven by `self` below). `self`'s
-        // own copy of these four is only ever as fresh as whenever it
-        // was loaded, which could be an entire session ago -- writing it
-        // back verbatim would silently erase a host/document/launcher/
-        // server entry added by hand-editing the file *after* that, the
-        // moment anything else triggers a save (previously only a
-        // deliberate settings change; now also every quit, once window-
-        // layout persistence started saving automatically). Re-reading
-        // them fresh from whatever's on disk right now, and falling back
-        // to `self`'s own copy only if the file can't be read at all
-        // (the very first save, nothing on disk yet), means a hand-edit
-        // always wins instead of racing a stale in-memory copy.
-        let (vnc_hosts, documents, workspaces, lsp_servers) = match std::fs::read_to_string(&self.path) {
-            Ok(contents) => {
-                let sections = ini::parse(&contents);
-                let vnc_hosts = sections.get("vnc").map(parse_vnc_hosts).unwrap_or_default();
-                let documents = sections.get("documents").map(parse_documents).unwrap_or_default();
-                let workspaces = sections.get("workspaces").map(|s| parse_pair_list(s, "ws")).unwrap_or_default();
-                let lsp_servers = sections.get("lsp").map(|s| parse_pair_list(s, "server")).unwrap_or_default();
-                (vnc_hosts, documents, workspaces, lsp_servers)
-            }
-            Err(_) => (self.vnc_hosts.clone(), self.documents.clone(), self.workspaces.clone(), self.lsp_servers.clone()),
-        };
-        let mut out = String::new();
-        out.push_str("[editor]\n");
-        if let Some(theme) = &self.theme {
-            out.push_str(&format!("theme = {}\n", ini::quote_if_needed(theme)));
-        }
-        if let Some(font_size) = self.font_size {
-            out.push_str(&format!("font_size = {font_size}\n"));
-        }
-        if let Some(font_family) = &self.font_family {
-            out.push_str(&format!("font_family = {}\n", ini::quote_if_needed(font_family)));
-        }
-        if let Some(indent_width) = self.indent_width {
-            out.push_str(&format!("indent_width = {indent_width}\n"));
-        }
-        if let Some(iskeyword_extra) = &self.iskeyword_extra {
-            out.push_str(&format!("iskeyword_extra = {}\n", ini::quote_if_needed(iskeyword_extra)));
-        }
-        if let Some(tab_width) = self.tab_width {
-            out.push_str(&format!("tab_width = {tab_width}\n"));
-        }
-        if let Some(watch) = self.watch_files {
-            out.push_str(&format!("watch_files = {watch}
-"));
-        }
-        if let Some(animations) = self.animations {
-            out.push_str(&format!("animations = {animations}\n"));
-        }
-        out.push('\n');
-        out.push_str("[completion]\n");
-        if let Some(symbols_file) = &self.completion_symbols_file {
-            out.push_str(&format!("symbols_file = {}\n", symbols_file.display()));
-        }
-        out.push('\n');
-        out.push_str("[lsp]\n");
-        for (i, (language, command_line)) in lsp_servers.iter().enumerate() {
-            out.push_str(&format!("server{} = {language}|{command_line}\n", i + 1));
-        }
-        out.push('\n');
-        out.push_str("[explorer]\n");
-        for (i, (name, path)) in self.explorer_bookmarks.iter().enumerate() {
-            out.push_str(&format!("bookmark{} = {name}|{}\n", i + 1, path.display()));
-        }
-        out.push('\n');
-        out.push_str("[agenda]\n");
-        for (i, category) in self.agenda_categories.iter().enumerate() {
-            out.push_str(&format!("category{} = {}\n", i + 1, ini::quote_if_needed(category)));
-        }
-        if let Some(round) = self.agenda_worklog_round {
-            out.push_str(&format!("worklog_round = {round}\n"));
-        }
-        out.push('\n');
-        out.push_str("[embedded]\n");
-        for (key, value) in [
-            ("arduino_cli", &self.embedded_arduino_cli),
-            ("clangd", &self.embedded_clangd),
-            ("arduino_language_server", &self.embedded_arduino_language_server),
-        ] {
-            if let Some(path) = value {
-                out.push_str(&format!("{key} = {}\n", path.display()));
-            }
-        }
-        out.push('\n');
-        out.push_str("[mib]\n");
-        for (i, (label, root_path)) in self.mib_roots.iter().enumerate() {
-            out.push_str(&format!("root{} = {label}|{}\n", i + 1, root_path.display()));
-        }
-        if let Some(template) = &self.mib_telecommand_template {
-            out.push_str(&format!("telecommand_template = {}\n", ini::quote_if_needed(template)));
-        }
-        if let Some(template) = &self.mib_telecommand_argument_template {
-            out.push_str(&format!("telecommand_argument_template = {}\n", ini::quote_if_needed(template)));
-        }
-        if let Some(separator) = &self.mib_telecommand_argument_separator {
-            out.push_str(&format!("telecommand_argument_separator = {}\n", ini::quote_if_needed(separator)));
-        }
-        out.push('\n');
-        out.push_str("[jira]\n");
-        if let Some(base_url) = &self.jira_base_url {
-            out.push_str(&format!("base_url = {}\n", ini::quote_if_needed(base_url)));
-        }
-        if let Some(token) = &self.jira_token {
-            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
-        }
-        for (i, (key, name)) in self.jira_projects.iter().enumerate() {
-            out.push_str(&format!("project{} = {key}|{name}\n", i + 1));
-        }
-        for (i, (id, name)) in self.jira_users.iter().enumerate() {
-            out.push_str(&format!("user{} = {id}|{name}\n", i + 1));
-        }
-        for (i, (project, blocked)) in self.jira_blocked.iter().enumerate() {
-            let value = match blocked {
-                JiraBlocked::Status { id, name } => format!("{project}|{id}|{name}"),
-                JiraBlocked::Flag => format!("{project}|flag"),
-                JiraBlocked::Local => format!("{project}|local"),
-            };
-            out.push_str(&format!("blocked{} = {value}\n", i + 1));
-        }
-        for (i, (jira_name, level)) in self.jira_priority_map.iter().enumerate() {
-            out.push_str(&format!("priority{} = {jira_name}|{level}\n", i + 1));
-        }
-        if let Some(minutes) = self.jira_sync_minutes {
-            out.push_str(&format!("sync_minutes = {minutes}\n"));
-        }
-        out.push('\n');
-        out.push_str("[git]\n");
-        if let Some(limit) = self.git_graph_limit {
-            out.push_str(&format!("graph_limit = {limit}\n"));
-        }
-        if let Some(base) = &self.git_base_branch {
-            out.push_str(&format!("base_branch = {}\n", ini::quote_if_needed(base)));
-        }
-        if let Some(style) = &self.git_graph_style {
-            out.push_str(&format!("graph_style = {}\n", ini::quote_if_needed(style)));
-        }
-        if let Some(layout) = &self.git_layout {
-            out.push_str(&format!("layout = {}\n", ini::quote_if_needed(layout)));
-        }
-        if let Some(minutes) = self.git_auto_fetch_minutes {
-            out.push_str(&format!("auto_fetch = {minutes}m\n"));
-        }
-        if !self.git_reviewers.is_empty() {
-            out.push_str(&format!("reviewers = {}\n", ini::quote_if_needed(&self.git_reviewers.join(", "))));
-        }
-        out.push('\n');
-        out.push_str("[gitlab]\n");
-        if let Some(url) = &self.gitlab_base_url {
-            out.push_str(&format!("base_url = {}\n", ini::quote_if_needed(url)));
-        }
-        if let Some(token) = &self.gitlab_token {
-            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
-        }
-        out.push('\n');
-        if let Some(token) = &self.github_token {
-            out.push_str("[github]\n");
-            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
-            out.push('\n');
-        }
-        out.push_str("[vnc]\n");
-        for (i, (name, host, port)) in vnc_hosts.iter().enumerate() {
-            out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));
-        }
-        out.push('\n');
-        out.push_str("[documents]\n");
-        for (i, (name, doc_path)) in documents.iter().enumerate() {
-            out.push_str(&format!("doc{} = {name}|{}\n", i + 1, doc_path.display()));
-        }
-        out.push('\n');
-        out.push_str("[workspaces]\n");
-        for (i, (name, action)) in workspaces.iter().enumerate() {
-            out.push_str(&format!("ws{} = {name}|{action}\n", i + 1));
-        }
-        out.push('\n');
-        out.push_str("[windows]\n");
-        if let Some(restore) = self.restore_session {
-            out.push_str(&format!("restore_session = {restore}\n"));
-        }
-        if let Some(restore) = self.restore_windows {
-            out.push_str(&format!("restore_windows = {restore}\n"));
-        }
-        if let Some(per_project) = self.workspace_per_project {
-            out.push_str(&format!("workspace_per_project = {per_project}\n"));
-        }
-        for (i, window) in self.windows.iter().enumerate() {
-            out.push_str(&format!(
-                "window{} = {},{},{},{}|{}\n",
-                i + 1,
-                window.x,
-                window.y,
-                window.width,
-                window.height,
-                window.maximized
-            ));
-        }
-        fenix_storage::write(&self.path, out.as_bytes())
+    /// `load_at`, never failing.
+    pub fn load_at_or_default(path: PathBuf, state_dir: PathBuf) -> Self {
+        Self::load_at(path.clone(), state_dir.clone()).unwrap_or_else(|e| {
+            let mut config = Self::empty(path, state_dir);
+            config.broken = true;
+            config.problems.push(Problem { key: None, line: None, message: e.to_string() });
+            config
+        })
     }
 
-    /// Location of this configuration, used to resolve companion user files.
+    fn read_toml(&mut self, text: &str) {
+        let parsed = match text.parse::<toml_edit::ImDocument<String>>() {
+            Ok(doc) => doc,
+            Err(e) => {
+                self.broken = true;
+                let line = e.span().map(|s| line_of(text, s.start));
+                self.problems.push(Problem { key: None, line, message: e.message().trim().to_string() });
+                return;
+            }
+        };
+        // Spans are only on the parsed document, so each setting's line
+        // is found before it becomes the editable one.
+        let lines: HashMap<&str, usize> = schema::settings()
+            .iter()
+            .filter_map(|s| {
+                let mut item = parsed.as_item();
+                for part in s.key.split('.') {
+                    item = item.as_table_like()?.get(part)?;
+                }
+                item.span().map(|span| (s.key, line_of(text, span.start)))
+            })
+            .collect();
+        let doc = parsed.into_mut();
+        for setting in schema::settings() {
+            let Some(item) = lookup(&doc, setting.key) else { continue };
+            let result = setting.kind.read(item).and_then(|value| setting.set(self, Some(value)));
+            if let Err(message) = result {
+                self.problems.push(Problem { key: Some(setting.key.into()), line: lines.get(setting.key).copied(), message });
+            }
+        }
+        // In the order they're in the file.
+        self.problems.sort_by_key(|p| p.line.unwrap_or(usize::MAX));
+        *self.doc.borrow_mut() = doc;
+    }
+
+    fn read_state(&mut self) {
+        let windows = self.state_dir.join("windows.json");
+        self.windows = fenix_storage::state::read(&windows, "windows").ok().flatten().unwrap_or_default();
+        let bookmarks = self.state_dir.join("bookmarks.json");
+        self.explorer_bookmarks = fenix_storage::state::read(&bookmarks, "explorer").ok().flatten().unwrap_or_default();
+    }
+
+    /// Notes every setting's value as the file has it, so a save knows
+    /// which ones Fenix itself changed.
+    fn remember(&self) {
+        let mut baseline = self.baseline.borrow_mut();
+        baseline.clear();
+        for setting in schema::settings() {
+            baseline.insert(setting.key, setting.get(self));
+        }
+    }
+
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
-}
 
-/// Parses the `[mib]` section's `root1 = LABEL|PATH`, `root2 = ...`
-/// numbered keys into an ordered `(label, path)` list. Numbered rather
-/// than one `roots = ...` key: the INI parser (`ini::parse`) is single-
-/// value-per-key, so a growable list needs its own key per entry, the
-/// same convention plenty of other hand-rolled INI readers use for
-/// lists. `|` splits label from path (not `:`, which Windows paths
-/// contain); any key that isn't `rootN`, or a value with no `|`, is
-/// silently skipped -- same "a bad entry loses only itself" posture
-/// every other field in this file already has. Sorted by the numeric
-/// ordinal, not by key string, so `root2` sorts before `root10`.
-fn parse_mib_roots(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
-    parse_pair_list(section, "root").into_iter().map(|(label, path)| (label, PathBuf::from(path))).collect()
-}
-
-/// Parses a numbered-key `{prefix}1 = a|b`, `{prefix}2 = a|b`, ... list
-/// into an ordered `Vec<(String, String)>`, sorted by the numeric
-/// ordinal (not the key string, so `{prefix}2` sorts before `{prefix}10`)
-/// -- the shared engine behind `parse_mib_roots` (which further maps
-/// the second field into a `PathBuf`) and the `[jira]` section's own
-/// `project`/`user` lists, which need this exact `(String, String)`
-/// shape directly. `|` splits the two halves (not `:`, which a Windows
-/// path -- `parse_mib_roots`'s own second field -- can contain); any
-/// key that doesn't match `{prefix}N`, or a value with no `|`, is
-/// silently skipped, same "a bad entry loses only itself" posture every
-/// other field in this file already has.
-/// Parses the `[vnc]` section's `host1 = NAME|HOST|PORT`, `host2 = ...`
-/// numbered keys into an ordered `(name, host, port)` list -- the same
-/// numbered-key convention as `parse_mib_roots`/`parse_pair_list`, just a
-/// 3-field split (those only handle two fields) since a VNC target needs
-/// a display name, an address, and a port. Sorted by the numeric ordinal,
-/// not the key string. Any key that isn't `hostN`, a value with fewer
-/// than 3 `|`-separated fields, or an unparsable port is silently
-/// skipped -- same "a bad entry loses only itself" posture every other
-/// field in this file already has.
-/// Parses the `[documents]` section's `doc1 = NAME|PATH`, `doc2 = ...`
-/// numbered keys into an ordered `(name, path)` list -- the same shape
-/// and reasoning as `parse_mib_roots`, just a different key prefix and a
-/// user-facing display name rather than an internal label. `|` splits
-/// name from path (not `:`, which Windows paths contain); a key that
-/// isn't `docN`, or a value with no `|`, is silently skipped.
-fn parse_documents(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, PathBuf)> {
-    parse_pair_list(section, "doc").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect()
-}
-
-fn parse_vnc_hosts(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, String, u16)> {
-    let mut hosts: Vec<(usize, String, String, u16)> = section
-        .iter()
-        .filter_map(|(key, value)| {
-            let n = key.strip_prefix("host")?.parse::<usize>().ok()?;
-            let mut parts = value.splitn(3, '|');
-            let name = parts.next()?.trim().to_string();
-            let host = parts.next()?.trim().to_string();
-            let port: u16 = parts.next()?.trim().parse().ok()?;
-            Some((n, name, host, port))
-        })
-        .collect();
-    hosts.sort_by_key(|(n, ..)| *n);
-    hosts.into_iter().map(|(_, name, host, port)| (name, host, port)).collect()
-}
-
-/// `windowN = X,Y,WIDTH,HEIGHT|MAXIMIZED`, ordinal-ordered the same
-/// way every other numbered-key list here is. An entry that doesn't
-/// parse is skipped rather than failing the whole load -- one
-/// hand-mangled line shouldn't cost you the rest of your layout.
-fn parse_windows(section: &std::collections::BTreeMap<String, String>) -> Vec<WindowLayout> {
-    let mut windows: Vec<(usize, WindowLayout)> = section
-        .iter()
-        .filter_map(|(key, value)| {
-            let n = key.strip_prefix("window")?.parse::<usize>().ok()?;
-            let (rect, maximized) = value.split_once('|')?;
-            let mut parts = rect.split(',');
-            let x = parts.next()?.trim().parse().ok()?;
-            let y = parts.next()?.trim().parse().ok()?;
-            let width = parts.next()?.trim().parse().ok()?;
-            let height = parts.next()?.trim().parse().ok()?;
-            let maximized = maximized.trim().parse().ok()?;
-            Some((n, WindowLayout { x, y, width, height, maximized }))
-        })
-        .collect();
-    windows.sort_by_key(|(n, _)| *n);
-    windows.into_iter().map(|(_, window)| window).collect()
-}
-
-/// `[jira]`'s `blockedN = PROJ|ID|NAME`, `PROJ|flag` or `PROJ|local`,
-/// ordinal-ordered. Anything else is skipped.
-fn parse_jira_blocked(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, JiraBlocked)> {
-    let mut entries: Vec<(usize, String, JiraBlocked)> = section
-        .iter()
-        .filter_map(|(key, value)| {
-            let n = key.strip_prefix("blocked")?.parse::<usize>().ok()?;
-            let mut parts = value.splitn(3, '|').map(str::trim);
-            let project = parts.next()?.to_string();
-            let blocked = match (parts.next()?, parts.next()) {
-                ("flag", None) => JiraBlocked::Flag,
-                ("local", None) => JiraBlocked::Local,
-                (id, Some(name)) if !id.is_empty() => JiraBlocked::Status { id: id.to_string(), name: name.to_string() },
-                _ => return None,
-            };
-            Some((n, project, blocked))
-        })
-        .collect();
-    entries.sort_by_key(|(n, ..)| *n);
-    entries.into_iter().map(|(_, project, blocked)| (project, blocked)).collect()
-}
-
-/// `15`, `15m`, `1h` -> minutes.
-fn parse_minutes(value: &str) -> Option<u32> {
-    let value = value.trim();
-    if let Some(hours) = value.strip_suffix('h') {
-        return hours.trim().parse::<u32>().ok().map(|h| h * 60);
+    /// Where the state files are.
+    pub fn state_dir(&self) -> &std::path::Path {
+        &self.state_dir
     }
-    value.strip_suffix('m').unwrap_or(value).trim().parse().ok()
-}
 
-fn parse_pair_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<(String, String)> {
-    let mut pairs: Vec<(usize, String, String)> = section
-        .iter()
-        .filter_map(|(key, value)| {
-            let n = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
-            let (a, b) = value.split_once('|')?;
-            Some((n, a.trim().to_string(), b.trim().to_string()))
-        })
-        .collect();
-    pairs.sort_by_key(|(n, _, _)| *n);
-    pairs.into_iter().map(|(_, a, b)| (a, b)).collect()
-}
+    /// Whether the file couldn't be parsed; it isn't written until it is.
+    pub fn is_broken(&self) -> bool {
+        self.broken
+    }
 
-/// Parses a numbered-key `{prefix}1 = a`, `{prefix}2 = a`, ... list into an
-/// ordered `Vec<String>`, sorted by the numeric ordinal (not the key
-/// string) -- the single-value sibling to `parse_pair_list`, for the
-/// `[agenda]` section's `categoryN` list, which has no second `|`-separated
-/// field to carry. A key that doesn't match `{prefix}N` is silently
-/// skipped, same "a bad entry loses only itself" posture every other field
-/// in this file already has.
-fn parse_single_list(section: &std::collections::BTreeMap<String, String>, prefix: &str) -> Vec<String> {
-    let mut entries: Vec<(usize, String)> = section
-        .iter()
-        .filter_map(|(key, value)| {
-            let n = key.strip_prefix(prefix)?.parse::<usize>().ok()?;
-            Some((n, value.trim().to_string()))
+    /// Saves what changed. The file is read again first and only the
+    /// settings Fenix changed since it was last read are written into it
+    /// -- so a hand edit made in the meantime, a comment, the order of
+    /// things and any key Fenix doesn't know all stay as they are. A
+    /// setting back at its default loses its line. The state files
+    /// (window placement, bookmarks) are written beside it.
+    pub fn save(&self) -> io::Result<()> {
+        self.save_state()?;
+        if self.broken {
+            let why = self.problems.first().map(|p| p.to_string()).unwrap_or_default();
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("settings.toml can't be read, so it wasn't written over -- fix it first ({why})")));
+        }
+        let on_disk = match std::fs::read_to_string(&self.path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        // Fresh from disk when it parses, else what was loaded.
+        let mut doc = match on_disk.as_deref().map(str::parse::<toml_edit::DocumentMut>) {
+            Some(Ok(doc)) => doc,
+            Some(Err(_)) => return Err(io::Error::new(io::ErrorKind::InvalidData, "settings.toml was changed into something that can't be read, so it wasn't written over")),
+            None => {
+                let mut doc = toml_edit::DocumentMut::new();
+                doc.decor_mut().set_prefix(HEADER);
+                doc
+            }
+        };
+        let mut baseline = self.baseline.borrow_mut();
+        for setting in schema::settings() {
+            let now = setting.get(self);
+            if baseline.get(setting.key) == Some(&now) {
+                continue;
+            }
+            let same_on_disk = lookup(&doc, setting.key).and_then(|i| setting.kind.read(i).ok()) == now;
+            if !same_on_disk {
+                store(&mut doc, setting.key, now.as_ref().map(|v| setting.kind.write(v)));
+            }
+            baseline.insert(setting.key, now);
+        }
+        let text = doc.to_string();
+        if on_disk.as_deref() != Some(text.as_str()) {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            fenix_storage::write(&self.path, text.as_bytes())?;
+        }
+        *self.doc.borrow_mut() = doc;
+        Ok(())
+    }
+
+    fn save_state(&self) -> io::Result<()> {
+        let windows = self.state_dir.join("windows.json");
+        if !self.windows.is_empty() || windows.exists() {
+            fenix_storage::state::write(&windows, "windows", &self.windows)?;
+        }
+        let bookmarks = self.state_dir.join("bookmarks.json");
+        if !self.explorer_bookmarks.is_empty() || bookmarks.exists() {
+            fenix_storage::state::write(&bookmarks, "explorer", &self.explorer_bookmarks)?;
+        }
+        Ok(())
+    }
+
+    /// Reads the file again after it changed on disk. When it parses, its
+    /// settings replace these; when it doesn't, these stay in use and
+    /// `problems` says why. State is left alone.
+    pub fn reload(&mut self) {
+        let mut fresh = Self::empty(self.path.clone(), self.state_dir.clone());
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => fresh.read_toml(&text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                self.problems = vec![Problem { key: None, line: None, message: e.to_string() }];
+                return;
+            }
+        }
+        if fresh.broken {
+            self.problems = fresh.problems;
+            return;
+        }
+        for setting in schema::settings() {
+            // Checked already, so this can't fail.
+            let _ = setting.set(self, setting.get(&fresh));
+        }
+        self.problems = fresh.problems;
+        self.broken = false;
+        *self.doc.borrow_mut() = fresh.doc.into_inner();
+        self.remember();
+    }
+
+    /// A token: from the environment when it's set there, else from the
+    /// file.
+    pub fn token(&self, secret: Secret) -> Option<String> {
+        secret.from_env().or_else(|| {
+            match secret {
+                Secret::GitLab => &self.gitlab_token,
+                Secret::Jira => &self.jira_token,
+                Secret::GitHub => &self.github_token,
+            }
+            .clone()
+            .filter(|t| !t.trim().is_empty())
         })
-        .collect();
-    entries.sort_by_key(|(n, _)| *n);
-    entries.into_iter().map(|(_, v)| v).collect()
+    }
+
+    /// Moves `config.ini` at `ini` into this file: every setting it had,
+    /// tokens included, is written here, its window placement and
+    /// bookmarks to the state files. `ini` itself isn't touched.
+    pub fn migrate_ini(ini: &std::path::Path, path: PathBuf, state_dir: PathBuf) -> io::Result<Self> {
+        let old = legacy::load(ini, path.clone(), state_dir.clone())?;
+        let mut config = Self::load_at(path, state_dir)?;
+        for setting in schema::settings() {
+            // A value the old file had that the new one doesn't take (a
+            // theme name with a typo, say) is dropped, not fatal.
+            if let Some(value) = setting.get(&old) {
+                if let Err(message) = setting.set(&mut config, Some(value)) {
+                    config.problems.push(Problem { key: Some(setting.key.into()), line: None, message: format!("from config.ini: {message}") });
+                }
+            }
+        }
+        config.windows = old.windows.clone();
+        config.explorer_bookmarks = old.explorer_bookmarks.clone();
+        config.save()?;
+        Ok(config)
+    }
 }
 
 /// Usernames written with commas or spaces between them, `@` or not.
@@ -804,41 +695,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// `settings.toml` in a folder of its own, so its `state/` is too.
     fn temp_path(name: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("fenix-config-test-{name}-{}-{n}.ini", std::process::id()))
-    }
-
-    #[test]
-    fn documents_are_parsed_in_ordinal_order_not_key_string_order() {
-        let path = temp_path("documents");
-        std::fs::write(
-            &path,
-            "[documents]\ndoc2 = Time Codes|/refs/301x0b4.pdf\ndoc10 = Tenth|/refs/tenth.pdf\ndoc1 = Space Packet Protocol|C:/refs/133x0b2e2.pdf\n",
-        )
-        .unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["Space Packet Protocol", "Time Codes", "Tenth"]);
-        // A Windows path keeps its drive-letter colon -- `|`, not `:`,
-        // is what splits the name from the path.
-        assert_eq!(config.documents[0].1, PathBuf::from("C:/refs/133x0b2e2.pdf"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn a_document_entry_with_no_pipe_is_skipped_without_losing_the_others() {
-        let path = temp_path("documents_bad");
-        std::fs::write(&path, "[documents]\ndoc1 = Good|/refs/a.pdf\ndoc2 = no-pipe-here\ndoc3 = Also Good|/refs/b.pdf\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        let names: Vec<&str> = config.documents.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["Good", "Also Good"]);
-        let _ = std::fs::remove_file(path);
+        let dir = std::env::temp_dir().join(format!("fenix-config-test-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.join("settings.toml")
     }
 
     #[test]
@@ -882,70 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn saving_does_not_erase_a_vnc_host_hand_added_to_the_file_after_load() {
-        // The actual reported bug: something else in the app (window-
-        // layout persistence, a theme change, ...) triggers a save
-        // with an in-memory `Config` that's older than the file on
-        // disk -- a `[vnc]` entry added by hand-editing config.ini
-        // *after* this `Config` was loaded must not be wiped out by
-        // that save.
-        let path = temp_path("vnc_survives_stale_save");
-        let mut config = Config::load(path.clone()).unwrap();
-        assert!(config.vnc_hosts.is_empty(), "nothing configured yet at load time");
-
-        // Simulate a hand-edit landing on disk while this `Config` is
-        // still the old, vnc-hosts-empty one in memory.
-        std::fs::write(&path, "[vnc]\nhost1 = build-vm|10.0.0.5|5900\n").unwrap();
-
-        // An unrelated save -- window-layout persistence is exactly
-        // this shape: it only ever touches `windows`, never `vnc_hosts`.
-        config.windows = vec![WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: false }];
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.vnc_hosts, vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900)]);
-        assert_eq!(reloaded.windows, config.windows, "the actual save this call was for should still take effect");
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn saving_does_not_erase_a_hand_edited_document_or_workspace_entry_either() {
-        let path = temp_path("documents_and_workspaces_survive_stale_save");
-        let mut config = Config::load(path.clone()).unwrap();
-
-        std::fs::write(
-            &path,
-            "[documents]\ndoc1 = Notes|C:/refs/notes.md\n\n[workspaces]\nws1 = Editor|\n",
-        )
-        .unwrap();
-
-        config.theme = Some("Nord".to_string());
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.documents, vec![("Notes".to_string(), PathBuf::from("C:/refs/notes.md"))]);
-        assert_eq!(reloaded.workspaces, vec![("Editor".to_string(), String::new())]);
-        assert_eq!(reloaded.theme, Some("Nord".to_string()));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn saving_does_not_erase_an_lsp_server_hand_added_to_the_file_after_load() {
-        let path = temp_path("lsp_servers_survive_stale_save");
-        let mut config = Config::load(path.clone()).unwrap();
-
-        std::fs::write(&path, "[lsp]\nserver1 = python|pyright-langserver --stdio\n").unwrap();
-
-        config.theme = Some("Nord".to_string());
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.lsp_servers, vec![("python".to_string(), "pyright-langserver --stdio".to_string())]);
-        assert_eq!(reloaded.theme, Some("Nord".to_string()));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn lsp_servers_round_trip_through_save_and_load() {
         let path = temp_path("lsp_servers_round_trip");
         let mut config = Config::load_or_default(path.clone());
@@ -956,20 +755,6 @@ mod tests {
         assert_eq!(
             reloaded.lsp_servers,
             vec![("python".to_string(), "pyright-langserver --stdio".to_string()), ("rust".to_string(), "rust-analyzer".to_string())]
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn lsp_servers_are_ordered_by_numeric_ordinal_not_key_string() {
-        let path = temp_path("lsp_servers_ordinal_order");
-        std::fs::write(&path, "[lsp]\nserver2 = second|cmd-two\nserver10 = tenth|cmd-ten\nserver1 = first|cmd-one\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(
-            config.lsp_servers,
-            vec![("first".to_string(), "cmd-one".to_string()), ("second".to_string(), "cmd-two".to_string()), ("tenth".to_string(), "cmd-ten".to_string())]
         );
         std::fs::remove_file(&path).ok();
     }
@@ -995,45 +780,6 @@ mod tests {
     }
 
     #[test]
-    fn windows_are_ordered_by_their_key_ordinal_not_alphabetically() {
-        let path = temp_path("windows_ordinal");
-        // `window10` sorts before `window2` as text -- the ordinal has
-        // to be parsed, not compared as a string.
-        std::fs::write(
-            &path,
-            "[windows]\nwindow10 = 100,0,800,600|false\nwindow2 = 200,0,800,600|false\nwindow1 = 300,0,800,600|false\n",
-        )
-        .unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        let xs: Vec<i32> = config.windows.iter().map(|w| w.x).collect();
-        assert_eq!(xs, vec![300, 200, 100]);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn a_mangled_window_entry_is_skipped_without_losing_the_rest_of_the_layout() {
-        let path = temp_path("windows_mangled");
-        std::fs::write(
-            &path,
-            "[windows]\nwindow1 = 0,0,800,600|true\nwindow2 = not-a-rectangle\nwindow3 = 10,20,30|false\nwindow4 = 5,5,640,480|false\n",
-        )
-        .unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(
-            config.windows,
-            vec![
-                WindowLayout { x: 0, y: 0, width: 800, height: 600, maximized: true },
-                WindowLayout { x: 5, y: 5, width: 640, height: 480, maximized: false },
-            ]
-        );
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn no_windows_section_means_nothing_recorded_and_no_opt_out() {
         let config = Config::load(temp_path("windows_absent")).unwrap();
         assert!(config.windows.is_empty());
@@ -1054,18 +800,6 @@ mod tests {
         let reloaded = Config::load(path.clone()).unwrap();
 
         assert_eq!(reloaded.workspaces, config.workspaces);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn workspaces_are_ordered_by_their_key_ordinal_not_alphabetically() {
-        let path = temp_path("workspaces_ordinal");
-        std::fs::write(&path, "[workspaces]\nws10 = Tenth|docker\nws2 = Second|git\nws1 = First|jira\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        let names: Vec<&str> = config.workspaces.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, vec!["First", "Second", "Tenth"]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1096,7 +830,7 @@ mod tests {
     #[test]
     fn load_or_default_never_fails_even_when_the_path_is_unreadable() {
         let path = temp_path("unreadable");
-        std::fs::create_dir(&path).unwrap(); // a directory, not a file -- read_to_string fails non-NotFound
+        std::fs::create_dir_all(&path).unwrap(); // a directory, not a file -- read_to_string fails non-NotFound
         assert!(Config::load(path.clone()).is_err());
         let config = Config::load_or_default(path.clone());
         assert!(config.theme.is_none());
@@ -1234,43 +968,6 @@ mod tests {
     }
 
     #[test]
-    fn mib_roots_survive_a_save_triggered_by_an_unrelated_field_change() {
-        // Regression guard: `save` regenerates every section from struct
-        // state on every call, so a hand-authored `[mib]` section must
-        // still be in the in-memory `Config` (loaded once at startup) or
-        // an unrelated theme-cycle save would silently wipe it from disk.
-        let path = temp_path("mib_survives_unrelated_save");
-        std::fs::write(&path, "[mib]\nroot1 = MIB-A|/data/mib-a\n").unwrap();
-        let mut config = Config::load(path.clone()).unwrap();
-        config.theme = Some("Nord".to_string()); // unrelated change
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.mib_roots, vec![("MIB-A".to_string(), PathBuf::from("/data/mib-a"))]);
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn mib_roots_are_ordered_by_numeric_ordinal_not_key_string() {
-        let path = temp_path("mib_root_order");
-        // Deliberately written out of string order (root10 sorts before
-        // root2 as a plain string) to prove numeric ordering is used.
-        std::fs::write(&path, "[mib]\nroot2 = SECOND|/b\nroot10 = TENTH|/j\nroot1 = FIRST|/a\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(
-            config.mib_roots,
-            vec![
-                ("FIRST".to_string(), PathBuf::from("/a")),
-                ("SECOND".to_string(), PathBuf::from("/b")),
-                ("TENTH".to_string(), PathBuf::from("/j")),
-            ]
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn the_gitlab_section_round_trips_through_a_save() {
         let path = temp_path("config_gitlab");
         let mut config = Config::load_or_default(path.clone());
@@ -1357,16 +1054,6 @@ mod tests {
     }
 
     #[test]
-    fn agenda_categories_are_parsed_in_ordinal_order_not_key_string_order() {
-        let path = temp_path("agenda_categories_ordinal");
-        std::fs::write(&path, "[agenda]\ncategory2 = Personal\ncategory10 = Tenth\ncategory1 = Fenix\n").unwrap();
-
-        let config = Config::load(path).unwrap();
-
-        assert_eq!(config.agenda_categories, vec!["Fenix".to_string(), "Personal".to_string(), "Tenth".to_string()]);
-    }
-
-    #[test]
     fn vnc_hosts_round_trip_through_save_and_load() {
         let path = temp_path("vnc_round_trip");
         let mut config = Config::load_or_default(path.clone());
@@ -1382,72 +1069,6 @@ mod tests {
     }
 
     #[test]
-    fn vnc_hosts_are_ordered_by_numeric_ordinal_not_key_string() {
-        let path = temp_path("vnc_ordinal_order");
-        std::fs::write(&path, "[vnc]\nhost2 = second|10.0.0.2|5900\nhost10 = tenth|10.0.0.10|5900\nhost1 = first|10.0.0.1|5900\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(
-            config.vnc_hosts,
-            vec![
-                ("first".to_string(), "10.0.0.1".to_string(), 5900),
-                ("second".to_string(), "10.0.0.2".to_string(), 5900),
-                ("tenth".to_string(), "10.0.0.10".to_string(), 5900),
-            ]
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn a_vnc_host_entry_missing_a_field_is_skipped_not_an_error() {
-        let path = temp_path("vnc_bad_entry");
-        std::fs::write(&path, "[vnc]\nhost1 = good|10.0.0.1|5900\nhost2 = missing-port|10.0.0.2\nhost3 = also-good|10.0.0.3|5901\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900), ("also-good".to_string(), "10.0.0.3".to_string(), 5901)]);
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn a_vnc_host_entry_with_an_unparsable_port_is_skipped_not_an_error() {
-        let path = temp_path("vnc_bad_port");
-        std::fs::write(&path, "[vnc]\nhost1 = good|10.0.0.1|5900\nhost2 = bad-port|10.0.0.2|not-a-port\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900)]);
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn a_mib_root_entry_with_no_separator_is_skipped_not_an_error() {
-        let path = temp_path("mib_root_bad_entry");
-        std::fs::write(&path, "[mib]\nroot1 = MIB-A|/data/a\nroot2 = no-separator-here\nroot3 = MIB-C|/data/c\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-
-        assert_eq!(
-            config.mib_roots,
-            vec![("MIB-A".to_string(), PathBuf::from("/data/a")), ("MIB-C".to_string(), PathBuf::from("/data/c"))]
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn a_corrupted_font_size_does_not_blank_out_the_other_settings() {
-        let path = temp_path("partial_corruption");
-        std::fs::write(&path, "[editor]\ntheme = TempleOS\nfont_size = not-a-number\nindent_width = 3\n").unwrap();
-
-        let config = Config::load(path.clone()).unwrap();
-        assert_eq!(config.theme, Some("TempleOS".to_string()));
-        assert!(config.font_size.is_none()); // only this one is lost
-        assert_eq!(config.indent_width, Some(3));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn save_creates_missing_parent_directories() {
         let path = temp_path("creates_parents").parent().unwrap().join("nested-fenix-config-test").join("config.ini");
         let mut config = Config::load_or_default(path.clone());
@@ -1455,26 +1076,6 @@ mod tests {
         config.save().unwrap();
         assert!(path.exists());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn save_omits_keys_that_are_none_instead_of_writing_an_empty_value() {
-        let path = temp_path("omits_none");
-        let mut config = Config::load_or_default(path.clone());
-        config.theme = Some("Orbit Dark".to_string());
-        config.save().unwrap();
-
-        let contents = std::fs::read_to_string(config.path()).unwrap();
-        assert!(!contents.contains("font_size"));
-        assert!(!contents.contains("symbols_file"));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn default_path_is_under_a_fenix_directory_named_config_dot_ini() {
-        if let Some(path) = Config::default_path() {
-            assert!(path.ends_with("fenix/config.ini") || path.ends_with("fenix\\config.ini"));
-        }
     }
 
     #[test]
@@ -1502,40 +1103,210 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    #[test]
-    fn a_malformed_blocked_entry_is_skipped() {
-        let path = temp_path("jira_blocked_bad");
-        std::fs::write(&path, "[jira]
-blocked1 = PROJ
-blocked2 = OPS|flag
-blocked3 = X|weird
-").unwrap();
-        let config = Config::load(path.clone()).unwrap();
-        assert_eq!(config.jira_blocked, vec![("OPS".to_string(), JiraBlocked::Flag)]);
-        std::fs::remove_file(&path).ok();
-    }
 
     #[test]
-    fn worklog_round_accepts_minutes_and_hours() {
-        assert_eq!(parse_minutes("15"), Some(15));
-        assert_eq!(parse_minutes("30m"), Some(30));
-        assert_eq!(parse_minutes("1h"), Some(60));
-        assert_eq!(parse_minutes("soon"), None);
-    }
-
-    #[test]
-    fn embedded_tool_paths_round_trip() {
-        let path = temp_path("embedded");
-        std::fs::write(&path, "[embedded]\narduino_cli = C:\\Tools\\arduino-cli.exe\nclangd = /opt/llvm/bin/clangd\n").unwrap();
-        let config = Config::load(path.clone()).unwrap();
-        assert_eq!(config.embedded_arduino_cli, Some(PathBuf::from("C:\\Tools\\arduino-cli.exe")));
-        assert_eq!(config.embedded_clangd, Some(PathBuf::from("/opt/llvm/bin/clangd")));
-        assert_eq!(config.embedded_arduino_language_server, None);
-
+    fn every_setting_round_trips_through_the_file() {
+        let path = temp_path("every");
+        let mut config = Config::load(path.clone()).unwrap();
+        let sample = |kind: &Kind| match kind {
+            Kind::Bool => Value::Bool(false),
+            Kind::Int { min, .. } => Value::Int(min + 1),
+            Kind::Float { min, .. } => Value::Float(min + 2.5),
+            Kind::Minutes => Value::Int(7),
+            Kind::Choice(choices) => Value::Text(choices[1].to_string()),
+            Kind::List => Value::List(vec!["alex".into(), "sam".into()]),
+            Kind::Map { paths: true, .. } => Value::Map(vec![("First one".into(), r"C:\refs\a b.pdf".into()), ("b".into(), "/refs/b".into())]),
+            Kind::Map { .. } => Value::Map(vec![("k 1".into(), "flag".into()), ("k2".into(), "10103: On Hold".into())]),
+            Kind::Records(_) => Value::Records(vec![vec!["build-vm".into(), "10.0.0.5".into(), "5901".into()], vec!["test".into(), "127.0.0.1".into(), "5900".into()]]),
+            _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
+        };
+        let settable: Vec<&Setting> = settings().iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
+        for s in &settable {
+            s.set(&mut config, Some(sample(&s.kind))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
+        }
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.embedded_arduino_cli, config.embedded_arduino_cli);
-        assert_eq!(reloaded.embedded_clangd, config.embedded_clangd);
-        std::fs::remove_file(&path).ok();
+        assert!(reloaded.problems.is_empty(), "{:?}", reloaded.problems);
+        for s in &settable {
+            assert_eq!(s.get(&reloaded), s.get(&config), "{}", s.key);
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[vnc.hosts]]") && text.contains("[lsp.servers]") && !text.contains("port = 5900"), "a port at its default isn't written:\n{text}");
+        assert!(!text.contains("[lsp]") && !text.contains("[vnc]\n"), "no empty parent headers:\n{text}");
+        assert!(text.contains("[editor]\nindent_width = 2"), "a table with settings has its header:\n{text}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn saving_changes_only_the_lines_of_the_settings_that_changed() {
+        let path = temp_path("in_place");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let hand = "# my settings\n[editor]\ntheme = \"Nord\" # the blue one\nfont_size = 14\n\n[mystery]\nfrom_the_future = true\n";
+        std::fs::write(&path, hand).unwrap();
+        let mut config = Config::load(path.clone()).unwrap();
+        assert_eq!((config.theme.as_deref(), config.font_size), (Some("Nord"), Some(14.0)));
+        config.font_size = Some(18.0);
+        config.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, hand.replace("font_size = 14", "font_size = 18"), "comments, the unknown section and the theme are as they were");
+        config.font_size = None;
+        config.save().unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("font_size"), "back at the default: the line goes");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_hand_edit_made_while_fenix_runs_survives_fenix_saving_something_else() {
+        let path = temp_path("hand_edit");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.theme = Some("Nord".into());
+        config.save().unwrap();
+        // Edited by hand, after Fenix read it.
+        let text = std::fs::read_to_string(&path).unwrap() + "\n[[vnc.hosts]]\nname = \"lab\"\nhost = \"10.1.1.1\"\n\n[lsp.servers]\npython = \"pyright-langserver --stdio\"\n";
+        std::fs::write(&path, text).unwrap();
+        config.font_size = Some(20.0);
+        config.save().unwrap();
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.vnc_hosts, [("lab".to_string(), "10.1.1.1".to_string(), 5900)]);
+        assert_eq!(reloaded.lsp_servers, [("python".to_string(), "pyright-langserver --stdio".to_string())]);
+        assert_eq!((reloaded.theme.as_deref(), reloaded.font_size), (Some("Nord"), Some(20.0)));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_bad_value_costs_only_that_setting_and_says_which_line() {
+        let path = temp_path("bad_value");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[editor]\ntheme = \"Nord\"\nfont_size = \"16px\"\nindent_width = 99\n[git]\nlayout = \"tabs\"\n").unwrap();
+        let config = Config::load(path.clone()).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("Nord"));
+        assert_eq!((config.font_size, config.indent_width, config.git_layout.as_deref()), (None, None, None));
+        let shown: Vec<String> = config.problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(shown.len(), 3, "{shown:?}");
+        assert!(shown[0].starts_with("settings.toml:3 -- editor.font_size: expected a number"), "{shown:?}");
+        assert!(shown[1].contains("editor.indent_width: a whole number from 1 to 16"), "{shown:?}");
+        assert!(shown[2].starts_with("settings.toml:6 -- git.layout: one of page, panes"), "{shown:?}");
+        assert!(!config.is_broken(), "a bad value doesn't stop the file being saved");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_file_that_cant_be_parsed_is_reported_and_never_written_over() {
+        let path = temp_path("broken");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "[editor]\ntheme = \"Nord\nfont_size = 14\n";
+        std::fs::write(&path, broken).unwrap();
+        let mut config = Config::load(path.clone()).unwrap();
+        assert!(config.is_broken());
+        assert_eq!(config.problems[0].line, Some(2), "{:?}", config.problems);
+        config.font_size = Some(20.0);
+        let err = config.save().unwrap_err();
+        assert!(err.to_string().contains("fix it first"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_reload_takes_hand_edits_and_keeps_the_last_good_values_through_a_mistake() {
+        let path = temp_path("reload");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[editor]\nfont_size = 14\n").unwrap();
+        let mut config = Config::load(path.clone()).unwrap();
+        std::fs::write(&path, "[editor]\nfont_size = 18\ntheme = \"Nord\"\n").unwrap();
+        config.reload();
+        assert_eq!((config.font_size, config.theme.as_deref()), (Some(18.0), Some("Nord")));
+        std::fs::write(&path, "[editor\nfont_size = 22\n").unwrap();
+        config.reload();
+        assert_eq!(config.font_size, Some(18.0), "still in use");
+        assert_eq!(config.problems.len(), 1);
+        std::fs::write(&path, "[editor]\n").unwrap();
+        config.reload();
+        assert_eq!((config.font_size, config.theme.as_deref()), (None, None), "a line taken out is back at its default");
+        assert!(config.problems.is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_token_is_kept_in_the_file_and_the_environment_wins_without_being_saved() {
+        let path = temp_path("tokens");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.gitlab_token = Some("glpat-in-the-file".into());
+        config.save().unwrap();
+        let again = Config::load(path.clone()).unwrap();
+        assert!(again.problems.is_empty(), "{:?}", again.problems);
+        assert_eq!(again.token(Secret::GitLab).as_deref(), Some("glpat-in-the-file"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("[gitlab]\ntoken = \"glpat-in-the-file\""));
+        // Jira's variable, which nothing else in the tests sets.
+        std::env::set_var("FENIX_JIRA_TOKEN", "from-the-environment");
+        let mut config = Config::load(path.clone()).unwrap();
+        assert_eq!(config.token(Secret::Jira).as_deref(), Some("from-the-environment"));
+        config.font_size = Some(20.0);
+        config.save().unwrap();
+        std::env::remove_var("FENIX_JIRA_TOKEN");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("from-the-environment"), "never written");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn window_placement_and_bookmarks_are_state_not_settings() {
+        let path = temp_path("state");
+        let mut config = Config::load(path.clone()).unwrap();
+        config.windows = vec![WindowLayout { x: -8, y: -8, width: 2560, height: 1369, maximized: true }];
+        config.explorer_bookmarks = vec![("src".into(), PathBuf::from("C:/code/src"))];
+        config.save().unwrap();
+        let dir = path.parent().unwrap();
+        assert!(dir.join("state").join("windows.json").is_file() && dir.join("state").join("bookmarks.json").is_file());
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("2560"), "not in settings.toml");
+        let reloaded = Config::load(path.clone()).unwrap();
+        assert_eq!(reloaded.windows, config.windows);
+        assert_eq!(reloaded.explorer_bookmarks, config.explorer_bookmarks);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_file_starts_with_what_it_is_and_nothing_else() {
+        let path = temp_path("new_file");
+        Config::load(path.clone()).unwrap().save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# Fenix settings.") && text.lines().all(|l| l.is_empty() || l.starts_with('#')), "{text}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_default_path_is_settings_toml_in_the_fenix_folder() {
+        if let Some(path) = Config::default_path() {
+            assert!(path.ends_with(std::path::Path::new("fenix").join("settings.toml")), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn config_ini_moves_over_with_its_lists_its_tokens_and_its_state() {
+        let dir = temp_path("migrate").parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("config.ini");
+        std::fs::write(
+            &ini,
+            "[editor]\ntheme = Visual Studio Dark\nfont_size = 16\nanimations = false\n\n[lsp]\nserver1 = python|C:\\tools\\pyright-langserver.exe --stdio\n\n[mib]\nroot1 = missionc|C:\\mib\\missionc\n\n[jira]\ntoken = jira-token\nuser1 = th096939|Thomas Pedneault\nblocked1 = FNX|10103|On Hold\n\n[gitlab]\nbase_url = http://localhost:8929\ntoken = glpat-old\n\n[git]\nauto_fetch = 5m\nreviewers = alex, sam\n\n[vnc]\nhost1 = test-vm|127.0.0.1|5900\nhost2 = build-vm|10.0.0.5|5901\n\n[explorer]\nbookmark1 = src|C:\\code\\src\n\n[windows]\nwindow1 = -8,-8,2560,1369|true\nrestore_session = false\n",
+        )
+        .unwrap();
+        let path = dir.join("settings.toml");
+        let config = Config::migrate_ini(&ini, path.clone(), dir.join("state")).unwrap();
+        assert!(config.problems.is_empty(), "{:?}", config.problems);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("token = \"glpat-old\"") && text.contains("token = \"jira-token\""), "tokens come along:\n{text}");
+        let reloaded = Config::load_at(path, dir.join("state")).unwrap();
+        assert_eq!(reloaded.theme.as_deref(), Some("Visual Studio Dark"));
+        assert_eq!(reloaded.animations, Some(false));
+        assert_eq!(reloaded.lsp_servers, [("python".to_string(), r"C:\tools\pyright-langserver.exe --stdio".to_string())]);
+        assert_eq!(reloaded.mib_roots, [("missionc".to_string(), PathBuf::from(r"C:\mib\missionc"))]);
+        assert_eq!(reloaded.jira_blocked, [("FNX".to_string(), JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() })]);
+        assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
+        assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);
+        assert_eq!(reloaded.vnc_hosts.len(), 2);
+        assert_eq!(reloaded.restore_session, Some(false));
+        assert_eq!(reloaded.windows, [WindowLayout { x: -8, y: -8, width: 2560, height: 1369, maximized: true }]);
+        assert_eq!(reloaded.explorer_bookmarks, [("src".to_string(), PathBuf::from(r"C:\code\src"))]);
+        assert!(ini.is_file(), "config.ini itself is left for the caller to back up");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

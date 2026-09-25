@@ -12,6 +12,8 @@ use super::*;
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
+use crate::settings_page::{self, SettingsPage};
+use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -30,11 +32,12 @@ pub(super) enum PageModel {
     Wizard(Wizard),
     Hub(Hub),
     Doctor(DoctorPage),
-    Settings(Settings),
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
     Rebase(Box<RebasePage>),
     Request(Box<RequestPage>),
+    UserSettings(Box<SettingsPage>),
+    Snippets(Box<SnippetsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
 }
@@ -64,10 +67,11 @@ impl PageState {
             PageModel::Wizard(w) => w.editing.is_some(),
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
             PageModel::Doctor(_) => false,
-            PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Request(r) => r.editing.is_some(),
+            PageModel::UserSettings(p) => p.typing(),
+            PageModel::Snippets(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -77,8 +81,8 @@ impl PageState {
         self.typing()
             || match &self.model {
                 PageModel::Wizard(w) => w.claims_space(),
-                PageModel::Settings(s) => s.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
+                PageModel::UserSettings(p) => p.claims_space(),
                 _ => false,
             }
     }
@@ -86,7 +90,6 @@ impl PageState {
     fn type_text(&mut self, text: &str) {
         match &mut self.model {
             PageModel::Wizard(w) => w.type_text(text),
-            PageModel::Settings(s) => s.type_text(text),
             PageModel::Hub(h) => {
                 let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
                 target.extend(text.chars().filter(|c| !c.is_control()));
@@ -95,6 +98,8 @@ impl PageState {
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
             PageModel::Request(r) => r.paste(text),
+            PageModel::UserSettings(p) => p.paste(text),
+            PageModel::Snippets(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -135,6 +140,8 @@ pub enum PageEvent {
     RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
     /// The status page's branch's request.
     GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
+    /// A line for the settings page: a token's test came back.
+    SettingsNote { buffer: BufferId, note: (String, bool) },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -243,11 +250,15 @@ impl App {
             Some(PageModel::Wizard(_)) | None => "*new project*".to_string(),
             Some(PageModel::Hub(_)) => "*projects*".to_string(),
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
-            Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
+            Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
+            Some(PageModel::UserSettings(p)) => match &p.scope {
+                settings_page::Scope::You => "*settings*".to_string(),
+                settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
+            },
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
         }
@@ -345,11 +356,12 @@ impl App {
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
-            PageModel::Settings(s) => project_settings::layout(s, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
             PageModel::Request(r) => git_request::layout(r, cols),
+            PageModel::UserSettings(p) => settings_page::layout(p, cols),
+            PageModel::Snippets(p) => snippets_page::layout(p, cols),
             PageModel::Inbox(i) => review_inbox::layout(i, cols),
             PageModel::Review(r) => review_page::layout(r, cols),
         };
@@ -423,10 +435,6 @@ impl App {
                 let action = d.key(key);
                 self.doctor_action(id, action);
             }
-            PageModel::Settings(s) => {
-                let action = s.key(key);
-                self.settings_action(id, action);
-            }
             PageModel::Git(g) => {
                 let action = g.key(key);
                 self.git_page_action(id, action);
@@ -442,6 +450,14 @@ impl App {
             PageModel::Request(r) => {
                 let action = r.key(key);
                 self.request_action(id, action);
+            }
+            PageModel::UserSettings(p) => {
+                let action = p.key(key);
+                self.user_settings_action(id, action);
+            }
+            PageModel::Snippets(p) => {
+                let action = p.key(key);
+                self.snippets_action(id, action);
             }
             PageModel::Inbox(i) => {
                 let action = i.key(key);
@@ -469,6 +485,7 @@ impl App {
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            event @ PageEvent::SettingsNote { .. } => self.apply_settings_event(event),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
@@ -998,7 +1015,10 @@ impl App {
                 self.cmd_project_new();
             }
             Action::Doctor(root) => self.open_doctor(root),
-            Action::Settings(root) => self.open_settings(root),
+            Action::Settings(root) => {
+                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+                self.open_settings_page(crate::settings_page::Scope::Project { root, name }, None);
+            }
             Action::TogglePin(root) => {
                 let pinned = !self.project_meta.is_pinned(&root);
                 self.project_meta.set_pinned(&root, pinned);
@@ -1166,49 +1186,45 @@ impl App {
     // --------------------------------------------------------------
 
     /// `SPC p ,`: the focused buffer's project's settings.
+    /// `SPC p ,`: the focused project's settings page, which leads to
+    /// its own page (kind, group, tasks, launch) too.
     pub(crate) fn cmd_project_settings(&mut self) {
         match self.project_root.clone() {
-            Some(root) => self.open_settings(root),
+            Some(_) => self.open_project_settings_page(),
             None => self.set_error("not in a project -- SPC p p, then , on one"),
         }
     }
 
-    pub(super) fn open_settings(&mut self, root: PathBuf) {
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Settings(s) if s.root == root)) {
-            self.show_page(id);
-            return;
-        }
-        let mut settings = Settings::new(root.clone(), fenix_project::detect_kind_from_files(&root));
-        settings.declared = fenix_project::declared_kind(&root);
-        settings.pinned = self.project_meta.is_pinned(&root);
-        settings.group = self.project_meta.group(&root).unwrap_or_default().to_string();
-        settings.jira = fenix_project::meta::jira_key(&root).unwrap_or_default();
-        self.open_page(PageModel::Settings(settings));
+    /// The project's own section of the settings page, read for `root`.
+    pub(super) fn project_page_model(&self, root: &Path) -> Settings {
+        let mut settings = Settings::new(root.to_path_buf(), fenix_project::detect_kind_from_files(root));
+        settings.declared = fenix_project::declared_kind(root);
+        settings.pinned = self.project_meta.is_pinned(root);
+        settings.group = self.project_meta.group(root).unwrap_or_default().to_string();
+        settings.jira = fenix_project::meta::jira_key(root).unwrap_or_default();
+        settings
     }
 
-    fn settings_action(&mut self, id: BufferId, action: project_settings::Action) {
+    /// What the settings page's project section asked for, for the
+    /// project at `root`.
+    pub(super) fn project_page_action(&mut self, root: PathBuf, action: project_settings::Action) {
         use project_settings::Action;
-        let Some(PageModel::Settings(s)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let root = s.root.clone();
-        let ini = fenix_project::meta::project_ini(&root);
         match action {
-            Action::None => {}
-            Action::Close => self.close_page(id),
+            Action::None | Action::Close => {}
             Action::SaveTools(tools) => match tools.write(&root) {
                 Ok(()) => self.set_message("saved .fenix/tools.json"),
                 Err(e) => self.set_error(e),
             },
             Action::SetKind(kind) => {
-                match fenix_project::meta::set_ini_value(&ini, "project", "kind", kind.map(|k| k.id())) {
-                    Ok(()) => self.set_message("saved .fenix/project.ini"),
-                    Err(e) => self.set_error(format!("{}: {e}", ini.display())),
+                match fenix_project::meta::set_kind(&root, kind) {
+                    Ok(()) => self.set_message("saved .fenix/settings.toml"),
+                    Err(e) => self.set_error(e.to_string()),
                 }
                 self.project_kinds.borrow_mut().clear();
             }
             Action::SetJira(key) => {
-                let value = (!key.is_empty()).then_some(key.as_str());
-                if let Err(e) = fenix_project::meta::set_ini_value(&ini, "project", "jira", value) {
-                    self.set_error(format!("{}: {e}", ini.display()));
+                if let Err(e) = fenix_project::meta::set_jira_key(&root, Some(key.as_str())) {
+                    self.set_error(e.to_string());
                 }
             }
             Action::SetGroup(group) => {
@@ -1519,17 +1535,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_edits_write_tools_json_and_project_ini() {
+    fn settings_edits_write_tools_json_and_the_projects_settings() {
         let dir = Scratch::new("settings");
         std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
         let mut app = App::with_file(None);
         app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(dir.0.join("meta.json"));
-        app.open_settings(dir.0.clone());
+        // SPC p , on the project, then its own section at the top.
+        app.open_settings_page(crate::settings_page::Scope::Project { root: dir.0.clone(), name: "settings".into() }, None);
+        press(&mut app, "\tk\n");
         let text = page_text(&mut app);
         assert!(text.contains("detect: Python") && text.contains("TASKS · 0"), "{text}");
         // Kind -> declared Python, then Jira.
         press(&mut app, "l");
-        assert!(std::fs::read_to_string(dir.0.join(".fenix/project.ini")).unwrap().contains("kind = python"));
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"python\""));
         press(&mut app, "jjj\nfnx\n");
         assert_eq!(fenix_project::meta::jira_key(&dir.0).as_deref(), Some("FNX"));
         // Add a task.

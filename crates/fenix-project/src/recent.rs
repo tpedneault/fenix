@@ -7,19 +7,18 @@ use std::path::PathBuf;
 /// from growing forever over a long-lived config directory.
 const MAX_RECENT_FILES: usize = 200;
 
-/// A remembered, most-recently-opened-first list of individual file
-/// paths -- persisted the same way as `KnownProjects` (a plain
-/// newline-separated path list, no serialization crate needed for
-/// something this simple), just for files instead of project roots.
+/// A remembered, most-recently-opened-first list of paths -- the `files`
+/// (or, for the explorer's folders, `dirs`) key of `state/recent.json`.
 pub struct RecentFiles {
     path: PathBuf,
+    key: &'static str,
     paths: Vec<PathBuf>,
 }
 
 impl RecentFiles {
-    /// The default location: `dirs::config_dir()/fenix/recent_files.txt`.
+    /// `state/recent.json`, which holds both lists.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fenix").join("recent_files.txt"))
+        fenix_storage::paths::state_file("recent.json")
     }
 
     /// Where the explorer remembers the directories it has been.
@@ -31,25 +30,30 @@ impl RecentFiles {
     /// `SPC e r` goes back to a folder), so mixing them into one list
     /// would make both worse.
     pub fn default_dirs_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fenix").join("recent_dirs.txt"))
+        Self::default_path()
     }
 
     /// Loads the recent-files list from `path`. A missing file means "no
     /// recent files yet," not an error -- the common case on first run.
     pub fn load(path: PathBuf) -> io::Result<Self> {
-        let paths = match std::fs::read_to_string(&path) {
-            Ok(contents) => contents.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e),
-        };
-        Ok(Self { path, paths })
+        Self::load_key(path, FILES)
+    }
+
+    fn load_key(path: PathBuf, key: &'static str) -> io::Result<Self> {
+        let paths = fenix_storage::state::read(&path, key)?.unwrap_or_default();
+        Ok(Self { path, key, paths })
     }
 
     /// Same as `load`, but never fails -- any read error just starts
     /// with an empty list, the same "convenience cache, not critical
     /// data" posture as `KnownProjects::load_or_default`.
     pub fn load_or_default(path: PathBuf) -> Self {
-        Self::load(path.clone()).unwrap_or_else(|_| Self { path, paths: Vec::new() })
+        Self::load_key(path.clone(), FILES).unwrap_or_else(|_| Self { path, key: FILES, paths: Vec::new() })
+    }
+
+    /// The explorer's recent folders, from the same file.
+    pub fn dirs_or_default(path: PathBuf) -> Self {
+        Self::load_key(path.clone(), DIRS).unwrap_or_else(|_| Self { path, key: DIRS, paths: Vec::new() })
     }
 
     pub fn paths(&self) -> &[PathBuf] {
@@ -66,13 +70,12 @@ impl RecentFiles {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let contents: String = self.paths.iter().map(|p| format!("{}\n", p.display())).collect();
-        std::fs::write(&self.path, contents)
+        fenix_storage::state::write(&self.path, self.key, &self.paths)
     }
 }
+
+const FILES: &str = "files";
+const DIRS: &str = "dirs";
 
 #[cfg(test)]
 mod tests {

@@ -173,6 +173,45 @@ impl Grid {
         Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None }
     }
 
+    /// Draws `page` with its top-left at (`line`, `col`): its text, its
+    /// colours, hairlines, panels and popup, moved there -- and its
+    /// focused row, when `focus` says it has the keyboard.
+    pub fn embed(&mut self, page: &Page, line: usize, col: usize, focus: bool) {
+        for (i, text) in page.text.lines().enumerate() {
+            self.write(line + i, col, text);
+        }
+        let shift = |cols: &Range<usize>| cols.start + col..cols.end + col;
+        self.spans.extend(page.spans.iter().map(|s| Span { line: s.line + line, cols: shift(&s.cols), role: s.role }));
+        self.rules.extend(page.rules.iter().map(|(l, c)| (l + line, shift(c))));
+        self.panels.extend(page.panels.iter().map(|(l, c)| (l + line, shift(c))));
+        if focus {
+            if let Some((l, c)) = &page.focus {
+                self.focus = Some((l + line, shift(c)));
+            }
+        }
+        if let Some(popup) = &page.popup {
+            self.popup = Some(Popup { line: popup.line + line, col: popup.col + col, ..popup.clone() });
+        }
+    }
+
+    /// Writes `text` at (`line`, `col`) without colouring it.
+    fn write(&mut self, line: usize, col: usize, text: &str) {
+        if self.lines.len() <= line {
+            self.lines.resize(line + 1, Vec::new());
+        }
+        let len = text.chars().count();
+        if len == 0 {
+            return;
+        }
+        let row = &mut self.lines[line];
+        if row.len() < col + len {
+            row.resize(col + len, ' ');
+        }
+        for (i, c) in text.chars().enumerate() {
+            row[col + i] = c;
+        }
+    }
+
     /// Writes `text` at (`line`, `col`); returns the column after it.
     pub fn put(&mut self, line: usize, col: usize, text: &str, role: Role) -> usize {
         let len = text.chars().count();

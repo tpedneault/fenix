@@ -194,8 +194,8 @@ for anyone curious to poke around or build on it.
   then the directories you have actually been to, then registered
   projects. `SPC e m` bookmarks where you are, named after the folder,
   with no prompt -- a bookmark you can add without stopping to think is
-  one you will actually add. Bookmarks live in `config.ini`'s
-  `[explorer]` section and can be hand-edited between sessions.
+  one you will actually add. Bookmarks are kept with the rest of what
+  Fenix remembers about this machine, in `state\bookmarks.json`.
 
   **Renaming in bulk** is the thing an editor can do that a file manager
   cannot. `SPC e w` re-renders the listing as one bare name per line and
@@ -347,7 +347,7 @@ for anyone curious to poke around or build on it.
   before it's written, `t` runs a task, `e` opens the raw JSON.
 - **Project identity**: every project has a kind (Python, Arduino, MIB,
   Rust, Tcl, ...), detected from its files or declared as `[project]
-  kind = ...` in `.fenix/project.ini`. Its two- or three-letter tag
+  kind = "..."` in `.fenix/settings.toml`. Its two- or three-letter tag
   leads the modeline (`PY orbit-tools · decoder.py`) and Home's project
   rows (with the doctor's health dot), and the window is titled after
   the project.
@@ -426,8 +426,8 @@ for anyone curious to poke around or build on it.
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
   workspaces (`SPC TAB`) -- name one (`SPC TAB r`), jump straight to it
   by name instead of only cycling (`SPC TAB TAB`), or define a shelf of
-  them in `config.ini` and open-or-switch-to one on demand (`SPC TAB f`,
-  see `[workspaces]` below). Every pane shows a small title bar naming its
+  them in `SPC ,` (Documents & workspaces) and open-or-switch-to one on
+  demand (`SPC TAB f`). Every pane shows a small title bar naming its
   buffer (the filename, or a placeholder like `*dashboard*`/`*docker*`/
   a dired buffer's own directory for one with no path) -- with a split
   open, two different files are labeled at a glance, not just whichever
@@ -664,8 +664,8 @@ for anyone curious to poke around or build on it.
   merge request shows), with `t` toggling two-dot (`base..head`, every
   difference between the two trees, including what the base gained
   meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g q`
-  closes. The base picker leads with `[git] base_branch` from
-  `config.ini`, falling back to whichever of `main`/`master` the repo
+  closes. The base picker leads with the base branch from `SPC ,` (a
+  project can set its own), falling back to whichever of `main`/`master` the repo
   actually has, so "how does this differ from the mainline" is two keys
   and an Enter; each step says which side it's asking for, and the
   second echoes the base you already chose (`master...?`).
@@ -719,7 +719,7 @@ for anyone curious to poke around or build on it.
     name as a sentence, the description a summary of its commits, the
     base from `[git] base_branch`, a Jira key in the branch name
     (`feature/FNX-58-...`) linked as `Refs FNX-58`, and the reviewers
-    from `[git] reviewers` (or the project's own `.fenix/project.ini`).
+    from `[git] reviewers` (or the project's own `.fenix/settings.toml`).
     `Enter` edits a field in place, `e` writes the description in a
     buffer, `d` toggles draft. Under the form are the commits it brings
     and what's worth knowing first: whether it's pushed, whether it
@@ -805,9 +805,9 @@ for anyone curious to poke around or build on it.
   both `old_line` and `new_line`, and GitLab rejects a position carrying
   only one of them.
 
-  The only configuration is `[gitlab] base_url` and `token` in
-  `config.ini` (the instance root, *not* `/api/v4`; a personal access
-  token with `api` scope). Which project a repo belongs to is read from
+  The only configuration is the GitLab server and token in `SPC ,`
+  (Forges): the instance root, *not* `/api/v4`, and a personal access
+  token with `api` scope. Which project a repo belongs to is read from
   its own `origin` remote -- SSH, `ssh://`, or HTTPS -- so one pair of
   values covers every repo on the instance, and nothing is configured
   per checkout. Each of the three ways that can fail says which one it
@@ -938,9 +938,8 @@ for anyone curious to poke around or build on it.
   `Cargo.toml`, `pytest`/`ruff check` for a `pyproject.toml`, CMake
   configure/build/`ctest` for a `CMakeLists.txt`, `npm run build`/`test`
   for a `package.json` -- every matching ecosystem contributes its own
-  set, not just the first one found), plus any project-local overrides
-  from `.fenix/project.ini`'s `[tasks]` section (`taskN = NAME|COMMAND`,
-  same numbered-key convention `config.ini`'s own lists already use).
+  set, not just the first one found), plus the project's own
+  tasks from `.fenix/tools.json` (`SPC p ,` edits them).
   Runs in a live-streamed single-pane Task Output panel (`SPC p T`
   reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
   `clippy` specifically run with `--message-format=json` so each
@@ -977,9 +976,8 @@ for anyone curious to poke around or build on it.
   file in a fresh split if it wasn't already showing somewhere, without
   ever displacing whatever the debug panel's own panes are showing. A
   project's own launch target -- required for anything that isn't "the
-  script I have open" -- comes from `.fenix/project.ini`'s `[launch]`
-  section (`program`/`args`, the same per-project config file `[tasks]`
-  above already introduced).
+  script I have open" -- comes from `.fenix/tools.json`'s `launch`
+  (`program`, `args`, `cwd`, `env`; `SPC p ,` edits it).
 - **Tool status**: `SPC l m` opens a single-pane listing of every
   language with a built-in LSP server or DAP adapter -- the exact
   command that would be launched (a `[lsp]` override if configured,
@@ -1056,7 +1054,7 @@ for anyone curious to poke around or build on it.
   `SPC m r` reparses the configured MIB directories from disk. `SPC m
   a` registers a new MIB directory without leaving the editor: browse
   to it in the file explorer, `S` to select it, then type a label --
-  persisted to `config.ini` immediately, same as everything else here.
+  saved to `settings.toml` at once, same as everything else here.
   `SPC m d` fuzzy-finds a configured directory to remove the same way.
   Ported from an ICD 7.2 SCOS-2000 MIB workflow in the author's previous
   (Emacs) config -- see that config's own
@@ -1176,7 +1174,7 @@ and degrade gracefully (never a hard error) if they're not:
 - [`arduino-language-server`](https://github.com/arduino/arduino-language-server)
   and Arduino's build of [`clangd`](https://github.com/arduino/clang-static-binaries)
   — completion and live errors in sketches. Looked for in Fenix's tools
-  folder (`tools` next to `config.ini`, each in its own subfolder as its
+  folder (`%LocalAppData%\fenix\tools`, each in its own subfolder as its
   release archive unpacks), on `PATH`, and inside an Arduino IDE 2
   install; `[embedded]` can point at them instead. Without them, sketches
   still build, upload and monitor; `SPC m i` says what's missing.
@@ -1276,6 +1274,9 @@ popup shows what keys continue it.
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
+| `SPC ,` | Every setting, on one page -- search, change, reset |
+| `SPC p ,` | This project's settings: overrides, kind, group, Jira key, tasks, launch |
+| `SPC i S` / `SPC i n` | Manage snippets / make one from the last Visual selection |
 | `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
 | `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
 | `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
@@ -1332,7 +1333,7 @@ popup shows what keys continue it.
 | `SPC r g` | Prompt for a page number and jump to it |
 | `SPC r [` / `SPC r ]` | Jump to the first / last page |
 | `SPC r =` / `SPC r -` | Zoom the focused PDF session in / out |
-| `SPC r f` | Open a document from the `config.ini` `[documents]` index |
+| `SPC r f` | Open a document from the document index (`SPC ,` > Documents) |
 | `SPC r 0` | Fit the page to the pane |
 | `SPC r w` | Fit the page's width to the pane |
 | `SPC r o` | Toggle the focused PDF session's outline/bookmarks panel |
@@ -1391,7 +1392,7 @@ popup shows what keys continue it.
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
 | `SPC TAB d` | Remove the active workspace |
 | `SPC TAB TAB` | Switch to an open workspace by name |
-| `SPC TAB f` | Open a workspace from `config.ini`'s `[workspaces]` shelf -- switches to it if already open, otherwise creates it |
+| `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Documents & workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
 ### File explorer sidebar (`SPC e t`)
@@ -1585,7 +1586,7 @@ means "show everything," the normal way to clear the filter), `Esc`
 cancels without changing anything. The filter is folded directly into
 the JQL query (`AND status NOT IN (...)`), so it stays applied across
 `SPC j r` refreshes; it resets when the panel is closed and reopened,
-and isn't saved to `config.ini`.
+and isn't saved.
 
 ### VNC console panes (`SPC v v`)
 
@@ -1657,13 +1658,13 @@ commands, just reachable in one keystroke here.
 | `SPC r o` | Toggle the outline/bookmarks panel |
 | `/`, `SPC r /` | Search the document's text |
 
-`SPC r f` opens a fuzzy picker over a **document index** you define by
-hand in `config.ini`:
+`SPC r f` opens a fuzzy picker over a **document index** you keep in
+`SPC ,` (Documents & workspaces), or by hand in `settings.toml`:
 
-```ini
+```toml
 [documents]
-doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
-doc2 = Time Code Formats|C:\refs\301x0b4.pdf
+"Space Packet Protocol" = 'C:\refs\133x0b2e2.pdf'
+"Time Code Formats" = 'C:\refs\301x0b4.pdf'
 ```
 
 Each entry is a display name and a path. The picker lists and
@@ -1761,145 +1762,164 @@ up, and `Esc` is not among them; `Ctrl-E` is the dismiss key and
 
 ## Configuration
 
-Fenix reads a single INI-format settings file:
+The easiest way to change a setting is **`SPC ,`**: every setting on one
+page, by category, with what it does, its default, and a `•` on what
+you've changed. `/` searches them all; `Space` flips a switch, `h`/`l`
+step a number or cycle a choice (the theme previews as you go), `Enter`
+types a value in place, and lists (VNC hosts, language servers, MIB
+roots...) get rows you add, edit in a small form, move and delete. A
+value is checked before it's kept -- a font size of 90 stays on its row
+with the reason -- and a change applies at once and is saved at once.
+`r` puts a setting back to its default, `e` opens the file at its line.
 
-- **Windows**: `%AppData%\fenix\config.ini`
-- **Linux/macOS**: `~/.config/fenix/config.ini` (or wherever
-  `$XDG_CONFIG_HOME`/the platform's config directory points)
+### Where things live
 
-It's created automatically the first time you change a setting at
-runtime (picking a theme, font size, `:set shiftwidth=N`); you can also
-hand-edit it directly. Every key is optional — a missing or unparsable
-value just falls back to the built-in default instead of failing to
-load. A value's surrounding whitespace is always trimmed; wrap it in
-double quotes (`key = " "`) to keep whitespace that actually matters
-(`iskeyword_extra = ""`, an explicitly *empty* extra set, needs this —
-an unquoted empty value is indistinguishable from the key being absent
-altogether, which instead falls back to real Vim's own default of
-`_`).
+| What | Windows | Linux |
+|---|---|---|
+| Your settings, `settings.toml` | `%AppData%\fenix` | `~/.config/fenix` |
+| Your snippets (a folder per language) and project templates | `%AppData%\fenix\snippets`, `\templates` | `~/.config/fenix/...` |
+| Your data: the agenda | `%AppData%\fenix\data` | `~/.local/share/fenix` |
+| This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
+| Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
 
-```ini
+What you chose roams with your Windows profile; what Fenix noticed about
+this machine, and what it downloaded, doesn't. `FENIX_HOME=<folder>`
+puts all of it in one folder instead -- a portable install, or a test
+run that mustn't touch your real settings.
+
+An installation from before `settings.toml` moves over by itself the
+first time Fenix starts: `config.ini` becomes `settings.toml`, the
+other files go to their new places, and everything replaced is kept in `backup\` with a
+`MIGRATION.txt` saying what moved.
+
+### settings.toml
+
+Hand-editing is fine: Fenix notices when the file changes and uses the
+new values at once. When it saves a setting itself, it changes only that
+line -- your comments, the order of things and keys it doesn't know stay
+as they are -- and a setting back at its default loses its line. A value
+that's wrong costs only that setting; the status line and `SPC ,` name
+the line and why, and the last good value stays in use. A file that
+can't be parsed at all is never written over until it's fixed.
+
+```toml
+# Only what differs from the defaults needs to be here.
 [editor]
-theme = TempleOS
-font_size = 16
-font_family = Fira Code
-indent_width = 4
-iskeyword_extra = _
-tab_width = 8
-animations = true
+theme = "Visual Studio Dark"
+font_size = 18            # bigger on the laptop
 
-[completion]
-symbols_file = /home/you/tcl-symbols.txt
-
-[lsp]
-server1 = python|C:\Users\you\.local\bin\pyright-langserver.exe --stdio
-server2 = rust|rust-analyzer
-
-[embedded]
-arduino_cli = C:\Program Files\Arduino CLI\arduino-cli.exe
-
-[mib]
-root1 = MIB-A|C:\data\mib-a
-root2 = MIB-B|C:\data\mib-b
-telecommand_template = telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]
-telecommand_argument_template = {name}={value}
-telecommand_argument_separator = ", "
-
-[jira]
-base_url = https://jira.example.com
-token = your-personal-access-token
-project1 = PROJ|My Project
-user1 = jo1111111|John Doe
+[lsp.servers]
+python = 'C:\Users\you\.local\bin\pyright-langserver.exe --stdio'
 
 [git]
-graph_limit = 200
-base_branch = develop
-graph_style = ascii
+base_branch = "develop"
+reviewers = ["alex", "sam"]
+auto_fetch = 5
 
-[vnc]
-host1 = build-vm|10.0.0.5|5900
-host2 = test-vm|10.0.0.6|5900
+[gitlab]
+base_url = "https://gitlab.example.com"
+token = "glpat-..."      # SPC , > Forges types it masked
+
+[[vnc.hosts]]
+name = "build-vm"
+host = "10.0.0.5"         # port defaults to 5900
 
 [documents]
-doc1 = Space Packet Protocol|C:\refs\133x0b2e2.pdf
-doc2 = Time Code Formats|C:\refs\301x0b4.pdf
-doc3 = Team Onboarding Notes|C:\refs\onboarding.md
-
-[workspaces]
-ws1 = Editor|
-ws2 = Git|git
-ws3 = Podman|docker
-ws4 = Jira|jira
-ws5 = VNC Build|vnc:build-vm
-ws6 = VNC Test|vnc:test-vm
-ws7 = fenix|project:C:\src\fenix
-
-[windows]
-restore_windows = true
-window1 = 1920,0,2560,1400|true
-window2 = 4480,0,1920,1040|true
+"Space Packet Protocol" = 'C:\refs\133x0b2e2.pdf'
 ```
 
-| Section | Key | Meaning |
-|---|---|---|
-| `editor` | `theme` | `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`, `Solarized Dark`, or `One Dark` (case-insensitive) |
-| `editor` | `font_size` | Body text size in points |
-| `editor` | `font_family` | Body text font family, by name, as installed on your system. Overrides whatever the active theme names; unset falls back to the theme's own choice (and from there to your system's default monospace font) |
-| `editor` | `indent_width` | Spaces per indent level (`>>`/`<<`, Tab, auto-indent) |
-| `editor` | `tab_width` | Visual columns a literal tab character expands to when rendered (real Vim's own `:set tabstop`) -- distinct from `indent_width`, which governs what Tab/`>>`/`<<` actually insert (always spaces) |
-| `editor` | `animations` | `true`/`false` -- whether caret-fade, scroll-ease, and yank/paste-pulse animations play at all; unset defaults to `true`. `SPC t a` toggles and persists this live |
-| `completion` | `symbols_file` | Path to a plain-text symbols list, one identifier per line (blank lines and `#`-comments ignored), merged into the Tcl completion popup |
-| `lsp` | `server1`, `server2`, ... | A language server to launch, as `LANGUAGE\|COMMAND` (numbered, same reason as `mib`'s roots) -- `LANGUAGE` is one of `python`, `rust`, `c`, `cpp`, `bash`, `javascript`, `typescript`, `tsx`, ...; `COMMAND` is the program plus arguments, split on whitespace (no shell-quoting support). Overrides the built-in default for that language if one exists (`python` → `pyright-langserver --stdio`, `rust` → `rust-analyzer`, `c`/`cpp` → `clangd`, `bash` → `bash-language-server start`, `javascript`/`typescript`/`tsx` → `typescript-language-server --stdio`); required for every other language |
-| `embedded` | `arduino_cli` | Path to `arduino-cli`, when it isn't on `PATH` or in its installer's default location |
-| `embedded` | `clangd` | Path to the `clangd` the Arduino language server runs (Arduino's own build) |
-| `embedded` | `arduino_language_server` | Path to `arduino-language-server`, for completion in sketches, when it isn't in Fenix's tools folder, on `PATH` or in an Arduino IDE 2 install |
-| `mib` | `root1`, `root2`, ... | A configured SCOS-2000 MIB directory, as `LABEL\|PATH` (numbered since a plain INI key can't repeat) — see the SCOS-2000 MIB feature above |
-| `mib` | `telecommand_template` | Template used when `SPC m i` (in a Tcl file) inserts a telecommand -- `{type}`, `{stype}`, `{apid}`, `{mnemo}`, `{description}`, `{mib}`, `{arguments}` |
-| `mib` | `telecommand_argument_template` | Template for one variable telecommand argument within `{arguments}` -- `{name}`, `{value}` |
-| `mib` | `telecommand_argument_separator` | Separator joining rendered arguments together. Every INI value here has its surrounding whitespace stripped, so a separator that depends on it (a trailing space, or one that's pure whitespace) needs to be wrapped in double quotes -- `", "` or `" "` -- to survive; an unquoted `,` works exactly as before |
-| `documents` | `doc1`, `doc2`, ... | One entry in the `SPC r f` document index, as `NAME\|PATH` (numbered, same reason as `mib`'s roots). `NAME` is what the picker lists and fuzzy-matches; `PATH` can be any file Fenix opens, PDF or not |
-| `workspaces` | `ws1`, `ws2`, ... | One entry in the `SPC TAB f` workspace shelf, as `NAME\|ACTION` (numbered, same convention as `documents`). `ACTION` is `git`/`jira`/`docker` (opens that built-in panel -- `docker` covers Podman too, since the panel autodetects the engine), `vnc:HOST` (a name from `[vnc]`), `project:PATH` (switches to that project root and opens a find-file picker in it, same as `SPC p p`; adds it to the known-projects list if it isn't there yet), or anything else (including empty, as for a plain "Editor" entry) for a workspace with no live session behind it. Picking an already-open entry switches to it instead of creating a duplicate; picking a fresh one creates it and renames it to match, so it shows up correctly next time |
-| `jira` | `base_url` | The self-hosted Jira Server/Data Center instance's REST API root (e.g. `https://jira.example.com`) — see the JIRA dashboard feature above |
-| `jira` | `token` | A personal access token for `base_url`, sent as a `Bearer` token — plaintext, same as every other setting in this file |
-| `jira` | `project1`, `project2`, ... | A tracked project, as `KEY\|Display Name` (numbered, same convention as `mib`'s `root1`/`root2`) — added/removed via `SPC j p a`/`SPC j p d` rather than hand-edited, though either works |
-| `jira` | `user1`, `user2`, ... | A tracked user, as `id\|Display Name` — added/removed via `SPC j u a`/`SPC j u d` |
-| `git` | `graph_limit` | How many commits the History view's graph loads (`SPC g l`); unset means 200 |
-| `editor` | `watch_files` | `false` stops Fenix noticing files that change on disk while they're open; unset means on |
-| `gitlab` | `base_url` | The GitLab instance's own root, e.g. `https://gitlab.mycompany.com` -- not `/api/v4`, which Fenix appends itself |
-| `gitlab` | `token` | A GitLab personal access token with `api` scope. There is deliberately no project setting: it's read from each repo's `origin` remote |
-| `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
-| `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
-| `git` | `layout` | `page` (default) or `panes` -- what `SPC g g` opens: the Git status page, or the older seven-pane panel |
-| `git` | `reviewers` | e.g. `alex, sam` -- who a new pull request (`SPC g P`) asks for a review, prefilled on its page. A project's own `.fenix/project.ini` `[git] reviewers` takes its place; you're left out of it when it's you |
-| `github` | `token` | A GitHub token, for when the GitHub CLI isn't signed in (`gh auth login` is used first) |
-| `git` | `auto_fetch` | e.g. `5m` -- fetch the focused repository in the background when its last fetch is older than that. Off unless set; a remote that asks for a password is tried once per interval, never prompted |
-| `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
-| `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
-| `windows` | `workspace_per_project` | `true`/`false` -- whether opening a project from the hub gives it its own workspace (and returns to it); unset defaults to `true` |
-| `windows` | `window1`, `window2`, ... | One remembered OS window, as `X,Y,WIDTH,HEIGHT\|MAXIMIZED`. Written by Fenix on exit, not hand-authored -- `X,Y` is the outer frame's desktop position and `WIDTH,HEIGHT` the client area, which is the pair a window can actually be restored from. A window whose saved rectangle no longer lands on a connected monitor is placed by the window manager instead of opening off-screen |
+API tokens are kept in `settings.toml` with everything else -- mind that
+before sharing the file. `SPC ,` sets them (typed masked), tests them
+against their server (`t`) and clears them (`x`). `FENIX_GITLAB_TOKEN`,
+`FENIX_JIRA_TOKEN` and `FENIX_GITHUB_TOKEN` override the file when
+they're set, and are never written to it; GitHub also uses the GitHub
+CLI's sign-in (`gh auth login`) when there's no token. (Keeping them in
+the operating system's credential store instead is planned.)
 
-Known projects (`SPC p a`/`SPC p d`) and recently-opened files (used by
-the dashboard) are stored separately as plain newline-separated path
-lists in the same directory (`projects.txt`, `recent_files.txt`) — they're
-data, not settings, so they don't live in `config.ini`.
+### A project's own settings
 
-**`[vnc]`/`[documents]`/`[workspaces]`/`[lsp]` are shelves, not an
-auto-start list.** Adding hosts to `[vnc]` makes them selectable from
-`SPC v v`'s picker; adding entries to `[workspaces]` makes them
-selectable from `SPC TAB f`. Neither opens or connects to anything by
-itself at launch -- `restore_windows`/`[windows]` is the only thing
-Fenix does automatically on startup, and it only reopens each OS
-window's *position and size*, not what was open inside it (every
-restored window starts on a fresh scratch buffer). If you want a
-particular set of VNC connections or projects up the moment Fenix
-starts, run them from `SPC TAB f` once you're in -- there's no
-"autostart on launch" key yet.
+A project can set some settings for itself in `.fenix/settings.toml`,
+meant to be committed so the whole team shares them: indent and tab
+width, word characters, the base branch and reviewers. `SPC p ,` opens
+the settings page on the project: each row says whether it's set there,
+comes from you, or is the default, `Enter` sets one for the project and
+`r` goes back to yours. Its first section, "Project & tasks", holds
+the rest of what's the project's own: its kind, group, pin and Jira key,
+and its tasks, language servers and debug launch (`.fenix/tools.json`).
+`p` switches the page between yours and the project's.
 
-`config.ini` can be saved as UTF-8 with or without a byte-order mark --
-both parse correctly (Notepad's "UTF-8" option and PowerShell's
-`Out-File`/`Set-Content` both write one by default; a BOM on a file's
-very first line used to make that whole first section silently vanish,
-fixed since).
+A project from before `.fenix/settings.toml` kept these in
+`.fenix/project.ini`; the first time it's opened, that file moves over
+-- kind, Jira key, reviewers and serial monitor speed into
+`settings.toml`, its old `[tasks]` and `[launch]` into `tools.json` --
+and is deleted, so the change shows in `git status` for review.
+
+### Every setting
+
+The table is generated from the settings' own declarations (a test fails
+when it's out of date).
+
+| Setting | Takes | Default | What it does |
+|---|---|---|---|
+| **Editor** | | | |
+| `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
+| `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
+| **Appearance** | | | |
+| `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
+| `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; h and l go through them. |
+| `editor.font_size` | 6–48 | 16 | Text size, in points. |
+| `editor.animations` | true / false | on | Smooth scrolling and the caret's fade. |
+| **Files & explorer** | | | |
+| `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
+| **Completion & LSP** | | | |
+| `completion.symbols_file` | a path | – | A text file of words, one per line, offered by completion everywhere. |
+| `snippets.builtin` | true / false | on | Offer the snippets that come with Fenix; yours and a project's always are. SPC i S manages them. |
+| `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
+| **Git** | | | |
+| `git.base_branch` | text | main or master | The branch pull requests and comparisons start from. *A project can set it.* |
+| `git.reviewers` | a list | – | Usernames asked to review a new pull request. *A project can set it.* |
+| `git.auto_fetch` | minutes | never | Fetch the focused repository in the background this often, in minutes. |
+| `git.layout` | page / panes | page | The Git status page, or the older seven-pane panel. |
+| `git.graph_style` | ascii / unicode | ascii | Characters the commit graph is drawn with; unicode needs a font with box-drawing glyphs. |
+| `git.graph_limit` | 10–100000 | 200 | How many commits the graph view reads. |
+| **Forges** | | | |
+| `gitlab.base_url` | text | – | The GitLab instance's address, like https://gitlab.example.com. |
+| `gitlab.token` | text (a token) | – | A personal access token with the api scope. |
+| `github.token` | text (a token) | – | Used when the GitHub CLI isn't signed in (gh auth login). |
+| **Jira & agenda** | | | |
+| `jira.base_url` | text | – | Your Jira Server or Data Center's address. |
+| `jira.token` | text (a token) | – | A personal access token for the Jira server. |
+| `jira.sync_minutes` | minutes | 10 | How often linked agenda tasks are brought up to date, in minutes. |
+| `jira.projects` | key = name | – | Jira projects the dashboard tracks. |
+| `jira.users` | id = name | – | People the dashboard tracks. |
+| `jira.blocked` | project = meaning | – | Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task. |
+| `jira.priorities` | jira priority = agenda priority | – | How a Jira priority maps onto the agenda's. |
+| `agenda.categories` | a list | – | Categories offered when you file a task. |
+| `agenda.worklog_round` | minutes | 15 | Time logged to Jira is rounded to this many minutes. |
+| **Embedded & MIB** | | | |
+| `embedded.arduino_cli` | a path | found on PATH | Where arduino-cli is, when it isn't found by itself. |
+| `embedded.clangd` | a path | found on PATH | Where clangd is, when it isn't found by itself. |
+| `embedded.arduino_language_server` | a path | downloaded when needed | Where arduino-language-server is, when it isn't found by itself. |
+| `mib.roots` | name = folder | – | Folders holding a MIB database. |
+| `mib.telecommand_template` | text | – | How a telecommand is written; {name} and {args} are filled in. |
+| `mib.telecommand_argument_template` | text | – | How each argument is written; {name} and {value} are filled in. |
+| `mib.telecommand_argument_separator` | text | – | What goes between arguments. |
+| **VNC** | | | |
+| `vnc.hosts` | [[tables]] of name, host, port | – | Machines SPC v connects to. No passwords: every host is taken to be on a trusted network. |
+| **Documents & workspaces** | | | |
+| `documents` | name = file | – | The SPC r f document index: a name and the file it opens. |
+| `workspaces` | name = opens | – | SPC TAB f: git, jira, docker, vnc:HOST, project:PATH, or nothing. |
+| **Windows & session** | | | |
+| `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
+| `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
+| `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
+
+**Shelves, not autostart.** VNC hosts, documents and the workspace
+shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of
+them opens or connects to anything at launch. The one thing Fenix does
+by itself on startup is put its windows back (`session.restore_windows`)
+and reopen your workspaces (`session.restore_session`).
 
 ## Architecture
 
@@ -1926,7 +1946,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-diff` | Unified-diff parsing (files/hunks/lines, both sides' line numbers) and single-hunk patch synthesis — pure, no I/O; what hunk staging and diff rendering are both built on |
 | `fenix-git` | Shells out to `git`: status/files/branches/remotes/tags, commit graph topology and lane assignment, diffs (working tree, commit, ref-to-ref), fetch, and applying a patch to stage/unstage/discard one hunk |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
-| `fenix-config` | The unified `config.ini` reader/writer |
+| `fenix-config` | `settings.toml`: every setting declared once (the schema), read, checked and saved in place; the project layer |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) and terminal-query replies for both terminal surfaces — no thread/event-loop knowledge of its own |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 
@@ -1978,6 +1998,19 @@ recovery behavior, and current limits.
 ## Native snippets
 
 Insert-mode **Tab** expands `header`, `section`, and Tcl's `proc`, with editable
-fields, live mirrors, transformations and date/user/file variables. Add your own
-files in the `snippets` directory beside the config. See [the snippet guide](docs/SNIPPETS.md) for
-syntax, navigation, examples and design details.
+fields, live mirrors, transformations and date/user/file variables.
+
+`SPC i S` manages them: every snippet by language, the one you're typing
+in first, marked built-in, yours or the project's, with a preview of
+what the selected one inserts. `n` makes one (its file opens with the
+header written), `Enter` edits one, `c` copies a built-in one to yours to
+change it, `p` copies one into the project, `d` deletes one to the
+Recycle Bin and `t` tries it in the file you came from. `SPC i n` makes
+one from the last Visual selection. Saving a `.snippet` file says whether
+it works, or why it won't be offered.
+
+They live one file each, in a folder per language: yours in
+`%AppData%\fenix\snippets\<language>\`, a project's in
+`.fenix\snippets\<language>\` (a project's wins over yours, yours over a
+built-in one with the same trigger). See [the snippet guide](docs/SNIPPETS.md)
+for syntax, navigation, examples and design details.

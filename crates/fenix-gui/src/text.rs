@@ -128,6 +128,22 @@ fn is_monospace_installed(font_system: &FontSystem, family: &str) -> bool {
     font_system.db().faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family))
 }
 
+/// Every monospace font family installed, by name -- what the settings
+/// page's Font setting cycles through. The icon font Fenix embeds for its
+/// glyphs isn't one to write in, so it's left out.
+fn monospace_families(font_system: &FontSystem) -> Vec<String> {
+    let mut names: Vec<String> = font_system
+        .db()
+        .faces()
+        .filter(|face| face.monospaced)
+        .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+        .filter(|name| name != ICON_FONT_FAMILY)
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
 /// cosmic-text's generic alias can name an uninstalled font (notably
 /// Noto Sans Mono on Windows). Using that name directly permits proportional
 /// fallback, so resolve an actual fixed-pitch face before measuring the grid.
@@ -464,6 +480,11 @@ impl TextPipeline {
     /// The active font's real monospace advance width in pixels --
     /// callers doing per-column pixel math (caret, selection, badge
     /// sizing) should use this instead of the `CHAR_WIDTH` constant.
+    /// The monospace fonts installed, for the settings page.
+    pub fn monospace_families(&self) -> Vec<String> {
+        monospace_families(&self.fonts.borrow().font_system)
+    }
+
     pub fn char_width(&self) -> f32 {
         self.char_width
     }
@@ -1236,6 +1257,20 @@ mod tests {
             "expected the system default monospace font ({default_width}px) to be narrower \
              than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
         );
+    }
+
+    #[test]
+    fn the_font_list_is_the_monospace_families_without_the_icon_font() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        let names = monospace_families(&fonts);
+        assert!(names.iter().any(|n| n == "TempleOS"), "{names:?}");
+        assert!(!names.iter().any(|n| n == ICON_FONT_FAMILY), "{names:?}");
+        let mut sorted = names.clone();
+        sorted.sort_by_key(|n| n.to_lowercase());
+        sorted.dedup();
+        assert_eq!(names, sorted, "each once, by name");
     }
 
     #[test]

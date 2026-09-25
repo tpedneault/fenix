@@ -45,8 +45,12 @@ pub fn set_yaml_value(root: &Path, key: &str, value: &str) -> Result<(), String>
     std::fs::write(&path, out).map_err(|err| format!("couldn't write {}: {err}", path.display()))
 }
 
-/// `[monitor] baudrate` from `.fenix/project.ini`.
+/// `[monitor] baudrate` from the project's `.fenix/settings.toml` (or
+/// the `.fenix/project.ini` it used to be kept in).
 pub fn baud_rate(root: &Path) -> u32 {
+    if let Some(baud) = fenix_storage::project_file::get(root, "monitor.baudrate").and_then(|b| b.parse().ok()) {
+        return baud;
+    }
     let Ok(text) = std::fs::read_to_string(root.join(".fenix").join("project.ini")) else { return DEFAULT_BAUD };
     let mut in_monitor = false;
     for line in text.lines().map(str::trim) {
@@ -63,49 +67,10 @@ pub fn baud_rate(root: &Path) -> u32 {
     DEFAULT_BAUD
 }
 
-/// Sets `[monitor] baudrate`, keeping every other section of
-/// `.fenix/project.ini` (tasks, launch) as it was.
+/// Sets `[monitor] baudrate` in the project's `.fenix/settings.toml`,
+/// leaving everything else in it as it was.
 pub fn set_baud_rate(root: &Path, baud: u32) -> Result<(), String> {
-    let dir = root.join(".fenix");
-    let path = dir.join("project.ini");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut out: Vec<String> = Vec::new();
-    let mut in_monitor = false;
-    let mut saw_section = false;
-    let mut written = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(header) = trimmed.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            if in_monitor && !written {
-                out.push(format!("baudrate = {baud}"));
-                written = true;
-            }
-            in_monitor = header.trim() == "monitor";
-            saw_section |= in_monitor;
-        } else if in_monitor && trimmed.split_once('=').is_some_and(|(k, _)| k.trim() == "baudrate") {
-            if !written {
-                out.push(format!("baudrate = {baud}"));
-                written = true;
-            }
-            continue;
-        }
-        out.push(line.to_string());
-    }
-    if in_monitor && !written {
-        out.push(format!("baudrate = {baud}"));
-        written = true;
-    }
-    if !saw_section && !written {
-        if out.last().is_some_and(|l| !l.trim().is_empty()) {
-            out.push(String::new());
-        }
-        out.push("[monitor]".to_string());
-        out.push(format!("baudrate = {baud}"));
-    }
-    std::fs::create_dir_all(&dir).map_err(|err| format!("couldn't create {}: {err}", dir.display()))?;
-    let mut text = out.join("\n");
-    text.push('\n');
-    std::fs::write(&path, text).map_err(|err| format!("couldn't write {}: {err}", path.display()))
+    fenix_storage::project_file::set(root, "monitor.baudrate", Some(fenix_storage::project_file::Value::Int(baud as i64))).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -131,29 +96,25 @@ mod tests {
     }
 
     #[test]
-    fn the_baud_rate_defaults_to_9600_and_is_saved_beside_other_sections() {
+    fn the_baud_rate_defaults_to_9600_and_is_saved_beside_the_projects_other_settings() {
         let dir = TempDir::new("baud");
         assert_eq!(baud_rate(dir.path()), DEFAULT_BAUD);
-
         std::fs::create_dir_all(dir.path().join(".fenix")).unwrap();
-        std::fs::write(dir.path().join(".fenix").join("project.ini"), "[tasks]\ntask1 = Fmt|clang-format\n").unwrap();
+        std::fs::write(dir.path().join(".fenix").join("settings.toml"), "[project]\nkind = \"arduino\"\n").unwrap();
         set_baud_rate(dir.path(), 115200).unwrap();
         assert_eq!(baud_rate(dir.path()), 115200);
-
         set_baud_rate(dir.path(), 57600).unwrap();
-        let text = std::fs::read_to_string(dir.path().join(".fenix").join("project.ini")).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(".fenix").join("settings.toml")).unwrap();
         assert_eq!(baud_rate(dir.path()), 57600);
-        assert!(text.contains("[tasks]\ntask1 = Fmt|clang-format"));
+        assert!(text.contains("[project]\nkind = \"arduino\""), "{text}");
         assert_eq!(text.matches("baudrate").count(), 1);
     }
 
     #[test]
-    fn a_baud_rate_inside_an_existing_monitor_section_is_replaced() {
-        let dir = TempDir::new("baud_existing");
+    fn a_sketch_not_yet_moved_still_has_its_old_baud_rate() {
+        let dir = TempDir::new("baud_legacy");
         std::fs::create_dir_all(dir.path().join(".fenix")).unwrap();
-        std::fs::write(dir.path().join(".fenix").join("project.ini"), "[monitor]\nbaudrate = 9600\n[launch]\nprogram = x\n").unwrap();
-        set_baud_rate(dir.path(), 115200).unwrap();
-        let text = std::fs::read_to_string(dir.path().join(".fenix").join("project.ini")).unwrap();
-        assert_eq!(text, "[monitor]\nbaudrate = 115200\n[launch]\nprogram = x\n");
+        std::fs::write(dir.path().join(".fenix").join("project.ini"), "[monitor]\nbaudrate = 115200\n").unwrap();
+        assert_eq!(baud_rate(dir.path()), 115200);
     }
 }

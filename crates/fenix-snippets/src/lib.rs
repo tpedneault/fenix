@@ -6,7 +6,26 @@ mod template;
 pub use session::{Edit, Session};
 pub use template::{Context, Rendered, Template};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Where a snippet comes from. A closer layer wins on the same trigger:
+/// a project's over yours, yours over the built-in ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Source {
+    BuiltIn,
+    User,
+    Project,
+}
+
+impl Source {
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::BuiltIn => "built-in",
+            Source::User => "yours",
+            Source::Project => "project",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Snippet {
@@ -14,6 +33,45 @@ pub struct Snippet {
     pub trigger: String,
     pub scopes: Vec<String>,
     pub template: Template,
+    pub source: Source,
+    /// Its file; `None` for a built-in one.
+    pub file: Option<PathBuf>,
+    /// The file's text, header and all.
+    pub text: String,
+}
+
+/// The folder a snippet for `scopes` goes in: its first language, or
+/// `all` for one that works everywhere.
+pub fn folder_for(scopes: &[String]) -> String {
+    match scopes.first().map(String::as_str) {
+        None | Some("*") => "all".to_string(),
+        Some(scope) => scope.to_string(),
+    }
+}
+
+/// Text as a snippet's body that inserts exactly that text: `$`, `}`
+/// and `\` escaped.
+pub fn escape_body(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '$' | '}' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A new snippet file's text: the header, then `body`.
+pub fn file_text(name: &str, trigger: &str, scopes: &[String], body: &str) -> String {
+    let scope = if scopes.is_empty() { "*".to_string() } else { scopes.join(", ") };
+    let mut body = body.to_string();
+    // The cursor ends up where the text ends. Nothing after `$0`: a
+    // newline there would be inserted too.
+    if !body.contains("$0") {
+        body.push_str("$0");
+    }
+    format!("# name: {name}\n# key: {trigger}\n# scope: {scope}\n# --\n{body}")
 }
 
 impl Snippet {
@@ -58,6 +116,9 @@ impl Snippet {
             trigger,
             scopes,
             template: Template::parse(body.ok_or("missing # -- separator")?)?,
+            source: Source::BuiltIn,
+            file: None,
+            text: source.to_string(),
         })
     }
 }
@@ -79,27 +140,53 @@ impl Catalog {
             .filter_map(|trigger| self.matching(trigger, scope))
             .collect()
     }
-    /// Sorted user files override bundled entries with the same scope/key.
-    /// Bad files are reported individually; healthy snippets remain usable.
+    /// The built-in snippets, then the user's in `directory`: a user file
+    /// overrides a bundled entry with the same scope and key. Bad files
+    /// are reported individually; healthy snippets remain usable.
     pub fn load(directory: &Path) -> Self {
-        let mut catalog = Self::bundled();
-        let entries = match std::fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return catalog,
-            Err(e) => {
-                catalog.errors.push(format!("{}: {e}", directory.display()));
-                return catalog;
-            }
-        };
+        Self::layers(true, Some(directory), None)
+    }
+
+    /// Every layer: the built-in snippets (unless `builtin` is off), the
+    /// user's in `user`, the project's in `project`. Each folder holds a
+    /// folder per language (`tcl/proc.snippet`), and loose files too.
+    pub fn layers(builtin: bool, user: Option<&Path>, project: Option<&Path>) -> Self {
+        let mut catalog = if builtin { Self::bundled() } else { Self::default() };
+        if let Some(dir) = user {
+            catalog.read_layer(dir, Source::User);
+        }
+        if let Some(dir) = project {
+            catalog.read_layer(dir, Source::Project);
+        }
+        catalog
+    }
+
+    fn read_layer(&mut self, directory: &Path, source: Source) {
         let mut paths = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(entry) if entry.path().extension().is_some_and(|e| e == "snippet") => {
-                    paths.push(entry.path())
+        let mut folders = vec![directory.to_path_buf()];
+        let mut depth = 0;
+        while !folders.is_empty() && depth < 2 {
+            let mut next = Vec::new();
+            for folder in folders {
+                let entries = match std::fs::read_dir(&folder) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        self.errors.push(format!("{}: {e}", folder.display()));
+                        continue;
+                    }
+                };
+                for entry in entries {
+                    match entry {
+                        Ok(entry) if entry.path().is_dir() => next.push(entry.path()),
+                        Ok(entry) if entry.path().extension().is_some_and(|e| e == "snippet") => paths.push(entry.path()),
+                        Ok(_) => {}
+                        Err(e) => self.errors.push(e.to_string()),
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => catalog.errors.push(e.to_string()),
             }
+            folders = next;
+            depth += 1;
         }
         paths.sort();
         for path in paths {
@@ -110,11 +197,14 @@ impl Catalog {
                 Snippet::parse(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
             })();
             match parsed {
-                Ok(snippet) => catalog.snippets.push(snippet),
-                Err(e) => catalog.errors.push(format!("{}: {e}", path.display())),
+                Ok(mut snippet) => {
+                    snippet.source = source;
+                    snippet.file = Some(path);
+                    self.snippets.push(snippet);
+                }
+                Err(e) => self.errors.push(format!("{}: {e}", path.display())),
             }
         }
-        catalog
     }
 
     pub fn bundled() -> Self {
