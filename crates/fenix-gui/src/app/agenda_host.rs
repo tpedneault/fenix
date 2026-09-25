@@ -249,9 +249,11 @@ impl App {
             return false;
         }
         let now = chrono::Local::now();
-        let last = timer.last_seen.unwrap_or(timer.started_at).max(timer.started_at);
+        // Not knowing when you were last here (a clock started before
+        // Fenix kept track) is no reason to ask: you're here now.
+        let last = timer.last_seen.map(|seen| seen.max(timer.started_at));
         let idle = self.config.agenda_idle_minutes.unwrap_or(60);
-        if idle > 0 && now - last > chrono::Duration::minutes(i64::from(idle)) {
+        if let Some(last) = last.filter(|last| idle > 0 && now - *last > chrono::Duration::minutes(i64::from(idle))) {
             self.agenda_ask_about_gap(last);
             return true;
         }
@@ -607,6 +609,12 @@ mod tests {
         app.cmd_agenda_resume();
         assert_eq!(app.agenda_store.active_timer.as_ref().map(|t| t.task_id), Some(id));
         assert!(!app.agenda_note_activity(), "just started: nothing to ask");
+
+        // A clock that never saw you: nothing to go on, so nothing asked.
+        app.agenda_store.active_timer.as_mut().unwrap().started_at = now - chrono::Duration::hours(5);
+        app.agenda_store.active_timer.as_mut().unwrap().last_seen = None;
+        assert!(!app.agenda_note_activity());
+        assert!(app.agenda_store.active_timer.as_ref().unwrap().last_seen.is_some(), "and now it knows");
     }
 
     #[test]
