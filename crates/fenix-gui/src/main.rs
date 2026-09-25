@@ -1,4 +1,5 @@
 mod agenda_page;
+mod jira_page;
 mod app;
 mod commands;
 mod completion;
@@ -25,7 +26,6 @@ mod graph_view;
 mod gpu;
 mod icon;
 mod ipc;
-mod jira_panel;
 mod keymap;
 mod dap;
 mod lsp;

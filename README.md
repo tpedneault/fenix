@@ -1891,8 +1891,9 @@ when it's out of date).
 | `jira.base_url` | text | – | Your Jira Server or Data Center's address. |
 | `jira.token` | text (a token) | – | A personal access token for the Jira server. |
 | `jira.sync_minutes` | minutes | 10 | How often linked agenda tasks are brought up to date, in minutes. |
-| `jira.projects` | key = name | – | Jira projects the dashboard tracks. |
-| `jira.users` | id = name | – | People the dashboard tracks. |
+| `jira.projects` | key = name | – | Jira projects the Jira page lists open issues and the current sprint for. |
+| `jira.users` | username = name | – | People the Jira page lists issues assigned to. |
+| `jira.queries` | name = jql | – | Searches saved on the Jira page, by name. |
 | `jira.blocked` | project = meaning | – | Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task. |
 | `jira.priorities` | jira priority = agenda priority | – | How a Jira priority maps onto the agenda's. |
 | `agenda.categories` | a list | – | Categories offered when you file a task. |

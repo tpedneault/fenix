@@ -357,38 +357,19 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // request view -- rather than one each.
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close this git view", "git.close_view");
 
-        // Jira dashboard -- read-only browsing this phase (see the Jira
-        // dashboard plan's own scope notes). `p`/`u` add/delete letters
-        // mirror `SPC p a`/`SPC p d`'s own add/delete-from-a-persisted-
-        // list convention, same as the `m`ib group already reuses it.
+        // Jira: the page (searches, issues, a preview), and what you
+        // reach for from a file -- an issue by key, a search, a new one.
+        // Tracking projects and people happens on the page itself.
         t.label_group(&[spc, KeyPress::char('j')], "jira");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('j')], "open jira panel", "jira.open");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('q')], "close jira panel", "jira.close");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('r')], "refresh jira panel", "jira.refresh");
-        // Jump straight to any issue by key, even one not already showing
-        // in the current Issues list -- see `App::jira_start_goto_issue_
-        // prompt`'s own doc comment.
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('j')], "open jira", "jira.open");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('r')], "refresh jira", "jira.refresh");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('g')], "go to issue", "jira.goto_issue");
-        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('p')], "jira projects");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('a')], "add project", "jira.add_project");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('p'), KeyPress::char('d')], "delete project", "jira.delete_project");
-        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('u')], "jira users");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('a')], "add user", "jira.add_user");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('u'), KeyPress::char('d')], "delete user", "jira.delete_user");
-        // Create/update issues, phase 2: `i` mirrors `p`/`u`'s own
-        // two-level shape for one leaf so far (just create -- there's no
-        // "delete an issue" analog to `p d`/`u d`).
-        t.label_group(&[spc, KeyPress::char('j'), KeyPress::char('i')], "jira issue");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('i'), KeyPress::char('a')], "create issue", "jira.create_issue");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('/')], "search jira", "jira.search");
+        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('n')], "new issue", "jira.create_issue");
 
-        // The personal task/time-tracking agenda -- one shared buffer for
-        // all four views (list/board/report/detail), re-rendered in place
-        // rather than several synced panes like the jira/docker groups
-        // above (see `agenda_panel`'s own doc comment for why). Row
-        // actions (status/priority/category/clock/notes/subtasks/
-        // dependencies/archive/delete) are bare keys on the buffer itself
-        // (`App::agenda_route_key`), not leader bindings -- the same split
-        // the explorer's own dired keys already established.
+        // The agenda: the page and its tabs, and what you reach for from
+        // a file -- a new task, a task from here, the clock. A task's own
+        // keys (status, priority, clock, ...) are on the page.
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('b')], "agenda: board", "agenda.board");
@@ -811,74 +792,31 @@ mod tests {
     }
 
     #[test]
-    fn leader_trie_resolves_jira_open_close_and_refresh() {
+    fn leader_trie_resolves_the_jira_keys() {
         let trie = leader_trie();
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('j')) {
-            fenix_keymap::Step::Matched(&"jira.open") => {}
-            _ => panic!("expected SPC j j to resolve to jira.open"),
-        }
-
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('q')) {
-            fenix_keymap::Step::Matched(&"jira.close") => {}
-            _ => panic!("expected SPC j q to resolve to jira.close"),
-        }
-
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('r')) {
-            fenix_keymap::Step::Matched(&"jira.refresh") => {}
-            _ => panic!("expected SPC j r to resolve to jira.refresh"),
-        }
-
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        match m.feed(KeyPress::char('g')) {
-            fenix_keymap::Step::Matched(&"jira.goto_issue") => {}
-            _ => panic!("expected SPC j g to resolve to jira.goto_issue"),
-        }
-    }
-
-    #[test]
-    fn leader_trie_resolves_jira_project_and_user_add_delete() {
-        let trie = leader_trie();
-        let cases = [
-            (['j', 'p', 'a'], "jira.add_project"),
-            (['j', 'p', 'd'], "jira.delete_project"),
-            (['j', 'u', 'a'], "jira.add_user"),
-            (['j', 'u', 'd'], "jira.delete_user"),
-        ];
-        for (keys, expected) in cases {
+        for (key, command) in [('j', "jira.open"), ('r', "jira.refresh"), ('g', "jira.goto_issue"), ('/', "jira.search"), ('n', "jira.create_issue")] {
             let mut m = trie.matcher();
             m.feed(KeyPress::char(' '));
-            for k in &keys[..keys.len() - 1] {
-                m.feed(KeyPress::char(*k));
-            }
-            match m.feed(KeyPress::char(*keys.last().unwrap())) {
-                fenix_keymap::Step::Matched(&matched) if matched == expected => {}
-                _ => panic!("expected SPC {} to resolve to {expected}", keys.iter().collect::<String>()),
+            m.feed(KeyPress::char('j'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&c) if c == command => {}
+                _ => panic!("expected SPC j {key} to resolve to {command}"),
             }
         }
     }
 
     #[test]
-    fn leader_trie_resolves_jira_create_issue() {
+    fn leader_trie_resolves_the_agenda_keys() {
         let trie = leader_trie();
-
-        let mut m = trie.matcher();
-        m.feed(KeyPress::char(' '));
-        m.feed(KeyPress::char('j'));
-        m.feed(KeyPress::char('i'));
-        match m.feed(KeyPress::char('a')) {
-            fenix_keymap::Step::Matched(&"jira.create_issue") => {}
-            _ => panic!("expected SPC j i a to resolve to jira.create_issue"),
+        let keys = [('a', "agenda.open"), ('b', "agenda.board"), ('k', "agenda.board"), ('l', "agenda.list"), ('r', "agenda.report"), ('n', "agenda.new_task"), ('h', "agenda.from_here"), ('/', "agenda.find"), ('t', "agenda.toggle_clock"), ('T', "agenda.resume")];
+        for (key, command) in keys {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('a'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&c) if c == command => {}
+                _ => panic!("expected SPC a {key} to resolve to {command}"),
+            }
         }
     }
 

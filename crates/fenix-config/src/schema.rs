@@ -333,8 +333,9 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             c.jira_sync_minutes = int_set(v)?;
             Ok(())
         })).default("10"),
-        s("jira.projects", Jira, "Projects", Kind::Map { key: "Key", value: "Name", paths: false }, "Jira projects the dashboard tracks.", field!(jira_projects, map_get, map_set)),
-        s("jira.users", Jira, "Users", Kind::Map { key: "Id", value: "Name", paths: false }, "People the dashboard tracks.", field!(jira_users, map_get, map_set)),
+        s("jira.projects", Jira, "Projects", Kind::Map { key: "Key", value: "Name", paths: false }, "Jira projects the Jira page lists open issues and the current sprint for.", field!(jira_projects, map_get, map_set)),
+        s("jira.users", Jira, "People", Kind::Map { key: "Username", value: "Name", paths: false }, "People the Jira page lists issues assigned to.", field!(jira_users, map_get, map_set)),
+        s("jira.queries", Jira, "Saved searches", Kind::Map { key: "Name", value: "JQL", paths: false }, "Searches saved on the Jira page, by name.", field!(jira_queries, map_get, map_set)),
         s("jira.blocked", Jira, "What Blocked means", Kind::Map { key: "Project", value: "Meaning", paths: false }, "Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task.", (|c: &Config| (!c.jira_blocked.is_empty()).then(|| Value::Map(c.jira_blocked.iter().map(|(p, b)| (p.clone(), blocked_text(b))).collect())), |c: &mut Config, v| {
             c.jira_blocked = map_set(v)?.into_iter().map(|(p, t)| blocked_parse(&t).map(|b| (p, b))).collect::<Result<_, _>>()?;
             Ok(())

@@ -64,7 +64,6 @@ pub(crate) enum SyncPick {
     /// Link to this issue.
     Issue(Box<fenix_jira::IssueDetail>),
     CreateIssue,
-    CreateIn(String),
     TypeKey,
     Unlink,
     OpenInBrowser,
@@ -87,7 +86,7 @@ pub enum IssueFetch {
     Import,
     LinkKey(TaskId),
     Created(TaskId),
-    AddFromPanel { clock: bool },
+    AddFromJira { clock: bool },
 }
 
 /// Every background result the agenda's Jira side can come back with --
@@ -208,6 +207,10 @@ impl App {
     }
 
     /// The Flagged field id to request, when any project uses it.
+    pub(super) fn agenda_flag_field_wanted_now(&self) -> Option<String> {
+        self.agenda_flag_field_wanted().flatten()
+    }
+
     fn agenda_flag_field_wanted(&self) -> Option<Option<String>> {
         let wanted = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
         wanted.then(|| self.agenda_sync.flag_field.clone().flatten())
@@ -394,7 +397,7 @@ impl App {
                     };
                     match field {
                         Ok(Some(field)) => client.set_flagged(&key, &field, *on),
-                        Ok(None) => Err("this Jira has no Flagged field -- press b on the project in SPC j j to pick another meaning for Blocked".to_string()),
+                        Ok(None) => Err("this Jira has no Flagged field -- press b on the project's search on the Jira page (SPC j j) to pick another meaning for Blocked".to_string()),
                         Err(err) => Err(err),
                     }
                 }
@@ -645,7 +648,7 @@ impl App {
             return;
         };
         if self.config.jira_users.is_empty() {
-            self.set_error("no tracked Jira users to assign to -- SPC j u a adds one");
+            self.set_error("no people to assign to -- a on the Jira page (SPC j j) adds one");
             return;
         }
         let candidates = self
@@ -696,25 +699,6 @@ impl App {
     pub(super) fn agenda_fetch_issue(&mut self, key: String, purpose: IssueFetch) {
         let flag = self.agenda_flag_field_wanted().flatten();
         self.agenda_spawn(move |client| AgendaSyncEvent::Issues { purpose, result: client.get_issue_with(&key, flag.as_deref()).map(|d| vec![d]) });
-    }
-
-    /// Creates an issue from a local task (title, then description), then
-    /// links the two.
-    pub(super) fn agenda_create_issue_from_task(&mut self, id: TaskId, project: String, issue_type: String) {
-        let Some(task) = self.agenda_store.task(id) else { return };
-        let (title, description) = (task.title.clone(), task.description.clone());
-        let flag = self.agenda_flag_field_wanted().flatten();
-        self.set_message(format!("Creating a {project} issue..."));
-        self.agenda_spawn(move |client| {
-            let result = (|| {
-                let key = client.create_issue(&project, &issue_type, &title)?;
-                if !description.trim().is_empty() {
-                    client.update_description(&key, &description)?;
-                }
-                client.get_issue_with(&key, flag.as_deref()).map(|d| vec![d])
-            })();
-            AgendaSyncEvent::Issues { purpose: IssueFetch::Created(id), result }
-        });
     }
 
     fn agenda_link_detail(&mut self, id: TaskId, detail: &fenix_jira::IssueDetail) {
@@ -785,7 +769,7 @@ impl App {
                 },
                 Err(err) => self.set_error(format!("couldn't link: {err}")),
             },
-            IssueFetch::AddFromPanel { clock } => match result {
+            IssueFetch::AddFromJira { clock } => match result {
                 Ok(issues) => {
                     let Some(detail) = issues.first().cloned() else { return };
                     let id = match self.agenda_store.find_by_key(&detail.key) {
@@ -795,14 +779,14 @@ impl App {
                             self.agenda_store.create_linked(detail.key.clone(), update, None)
                         }
                     };
-                    self.agenda_finish_add_from_panel(id, &detail.key, clock);
+                    self.agenda_finish_add_from_jira(id, &detail.key, clock);
                 }
                 Err(err) => self.set_error(format!("couldn't fetch the issue: {err}")),
             },
         }
     }
 
-    fn agenda_finish_add_from_panel(&mut self, id: TaskId, key: &str, clock: bool) {
+    fn agenda_finish_add_from_jira(&mut self, id: TaskId, key: &str, clock: bool) {
         self.agenda_start_ticker();
         if clock {
             self.agenda_store.clock_in(id);
@@ -814,47 +798,23 @@ impl App {
         self.jira_rerender_issues();
     }
 
-    /// `a`/`t` on the Jira panel's Issues/Detail: add the current issue to
-    /// the agenda (`t` also starts the clock on it). An issue that's
-    /// already there isn't added twice.
-    pub(crate) fn jira_add_to_agenda(&mut self, clock: bool) {
-        let Some(key) = self.jira_current_issue_key() else { return };
+    /// `a`/`t` on an issue on the Jira page: add it to the agenda (`t`
+    /// also starts the clock on it). One that's already there isn't added
+    /// twice.
+    pub(crate) fn jira_add_to_agenda(&mut self, key: String, clock: bool) {
         if let Some(id) = self.agenda_store.find_by_key(&key) {
-            self.agenda_finish_add_from_panel(id, &key, clock);
+            self.agenda_finish_add_from_jira(id, &key, clock);
             return;
         }
-        self.agenda_fetch_issue(key, IssueFetch::AddFromPanel { clock });
+        self.agenda_fetch_issue(key, IssueFetch::AddFromJira { clock });
     }
 
-    /// Re-renders the Jira panel's Issues pane so "in agenda" markers
-    /// follow what was just linked or unlinked. The rows themselves don't
-    /// move, so every pane showing it keeps its cursor on the same line
-    /// (unlike `set_jira_buffer`, which starts a fresh listing at the top).
+    /// The Jira page again, so "in your agenda" follows what was just
+    /// linked or unlinked.
     pub(super) fn jira_rerender_issues(&mut self) {
-        let Some(session) = self.jira_session.as_ref() else { return };
-        let buffer = session.issues_buffer;
-        let panel = jira_panel::render_issues(&session.issues, &self.agenda_linked_keys());
-        let lines: Vec<(fenix_window::WindowId, usize)> = match self.buffers.get(buffer) {
-            Some(ob) => self
-                .windows()
-                .windows()
-                .into_iter()
-                .filter(|&pane| self.windows().content(pane) == Some(&buffer))
-                .map(|pane| (pane, ob.buffer.line_col(&self.pane_state(pane).cursor).0))
-                .collect(),
-            None => Vec::new(),
-        };
-        self.set_jira_buffer(buffer, panel);
-        for (pane, line) in lines {
-            let Some(ob) = self.buffers.get(buffer) else { return };
-            let line = line.min(ob.buffer.line_count().saturating_sub(1));
-            let cursor = Cursor { char_idx: ob.buffer.line_start_char(line), sticky_col: 0 };
-            *self.pane_state_mut(pane) = PaneState::seeded_at(cursor);
+        if let Some(state) = self.jira_page_id().and_then(|id| self.pages.get_mut(&id)) {
+            state.stale = true;
         }
-    }
-
-    pub(super) fn agenda_linked_keys(&self) -> HashSet<String> {
-        self.agenda_store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect()
     }
 
     pub(super) fn agenda_issue_url(&mut self, id: TaskId) -> Option<String> {
@@ -893,22 +853,11 @@ impl App {
         }
     }
 
-    /// `o` on the Jira panel's Issues/Detail.
-    pub(crate) fn jira_open_in_browser(&mut self) {
-        let Some(key) = self.jira_current_issue_key() else { return };
-        let Some(base_url) = self.config.jira_base_url.clone() else {
-            self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
-            return;
-        };
-        self.open_url(&format!("{}/browse/{key}", base_url.trim_end_matches('/')));
-    }
-
     // -- Blocked, per project -----------------------------------------------
 
-    /// `b` on a project in the Jira panel: choose (or change) what
+    /// `b` on a project's search on the Jira page: choose (or change) what
     /// Blocked means there, from every status the project uses.
-    pub(crate) fn jira_start_blocked_setup(&mut self) {
-        let Some(jira_panel::JiraEntry::Project(project)) = self.jira_entry_at_cursor() else { return };
+    pub(crate) fn jira_start_blocked_setup(&mut self, project: String) {
         self.agenda_spawn(move |client| {
             let result = client.list_project_statuses(&project);
             AgendaSyncEvent::ProjectStatuses { project, result }
@@ -978,24 +927,8 @@ impl App {
                 }
             }
             SyncPick::CreateIssue => {
-                if self.config.jira_projects.is_empty() {
-                    self.set_error("track a Jira project first (SPC j p a) to create issues in it");
-                    return;
-                }
-                let candidates = self
-                    .config
-                    .jira_projects
-                    .iter()
-                    .map(|(key, name)| fenix_picker::Candidate::new(format!("[{key}] {name}"), SyncPick::CreateIn(key.clone())))
-                    .collect();
-                self.agenda_enter_sync_picker(
-                    SyncPickerCtx { label: "CREATE IN".to_string(), task, project: None, revert: None },
-                    candidates,
-                );
-            }
-            SyncPick::CreateIn(project) => {
                 if let Some(id) = task {
-                    self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::LinkIssueType { id, project }, input: "Task".to_string() });
+                    self.jira_new_issue_from_task(id);
                 }
             }
             SyncPick::TypeKey => {
@@ -1469,23 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn linking_from_the_picker_takes_jiras_fields_and_marks_the_issue_in_the_jira_panel() {
-        let mut app = app();
-        let id = app.agenda_store.create_task("my title".to_string(), "".to_string(), Priority::Low, None);
-
-        app.apply_agenda_sync(AgendaSyncEvent::Issues { purpose: IssueFetch::LinkPicker(id), result: Ok(vec![detail("PROJ-7", OPEN)]) });
-        let labels = picker_labels(&app);
-        assert_eq!(labels[0], "+ Create a new Jira issue from this task...");
-        assert!(labels.iter().any(|l| l.starts_with("PROJ-7")));
-        confirm_row(&mut app, "PROJ-7");
-
-        let task = app.agenda_store.task(id).unwrap();
-        assert_eq!(task.jira_key(), Some("PROJ-7"));
-        assert_eq!(task.title, "PROJ-7 summary");
-        assert!(app.agenda_linked_keys().contains("PROJ-7"));
-    }
-
-    #[test]
     fn linking_an_issue_already_linked_elsewhere_is_refused() {
         let mut app = app();
         linked(&mut app, "PROJ-7", OPEN);
@@ -1517,15 +1433,6 @@ mod tests {
         let review = app.agenda_store.find_by_key("PROJ-3").unwrap();
         assert_eq!(app.agenda_store.task(review).unwrap().status, Status::InProgress);
         assert_eq!(app.agenda_store.tasks.len(), 3);
-    }
-
-    #[test]
-    fn t_on_the_jira_panel_adds_the_issue_and_starts_its_clock() {
-        let mut app = app();
-        app.apply_agenda_sync(AgendaSyncEvent::Issues { purpose: IssueFetch::AddFromPanel { clock: true }, result: Ok(vec![detail("PROJ-4", OPEN)]) });
-
-        let id = app.agenda_store.find_by_key("PROJ-4").unwrap();
-        assert_eq!(app.agenda_store.active_timer.as_ref().map(|t| t.task_id), Some(id));
     }
 
     #[test]
@@ -1691,26 +1598,5 @@ mod tests {
 
         assert_eq!(app.agenda_store.task(id).unwrap().title, "Theirs");
         assert!(app.agenda_store.outbox.is_empty());
-    }
-
-    #[test]
-    fn adding_an_issue_to_the_agenda_keeps_the_issues_cursor_where_it_was() {
-        let mut app = app();
-        app.open_jira_panel();
-        let session = app.jira_session.as_mut().unwrap();
-        session.issues = (1..=3)
-            .map(|n| fenix_jira::IssueSummary { key: format!("PROJ-{n}"), summary: "s".to_string(), status: "Open".to_string(), ..Default::default() })
-            .collect();
-        let (issues_pane, issues_buffer) = (session.issues_pane, session.issues_buffer);
-        app.jira_rerender_issues();
-        app.windows_mut().focus(issues_pane);
-        let third = app.buffers.get(issues_buffer).unwrap().buffer.line_start_char(2);
-        app.test_set_cursor(Cursor { char_idx: third, sticky_col: 0 });
-
-        app.apply_agenda_sync(AgendaSyncEvent::Issues { purpose: IssueFetch::AddFromPanel { clock: false }, result: Ok(vec![detail("PROJ-3", OPEN)]) });
-
-        let ob = app.buffers.get(issues_buffer).unwrap();
-        assert_eq!(ob.buffer.line_col(&app.pane_state(issues_pane).cursor).0, 2);
-        assert!(ob.buffer.text().lines().nth(2).unwrap().ends_with("· in agenda"));
     }
 }

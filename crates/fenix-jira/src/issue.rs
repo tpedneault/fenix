@@ -13,6 +13,10 @@ pub struct IssueSummary {
     pub status_category: String,
     pub assignee: Option<String>,
     pub updated: String,
+    pub priority: Option<String>,
+    pub issue_type: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub due: Option<String>,
 }
 
 /// One issue's own comment.
@@ -49,6 +53,7 @@ pub struct IssueDetail {
     pub comments: Vec<Comment>,
     /// The due date, `YYYY-MM-DD`, when the issue has one.
     pub due: Option<String>,
+    pub issue_type: Option<String>,
 }
 
 /// The JQL for "every issue assigned to `user_id`, scoped to whichever
@@ -92,20 +97,7 @@ pub fn project_of(key: &str) -> &str {
     key.rsplit_once('-').map_or(key, |(project, _)| project)
 }
 
-const DETAIL_FIELDS: &str = "summary,description,status,priority,assignee,reporter,created,updated,comment,duedate";
-
-pub fn build_jql(user_id: &str, project_keys: &[String], excluded_statuses: &[String]) -> String {
-    let mut jql = format!("assignee = \"{user_id}\"");
-    if !project_keys.is_empty() {
-        jql.push_str(&format!(" AND project IN ({})", project_keys.join(",")));
-    }
-    if !excluded_statuses.is_empty() {
-        let quoted: Vec<String> = excluded_statuses.iter().map(|s| format!("\"{}\"", s.replace('"', "\\\""))).collect();
-        jql.push_str(&format!(" AND status NOT IN ({})", quoted.join(",")));
-    }
-    jql.push_str(" ORDER BY updated DESC");
-    jql
-}
+const DETAIL_FIELDS: &str = "summary,description,status,priority,assignee,reporter,created,updated,comment,duedate,issuetype";
 
 impl JiraClient {
     /// `GET /rest/api/2/search` -- runs `jql`, returns up to
@@ -114,7 +106,7 @@ impl JiraClient {
         let max_results = max_results.to_string();
         let body = self.request(
             "/rest/api/2/search",
-            &[("jql", jql), ("maxResults", &max_results), ("fields", "summary,status,assignee,updated")],
+            &[("jql", jql), ("maxResults", &max_results), ("fields", "summary,status,assignee,updated,priority,issuetype,duedate")],
         )?;
         let issues = body.get("issues").and_then(|v| v.as_array()).ok_or_else(|| "unexpected search response shape".to_string())?;
         Ok(issues.iter().filter_map(parse_issue_summary).collect())
@@ -193,6 +185,9 @@ fn parse_issue_summary(v: &serde_json::Value) -> Option<IssueSummary> {
         status_category: status_category(fields),
         assignee: person_name(fields, "assignee"),
         updated: text_field(fields, "updated").unwrap_or_default(),
+        priority: fields.get("priority").and_then(|p| p.get("name")).and_then(|n| n.as_str()).map(str::to_string),
+        issue_type: fields.get("issuetype").and_then(|p| p.get("name")).and_then(|n| n.as_str()).map(str::to_string),
+        due: text_field(fields, "duedate"),
     })
 }
 
@@ -230,74 +225,13 @@ fn parse_issue_detail(v: &serde_json::Value, flag_field: Option<&str>) -> Option
         updated: text_field(fields, "updated").unwrap_or_default(),
         comments,
         due: text_field(fields, "duedate"),
+        issue_type: fields.get("issuetype").and_then(|p| p.get("name")).and_then(|n| n.as_str()).map(str::to_string),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn build_jql_with_no_tracked_projects_omits_the_project_clause() {
-        assert_eq!(build_jql("jo1111111", &[], &[]), r#"assignee = "jo1111111" ORDER BY updated DESC"#);
-    }
-
-    #[test]
-    fn build_jql_with_one_project() {
-        assert_eq!(
-            build_jql("jo1111111", &["PROJ".to_string()], &[]),
-            r#"assignee = "jo1111111" AND project IN (PROJ) ORDER BY updated DESC"#
-        );
-    }
-
-    #[test]
-    fn build_jql_with_several_projects_joins_them_with_commas() {
-        assert_eq!(
-            build_jql("jo1111111", &["PROJ".to_string(), "OTHER".to_string()], &[]),
-            r#"assignee = "jo1111111" AND project IN (PROJ,OTHER) ORDER BY updated DESC"#
-        );
-    }
-
-    #[test]
-    fn build_jql_with_no_excluded_statuses_omits_the_status_clause() {
-        assert_eq!(build_jql("jo1111111", &[], &[]), r#"assignee = "jo1111111" ORDER BY updated DESC"#);
-    }
-
-    #[test]
-    fn build_jql_with_one_excluded_status() {
-        assert_eq!(
-            build_jql("jo1111111", &[], &["Done".to_string()]),
-            r#"assignee = "jo1111111" AND status NOT IN ("Done") ORDER BY updated DESC"#
-        );
-    }
-
-    #[test]
-    fn build_jql_with_several_excluded_statuses_quotes_each_one() {
-        assert_eq!(
-            build_jql("jo1111111", &[], &["Done".to_string(), "In Progress".to_string()]),
-            r#"assignee = "jo1111111" AND status NOT IN ("Done","In Progress") ORDER BY updated DESC"#
-        );
-    }
-
-    #[test]
-    fn build_jql_escapes_an_embedded_double_quote_in_an_excluded_status() {
-        // Contrived (real workflow status names essentially never
-        // contain a literal `"`), but confirms the escaping code path
-        // actually runs rather than producing broken JQL with an
-        // unescaped quote breaking out of the string literal.
-        assert_eq!(
-            build_jql("jo1111111", &[], &["Weird\"Status".to_string()]),
-            r#"assignee = "jo1111111" AND status NOT IN ("Weird\"Status") ORDER BY updated DESC"#
-        );
-    }
-
-    #[test]
-    fn build_jql_combines_project_and_status_clauses() {
-        assert_eq!(
-            build_jql("jo1111111", &["PROJ".to_string()], &["Done".to_string()]),
-            r#"assignee = "jo1111111" AND project IN (PROJ) AND status NOT IN ("Done") ORDER BY updated DESC"#
-        );
-    }
 
     fn search_response(issues: &str) -> serde_json::Value {
         serde_json::from_str(&format!(r#"{{"issues": [{issues}]}}"#)).unwrap()

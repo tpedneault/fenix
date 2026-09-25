@@ -155,6 +155,8 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// Searches saved on the Jira page, `(name, JQL)`.
+    pub jira_queries: Vec<(String, String)>,
     /// What moving a linked agenda task to Blocked means in each Jira
     /// project, keyed by project key -- `blockedN = PROJ|10103|On Hold`
     /// (a real status, matched by its id so a rename can't break it),
@@ -433,6 +435,7 @@ impl Config {
             jira_token: None,
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
+            jira_queries: Vec::new(),
             jira_blocked: Vec::new(),
             jira_priority_map: Vec::new(),
             jira_sync_minutes: None,

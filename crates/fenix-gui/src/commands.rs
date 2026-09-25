@@ -191,15 +191,11 @@ impl CommandRegistry {
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
-        registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
-        registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
-        registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
-        registry.register("jira.goto_issue", "Jump straight to any issue by key", cmd_jira_goto_issue);
-        registry.register("jira.add_project", "Track a new Jira project by key", cmd_jira_add_project);
-        registry.register("jira.delete_project", "Stop tracking a Jira project", cmd_jira_delete_project);
-        registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
-        registry.register("jira.delete_user", "Stop tracking a Jira user", cmd_jira_delete_user);
-        registry.register("jira.create_issue", "Create a new Jira issue in a tracked project", cmd_jira_create_issue);
+        registry.register("jira.open", "Open the Jira page: your searches, their issues, a preview", cmd_jira_open);
+        registry.register("jira.refresh", "Run the Jira page's search again", cmd_jira_refresh);
+        registry.register("jira.goto_issue", "Open any issue by key", cmd_jira_goto_issue);
+        registry.register("jira.search", "Search Jira: words, or JQL after :", cmd_jira_search);
+        registry.register("jira.create_issue", "Create an issue, with the project's real types and fields", cmd_jira_create_issue);
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         registry.register("embedded.build", "Compile the sketch for its board", cmd_embedded_build);
         registry.register("embedded.upload", "Compile and flash the sketch to the board", cmd_embedded_upload);
@@ -686,11 +682,7 @@ fn cmd_git_close(ctx: &mut CommandCtx) {
 }
 
 fn cmd_jira_open(ctx: &mut CommandCtx) {
-    ctx.app.open_jira_panel();
-}
-
-fn cmd_jira_close(ctx: &mut CommandCtx) {
-    ctx.app.jira_session_close();
+    ctx.app.open_jira_page();
 }
 
 fn cmd_jira_refresh(ctx: &mut CommandCtx) {
@@ -698,11 +690,11 @@ fn cmd_jira_refresh(ctx: &mut CommandCtx) {
 }
 
 fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_goto_issue_prompt();
+    ctx.app.cmd_jira_goto();
 }
 
-fn cmd_jira_add_project(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_add_project_prompt();
+fn cmd_jira_search(ctx: &mut CommandCtx) {
+    ctx.app.cmd_jira_search();
 }
 
 fn cmd_embedded_build(ctx: &mut CommandCtx) {
@@ -793,20 +785,8 @@ fn cmd_agenda_toggle_clock(ctx: &mut CommandCtx) {
     ctx.app.cmd_agenda_toggle_clock();
 }
 
-fn cmd_jira_delete_project(ctx: &mut CommandCtx) {
-    ctx.app.picker_delete_jira_project();
-}
-
-fn cmd_jira_add_user(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_add_user_prompt();
-}
-
-fn cmd_jira_delete_user(ctx: &mut CommandCtx) {
-    ctx.app.picker_delete_jira_user();
-}
-
 fn cmd_jira_create_issue(ctx: &mut CommandCtx) {
-    ctx.app.picker_create_jira_issue();
+    ctx.app.cmd_jira_new_issue();
 }
 
 fn cmd_agenda_import(ctx: &mut CommandCtx) {
