@@ -213,12 +213,13 @@ impl CommandRegistry {
         registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
         registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
         registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
-        registry.register("agenda.open", "Open the agenda (last view shown)", cmd_agenda_open);
-        registry.register("agenda.board", "Show the agenda as a Kanban board", cmd_agenda_board);
-        registry.register("agenda.list", "Show the agenda as a list", cmd_agenda_list);
-        registry.register("agenda.report", "Show the agenda's time report", cmd_agenda_report);
-        registry.register("agenda.new_task", "Add a new task to the agenda", cmd_agenda_new_task);
-        registry.register("agenda.add_category", "Add a new agenda category", cmd_agenda_add_category);
+        registry.register("agenda.open", "Open the agenda page where it was left", cmd_agenda_open);
+        registry.register("agenda.board", "Open the agenda on its board", cmd_agenda_board);
+        registry.register("agenda.list", "Open the agenda on its list", cmd_agenda_list);
+        registry.register("agenda.report", "Open the agenda on this week's time", cmd_agenda_report);
+        registry.register("agenda.new_task", "Add a task to the agenda", cmd_agenda_new_task);
+        registry.register("agenda.from_here", "Add a task about the selection or line here", cmd_agenda_from_here);
+        registry.register("agenda.find", "Search every task", cmd_agenda_find);
         registry.register("agenda.toggle_clock", "Start, stop, or switch the agenda's running timer", cmd_agenda_toggle_clock);
         registry.register("agenda.import", "Pick Jira issues assigned to you to add to the agenda", cmd_agenda_import);
         registry.register("agenda.sync", "Refresh linked tasks from Jira and send pending changes", cmd_agenda_sync);
@@ -772,11 +773,15 @@ fn cmd_agenda_report(ctx: &mut CommandCtx) {
 }
 
 fn cmd_agenda_new_task(ctx: &mut CommandCtx) {
-    ctx.app.agenda_start_new_task_prompt();
+    ctx.app.cmd_agenda_new_task();
 }
 
-fn cmd_agenda_add_category(ctx: &mut CommandCtx) {
-    ctx.app.agenda_start_add_category_prompt();
+fn cmd_agenda_from_here(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_task_from_here();
+}
+
+fn cmd_agenda_find(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_find();
 }
 
 fn cmd_agenda_toggle_clock(ctx: &mut CommandCtx) {

@@ -142,6 +142,17 @@ pub struct Task {
     /// When it's due, if ever. On a linked task, Jira's own due date.
     #[serde(default)]
     pub due: Option<chrono::NaiveDate>,
+    /// The code it's about, when it was made from a selection.
+    #[serde(default)]
+    pub code: Option<CodeRef>,
+}
+
+/// A place in a file: what a task made from a selection points back to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeRef {
+    pub path: std::path::PathBuf,
+    /// 1-based.
+    pub line: usize,
 }
 
 impl Task {

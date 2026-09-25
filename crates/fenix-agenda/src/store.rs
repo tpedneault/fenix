@@ -60,6 +60,7 @@ impl AgendaStore {
             order,
             jira: None,
             due: None,
+            code: None,
         });
         id
     }
@@ -190,6 +191,21 @@ impl AgendaStore {
                 subtask.done = !subtask.done;
                 task.updated_at = Local::now();
             }
+        }
+    }
+
+    pub fn edit_subtask(&mut self, id: TaskId, index: usize, text: String) {
+        if let Some(task) = self.task_mut(id) {
+            if let Some(subtask) = task.subtasks.get_mut(index) {
+                subtask.text = text;
+                task.updated_at = Local::now();
+            }
+        }
+    }
+
+    pub fn set_code(&mut self, id: TaskId, code: Option<crate::task::CodeRef>) {
+        if let Some(task) = self.task_mut(id) {
+            task.code = code;
         }
     }
 

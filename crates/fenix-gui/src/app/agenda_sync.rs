@@ -11,7 +11,7 @@
 
 use super::*;
 
-use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, SyncField, WorklogRow};
+use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, WorklogRow};
 use fenix_config::JiraBlocked;
 
 /// Shown on a linked task whose issue a sync couldn't find.
@@ -53,7 +53,6 @@ pub(super) struct SyncPickerCtx {
     pub(super) label: String,
     pub(super) task: Option<TaskId>,
     pub(super) project: Option<String>,
-    pub(super) field: Option<SyncField>,
     /// Where the task's card was before a board move this picker is
     /// finishing -- cancelling puts it back.
     pub(super) revert: Option<(Status, i64)>,
@@ -79,8 +78,6 @@ pub(crate) enum SyncPick {
     Blocked(JiraBlocked, Option<fenix_jira::Transition>),
     Priority(String),
     Assignee(String, String),
-    KeepMine,
-    TakeTheirs,
 }
 
 /// What an issue fetch was for.
@@ -565,7 +562,6 @@ impl App {
                             label: format!("WHAT DOES BLOCKED MEAN IN {project}?"),
                             task: Some(id),
                             project: Some(project.clone()),
-                            field: None,
                             revert: Some(prev),
                         },
                         candidates,
@@ -615,7 +611,7 @@ impl App {
             candidates.push(fenix_picker::Candidate::new(blocked, SyncPick::StartBlocked));
         }
         self.agenda_enter_sync_picker(
-            SyncPickerCtx { label: format!("{key} STATUS"), task: Some(id), project: None, field: None, revert },
+            SyncPickerCtx { label: format!("{key} STATUS"), task: Some(id), project: None, revert },
             candidates,
         );
     }
@@ -658,7 +654,7 @@ impl App {
             .iter()
             .map(|(uid, name)| fenix_picker::Candidate::new(format!("{name} ({uid})"), SyncPick::Assignee(uid.clone(), name.clone())))
             .collect();
-        self.agenda_enter_sync_picker(SyncPickerCtx { label: format!("ASSIGN {key}"), task: Some(id), project: None, field: None, revert: None }, candidates);
+        self.agenda_enter_sync_picker(SyncPickerCtx { label: format!("ASSIGN {key}"), task: Some(id), project: None, revert: None }, candidates);
     }
 
     // -- Linking ------------------------------------------------------------
@@ -672,7 +668,7 @@ impl App {
                 fenix_picker::Candidate::new(format!("Open {key} in the browser"), SyncPick::OpenInBrowser),
                 fenix_picker::Candidate::new(format!("Unlink {key} (keep this as a local task)"), SyncPick::Unlink),
             ];
-            self.agenda_enter_sync_picker(SyncPickerCtx { label: key, task: Some(id), project: None, field: None, revert: None }, candidates);
+            self.agenda_enter_sync_picker(SyncPickerCtx { label: key, task: Some(id), project: None, revert: None }, candidates);
             return;
         }
         let jql = fenix_jira::build_my_open_issues_jql(&self.tracked_project_keys());
@@ -752,7 +748,7 @@ impl App {
                     Err(err) => self.set_error(format!("couldn't list your Jira issues: {err}")),
                 }
                 self.agenda_enter_sync_picker(
-                    SyncPickerCtx { label: "LINK TO JIRA".to_string(), task: Some(id), project: None, field: None, revert: None },
+                    SyncPickerCtx { label: "LINK TO JIRA".to_string(), task: Some(id), project: None, revert: None },
                     candidates,
                 );
             }
@@ -774,7 +770,7 @@ impl App {
                     return;
                 }
                 self.agenda_enter_sync_picker(
-                    SyncPickerCtx { label: "IMPORT  (Tab marks)".to_string(), task: None, project: None, field: None, revert: None },
+                    SyncPickerCtx { label: "IMPORT  (Tab marks)".to_string(), task: None, project: None, revert: None },
                     candidates,
                 );
                 self.set_message("Tab marks issues to import, Enter adds them");
@@ -946,25 +942,7 @@ impl App {
             SyncPick::Blocked(JiraBlocked::Local, None),
         ));
         self.agenda_enter_sync_picker(
-            SyncPickerCtx { label: format!("WHAT DOES BLOCKED MEAN IN {project}?"), task: None, project: Some(project), field: None, revert: None },
-            candidates,
-        );
-    }
-
-    // -- Conflicts ----------------------------------------------------------
-
-    /// `Enter` on a conflict row.
-    pub(super) fn agenda_start_conflict_picker(&mut self, id: TaskId, field: SyncField) {
-        let Some(task) = self.agenda_store.task(id) else { return };
-        let Some(conflict) = task.jira.as_ref().and_then(|l| l.conflicts.iter().find(|c| c.field == field)) else { return };
-        let mine = task.sync_value(field);
-        let clip = |s: &str| s.lines().next().unwrap_or_default().chars().take(60).collect::<String>();
-        let candidates = vec![
-            fenix_picker::Candidate::new(format!("Keep mine: {}", clip(&mine)), SyncPick::KeepMine),
-            fenix_picker::Candidate::new(format!("Take Jira's: {}", clip(&conflict.their_value())), SyncPick::TakeTheirs),
-        ];
-        self.agenda_enter_sync_picker(
-            SyncPickerCtx { label: format!("CONFLICT: {}", field.label().to_uppercase()), task: Some(id), project: None, field: Some(field), revert: None },
+            SyncPickerCtx { label: format!("WHAT DOES BLOCKED MEAN IN {project}?"), task: None, project: Some(project), revert: None },
             candidates,
         );
     }
@@ -1011,7 +989,7 @@ impl App {
                     .map(|(key, name)| fenix_picker::Candidate::new(format!("[{key}] {name}"), SyncPick::CreateIn(key.clone())))
                     .collect();
                 self.agenda_enter_sync_picker(
-                    SyncPickerCtx { label: "CREATE IN".to_string(), task, project: None, field: None, revert: None },
+                    SyncPickerCtx { label: "CREATE IN".to_string(), task, project: None, revert: None },
                     candidates,
                 );
             }
@@ -1103,24 +1081,17 @@ impl App {
                     self.agenda_after_edit();
                 }
             }
-            SyncPick::KeepMine | SyncPick::TakeTheirs => {
-                let (Some(id), Some(field)) = (task, ctx.as_ref().and_then(|c| c.field)) else { return };
-                self.agenda_store.resolve_conflict(id, field, matches!(pick, SyncPick::KeepMine));
-                self.agenda_after_edit();
-            }
         }
     }
 
     // -- Worklogs -----------------------------------------------------------
 
-    /// `SPC a w`, or `W` on the report: the worklog review, fresh.
+    /// `SPC a w`: the worklog review, fresh, over the Time tab.
     pub(crate) fn cmd_agenda_worklogs(&mut self) {
-        self.agenda_sync.worklog_edits.clear();
-        self.agenda_sync.worklog_dropped.clear();
-        if !matches!(self.agenda_view, agenda_panel::AgendaView::Worklogs | agenda_panel::AgendaView::Detail(_)) {
-            self.agenda_return_view = Some(self.agenda_view);
+        let id = self.open_agenda_page(Some(crate::agenda_page::Tab::Time));
+        if let Some(page) = self.agenda_page_mut(id) {
+            page.open_worklogs();
         }
-        self.open_agenda(agenda_panel::AgendaView::Worklogs);
     }
 
     pub(super) fn agenda_worklog_round(&self) -> u32 {
@@ -1138,42 +1109,6 @@ impl App {
         }
         rows
     }
-
-    fn agenda_worklog_row_at_cursor(&self) -> Option<WorklogRow> {
-        let Some(agenda_panel::AgendaEntry::Worklog(i)) = self.agenda_entry_at_cursor() else { return None };
-        self.agenda_worklog_rows().into_iter().nth(i)
-    }
-
-    /// Keys on the worklog review. `None` when the key isn't one of them.
-    pub(super) fn agenda_worklog_key(&mut self, c: char) -> Option<bool> {
-        match c {
-            'W' => {
-                self.agenda_send_worklogs();
-                Some(true)
-            }
-            'e' => {
-                let row = self.agenda_worklog_row_at_cursor()?;
-                let input = agenda_panel::format_duration(chrono::Duration::minutes(row.minutes));
-                self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::WorklogMinutes { task: row.task, date: row.date }, input });
-                Some(true)
-            }
-            'D' => {
-                let row = self.agenda_worklog_row_at_cursor()?;
-                self.agenda_sync.worklog_dropped.insert((row.task, row.date));
-                self.refresh_agenda_buffer();
-                Some(true)
-            }
-            'x' => {
-                let row = self.agenda_worklog_row_at_cursor()?;
-                self.agenda_store.mark_sent(row.task, &row.entries);
-                self.agenda_save_and_refresh();
-                self.set_message(format!("{} on {}: dismissed, won't be sent", row.key, row.date));
-                Some(true)
-            }
-            _ => None,
-        }
-    }
-
     /// `W` on the review: sends every row, one worklog each, filed on the
     /// day the work happened.
     pub(super) fn agenda_send_worklogs(&mut self) {
@@ -1221,7 +1156,7 @@ impl App {
         }
         self.agenda_save_and_refresh();
         if failures.is_empty() {
-            self.set_message(format!("Sent {sent} worklog(s), {}", agenda_panel::format_duration(chrono::Duration::minutes(minutes))));
+            self.set_message(format!("Sent {sent} worklog(s), {}", crate::agenda_page::format_minutes(minutes)));
         } else {
             self.set_error(format!("Sent {sent}, {} failed -- {}", failures.len(), failures.join("; ")));
         }
@@ -1254,7 +1189,7 @@ impl App {
                     let candidates =
                         priorities.into_iter().map(|p| fenix_picker::Candidate::new(p.name.clone(), SyncPick::Priority(p.name))).collect();
                     self.agenda_enter_sync_picker(
-                        SyncPickerCtx { label: format!("{key} PRIORITY"), task: Some(task), project: None, field: None, revert: None },
+                        SyncPickerCtx { label: format!("{key} PRIORITY"), task: Some(task), project: None, revert: None },
                         candidates,
                     );
                 }
@@ -1709,18 +1644,25 @@ mod tests {
 
         app.cmd_agenda_worklogs();
 
-        assert_eq!(app.agenda_view, agenda_panel::AgendaView::Worklogs);
-        let text = app.buffers.get(app.agenda_buffer.unwrap()).unwrap().buffer.text();
-        assert!(text.contains("PROJ-1"));
-        assert!(text.contains("50m -> 45m"));
+        let id = app.focused_buffer_id();
+        let pane = app.focused_pane_id();
+        app.ensure_page_layout(id, pane, 130);
+        let popup = app.pages[&id].page.popup.as_ref().expect("the review").text();
+        assert!(popup.contains("PROJ-1"));
+        assert!(popup.contains("50m → 45m"), "{popup}");
     }
 
     #[test]
     fn deleting_a_linked_task_says_jira_isnt_affected() {
         let mut app = app();
-        let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_confirm_delete = Some(id);
-        assert!(app.agenda_confirm_text().unwrap().contains("PROJ-1 in Jira is not affected"));
+        linked(&mut app, "PROJ-1", OPEN);
+        app.open_agenda_page(Some(crate::agenda_page::Tab::List));
+        app.page_key(KeyPress::char('D'));
+        let id = app.focused_buffer_id();
+        let Some(super::pages::PageModel::Agenda(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+        assert!(page.note.as_ref().unwrap().0.contains("PROJ-1 in Jira isn't touched"));
+        app.page_key(KeyPress::char('D'));
+        assert!(app.agenda_store.tasks.is_empty());
     }
 
     #[test]
@@ -1734,9 +1676,18 @@ mod tests {
         let update = app.agenda_remote_update(&theirs);
         app.agenda_store.apply_remote(id, update);
 
-        app.agenda_start_conflict_picker(id, SyncField::Title);
-        assert_eq!(picker_labels(&app), vec!["Keep mine: Mine".to_string(), "Take Jira's: Theirs".to_string()]);
-        confirm_row(&mut app, "Take");
+        let page = app.open_agenda_page(Some(crate::agenda_page::Tab::List));
+        app.page_key(KeyPress::named(FenixNamedKey::Enter));
+        // The conflict is the row after the fields.
+        for _ in 0..5 {
+            app.page_key(KeyPress::char('j'));
+        }
+        app.page_key(KeyPress::named(FenixNamedKey::Enter));
+        let pane = app.focused_pane_id();
+        app.ensure_page_layout(page, pane, 130);
+        let menu = app.pages[&page].page.popup.as_ref().expect("keep or take").text();
+        assert!(menu.contains("Keep mine: Mine") && menu.contains("Take Jira's: Theirs"), "{menu}");
+        app.page_key(KeyPress::char('2'));
 
         assert_eq!(app.agenda_store.task(id).unwrap().title, "Theirs");
         assert!(app.agenda_store.outbox.is_empty());

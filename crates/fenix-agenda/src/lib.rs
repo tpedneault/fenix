@@ -14,4 +14,4 @@ pub use persist::{default_path, load, save};
 pub use jira::{Conflict, JiraLink, OpKind, PendingOp, RemoteComment, RemoteSnapshot, RemoteUpdate, SyncField};
 pub use store::{ActiveTimer, AgendaStore};
 pub use sync::{parse_due, WorklogRow};
-pub use task::{NoteEntry, Priority, Status, Subtask, Task, TaskId, TimeEntry, TimeSource};
+pub use task::{CodeRef, NoteEntry, Priority, Status, Subtask, Task, TaskId, TimeEntry, TimeSource};

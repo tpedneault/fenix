@@ -12,6 +12,7 @@ use super::*;
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
+use crate::agenda_page::{self, AgendaPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -40,6 +41,7 @@ pub(super) enum PageModel {
     Snippets(Box<SnippetsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
+    Agenda(Box<AgendaPage>),
 }
 
 pub(super) struct PageState {
@@ -53,11 +55,13 @@ pub(super) struct PageState {
     /// sends (a step since retried, a check since restarted) is dropped.
     generation: u64,
     started: Option<Instant>,
+    /// The minute it was last laid out in, for pages that show a clock.
+    minute: i64,
 }
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None }
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, minute: 0 }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -72,6 +76,7 @@ impl PageState {
             PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
             PageModel::Snippets(p) => p.typing(),
+            PageModel::Agenda(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -83,6 +88,7 @@ impl PageState {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
                 PageModel::UserSettings(p) => p.claims_space(),
+                PageModel::Agenda(p) => p.claims_space(),
                 _ => false,
             }
     }
@@ -100,6 +106,7 @@ impl PageState {
             PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
             PageModel::Snippets(p) => p.paste(text),
+            PageModel::Agenda(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -261,6 +268,7 @@ impl App {
             },
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
+            Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
         }
     }
 
@@ -348,11 +356,26 @@ impl App {
     /// Lays page `id` out for a pane `cols` cells wide, if it changed or
     /// the pane did, and puts the cursor on its focused row.
     pub(super) fn ensure_page_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize) {
+        // What the agenda page reads besides the store, worked out before
+        // the page is borrowed.
+        let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
+            .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         let Some(state) = self.pages.get_mut(&id) else { return };
+        // A running clock's minutes move on by themselves.
+        let minute = chrono::Local::now().timestamp() / 60;
+        if agenda.is_some() && self.agenda_store.active_timer.is_some() && state.minute != minute {
+            state.minute = minute;
+            state.stale = true;
+        }
         if !state.stale && state.cols == cols {
             return;
         }
         state.page = match &state.model {
+            PageModel::Agenda(p) => {
+                let (worklogs, sync, round) = agenda.unwrap_or_default();
+                let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+                agenda_page::layout(p, &ctx, cols)
+            }
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -421,9 +444,17 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Right), _) => Key::Right,
             _ => return false,
         };
+        let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
+            .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
         match &mut state.model {
+            PageModel::Agenda(p) => {
+                let (worklogs, sync, round) = agenda.unwrap_or_default();
+                let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+                let action = p.key(key, &ctx);
+                self.agenda_page_action(id, action);
+            }
             PageModel::Wizard(w) => {
                 let action = w.key(key);
                 self.wizard_action(id, action);

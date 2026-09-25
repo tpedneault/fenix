@@ -142,16 +142,6 @@ pub enum BufferKind {
     /// workspace, and comes back through the ordinary buffer switcher
     /// (`SPC b b`) -- the same reasoning `Vnc` settled on.
     Terminal,
-    /// The personal task/time-tracking agenda (`SPC a`) -- same "real
-    /// buffer, just tagged" shape as `Dashboard`/`Explorer`/`Docker`, but
-    /// unlike those (and unlike `Jira`, which really does span several
-    /// synced panes backed by a live API) this is one buffer for all four
-    /// views (list/board/report/detail): there's no live/async data behind
-    /// it to keep in sync across panes, so the host just re-renders this
-    /// same buffer's text via `Buffer::replace_range` whenever the view or
-    /// the underlying `fenix_agenda::AgendaStore` changes (see `fenix-gui`'s
-    /// `agenda_panel` module).
-    Agenda,
     /// A generated, key-driven page -- the new-project wizard (`SPC p
     /// c`). Its text is laid out by the host from the page's own state
     /// on every change, like `Dashboard`'s; every key that means
@@ -219,7 +209,6 @@ impl BufferKind {
             | BufferKind::ToolStatus
             | BufferKind::Merge
             | BufferKind::Terminal
-            | BufferKind::Agenda
             // The wizard's answers and its running commands live in the
             // host, not in this text.
             | BufferKind::Page => true,
@@ -392,15 +381,6 @@ impl BufferList {
     /// window tree; its own (always-empty) text is never shown.
     pub fn open_vnc(&mut self) -> BufferId {
         self.insert(Buffer::empty(), None, BufferKind::Vnc)
-    }
-
-    /// A real buffer seeded with `text` (a rendered agenda view -- list,
-    /// board, report, or one task's detail) and tagged `Agenda` -- `SPC
-    /// a`. Same "real buffer, just tagged" shape as `open_dashboard`; the
-    /// host re-renders `text` via `Buffer::replace_range` whenever the
-    /// view switches or the store changes.
-    pub fn open_agenda(&mut self, text: &str) -> BufferId {
-        self.insert(Buffer::from_text(text), None, BufferKind::Agenda)
     }
 
     /// An empty, pathless buffer tagged `Terminal` -- `SPC o T`. Same
@@ -612,7 +592,6 @@ mod tests {
             BufferKind::Merge,
             BufferKind::Docker,
             BufferKind::Jira,
-            BufferKind::Agenda,
             BufferKind::Debug,
             BufferKind::Terminal,
             BufferKind::Vnc,

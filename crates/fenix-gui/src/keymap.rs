@@ -391,11 +391,14 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // the explorer's own dired keys already established.
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('k')], "agenda: kanban board", "agenda.board");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('b')], "agenda: board", "agenda.board");
+        // The board's old key, kept for a release.
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('k')], "agenda: board (now SPC a b)", "agenda.board");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('l')], "agenda: list", "agenda.list");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('r')], "agenda: time report", "agenda.report");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('r')], "agenda: this week's time", "agenda.report");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('n')], "agenda: new task", "agenda.new_task");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('c')], "agenda: add category", "agenda.add_category");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('h')], "agenda: task from here", "agenda.from_here");
+        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('/')], "agenda: find a task", "agenda.find");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: start/stop clock", "agenda.toggle_clock");
         // The Jira side: pick which of your issues to track, refresh the
         // ones you track, and review/send time as worklogs.
