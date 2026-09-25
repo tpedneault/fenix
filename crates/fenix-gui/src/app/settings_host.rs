@@ -51,7 +51,7 @@ impl App {
         let mut snap = Snapshot {
             secrets,
             themes: theme::ALL.iter().map(|t| t.name.to_string()).collect(),
-            fonts: Vec::new(),
+            fonts: self.text.as_ref().map(|t| t.monospace_families()).unwrap_or_default(),
             project: self.settings_project(),
             ..Default::default()
         };
@@ -89,6 +89,10 @@ impl App {
     /// settings page, on `key` when there's one to show.
     pub(crate) fn open_settings_page(&mut self, scope: Scope, key: Option<&str>) {
         let snap = self.settings_snapshot(&scope);
+        let project_page = match &scope {
+            Scope::Project { root, .. } => Some(self.project_page_model(root)),
+            Scope::You => None,
+        };
         let id = match self.find_page(|m| matches!(m, PageModel::UserSettings(_))) {
             Some(id) => {
                 self.show_page(id);
@@ -96,11 +100,16 @@ impl App {
                     if page.scope != scope {
                         page.set_scope(scope);
                     }
+                    page.project_page = project_page;
                     page.refresh(snap);
                 }
                 id
             }
-            None => self.open_page(PageModel::UserSettings(Box::new(SettingsPage::new(scope, snap)))),
+            None => {
+                let mut page = SettingsPage::new(scope, snap);
+                page.project_page = project_page;
+                self.open_page(PageModel::UserSettings(Box::new(page)))
+            }
         };
         if let (Some(key), Some(page)) = (key, self.settings_page(id)) {
             page.show(key);
@@ -125,8 +134,13 @@ impl App {
             SettingsAction::Close => self.close_page(id),
             SettingsAction::SwitchScope(scope) => {
                 let snap = self.settings_snapshot(&scope);
+                let project_page = match &scope {
+                    Scope::Project { root, .. } => Some(self.project_page_model(root)),
+                    Scope::You => None,
+                };
                 if let Some(page) = self.settings_page(id) {
                     page.set_scope(scope);
+                    page.project_page = project_page;
                     page.note = None;
                     page.refresh(snap);
                 }
@@ -176,7 +190,10 @@ impl App {
                 self.refresh_settings_pages();
             }
             SettingsAction::TestSecret(secret) => self.test_secret(id, secret),
-            SettingsAction::OpenProjectPage(root) => self.open_settings(root),
+            SettingsAction::Project(action) => {
+                let Some(Scope::Project { root, .. }) = self.settings_page(id).map(|p| p.scope.clone()) else { return };
+                self.project_page_action(root, action);
+            }
             SettingsAction::OpenFile(key) => {
                 let path = match self.settings_page(id).map(|p| p.snap.file.clone()) {
                     Some(path) => path,

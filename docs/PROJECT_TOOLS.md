@@ -3,7 +3,7 @@
 Fenix runs one language server per language and canonical project root. Opening
 two Python or Rust projects no longer routes their requests to the same server.
 Relative aliases of a root reuse the same session. The nearest project marker
-determines ownership; `.fenix/project.ini` and `.fenix/tools.json` are also markers.
+determines ownership; `.fenix/settings.toml` and `.fenix/tools.json` are also markers.
 
 Add `.fenix/tools.json` to a project for structured commands:
 

@@ -347,7 +347,7 @@ for anyone curious to poke around or build on it.
   before it's written, `t` runs a task, `e` opens the raw JSON.
 - **Project identity**: every project has a kind (Python, Arduino, MIB,
   Rust, Tcl, ...), detected from its files or declared as `[project]
-  kind = ...` in `.fenix/project.ini`. Its two- or three-letter tag
+  kind = "..."` in `.fenix/settings.toml`. Its two- or three-letter tag
   leads the modeline (`PY orbit-tools · decoder.py`) and Home's project
   rows (with the doctor's health dot), and the window is titled after
   the project.
@@ -719,7 +719,7 @@ for anyone curious to poke around or build on it.
     name as a sentence, the description a summary of its commits, the
     base from `[git] base_branch`, a Jira key in the branch name
     (`feature/FNX-58-...`) linked as `Refs FNX-58`, and the reviewers
-    from `[git] reviewers` (or the project's own `.fenix/project.ini`).
+    from `[git] reviewers` (or the project's own `.fenix/settings.toml`).
     `Enter` edits a field in place, `e` writes the description in a
     buffer, `d` toggles draft. Under the form are the commits it brings
     and what's worth knowing first: whether it's pushed, whether it
@@ -938,9 +938,8 @@ for anyone curious to poke around or build on it.
   `Cargo.toml`, `pytest`/`ruff check` for a `pyproject.toml`, CMake
   configure/build/`ctest` for a `CMakeLists.txt`, `npm run build`/`test`
   for a `package.json` -- every matching ecosystem contributes its own
-  set, not just the first one found), plus any project-local overrides
-  from `.fenix/project.ini`'s `[tasks]` section (`taskN = NAME|COMMAND`,
-  numbered keys, as that file keeps them).
+  set, not just the first one found), plus the project's own
+  tasks from `.fenix/tools.json` (`SPC p ,` edits them).
   Runs in a live-streamed single-pane Task Output panel (`SPC p T`
   reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
   `clippy` specifically run with `--message-format=json` so each
@@ -977,9 +976,8 @@ for anyone curious to poke around or build on it.
   file in a fresh split if it wasn't already showing somewhere, without
   ever displacing whatever the debug panel's own panes are showing. A
   project's own launch target -- required for anything that isn't "the
-  script I have open" -- comes from `.fenix/project.ini`'s `[launch]`
-  section (`program`/`args`, the same per-project config file `[tasks]`
-  above already introduced).
+  script I have open" -- comes from `.fenix/tools.json`'s `launch`
+  (`program`, `args`, `cwd`, `env`; `SPC p ,` edits it).
 - **Tool status**: `SPC l m` opens a single-pane listing of every
   language with a built-in LSP server or DAP adapter -- the exact
   command that would be launched (a `[lsp]` override if configured,
@@ -1277,7 +1275,7 @@ popup shows what keys continue it.
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
 | `SPC ,` | Every setting, on one page -- search, change, reset |
-| `SPC p ,` | This project's settings, and its own page (kind, tasks, launch) |
+| `SPC p ,` | This project's settings: overrides, kind, group, Jira key, tasks, launch |
 | `SPC i S` / `SPC i n` | Manage snippets / make one from the last Visual selection |
 | `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
 | `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
@@ -1845,10 +1843,16 @@ meant to be committed so the whole team shares them: indent and tab
 width, word characters, the base branch and reviewers. `SPC p ,` opens
 the settings page on the project: each row says whether it's set there,
 comes from you, or is the default, `Enter` sets one for the project and
-`r` goes back to yours. The project's own page -- its kind, group, Jira
-key, tasks, language servers and debug launch (`.fenix/tools.json`) --
-is the first entry there. `p` switches the page between yours and the
-project's.
+`r` goes back to yours. Its first section, "Project & tasks", holds
+the rest of what's the project's own: its kind, group, pin and Jira key,
+and its tasks, language servers and debug launch (`.fenix/tools.json`).
+`p` switches the page between yours and the project's.
+
+A project from before `.fenix/settings.toml` kept these in
+`.fenix/project.ini`; the first time it's opened, that file moves over
+-- kind, Jira key, reviewers and serial monitor speed into
+`settings.toml`, its old `[tasks]` and `[launch]` into `tools.json` --
+and is deleted, so the change shows in `git status` for review.
 
 ### Every setting
 
@@ -1863,7 +1867,7 @@ when it's out of date).
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
 | **Appearance** | | | |
 | `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
-| `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine. |
+| `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; h and l go through them. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
 | `editor.animations` | true / false | on | Smooth scrolling and the caret's fade. |
 | **Files & explorer** | | | |

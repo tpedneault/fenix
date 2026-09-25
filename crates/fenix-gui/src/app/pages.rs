@@ -32,7 +32,6 @@ pub(super) enum PageModel {
     Wizard(Wizard),
     Hub(Hub),
     Doctor(DoctorPage),
-    Settings(Settings),
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
     Rebase(Box<RebasePage>),
@@ -68,7 +67,6 @@ impl PageState {
             PageModel::Wizard(w) => w.editing.is_some(),
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
             PageModel::Doctor(_) => false,
-            PageModel::Settings(s) => s.editing.is_some(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Request(r) => r.editing.is_some(),
@@ -83,7 +81,6 @@ impl PageState {
         self.typing()
             || match &self.model {
                 PageModel::Wizard(w) => w.claims_space(),
-                PageModel::Settings(s) => s.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
                 PageModel::UserSettings(p) => p.claims_space(),
                 _ => false,
@@ -93,7 +90,6 @@ impl PageState {
     fn type_text(&mut self, text: &str) {
         match &mut self.model {
             PageModel::Wizard(w) => w.type_text(text),
-            PageModel::Settings(s) => s.type_text(text),
             PageModel::Hub(h) => {
                 let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
                 target.extend(text.chars().filter(|c| !c.is_control()));
@@ -254,7 +250,6 @@ impl App {
             Some(PageModel::Wizard(_)) | None => "*new project*".to_string(),
             Some(PageModel::Hub(_)) => "*projects*".to_string(),
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
-            Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
@@ -361,7 +356,6 @@ impl App {
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
-            PageModel::Settings(s) => project_settings::layout(s, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
@@ -440,10 +434,6 @@ impl App {
             PageModel::Doctor(d) => {
                 let action = d.key(key);
                 self.doctor_action(id, action);
-            }
-            PageModel::Settings(s) => {
-                let action = s.key(key);
-                self.settings_action(id, action);
             }
             PageModel::Git(g) => {
                 let action = g.key(key);
@@ -1205,26 +1195,22 @@ impl App {
         }
     }
 
-    pub(super) fn open_settings(&mut self, root: PathBuf) {
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Settings(s) if s.root == root)) {
-            self.show_page(id);
-            return;
-        }
-        let mut settings = Settings::new(root.clone(), fenix_project::detect_kind_from_files(&root));
-        settings.declared = fenix_project::declared_kind(&root);
-        settings.pinned = self.project_meta.is_pinned(&root);
-        settings.group = self.project_meta.group(&root).unwrap_or_default().to_string();
-        settings.jira = fenix_project::meta::jira_key(&root).unwrap_or_default();
-        self.open_page(PageModel::Settings(settings));
+    /// The project's own section of the settings page, read for `root`.
+    pub(super) fn project_page_model(&self, root: &Path) -> Settings {
+        let mut settings = Settings::new(root.to_path_buf(), fenix_project::detect_kind_from_files(root));
+        settings.declared = fenix_project::declared_kind(root);
+        settings.pinned = self.project_meta.is_pinned(root);
+        settings.group = self.project_meta.group(root).unwrap_or_default().to_string();
+        settings.jira = fenix_project::meta::jira_key(root).unwrap_or_default();
+        settings
     }
 
-    fn settings_action(&mut self, id: BufferId, action: project_settings::Action) {
+    /// What the settings page's project section asked for, for the
+    /// project at `root`.
+    pub(super) fn project_page_action(&mut self, root: PathBuf, action: project_settings::Action) {
         use project_settings::Action;
-        let Some(PageModel::Settings(s)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let root = s.root.clone();
         match action {
-            Action::None => {}
-            Action::Close => self.close_page(id),
+            Action::None | Action::Close => {}
             Action::SaveTools(tools) => match tools.write(&root) {
                 Ok(()) => self.set_message("saved .fenix/tools.json"),
                 Err(e) => self.set_error(e),
@@ -1554,7 +1540,9 @@ mod tests {
         std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
         let mut app = App::with_file(None);
         app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(dir.0.join("meta.json"));
-        app.open_settings(dir.0.clone());
+        // SPC p , on the project, then its own section at the top.
+        app.open_settings_page(crate::settings_page::Scope::Project { root: dir.0.clone(), name: "settings".into() }, None);
+        press(&mut app, "\tk\n");
         let text = page_text(&mut app);
         assert!(text.contains("detect: Python") && text.contains("TASKS · 0"), "{text}");
         // Kind -> declared Python, then Jira.

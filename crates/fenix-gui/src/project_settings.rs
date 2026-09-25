@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use fenix_project::tools::{join_command_line, split_command_line, CommandSpec, ProjectTools};
 use fenix_project::ProjectKind;
 
-use crate::page::{fit, frame, Grid, Key, Page, Role};
+use crate::page::{fit, Grid, Key, Page, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
@@ -47,7 +47,6 @@ pub enum Action {
 
 pub struct Settings {
     pub root: PathBuf,
-    pub name: String,
     pub detected: ProjectKind,
     pub declared: Option<ProjectKind>,
     pub group: String,
@@ -70,14 +69,12 @@ pub struct Settings {
 
 impl Settings {
     pub fn new(root: PathBuf, detected: ProjectKind) -> Self {
-        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
         let (tools, tools_error) = match ProjectTools::read(&root) {
             Ok(tools) => (tools, None),
             Err(e) => (ProjectTools::default(), Some(e)),
         };
         Settings {
             root,
-            name,
             detected,
             declared: None,
             group: String::new(),
@@ -385,21 +382,17 @@ fn parse_command(line: &str, existing: Option<&CommandSpec>) -> Result<CommandSp
     Ok(spec)
 }
 
+/// The page as the settings page's "Project & tasks" section shows it:
+/// `cols` wide, from its first row, with no header of its own (the
+/// settings page names the project already).
 pub fn layout(settings: &Settings, cols: usize) -> Page {
-    let (left, width) = frame(cols, 100);
+    let (left, width) = (0, cols.min(100));
     let mut g = Grid::new();
-    let kind = settings.declared.unwrap_or(settings.detected);
-    let end = g.put(1, left, kind.tag(), Role::Kind(kind));
-    let end = g.put(1, end + 2, &settings.name, Role::Title);
-    g.put(1, end + 2, "· settings", Role::Muted);
-    let source = ".fenix/tools.json";
-    g.put(1, (left + width).saturating_sub(source.len()), source, Role::Muted);
-    g.rule(2, left..left + width);
-    let mut y = 3;
+    let mut y = 0;
     if let Some(note) = &settings.note {
         g.put(y, left + 2, &fit(note, width - 4), Role::Warn);
+        y += 1;
     }
-    y += 1;
 
     let label_x = left + 2;
     let value_x = left + 18;

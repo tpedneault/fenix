@@ -303,7 +303,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
         // Appearance
         s("editor.theme", Appearance, "Theme", Kind::Theme, "The colour theme; h and l preview each one.", field!(theme, text_get, text_set)).default("Orbit Dark"),
-        s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
+        s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; h and l go through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
         s("editor.font_size", Appearance, "Font size", Kind::Float { min: 6.0, max: 48.0 }, "Text size, in points.", field!(font_size, f32_get, f32_set)).default("16"),
         s("editor.animations", Appearance, "Animations", Kind::Bool, "Smooth scrolling and the caret's fade.", field!(animations, bool_get, bool_set)).default("on"),
         // Files

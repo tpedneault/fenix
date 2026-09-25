@@ -70,8 +70,9 @@ pub enum Action {
     OpenFile(Option<&'static str>),
     /// Show `scope` instead.
     SwitchScope(Scope),
-    /// The project's own page: kind, group, Jira, tasks, launch.
-    OpenProjectPage(PathBuf),
+    /// Something the project's own section asked for: its kind, group,
+    /// pin, Jira key, tasks, language servers or launch.
+    Project(crate::project_settings::Action),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,6 +130,9 @@ pub struct SettingsPage {
     pub note: Option<(String, bool)>,
     /// `d` once asks; `d` again deletes.
     armed_delete: bool,
+    /// In a project's scope, the project's own section: its kind, group,
+    /// Jira key, tasks, language servers and debug launch.
+    pub project_page: Option<crate::project_settings::Settings>,
 }
 
 fn setting_matches(s: &Setting, needle: &str) -> bool {
@@ -160,7 +164,7 @@ fn is_list(kind: &Kind) -> bool {
 
 impl SettingsPage {
     pub fn new(scope: Scope, snap: Snapshot) -> Self {
-        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false };
+        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, project_page: None };
         page.set_scope(scope);
         page
     }
@@ -186,7 +190,13 @@ impl SettingsPage {
     }
 
     /// New values from the host, keeping the cursor on the same setting.
-    pub fn refresh(&mut self, snap: Snapshot) {
+    pub fn refresh(&mut self, mut snap: Snapshot) {
+        // While this page has the keyboard no file is focused, so the
+        // host can't say which project `p` switches to: the one the page
+        // was opened from stays.
+        if snap.project.is_none() {
+            snap.project = self.snap.project.take();
+        }
         let before = self.selected();
         self.snap = snap;
         if let Some(row) = before {
@@ -211,16 +221,30 @@ impl SettingsPage {
     }
 
     pub fn typing(&self) -> bool {
-        self.searching || self.edit.is_some()
+        self.searching || self.edit.is_some() || self.in_project_page() && self.project_page.as_ref().is_some_and(|p| p.editing.is_some())
     }
 
     /// Space flips a switch; anywhere else it's the leader.
     pub fn claims_space(&self) -> bool {
+        if self.in_project_page() {
+            return self.project_page.as_ref().is_some_and(|p| p.claims_space());
+        }
         self.typing() || matches!(self.selected(), Some(Row::Setting(s)) if s.kind == Kind::Bool)
+    }
+
+    /// Whether the keyboard is in the project's own section.
+    fn in_project_page(&self) -> bool {
+        self.focus == Focus::Settings && self.on_project_page() && self.project_page.is_some()
     }
 
     /// Text pasted while typing.
     pub fn paste(&mut self, text: &str) {
+        if self.in_project_page() {
+            if let Some(p) = &mut self.project_page {
+                p.type_text(text);
+            }
+            return;
+        }
         let text: String = text.chars().filter(|c| !c.is_control()).collect();
         if let Some(target) = self.typed() {
             target.push_str(&text);
@@ -398,6 +422,24 @@ impl SettingsPage {
         if key != Key::Char('d') {
             self.armed_delete = false;
         }
+        if self.in_project_page() {
+            let editing = self.project_page.as_ref().is_some_and(|p| p.editing.is_some());
+            match key {
+                // The page's own keys, unless a field there is being typed.
+                Key::Tab | Key::BackTab if !editing => {
+                    self.focus = Focus::Categories;
+                    return Action::None;
+                }
+                Key::Char('p') if !editing => return Action::SwitchScope(Scope::You),
+                _ => {}
+            }
+            let action = self.project_page.as_mut().map(|p| p.key(key)).unwrap_or(crate::project_settings::Action::None);
+            return match action {
+                crate::project_settings::Action::None => Action::None,
+                crate::project_settings::Action::Close => Action::Close,
+                other => Action::Project(other),
+            };
+        }
         if self.searching {
             match key {
                 Key::Escape => {
@@ -448,11 +490,6 @@ impl SettingsPage {
                         Action::None
                     }
                 };
-            }
-            Key::Enter if self.on_project_page() => {
-                if let Scope::Project { root, .. } = &self.scope {
-                    return Action::OpenProjectPage(root.clone());
-                }
             }
             _ if self.focus == Focus::Categories => {
                 if matches!(key, Key::Enter | Key::Char('l') | Key::Right) {
@@ -784,14 +821,11 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let mut y = top;
     let rows = page.rows();
     if page.on_project_page() {
-        for line in wrap("The project's kind, group, pin and Jira key, its tasks, its language servers and its debug launch (.fenix/tools.json).", sw) {
-            g.put(y, sx, &line, Role::Text);
-            y += 1;
-        }
-        y += 1;
-        g.put(y, sx, "Enter opens them.", Role::Accent);
-        if page.focus == Focus::Settings {
-            g.focus(y, sx..sx + sw);
+        match &page.project_page {
+            Some(project) => g.embed(&crate::project_settings::layout(project, sw), y, sx, page.focus == Focus::Settings),
+            None => {
+                g.put(y, sx, "The project's own settings aren't readable right now.", Role::Muted);
+            }
         }
     } else if rows.is_empty() {
         g.put(y, sx, "Nothing matches.", Role::Muted);
@@ -826,7 +860,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                     let (text, role) = shown(page, s);
                     let text = match s.kind {
                         Kind::Bool => format!("{} {text}", if matches!(page.value(s), Some(Value::Bool(false))) || (page.value(s).is_none() && s.default == "off") { "[ ]" } else { "[x]" }),
-                        Kind::Choice(_) | Kind::Theme | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => format!("‹ {text} ›"),
+                        Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => format!("‹ {text} ›"),
                         _ => text,
                     };
                     g.put(y, vx, &fit(&text, room), role);
@@ -912,7 +946,11 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         }
     }
 
-    let keys: Vec<(&str, &str)> = if page.searching {
+    let keys: Vec<(&str, &str)> = if page.in_project_page() && page.project_page.as_ref().is_some_and(|p| p.editing.is_some()) {
+        vec![("Enter", "keep"), ("Esc", "put it back")]
+    } else if page.in_project_page() {
+        vec![("j/k", "row"), ("Enter", "edit"), ("h/l", "change"), ("a", "add"), ("d", "delete"), ("t", "run task"), ("e", "open tools.json"), ("Tab", "sections"), ("p", "yours"), ("q", "close")]
+    } else if page.searching {
         vec![("Enter", "go to the results"), ("Esc", "clear")]
     } else if matches!(page.edit, Some(Edit::Inline { .. })) {
         vec![("Enter", "keep"), ("Esc", "put it back")]
@@ -960,6 +998,29 @@ mod tests {
     }
 
     #[test]
+    fn the_projects_own_section_is_shown_in_place_and_takes_the_keys() {
+        let root = PathBuf::from("/p");
+        let mut p = SettingsPage::new(Scope::Project { root: root.clone(), name: "fenix".into() }, snap());
+        p.project_page = Some(crate::project_settings::Settings::new(root, fenix_project::ProjectKind::Python));
+        p.key(Key::Tab);
+        p.key(Key::Char('k'));
+        p.key(Key::Enter);
+        let text = layout(&p, 130).text;
+        assert!(text.contains("TASKS · 0") && text.contains("detect: Python"), "the project's page, in the right column:\n{text}");
+        assert!(matches!(p.key(Key::Char('l')), Action::Project(crate::project_settings::Action::SetKind(Some(_)))), "its keys reach it");
+        assert_eq!(p.key(Key::Tab), Action::None);
+        assert!(!p.in_project_page(), "Tab goes back to the sections");
+    }
+
+    #[test]
+    fn p_still_switches_to_the_project_after_a_change_is_read_back() {
+        let mut p = page();
+        p.snap.project = Some((PathBuf::from("/p"), "fenix".into()));
+        p.refresh(snap());
+        assert!(matches!(p.key(Key::Char('p')), Action::SwitchScope(Scope::Project { .. })));
+    }
+
+    #[test]
     fn a_category_lists_its_settings_with_what_changed_marked() {
         let mut p = page();
         goto(&mut p, "editor.font_size");
@@ -980,6 +1041,19 @@ mod tests {
         assert_eq!(p.key(Key::Space), Action::Set { key: "editor.animations", value: Some(Value::Bool(false)) }, "on by default, so off");
         goto(&mut p, "git.layout");
         assert_eq!(p.key(Key::Enter), Action::Set { key: "git.layout", value: Some(Value::Text("panes".into())) });
+    }
+
+    #[test]
+    fn the_font_cycles_through_the_installed_ones() {
+        let mut snap = snap();
+        snap.fonts = vec!["Cascadia Mono".into(), "Consolas".into(), "JetBrains Mono".into()];
+        let mut p = SettingsPage::new(Scope::You, snap);
+        goto(&mut p, "editor.font_family");
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("Cascadia Mono".into())) });
+        p.snap.here.insert("editor.font_family", Value::Text("Consolas".into()));
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) });
+        assert_eq!(p.key(Key::Char('h')), Action::Set { key: "editor.font_family", value: Some(Value::Text("Cascadia Mono".into())) });
+        assert!(layout(&p, 130).text.contains("‹ Consolas ›"));
     }
 
     #[test]
@@ -1105,10 +1179,6 @@ mod tests {
         assert!(!text.contains("Font size") && !p.categories().contains(&Category::Appearance), "the theme isn't per-project");
         assert_eq!(p.key(Key::Char('r')), Action::Set { key: "editor.indent_width", value: None });
         assert!(text.contains("Project & tasks"), "{text}");
-        p.key(Key::Tab);
-        p.key(Key::Char('k'));
-        assert!(layout(&p, 130).text.contains("Enter opens them."));
-        assert_eq!(p.key(Key::Enter), Action::OpenProjectPage(PathBuf::from("/p")));
         assert_eq!(p.key(Key::Char('p')), Action::SwitchScope(Scope::You));
     }
 }
