@@ -501,6 +501,16 @@ mod tests {
         store.log_manual_time(id, chrono::Duration::minutes(20));
         store.log_manual_time(id, chrono::Duration::minutes(50));
         store.log_manual_time(local, chrono::Duration::minutes(90));
+        // Moved to midday: logged "ending now", a run just after midnight
+        // would start some of them yesterday, a day of their own.
+        let noon = chrono::Local::now().date_naive().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+        for task in &mut store.tasks {
+            for entry in &mut task.time_entries {
+                let length = entry.end - entry.start;
+                entry.end = noon;
+                entry.start = noon - length;
+            }
+        }
 
         let rows = store.worklog_batch(15);
         assert_eq!(rows.len(), 1, "local tasks never produce worklogs");
