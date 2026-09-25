@@ -403,6 +403,7 @@ impl App {
         let shift = self.modifiers.shift_key();
         let key = match (keypress.code, keypress.mods.ctrl) {
             (KeyCode::Char('c'), true) => Key::CtrlC,
+            (KeyCode::Char('o'), true) if typing => Key::CtrlO,
             (_, true) => return false,
             (KeyCode::Char(' '), false) if claims_space => Key::Space,
             (KeyCode::Char(':'), false) if typing => Key::Char(':'),
@@ -1000,7 +1001,7 @@ impl App {
             Action::Add(path) => {
                 self.register_project_dir(&path);
                 self.hub_reload(id);
-                let root = std::fs::canonicalize(&path).unwrap_or(path);
+                let root = std::fs::canonicalize(&path).map(fenix_lsp::normalize).unwrap_or(path);
                 if let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
                     hub.focus_root(&root);
                 }

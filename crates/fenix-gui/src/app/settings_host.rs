@@ -194,6 +194,23 @@ impl App {
                 let Some(Scope::Project { root, .. }) = self.settings_page(id).map(|p| p.scope.clone()) else { return };
                 self.project_page_action(root, action);
             }
+            SettingsAction::Browse { start, folder } => {
+                // Where it points now, or the nearest folder of it that
+                // exists; else the project, else home.
+                let start = start
+                    .and_then(|p| p.ancestors().find(|a| a.is_dir()).map(Path::to_path_buf))
+                    .or_else(|| self.project_root.clone())
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_default();
+                match ExplorerState::opened(&start) {
+                    Ok(explorer) => {
+                        self.explorer = Some(explorer);
+                        self.explorer_purpose = ExplorerPurpose::PickSettingPath { folder };
+                        self.main_view = MainView::Explorer;
+                    }
+                    Err(e) => self.set_error(format!("couldn't list {} ({e})", start.display())),
+                }
+            }
             SettingsAction::OpenFile(key) => {
                 let path = match self.settings_page(id).map(|p| p.snap.file.clone()) {
                     Some(path) => path,
@@ -212,6 +229,19 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The path picked in the explorer the settings page opened: back to
+    /// the page, which puts it where it was wanted.
+    pub(super) fn settings_path_picked(&mut self, path: &Path) {
+        self.explorer = None;
+        self.explorer_purpose = ExplorerPurpose::Browse;
+        self.main_view = MainView::Editor;
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::UserSettings(_))) else { return };
+        self.show_page(id);
+        let path = fenix_project::plain_path(path.to_path_buf());
+        let Some(action) = self.settings_page(id).map(|p| p.browsed(&path)) else { return };
+        self.user_settings_action(id, action);
     }
 
     /// Sets one of your settings: checked, applied to the running editor
@@ -533,6 +563,20 @@ base_branch = \"develop\"
         assert!(text.contains("tab_width = 9") && text.contains("indent_width = 2"), "{text}");
         assert_eq!(app.config.tab_width, None, "yours is untouched");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn b_browses_for_a_path_in_the_explorer_and_the_pick_is_saved() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("completion.symbols_file"));
+        press(&mut app, "b");
+        assert_eq!(app.main_view, MainView::Explorer);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickSettingPath { folder: false });
+
+        app.settings_path_picked(Path::new(r"\\?\C:\words.txt"));
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
+        assert_eq!(app.config.completion_symbols_file, Some(PathBuf::from(r"C:\words.txt")), "saved, without the verbatim prefix");
     }
 
     #[test]

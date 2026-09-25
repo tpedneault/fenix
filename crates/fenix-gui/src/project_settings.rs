@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use fenix_project::tools::{join_command_line, split_command_line, CommandSpec, ProjectTools};
 use fenix_project::ProjectKind;
 
-use crate::page::{fit, Grid, Key, Page, Role};
+use crate::page::{fit, fit_tail, Grid, Key, Page, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
@@ -437,7 +437,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
         g.put(y, label_x, &fit(&label, 15), if add_row { Role::Accent } else { Role::Muted });
         let editing = settings.editing.as_ref().filter(|(f, _)| *f == field);
         if let Some((_, text)) = editing {
-            let end = g.put(y, value_x, &fit(&format!("{text}▏"), value_room), Role::Title);
+            let end = g.put(y, value_x, &fit_tail(&format!("{text}▏"), value_room), Role::Title);
             g.panels.push((y, value_x - 1..end + 1));
             if add_row && text.is_empty() {
                 let hint = match field {

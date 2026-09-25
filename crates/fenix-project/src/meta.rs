@@ -29,17 +29,30 @@ impl ProjectMeta {
     /// Loads it, starting empty when the file is missing or unreadable
     /// -- a convenience, not critical data.
     pub fn load_or_default(path: PathBuf) -> Self {
-        let mut meta: Self = fenix_storage::state::read(&path, "meta").ok().flatten().unwrap_or_default();
-        meta.path = path;
-        meta
+        let meta: Self = fenix_storage::state::read(&path, "meta").ok().flatten().unwrap_or_default();
+        meta.plain(path)
     }
 
     /// The whole-file `project_meta.json` it used to be kept in, for
     /// moving it over; `None` when there's none to read.
     pub fn read_legacy(path: &Path, into: PathBuf) -> Option<Self> {
-        let mut meta: Self = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        meta.path = into;
-        Some(meta)
+        let meta: Self = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        Some(meta.plain(into))
+    }
+
+    /// Every root in the plain form the known projects keep them in
+    /// (`crate::plain_path`), so a pin made on a `\\?\` root still
+    /// finds its project.
+    fn plain(self, path: PathBuf) -> Self {
+        Self {
+            pinned: self.pinned.into_iter().map(crate::plain_path).collect(),
+            groups: self.groups.into_iter().map(|(root, group)| (crate::plain_path(root), group)).collect(),
+            path,
+        }
+    }
+
+    fn key(root: &Path) -> PathBuf {
+        crate::plain_path(root.to_path_buf())
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -47,28 +60,28 @@ impl ProjectMeta {
     }
 
     pub fn is_pinned(&self, root: &Path) -> bool {
-        self.pinned.contains(root)
+        self.pinned.contains(&Self::key(root))
     }
 
     pub fn set_pinned(&mut self, root: &Path, pinned: bool) {
         if pinned {
-            self.pinned.insert(root.to_path_buf());
+            self.pinned.insert(Self::key(root));
         } else {
-            self.pinned.remove(root);
+            self.pinned.remove(&Self::key(root));
         }
     }
 
     pub fn group(&self, root: &Path) -> Option<&str> {
-        self.groups.get(root).map(String::as_str)
+        self.groups.get(&Self::key(root)).map(String::as_str)
     }
 
     /// Sets `root`'s group; a blank name ungroups it.
     pub fn set_group(&mut self, root: &Path, group: &str) {
         let group = group.trim();
         if group.is_empty() {
-            self.groups.remove(root);
+            self.groups.remove(&Self::key(root));
         } else {
-            self.groups.insert(root.to_path_buf(), group.to_string());
+            self.groups.insert(Self::key(root), group.to_string());
         }
     }
 
@@ -81,8 +94,9 @@ impl ProjectMeta {
 
     /// Forgets `root` entirely (it was removed from the project list).
     pub fn forget(&mut self, root: &Path) {
-        self.pinned.remove(root);
-        self.groups.remove(root);
+        let root = Self::key(root);
+        self.pinned.remove(&root);
+        self.groups.remove(&root);
     }
 }
 

@@ -2401,6 +2401,9 @@ enum ExplorerPurpose {
     FindFrom,
     /// The new-project wizard's "In" folder: `S` hands it back.
     PickWizardParent,
+    /// A path for the settings page (`b`, `Ctrl-O`): `Enter` on a file
+    /// hands it back, or `S` the folder when a folder's wanted.
+    PickSettingPath { folder: bool },
 }
 
 /// One position in the `Ctrl-O`/`Ctrl-I` jumplist -- a buffer plus a
@@ -12734,7 +12737,7 @@ impl App {
     /// noise before persisting -- no typed-input parsing like the old
     /// free-text prompt needed.
     fn register_project_dir(&mut self, dir: &Path) {
-        let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let root = std::fs::canonicalize(dir).map(fenix_lsp::normalize).unwrap_or_else(|_| dir.to_path_buf());
         self.known_projects.add(root);
         if let Err(err) = self.known_projects.save() {
             eprintln!("fenix: couldn't save project history: {err}");
@@ -12977,7 +12980,7 @@ impl App {
     /// before-persisting step, but not registering anything until the
     /// label prompt resolves.
     fn start_mib_root_label_prompt(&mut self, dir: &Path) {
-        let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let root = std::fs::canonicalize(dir).map(fenix_lsp::normalize).unwrap_or_else(|_| dir.to_path_buf());
         self.mib_root_prompt = Some((root, String::new()));
         self.main_view = MainView::Editor;
         self.explorer = None;
@@ -21629,6 +21632,9 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.wizard_parent_picked(&cwd);
+                } else if self.main_view == MainView::Explorer && self.explorer_purpose == (ExplorerPurpose::PickSettingPath { folder: true }) {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.settings_path_picked(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
                 // `S` only means something while picking a project/MIB dir,
@@ -21656,8 +21662,13 @@ impl App {
 
         if !is_dir
             && self.main_view == MainView::Explorer
-            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir | ExplorerPurpose::PickWizardParent)
+            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir | ExplorerPurpose::PickWizardParent | ExplorerPurpose::PickSettingPath { folder: true })
         {
+            return;
+        }
+
+        if !is_dir && self.main_view == MainView::Explorer && self.explorer_purpose == (ExplorerPurpose::PickSettingPath { folder: false }) {
+            self.settings_path_picked(&path);
             return;
         }
 
@@ -25015,6 +25026,12 @@ impl App {
                         ExplorerPurpose::PickWizardParent => {
                             format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::PickSettingPath { folder: true } => {
+                            format!("{}   S to pick this folder, q to go back ", explorer.cwd.display())
+                        }
+                        ExplorerPurpose::PickSettingPath { folder: false } => {
+                            format!("{}   Enter to pick a file, q to go back ", explorer.cwd.display())
+                        }
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
                         }
@@ -25027,6 +25044,7 @@ impl App {
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
                 ExplorerPurpose::PickMibRootDir => "ADDMIB",
                 ExplorerPurpose::PickWizardParent => "NEWIN",
+                ExplorerPurpose::PickSettingPath { .. } => "PICK",
                 ExplorerPurpose::FindFrom => "FINDFROM",
             };
             return (badge, suffix);
@@ -37372,7 +37390,7 @@ configure_board stm32
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.explorer.is_none());
         assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
-        let canonical = std::fs::canonicalize(project_dir.path()).unwrap();
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(project_dir.path()).unwrap());
         assert_eq!(app.known_projects.roots(), std::slice::from_ref(&canonical));
         // Persisted, not just held in memory.
         let reloaded = fenix_project::KnownProjects::load_or_default(known_dir.path().join("projects.txt"));
@@ -37422,7 +37440,7 @@ configure_board stm32
         assert_eq!(app.main_view, MainView::Editor);
         assert!(app.explorer.is_none());
         assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
-        let canonical = std::fs::canonicalize(mib_dir.path()).unwrap();
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(mib_dir.path()).unwrap());
         assert_eq!(app.mib_root_prompt, Some((canonical, String::new())));
         // Nothing registered yet -- only the label prompt started.
         assert!(app.config.mib_roots.is_empty());
@@ -37499,7 +37517,7 @@ configure_board stm32
         app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
 
         assert!(app.mib_root_prompt.is_none());
-        let canonical = std::fs::canonicalize(mib_dir.path()).unwrap();
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(mib_dir.path()).unwrap());
         assert_eq!(app.config.mib_roots, vec![("TEST-MIB".to_string(), canonical.clone())]);
         assert_eq!(app.mib_roots, vec![fenix_mib::MibRoot { label: "TEST-MIB".to_string(), path: canonical.clone() }]);
         assert!(app.mib_index.is_none(), "the stale index should be invalidated, not just left as-is");
