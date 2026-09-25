@@ -498,12 +498,8 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
         }
         g.put(y, left + 2, "It isn't changed from here until it's valid -- e opens it.", Role::Muted);
     }
-    let keys: &[(&str, &str)] = if settings.editing.is_some() {
-        &[("Enter", "save"), ("Esc", "cancel")]
-    } else {
-        &[("Enter", "edit"), ("a", "add"), ("d", "delete"), ("t", "run task"), ("e", "raw JSON"), ("q", "close")]
-    };
-    g.keys(left, width, keys);
+    // No key strip: the settings page this sits in shows the keys.
+    let _ = (left, width);
     g.finish()
 }
 
