@@ -33,10 +33,6 @@ pub enum BufferKind {
     /// A Lazygit-style repo status/files/branches/commits/stash panel
     /// (`SPC g g`) -- same "real buffer, just tagged" shape as `Docker`.
     Git,
-    /// The Jira dashboard's projects/users/issues/detail panel
-    /// (`SPC j j`) -- same "real buffer, just tagged" shape as `Docker`/
-    /// `Git`.
-    Jira,
     /// A tab-separated `Text` buffer toggled into elastic-column table
     /// view (`SPC f t`) -- unlike `Dashboard`/`Explorer`/`Docker`/`Git`,
     /// this isn't a distinct generated buffer: it's the *same* buffer,
@@ -142,16 +138,6 @@ pub enum BufferKind {
     /// workspace, and comes back through the ordinary buffer switcher
     /// (`SPC b b`) -- the same reasoning `Vnc` settled on.
     Terminal,
-    /// The personal task/time-tracking agenda (`SPC a`) -- same "real
-    /// buffer, just tagged" shape as `Dashboard`/`Explorer`/`Docker`, but
-    /// unlike those (and unlike `Jira`, which really does span several
-    /// synced panes backed by a live API) this is one buffer for all four
-    /// views (list/board/report/detail): there's no live/async data behind
-    /// it to keep in sync across panes, so the host just re-renders this
-    /// same buffer's text via `Buffer::replace_range` whenever the view or
-    /// the underlying `fenix_agenda::AgendaStore` changes (see `fenix-gui`'s
-    /// `agenda_panel` module).
-    Agenda,
     /// A generated, key-driven page -- the new-project wizard (`SPC p
     /// c`). Its text is laid out by the host from the page's own state
     /// on every change, like `Dashboard`'s; every key that means
@@ -206,7 +192,6 @@ impl BufferKind {
             BufferKind::WorkspaceEdit
             | BufferKind::Docker
             | BufferKind::Git
-            | BufferKind::Jira
             | BufferKind::SearchReplace
             | BufferKind::Vnc
             | BufferKind::Pdf
@@ -219,7 +204,6 @@ impl BufferKind {
             | BufferKind::ToolStatus
             | BufferKind::Merge
             | BufferKind::Terminal
-            | BufferKind::Agenda
             // The wizard's answers and its running commands live in the
             // host, not in this text.
             | BufferKind::Page => true,
@@ -376,14 +360,6 @@ impl BufferList {
         self.insert(Buffer::from_text(text), None, BufferKind::Git)
     }
 
-    /// A real buffer seeded with `text` (a rendered projects/users/
-    /// issues/detail listing) and tagged `Jira` -- `SPC j j`. Same "real
-    /// buffer, just tagged" shape as `open_docker`/`open_git`; the host
-    /// re-renders `text` via `Buffer::replace_range` on refresh.
-    pub fn open_jira(&mut self, text: &str) -> BufferId {
-        self.insert(Buffer::from_text(text), None, BufferKind::Jira)
-    }
-
     /// An empty, pathless buffer tagged `Vnc` -- `SPC v v`. Deliberately
     /// `Buffer::empty()`, not `Buffer::from_text(...)` like `open_docker`/
     /// `open_jira` seed a rendered text panel: a VNC pane's content is a
@@ -392,15 +368,6 @@ impl BufferList {
     /// window tree; its own (always-empty) text is never shown.
     pub fn open_vnc(&mut self) -> BufferId {
         self.insert(Buffer::empty(), None, BufferKind::Vnc)
-    }
-
-    /// A real buffer seeded with `text` (a rendered agenda view -- list,
-    /// board, report, or one task's detail) and tagged `Agenda` -- `SPC
-    /// a`. Same "real buffer, just tagged" shape as `open_dashboard`; the
-    /// host re-renders `text` via `Buffer::replace_range` whenever the
-    /// view switches or the store changes.
-    pub fn open_agenda(&mut self, text: &str) -> BufferId {
-        self.insert(Buffer::from_text(text), None, BufferKind::Agenda)
     }
 
     /// An empty, pathless buffer tagged `Terminal` -- `SPC o T`. Same
@@ -611,8 +578,6 @@ mod tests {
             BufferKind::Graph,
             BufferKind::Merge,
             BufferKind::Docker,
-            BufferKind::Jira,
-            BufferKind::Agenda,
             BufferKind::Debug,
             BufferKind::Terminal,
             BufferKind::Vnc,
@@ -645,7 +610,6 @@ mod tests {
         assert!(!BufferKind::Explorer.tracks_unsaved_changes());
         assert!(!BufferKind::Docker.tracks_unsaved_changes());
         assert!(!BufferKind::Git.tracks_unsaved_changes());
-        assert!(!BufferKind::Jira.tracks_unsaved_changes());
         assert!(!BufferKind::SearchReplace.tracks_unsaved_changes());
         assert!(!BufferKind::Vnc.tracks_unsaved_changes());
         assert!(!BufferKind::Pdf.tracks_unsaved_changes());

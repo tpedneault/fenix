@@ -191,15 +191,11 @@ impl CommandRegistry {
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
-        registry.register("jira.open", "Show the Jira projects/users/issues/detail panel", cmd_jira_open);
-        registry.register("jira.close", "Close the Jira panel session", cmd_jira_close);
-        registry.register("jira.refresh", "Re-fetch the Jira panel's current issues/detail", cmd_jira_refresh);
-        registry.register("jira.goto_issue", "Jump straight to any issue by key", cmd_jira_goto_issue);
-        registry.register("jira.add_project", "Track a new Jira project by key", cmd_jira_add_project);
-        registry.register("jira.delete_project", "Stop tracking a Jira project", cmd_jira_delete_project);
-        registry.register("jira.add_user", "Track a new Jira user by id", cmd_jira_add_user);
-        registry.register("jira.delete_user", "Stop tracking a Jira user", cmd_jira_delete_user);
-        registry.register("jira.create_issue", "Create a new Jira issue in a tracked project", cmd_jira_create_issue);
+        registry.register("jira.open", "Open the Jira page: your searches, their issues, a preview", cmd_jira_open);
+        registry.register("jira.refresh", "Run the Jira page's search again", cmd_jira_refresh);
+        registry.register("jira.goto_issue", "Open any issue by key", cmd_jira_goto_issue);
+        registry.register("jira.search", "Search Jira: words, or JQL after :", cmd_jira_search);
+        registry.register("jira.create_issue", "Create an issue, with the project's real types and fields", cmd_jira_create_issue);
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         registry.register("embedded.build", "Compile the sketch for its board", cmd_embedded_build);
         registry.register("embedded.upload", "Compile and flash the sketch to the board", cmd_embedded_upload);
@@ -213,13 +209,15 @@ impl CommandRegistry {
         registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
         registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
         registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
-        registry.register("agenda.open", "Open the agenda (last view shown)", cmd_agenda_open);
-        registry.register("agenda.board", "Show the agenda as a Kanban board", cmd_agenda_board);
-        registry.register("agenda.list", "Show the agenda as a list", cmd_agenda_list);
-        registry.register("agenda.report", "Show the agenda's time report", cmd_agenda_report);
-        registry.register("agenda.new_task", "Add a new task to the agenda", cmd_agenda_new_task);
-        registry.register("agenda.add_category", "Add a new agenda category", cmd_agenda_add_category);
-        registry.register("agenda.toggle_clock", "Start, stop, or switch the agenda's running timer", cmd_agenda_toggle_clock);
+        registry.register("agenda.open", "Open the agenda page where it was left", cmd_agenda_open);
+        registry.register("agenda.board", "Open the agenda on its board", cmd_agenda_board);
+        registry.register("agenda.list", "Open the agenda on its list", cmd_agenda_list);
+        registry.register("agenda.report", "Open the agenda on this week's time", cmd_agenda_report);
+        registry.register("agenda.new_task", "Add a task to the agenda", cmd_agenda_new_task);
+        registry.register("agenda.from_here", "Add a task about the selection or line here", cmd_agenda_from_here);
+        registry.register("agenda.find", "Search every task", cmd_agenda_find);
+        registry.register("agenda.toggle_clock", "Stop the clock, resume the last task, or switch to another", cmd_agenda_toggle_clock);
+        registry.register("agenda.resume", "Start the clock again on what you worked on last", cmd_agenda_resume);
         registry.register("agenda.import", "Pick Jira issues assigned to you to add to the agenda", cmd_agenda_import);
         registry.register("agenda.sync", "Refresh linked tasks from Jira and send pending changes", cmd_agenda_sync);
         registry.register("agenda.worklogs", "Review unsent time on linked tasks and send it to Jira", cmd_agenda_worklogs);
@@ -684,11 +682,7 @@ fn cmd_git_close(ctx: &mut CommandCtx) {
 }
 
 fn cmd_jira_open(ctx: &mut CommandCtx) {
-    ctx.app.open_jira_panel();
-}
-
-fn cmd_jira_close(ctx: &mut CommandCtx) {
-    ctx.app.jira_session_close();
+    ctx.app.open_jira_page();
 }
 
 fn cmd_jira_refresh(ctx: &mut CommandCtx) {
@@ -696,11 +690,11 @@ fn cmd_jira_refresh(ctx: &mut CommandCtx) {
 }
 
 fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_goto_issue_prompt();
+    ctx.app.cmd_jira_goto();
 }
 
-fn cmd_jira_add_project(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_add_project_prompt();
+fn cmd_jira_search(ctx: &mut CommandCtx) {
+    ctx.app.cmd_jira_search();
 }
 
 fn cmd_embedded_build(ctx: &mut CommandCtx) {
@@ -772,31 +766,27 @@ fn cmd_agenda_report(ctx: &mut CommandCtx) {
 }
 
 fn cmd_agenda_new_task(ctx: &mut CommandCtx) {
-    ctx.app.agenda_start_new_task_prompt();
+    ctx.app.cmd_agenda_new_task();
 }
 
-fn cmd_agenda_add_category(ctx: &mut CommandCtx) {
-    ctx.app.agenda_start_add_category_prompt();
+fn cmd_agenda_from_here(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_task_from_here();
+}
+
+fn cmd_agenda_resume(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_resume();
+}
+
+fn cmd_agenda_find(ctx: &mut CommandCtx) {
+    ctx.app.cmd_agenda_find();
 }
 
 fn cmd_agenda_toggle_clock(ctx: &mut CommandCtx) {
     ctx.app.cmd_agenda_toggle_clock();
 }
 
-fn cmd_jira_delete_project(ctx: &mut CommandCtx) {
-    ctx.app.picker_delete_jira_project();
-}
-
-fn cmd_jira_add_user(ctx: &mut CommandCtx) {
-    ctx.app.jira_start_add_user_prompt();
-}
-
-fn cmd_jira_delete_user(ctx: &mut CommandCtx) {
-    ctx.app.picker_delete_jira_user();
-}
-
 fn cmd_jira_create_issue(ctx: &mut CommandCtx) {
-    ctx.app.picker_create_jira_issue();
+    ctx.app.cmd_jira_new_issue();
 }
 
 fn cmd_agenda_import(ctx: &mut CommandCtx) {

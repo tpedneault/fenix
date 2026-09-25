@@ -40,6 +40,9 @@ pub struct RemoteSnapshot {
     pub flagged: bool,
     pub updated: String,
     pub comments: Vec<RemoteComment>,
+    /// `YYYY-MM-DD`, when the issue has a due date.
+    #[serde(default)]
+    pub due: Option<String>,
 }
 
 /// A fetched issue plus what it means for the agenda's own fields -- the
@@ -62,15 +65,32 @@ pub enum SyncField {
     Description,
     Status,
     Priority,
+    Due,
 }
 
 impl SyncField {
+    pub const ALL: [SyncField; 5] = [SyncField::Title, SyncField::Description, SyncField::Status, SyncField::Priority, SyncField::Due];
+
     pub fn label(self) -> &'static str {
         match self {
             SyncField::Title => "title",
             SyncField::Description => "description",
             SyncField::Status => "status",
             SyncField::Priority => "priority",
+            SyncField::Due => "due date",
+        }
+    }
+}
+
+impl crate::task::Task {
+    /// This task's own value for `field`, for display beside Jira's.
+    pub fn sync_value(&self, field: SyncField) -> String {
+        match field {
+            SyncField::Title => self.title.clone(),
+            SyncField::Description => self.description.clone(),
+            SyncField::Status => self.status.label().to_string(),
+            SyncField::Priority => self.priority.label().to_string(),
+            SyncField::Due => self.due.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "none".to_string()),
         }
     }
 }
@@ -92,6 +112,7 @@ impl Conflict {
             SyncField::Description => s.description.clone(),
             SyncField::Status => s.status_name.clone(),
             SyncField::Priority => s.priority.clone().unwrap_or_default(),
+            SyncField::Due => s.due.clone().unwrap_or_else(|| "none".to_string()),
         }
     }
 }
@@ -143,6 +164,8 @@ pub enum OpKind {
     /// A workflow transition, already chosen, with where it lands.
     Transition { id: String, to_id: String, to_name: String, to_category: String },
     SetFlag(bool),
+    /// `YYYY-MM-DD`, or `None` to clear it.
+    SetDue(Option<String>),
 }
 
 impl OpKind {
@@ -153,6 +176,7 @@ impl OpKind {
             OpKind::SetDescription(_) => Some(SyncField::Description),
             OpKind::SetPriority(_) => Some(SyncField::Priority),
             OpKind::Transition { .. } | OpKind::SetFlag(_) => Some(SyncField::Status),
+            OpKind::SetDue(_) => Some(SyncField::Due),
             OpKind::AddComment(_) | OpKind::SetAssignee { .. } => None,
         }
     }
@@ -168,6 +192,8 @@ impl OpKind {
             OpKind::Transition { to_name, .. } => format!("moved to {to_name}"),
             OpKind::SetFlag(true) => "flagged".to_string(),
             OpKind::SetFlag(false) => "unflagged".to_string(),
+            OpKind::SetDue(Some(date)) => format!("due {date}"),
+            OpKind::SetDue(None) => "due date cleared".to_string(),
         }
     }
 
@@ -189,6 +215,7 @@ impl OpKind {
                 base.status_category = to_category.clone();
             }
             OpKind::SetFlag(on) => base.flagged = *on,
+            OpKind::SetDue(due) => base.due = due.clone(),
         }
     }
 }

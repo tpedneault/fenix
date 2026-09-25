@@ -7,6 +7,10 @@ use crate::task::{NoteEntry, Priority, Status, Subtask, Task, TaskId, TimeEntry,
 pub struct ActiveTimer {
     pub task_id: TaskId,
     pub started_at: DateTime<Local>,
+    /// When you were last seen doing anything while it ran -- saved now
+    /// and then, so a clock left running over a closed laptop is noticed.
+    #[serde(default)]
+    pub last_seen: Option<DateTime<Local>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,6 +63,8 @@ impl AgendaStore {
             archived: false,
             order,
             jira: None,
+            due: None,
+            code: None,
         });
         id
     }
@@ -82,6 +88,13 @@ impl AgendaStore {
     pub fn set_category(&mut self, id: TaskId, category: Option<String>) {
         if let Some(task) = self.task_mut(id) {
             task.category = category;
+            task.updated_at = Local::now();
+        }
+    }
+
+    pub fn set_due(&mut self, id: TaskId, due: Option<chrono::NaiveDate>) {
+        if let Some(task) = self.task_mut(id) {
+            task.due = due;
             task.updated_at = Local::now();
         }
     }
@@ -142,6 +155,33 @@ impl AgendaStore {
         }
     }
 
+    /// Corrects a logged time entry's start and end. Refused (false) when
+    /// the end isn't after the start. A corrected entry that had been sent
+    /// to Jira stays sent: Jira keeps what it was sent.
+    pub fn edit_time_entry(&mut self, id: TaskId, index: usize, start: DateTime<Local>, end: DateTime<Local>) -> bool {
+        if end <= start {
+            return false;
+        }
+        let Some(task) = self.task_mut(id) else { return false };
+        let Some(entry) = task.time_entries.get_mut(index) else { return false };
+        entry.start = start;
+        entry.end = end;
+        task.updated_at = Local::now();
+        true
+    }
+
+    /// Logs a span of time that already happened, `start` to `end`.
+    pub fn log_span(&mut self, id: TaskId, start: DateTime<Local>, end: DateTime<Local>) -> bool {
+        if end <= start {
+            return false;
+        }
+        let Some(task) = self.task_mut(id) else { return false };
+        task.time_entries.push(TimeEntry { start, end, source: TimeSource::Manual, sent: false });
+        task.time_entries.sort_by_key(|e| e.start);
+        task.updated_at = Local::now();
+        true
+    }
+
     pub fn add_subtask(&mut self, id: TaskId, text: String) {
         if let Some(task) = self.task_mut(id) {
             task.subtasks.push(Subtask { text, done: false });
@@ -155,6 +195,21 @@ impl AgendaStore {
                 subtask.done = !subtask.done;
                 task.updated_at = Local::now();
             }
+        }
+    }
+
+    pub fn edit_subtask(&mut self, id: TaskId, index: usize, text: String) {
+        if let Some(task) = self.task_mut(id) {
+            if let Some(subtask) = task.subtasks.get_mut(index) {
+                subtask.text = text;
+                task.updated_at = Local::now();
+            }
+        }
+    }
+
+    pub fn set_code(&mut self, id: TaskId, code: Option<crate::task::CodeRef>) {
+        if let Some(task) = self.task_mut(id) {
+            task.code = code;
         }
     }
 
@@ -206,7 +261,36 @@ impl AgendaStore {
     /// so it should never require remembering to clock out first.
     pub fn clock_in(&mut self, id: TaskId) {
         self.clock_out();
-        self.active_timer = Some(ActiveTimer { task_id: id, started_at: Local::now() });
+        self.active_timer = Some(ActiveTimer { task_id: id, started_at: Local::now(), last_seen: None });
+    }
+
+    /// Stops the timer as of `end` (clamped to its start and now) -- for
+    /// time that ran on while you were away. A span that comes out empty
+    /// records nothing.
+    pub fn clock_out_at(&mut self, end: DateTime<Local>) {
+        let Some(timer) = self.active_timer.take() else { return };
+        let end = end.min(Local::now());
+        if end <= timer.started_at {
+            return;
+        }
+        if let Some(task) = self.task_mut(timer.task_id) {
+            task.time_entries.push(TimeEntry { start: timer.started_at, end, source: TimeSource::Timer, sent: false });
+            task.updated_at = Local::now();
+        }
+    }
+
+    /// Stops the timer without recording anything.
+    pub fn drop_timer(&mut self) {
+        self.active_timer = None;
+    }
+
+    /// Tasks by when they were last worked on, most recent first; ones
+    /// never worked on aren't included.
+    pub fn recently_worked(&self) -> Vec<(TaskId, DateTime<Local>)> {
+        let mut out: Vec<(TaskId, DateTime<Local>)> =
+            self.tasks.iter().filter(|t| !t.archived).filter_map(|t| t.time_entries.iter().map(|e| e.end).max().map(|at| (t.id, at))).collect();
+        out.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+        out
     }
 
     /// Stops whatever timer is running, if any, recording the elapsed span
@@ -354,6 +438,49 @@ mod tests {
         let mut store = AgendaStore::default();
         let id = store.create_task("Write the plan".to_string(), "".to_string(), Priority::Medium, None);
         (store, id)
+    }
+
+    #[test]
+    fn a_time_entry_is_corrected_in_place_and_a_backwards_one_refused() {
+        let (mut store, id) = store_with_task();
+        let at = |h: u32, m: u32| Local::now().date_naive().and_hms_opt(h, m, 0).unwrap().and_local_timezone(Local).unwrap();
+        assert!(store.log_span(id, at(10, 0), at(11, 30)));
+        assert!(store.log_span(id, at(8, 0), at(9, 0)));
+        assert_eq!(store.task(id).unwrap().time_entries[0].start, at(8, 0), "kept in order");
+
+        assert!(store.edit_time_entry(id, 1, at(10, 15), at(11, 0)));
+        assert_eq!(store.task(id).unwrap().time_entries[1].duration(), chrono::Duration::minutes(45));
+        assert!(!store.edit_time_entry(id, 1, at(11, 0), at(10, 0)));
+        assert!(!store.log_span(id, at(9, 0), at(9, 0)));
+    }
+
+    #[test]
+    fn a_task_is_in_a_project_by_its_category_or_its_issue() {
+        let (mut store, id) = store_with_task();
+        assert!(!store.task(id).unwrap().in_project("fenix", Some("FEN")));
+        store.set_category(id, Some("Fenix".to_string()));
+        assert!(store.task(id).unwrap().in_project("fenix", None), "a category named like the project");
+        let other = store.create_task("x".to_string(), String::new(), Priority::Low, None);
+        let update = crate::RemoteUpdate { snapshot: Default::default(), status: Status::Todo, priority: Priority::Low, mine: None };
+        store.link(other, "FEN-12".to_string(), update);
+        assert!(store.task(other).unwrap().in_project("fenix", Some("FEN")));
+        assert!(!store.task(other).unwrap().in_project("fenix", Some("OPS")));
+    }
+
+    #[test]
+    fn a_clock_left_running_can_be_cut_back_or_dropped() {
+        let (mut store, id) = store_with_task();
+        store.clock_in(id);
+        let started = store.active_timer.as_ref().unwrap().started_at;
+        store.active_timer.as_mut().unwrap().started_at = started - chrono::Duration::hours(3);
+        store.clock_out_at(started - chrono::Duration::hours(2));
+        assert_eq!(store.task(id).unwrap().time_entries[0].duration(), chrono::Duration::hours(1));
+        assert_eq!(store.recently_worked()[0].0, id);
+
+        store.clock_in(id);
+        store.drop_timer();
+        assert!(store.active_timer.is_none());
+        assert_eq!(store.task(id).unwrap().time_entries.len(), 1, "nothing recorded");
     }
 
     #[test]

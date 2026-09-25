@@ -120,17 +120,26 @@ impl App {
             item.health = self.project_health.get(&item.root).map(|(health, _)| *health);
         }
 
-        // Open tasks: the one on the clock first, then in progress, then
-        // by priority -- the agenda has no due dates, so "today" is what's
-        // in hand.
+        // Open tasks the way the agenda's Today puts them: the one on the
+        // clock, then in progress, then what's due within a week, then
+        // what's ready to start. Waiting and blocked ones stay on the page.
         let live = self.agenda_store.active_timer.as_ref().map(|t| (t.task_id, now.signed_duration_since(t.started_at)));
-        let mut open: Vec<&fenix_agenda::Task> =
-            self.agenda_store.tasks.iter().filter(|t| !t.archived && t.status != fenix_agenda::Status::Done).collect();
+        let week = now.date_naive() + chrono::Duration::days(7);
+        let store = &self.agenda_store;
+        let mut open: Vec<&fenix_agenda::Task> = store
+            .tasks
+            .iter()
+            .filter(|t| !t.archived && t.status != fenix_agenda::Status::Done)
+            .filter(|t| t.status == fenix_agenda::Status::InProgress || (t.status == fenix_agenda::Status::Todo && store.is_ready(t.id)) || live.is_some_and(|(id, _)| id == t.id))
+            .collect();
         open.sort_by_key(|t| {
             (
                 live.is_none_or(|(id, _)| id != t.id),
                 t.status != fenix_agenda::Status::InProgress,
+                t.due.filter(|d| *d <= week).is_none(),
+                t.due,
                 std::cmp::Reverse(t.priority),
+                t.order,
             )
         });
         let today = open
@@ -286,7 +295,9 @@ impl App {
             HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
             HomeEntry::Project(root) => self.switch_to_project(root),
             HomeEntry::NewProject => self.cmd_project_new(),
-            HomeEntry::Agenda => self.cmd_agenda_open(),
+            HomeEntry::Agenda => {
+                self.open_agenda_page(Some(crate::agenda_page::Tab::Today));
+            }
             HomeEntry::Todo { path, line, col } => {
                 self.open_file_from_picker(&path);
                 self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col, text: String::new() });

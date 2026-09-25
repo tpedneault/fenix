@@ -155,6 +155,8 @@ pub struct Config {
     /// Tracked users, `(id, display name)` -- same shape/convention as
     /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
     pub jira_users: Vec<(String, String)>,
+    /// Searches saved on the Jira page, `(name, JQL)`.
+    pub jira_queries: Vec<(String, String)>,
     /// What moving a linked agenda task to Blocked means in each Jira
     /// project, keyed by project key -- `blockedN = PROJ|10103|On Hold`
     /// (a real status, matched by its id so a rename can't break it),
@@ -222,6 +224,10 @@ pub struct Config {
     /// minutes (`[agenda] worklog_round = 15`) -- unset means 15, `0`
     /// or `1` sends exact minutes.
     pub agenda_worklog_round: Option<u32>,
+    /// How long without a key press, with the clock running, before Fenix
+    /// asks what to keep (`[agenda] idle_minutes = 60`) -- unset means
+    /// 60, `0` never asks.
+    pub agenda_idle_minutes: Option<u32>,
     /// Where the embedded-development tools live, when they aren't where
     /// Fenix looks on its own (its tools folder, `PATH`, the usual
     /// install locations) -- `[embedded]`'s `arduino_cli`, `clangd` and
@@ -417,6 +423,7 @@ impl Config {
             explorer_bookmarks: Vec::new(),
             agenda_categories: Vec::new(),
             agenda_worklog_round: None,
+            agenda_idle_minutes: None,
             embedded_arduino_cli: None,
             embedded_clangd: None,
             embedded_arduino_language_server: None,
@@ -428,6 +435,7 @@ impl Config {
             jira_token: None,
             jira_projects: Vec::new(),
             jira_users: Vec::new(),
+            jira_queries: Vec::new(),
             jira_blocked: Vec::new(),
             jira_priority_map: Vec::new(),
             jira_sync_minutes: None,

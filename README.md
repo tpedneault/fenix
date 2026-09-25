@@ -814,44 +814,31 @@ for anyone curious to poke around or build on it.
   was. The client is written against a `Forge` trait rather than
   GitLab's JSON, so a second forge would be a second client, not a
   second panel.
-- **JIRA dashboard** (`SPC j ...`): track projects and users by hand
-  (`SPC j p a`/`SPC j u a` to add, `SPC j p d`/`SPC j u d` to remove),
-  then `SPC j j` opens a four-pane workspace -- Projects | Users |
-  Issues | Detail, every pane read-only (like the Docker/Git panels --
-  it's a generated listing, not something you edit; `x` on any pane
-  shows its own key list, the same which-key-style popup Docker/Git
-  already have). Moving the cursor onto a tracked user runs a JQL
-  search for every issue assigned to them, scoped to every currently-
-  tracked project, and lists the results in Issues; moving onto an
-  issue shows its full detail (description, status, assignee, reporter,
-  dates, comments) in Detail -- the description and every comment's
-  body word-wrap onto as many lines as they need (paragraph breaks
-  survive wrapping intact), so a long real-world description reads as
-  actual prose instead of one line running off the pane. `SPC j r`
-  refreshes, `SPC j q` closes the session, `SPC j g` jumps straight to
-  any issue by key (even one not
-  present in the current query). Talks to a self-hosted Jira Server/
-  Data Center instance's REST API via a personal access token (see
-  [Configuration](#configuration)).
-  `SPC j i a` creates a new issue in a tracked project (pick the
-  project, type an issue type and a summary). On Issues or Detail: `t`
-  transitions the issue's status (fetches the real available
-  transitions for its current workflow state and offers a picker --
-  never a fixed list), `T` edits the title, `A` reassigns to one of
-  your tracked users, `P` changes priority (fetched live from the
-  instance's real configured scheme, not a guessed list), `l` logs
-  time (Jira's own duration syntax, e.g. `2h 30m`), `y` copies the
-  issue's browse URL to the clipboard, and `c`/`e` open a real, Vim-
-  navigable scratch buffer -- empty for a new comment, pre-filled with
-  the current text for a description edit -- so you get full editing
-  power for anything longer than one line; `SPC j s` submits it,
-  `SPC j x` discards it. On Issues, `f` opens a multi-select picker
-  over every status seen so far this session (`Tab` toggles a status
-  on/off without closing the picker, `Enter` applies -- an empty
-  selection means "show everything") to hide statuses you don't want
-  cluttering the list (e.g. Done/Closed) -- folded into the JQL query
-  itself, so it stays applied across refreshes; resets when you close
-  and reopen the panel.
+- **Agenda** (`SPC a a`): your own tasks on one page with four tabs --
+  **Today** (what's running, in progress, due, next up, waiting, and
+  what needs you, beside this week's hours), **Board**, **List** and
+  **Time** (a week timesheet). A task has its own page: fields edited in
+  place, a checklist, what it waits on, notes and Jira comments, and its
+  time entries, which can be corrected. `/` searches, `f` filters, `P`
+  keeps to the open project (a task filed under a category named like the
+  project, or an issue in its Jira project). `n` adds a task in one line
+  (`Fix login !high #ui due:fri PROJ-12`); `SPC a h` makes one from the
+  selection or line under the cursor and remembers where it came from.
+  `SPC a t` stops the clock, resumes the last task or switches; when the
+  clock ran while you were away, Fenix asks what to keep. Tasks can be
+  linked to Jira issues and stay in step both ways, due dates included;
+  time on them is sent as worklogs from the Time tab (`W`). `?` on the
+  page lists every key.
+- **Jira** (`SPC j j`): a page of searches -- assigned to you, reported
+  by you, watching, recently updated, each tracked project's current
+  sprint and open issues, each tracked person's, and any saved JQL --
+  with the selected search's issues and a preview. An issue answers the
+  agenda's own keys (`s` status through its real transitions, `p`
+  priority, `A` assign, `u` due, `C` comment, `T` log time, `a`/`t` add
+  to the agenda). `n` creates an issue with the project's real issue
+  types and the fields a type requires. `SPC j /` searches, `SPC j g`
+  opens a key. Talks to a self-hosted Jira Server/Data Center through a
+  personal access token (see [Configuration](#configuration)).
 - **VNC console panes** (`SPC v ...`): configure VM hosts by hand under
   `[vnc]`, then `SPC v v` fuzzy-picks one by name to open (or switch
   back to) a live VNC connection as an ordinary, splittable pane. Each
@@ -1317,14 +1304,18 @@ popup shows what keys continue it.
 | `]` / `[` (any diff) | Next / previous hunk |
 | `Tab` (any diff) | Fold the file under the cursor down to its header |
 | `Enter` (any diff) | Open the real file at the line under the cursor |
-| `SPC j j` | Open (or refocus) the JIRA dashboard |
-| `SPC j p a` / `SPC j p d` | Add / remove a tracked JIRA project |
-| `SPC j u a` / `SPC j u d` | Add / remove a tracked JIRA user |
-| `SPC j i a` | Create a new issue in a tracked project |
-| `SPC j g` | Jump straight to any issue by key |
-| `SPC j r` | Refresh the JIRA dashboard's current issues/detail |
-| `SPC j q` | Close the JIRA dashboard session |
-| `SPC j s` / `SPC j x` | Submit / cancel a pending comment or description edit |
+| `SPC a a` | Open the agenda page where it was left |
+| `SPC a b` / `SPC a l` / `SPC a r` | Open the agenda on its board / list / this week's time (`SPC a k` still opens the board) |
+| `SPC a n` | Add a task |
+| `SPC a h` | Add a task about the selection or line under the cursor |
+| `SPC a /` | Search every task |
+| `SPC a t` / `SPC a T` | Clock: stop, resume or switch / resume the last task |
+| `SPC a i` / `SPC a s` / `SPC a w` | Bring in Jira issues / sync with Jira / review and send worklogs |
+| `SPC j j` | Open the Jira page |
+| `SPC j /` | Search Jira (words, or JQL after `:`) |
+| `SPC j g` | Open an issue by key |
+| `SPC j n` | Create an issue |
+| `SPC j r` | Run the Jira page's search again |
 | `SPC v v` | Open (or switch to) a configured VNC session by name |
 | `SPC v q` | Close the focused VNC session |
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
@@ -1544,49 +1535,49 @@ is already Fenix's global leader-key trigger -- Files uses separate
 `s`/`S` keys instead, the same distinct-keys-per-action convention the
 Docker panel's own `s`/`S`/`R` already established.
 
-### JIRA dashboard (`SPC j j`)
+### Agenda (`SPC a a`) and Jira (`SPC j j`)
 
-Opens its own workspace with four real, titled panes -- Projects and
-Users stacked on the left, Issues (the main pane) and Detail on the
-right. Each is an ordinary Vim-navigable buffer (`j k gg G / n N ...`
-all work) but genuinely read-only, like the Docker/Git panels -- it's
-a generated listing, not something you edit; any edit that slips
-through is silently reverted. Moving the cursor onto a tracked user
-re-runs the query behind Issues; moving onto an issue re-fetches
-Detail. Only these are special, and only on the pane named:
+Both are pages: a key strip at the bottom follows the row under the
+cursor, choices open as a menu beside it, and `?` lists every key. A
+task and an issue answer the same letters.
 
-| Keys | Pane | Action |
-|---|---|---|
-| `1`-`4` | any | Jump to the pane numbered that in its title bar |
-| `t` | Issues, Detail | Transition the issue's status (fetches the real available transitions, offers a picker) |
-| `T` | Issues, Detail | Edit the title |
-| `A` | Issues, Detail | Reassign to one of your tracked users (picker) |
-| `P` | Issues, Detail | Change priority (picker, fetched live from the instance's real configured scheme) |
-| `c` | Issues, Detail | Add a comment (opens a real scratch buffer) |
-| `e` | Issues, Detail | Edit the description (opens a real scratch buffer, pre-filled) |
-| `l` | Issues, Detail | Log time (Jira's own duration syntax, e.g. `2h 30m`) |
-| `y` | Issues, Detail | Copy the issue's browse URL to the clipboard |
-| `f` | Issues | Open the multi-select status filter |
-| `x` | Issues, Detail | Show this pane's available keys |
+| Keys | On a task (row, card or its page) and on an issue |
+|---|---|
+| `s` / `p` / `u` | Status (a linked task or an issue: its real transitions) / priority / due date |
+| `c` | Category (tasks; categories double as projects) |
+| `e` / `E` | Title / description (a compose pane) |
+| `N` / `C` | Private note (tasks) / Jira comment |
+| `t` / `T` | Clock / log time (`1h 30m`, or `9:15-10:40`) |
+| `I` / `A` | Link to an issue or unlink / assign |
+| `a` | On an issue: add it to the agenda (`t` also starts the clock) |
+| `y` / `o` / `r` | Copy the link / open it in the browser / retry a refused change |
+| `x` / `D` `D` | Archive / delete (a task; the issue in Jira is never touched) |
 
-`c`/`e` hand you a genuine, full-featured buffer -- write as much as
-you want, over as many lines as you want, with every ordinary Vim
-motion and edit available. `SPC j s` submits it (posts the comment, or
-saves the new description) and restores Detail to its normal view;
-`SPC j x` discards it the same way, without submitting anything. These
-are leader bindings rather than pane-scoped bare keys on purpose: real
-prose routinely contains the letters `c`/`e`/`t`/`T`/`l`, and a bare-key
-trigger would hijack ordinary typing the moment it did.
+| Keys | Agenda page |
+|---|---|
+| `1`-`4`, `Tab` | Today, Board, List, Time |
+| `Enter` / `Esc` | A task's page / back |
+| `n` | New task: `!high`, `#category`, `due:fri` and a Jira key work in the title |
+| `/` / `f` / `F` / `P` | Search / filters / clear them / only the open project |
+| `H` `L` / `J` `K` | Board: move the card / reorder |
+| `a` / `d` `d` / `h` `l` | Task page: add to the section / delete the row / change a field |
+| `[` `]` / `W` / `y` | Time: week before and after / review and send worklogs / copy the week |
+| `R` | Sync with Jira |
 
-`f` opens a multi-select picker over every status Issues has shown at
-least once this session -- `Tab` toggles the entry under the cursor
-on/off without closing the picker (any already-excluded statuses show
-up pre-checked), `Enter` applies whatever's checked (nothing checked
-means "show everything," the normal way to clear the filter), `Esc`
-cancels without changing anything. The filter is folded directly into
-the JQL query (`AND status NOT IN (...)`), so it stays applied across
-`SPC j r` refreshes; it resets when the panel is closed and reopened,
-and isn't saved.
+| Keys | Jira page |
+|---|---|
+| `h` `l` / `j` `k` | Searches and issues / move |
+| `Enter` / `Esc` | An issue's page (or its task, when it's in the agenda) / back |
+| `a` / `d` `d` / `e` / `S` | Searches: add a project, person or saved search / remove / edit / save a typed one |
+| `b` | On a project's search: what Blocked means in it |
+| `n` | New issue, with the project's issue types and required fields |
+| `/` / `f` | Filter the issues / hide statuses |
+| `R` | Run the search again |
+
+Tracked projects, people and saved searches are the `jira.projects`,
+`jira.users` and `jira.queries` settings, so the settings page edits them
+too. The agenda's categories are `agenda.categories`; `c` on a task
+offers "+ new category".
 
 ### VNC console panes (`SPC v v`)
 
@@ -1891,12 +1882,14 @@ when it's out of date).
 | `jira.base_url` | text | – | Your Jira Server or Data Center's address. |
 | `jira.token` | text (a token) | – | A personal access token for the Jira server. |
 | `jira.sync_minutes` | minutes | 10 | How often linked agenda tasks are brought up to date, in minutes. |
-| `jira.projects` | key = name | – | Jira projects the dashboard tracks. |
-| `jira.users` | id = name | – | People the dashboard tracks. |
+| `jira.projects` | key = name | – | Jira projects the Jira page lists open issues and the current sprint for. |
+| `jira.users` | username = name | – | People the Jira page lists issues assigned to. |
+| `jira.queries` | name = jql | – | Searches saved on the Jira page, by name. |
 | `jira.blocked` | project = meaning | – | Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task. |
 | `jira.priorities` | jira priority = agenda priority | – | How a Jira priority maps onto the agenda's. |
 | `agenda.categories` | a list | – | Categories offered when you file a task. |
 | `agenda.worklog_round` | minutes | 15 | Time logged to Jira is rounded to this many minutes. |
+| `agenda.idle_minutes` | minutes | 60 | With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks. |
 | **Embedded & MIB** | | | |
 | `embedded.arduino_cli` | a path | found on PATH | Where arduino-cli is, when it isn't found by itself. |
 | `embedded.clangd` | a path | found on PATH | Where clangd is, when it isn't found by itself. |

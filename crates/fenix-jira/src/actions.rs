@@ -77,6 +77,11 @@ impl JiraClient {
         self.update_fields(key, serde_json::json!({"description": description}))
     }
 
+    /// Sets the due date (`YYYY-MM-DD`), or clears it with `None`.
+    pub fn update_due(&self, key: &str, due: Option<&str>) -> Result<(), String> {
+        self.update_fields(key, serde_json::json!({"duedate": due}))
+    }
+
     fn update_fields(&self, key: &str, fields: serde_json::Value) -> Result<(), String> {
         let path = format!("/rest/api/2/issue/{key}");
         self.send("PUT", &path, &serde_json::json!({"fields": fields}))?;
