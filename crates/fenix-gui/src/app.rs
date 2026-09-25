@@ -18,6 +18,7 @@ mod git_rebase_page;
 mod git_request_page;
 mod migrate;
 mod settings_host;
+mod snippets_host;
 mod review_host;
 use tool_sessions::LspKey;
 
@@ -6866,6 +6867,13 @@ pub struct App {
     /// The focused project's own settings (`.fenix/settings.toml`),
     /// with the root they're for.
     project_settings: Option<(PathBuf, fenix_config::ProjectSettings)>,
+    /// Your snippets' folder (a throwaway one in tests).
+    snippets_dir: PathBuf,
+    /// The buffer and pane the snippets page was opened from, to try a
+    /// snippet in.
+    snippets_origin: Option<(BufferId, fenix_window::WindowId)>,
+    /// The project the snippets page is showing, while it's in front.
+    snippets_project: Option<PathBuf>,
 
     /// Configured SCOS-2000 MIB roots (`config.mib_roots`), rebuilt
     /// (`persist_mib_roots`) whenever `SPC m a`/`SPC m d` changes the
@@ -7673,6 +7681,9 @@ impl App {
             secret_store,
             settings_stamp: None,
             project_settings: None,
+            snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
+            snippets_origin: None,
+            snippets_project: None,
             mib_roots,
             mib_index: None,
             mib_root_prompt: None,
@@ -9883,9 +9894,11 @@ impl App {
                 // "recover" it on the next start.
                 self.discard_recovery_for(id);
                 self.refresh_gutter_hunks(id);
-                match self.xml_save_problem(&path) {
-                    Some(problem) => self.set_error(format!("saved {} -- {problem}", path.display())),
-                    None => self.set_message(format!("saved {}", path.display())),
+                match (self.xml_save_problem(&path), Self::snippet_save_note(&path)) {
+                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", path.display())),
+                    (None, Some(Ok(note))) => self.set_message(format!("saved -- {note}")),
+                    (None, Some(Err(why))) => self.set_error(format!("saved -- {why}")),
+                    (None, None) => self.set_message(format!("saved {}", path.display())),
                 }
             }
             Err(err) => self.set_error(format!("save failed: {err}")),

@@ -133,6 +133,19 @@ pub(crate) fn run(legacy: &Path, roots: &Roots, store: &dyn SecretStore) -> Repo
             }
         }
     }
+    // Snippets: loose files go into their language's folder.
+    let snippets = roots.snippets();
+    let loose: Vec<PathBuf> = std::fs::read_dir(&snippets)
+        .map(|entries| entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "snippet")).collect())
+        .unwrap_or_default();
+    for file in loose {
+        let scopes = std::fs::read_to_string(&file).ok().and_then(|t| fenix_snippets::Snippet::parse(&t).ok()).map(|s| s.scopes).unwrap_or_default();
+        let to = snippets.join(fenix_snippets::folder_for(&scopes)).join(file.file_name().unwrap_or_default());
+        if !to.exists() {
+            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            step(format!("snippets/{name} → snippets/{}/", fenix_snippets::folder_for(&scopes)), relocate(&file, &to));
+        }
+    }
     if !report.moved.is_empty() || !report.failed.is_empty() {
         write_log(roots, &report);
     }
@@ -175,12 +188,23 @@ mod tests {
         std::fs::write(legacy.join("session.json"), "{}").unwrap();
         std::fs::write(legacy.join("recovery").join("x.fenixsave"), "unsaved").unwrap();
         std::fs::write(legacy.join("tools").join("clangd").join("clangd.exe"), "binary").unwrap();
+        std::fs::create_dir_all(legacy.join("snippets")).unwrap();
+        std::fs::write(legacy.join("snippets").join("proc.snippet"), "# key: proc
+# scope: tcl
+# --
+proc x {} {}
+").unwrap();
+        std::fs::write(legacy.join("snippets").join("todo.snippet"), "# key: todo
+# --
+TODO
+").unwrap();
         let roots = Roots { settings: legacy.clone(), data: legacy.join("data"), local: base.join("Local").join("fenix") };
         let store = MemoryStore::new("test");
 
         let report = run(&legacy, &roots, &store);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
-        assert_eq!(report.moved.len(), 8, "{:?}", report.moved);
+        assert_eq!(report.moved.len(), 10, "{:?}", report.moved);
+        assert!(legacy.join("snippets").join("tcl").join("proc.snippet").is_file() && legacy.join("snippets").join("all").join("todo.snippet").is_file());
         assert!(std::fs::read_to_string(roots.backup().join("MIGRATION.txt")).unwrap().contains("moved   config.ini"));
 
         let config = fenix_config::Config::load_at(roots.settings_file(), roots.local.join("state")).unwrap();

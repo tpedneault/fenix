@@ -19,8 +19,11 @@ pub(super) struct SnippetChoice {
 }
 
 impl App {
+    /// Every snippet that applies here: the built-in ones, yours and the
+    /// focused project's (`snippets_host`).
     pub(super) fn snippet_catalog(&self) -> Catalog {
-        Catalog::load(&fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")))
+        let project = self.project_root.as_ref().map(|r| r.join(".fenix").join("snippets"));
+        self.snippet_layers(project.as_deref())
     }
 
     pub(super) fn snippet_scope(&self) -> String {

@@ -267,3 +267,39 @@ fn metadata_validation_and_bundled_examples() {
             .is_empty());
     }
 }
+
+#[test]
+fn layers_read_language_folders_and_a_closer_layer_wins() {
+    let user = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(user.path().join("tcl")).unwrap();
+    std::fs::write(user.path().join("tcl").join("proc.snippet"), "# name: Mine\n# key: proc\n# scope: tcl\n# --\nproc mine {} {}\n").unwrap();
+    std::fs::write(user.path().join("loose.snippet"), "# key: loose\n# --\nx\n").unwrap();
+    std::fs::create_dir_all(project.path().join("tcl")).unwrap();
+    std::fs::write(project.path().join("tcl").join("proc.snippet"), "# name: Team\n# key: proc\n# scope: tcl\n# --\nproc team {} {}\n").unwrap();
+
+    let catalog = fenix_snippets::Catalog::layers(true, Some(user.path()), Some(project.path()));
+    assert!(catalog.errors.is_empty(), "{:?}", catalog.errors);
+    let proc = catalog.matching("proc", "tcl").unwrap();
+    assert_eq!((proc.name.as_str(), proc.source), ("Team", fenix_snippets::Source::Project));
+    assert!(catalog.matching("loose", "text").is_some(), "loose files still count");
+    let mine = catalog.snippets.iter().find(|s| s.name == "Mine").unwrap();
+    assert_eq!(mine.file.as_deref(), Some(user.path().join("tcl").join("proc.snippet").as_path()));
+    assert!(mine.text.starts_with("# name: Mine"));
+
+    let without = fenix_snippets::Catalog::layers(false, Some(user.path()), None);
+    assert!(without.snippets.iter().all(|s| s.source != fenix_snippets::Source::BuiltIn));
+}
+
+#[test]
+fn a_selection_becomes_a_snippet_that_inserts_it_as_it_was() {
+    let selected = "total = ${price} \\ 2\n";
+    let text = fenix_snippets::file_text("Half", "half", &["python".to_string()], &fenix_snippets::escape_body(selected));
+    assert!(text.starts_with("# name: Half\n# key: half\n# scope: python\n# --\n"), "{text}");
+    let snippet = fenix_snippets::Snippet::parse(&text).unwrap();
+    let rendered = snippet.template.render(&Default::default(), &Default::default(), "");
+    assert_eq!(rendered.text, selected);
+    assert_eq!(snippet.template.field_count(), 0);
+    assert_eq!(fenix_snippets::folder_for(&["*".to_string()]), "all");
+    assert_eq!(fenix_snippets::folder_for(&["tcl".to_string(), "c".to_string()]), "tcl");
+}

@@ -99,6 +99,9 @@ pub struct Config {
     /// complaint, or who just prefers snappier motion.
     pub animations: Option<bool>,
     pub completion_symbols_file: Option<PathBuf>,
+    /// Whether the snippets that come with Fenix are offered; yours and
+    /// a project's always are.
+    pub snippets_builtin: Option<bool>,
     /// Configured language server commands, `(language, command_line)`
     /// -- `[lsp]`'s `serverN = LANGUAGE|COMMAND_LINE`, same numbered-key
     /// list convention `mib_roots`/`jira_projects` already established.
@@ -407,6 +410,7 @@ impl Config {
             tab_width: None,
             animations: None,
             completion_symbols_file: None,
+            snippets_builtin: None,
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),

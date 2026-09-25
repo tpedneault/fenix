@@ -11,6 +11,14 @@ pub struct CommandCtx<'a> {
 
 type CommandFn = fn(&mut CommandCtx);
 
+fn cmd_snippets_open(ctx: &mut CommandCtx) {
+    ctx.app.open_snippets_page(None);
+}
+
+fn cmd_snippets_from_selection(ctx: &mut CommandCtx) {
+    ctx.app.snippet_from_selection();
+}
+
 fn cmd_insert_snippet(ctx: &mut CommandCtx) {
     ctx.app.start_snippet_picker();
 }
@@ -33,6 +41,8 @@ pub struct CommandRegistry {
 impl CommandRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self { commands: Vec::new() };
+        registry.register("snippets.open", "Every snippet: make, edit, copy, delete and try them", cmd_snippets_open);
+        registry.register("snippets.from_selection", "Make a snippet from the last Visual selection", cmd_snippets_from_selection);
         registry.register("insert.snippet", "Choose a snippet for the current document", cmd_insert_snippet);
         registry.register("file.save", "Save the current file", cmd_save);
         registry.register("file.save_force", "Save, overwriting a file that changed on disk (:w!)", cmd_save_force);

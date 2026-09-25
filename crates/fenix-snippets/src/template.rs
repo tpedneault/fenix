@@ -254,6 +254,18 @@ impl Template {
         Ok(Self { parts, defaults })
     }
 
+    /// How many fields Tab moves through.
+    pub fn field_count(&self) -> usize {
+        self.parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Field(id, _) if *id != 0 => Some(*id),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
     pub fn render(
         &self,
         values: &BTreeMap<u32, String>,

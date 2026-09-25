@@ -13,6 +13,7 @@ use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
 use crate::settings_page::{self, SettingsPage};
+use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -37,6 +38,7 @@ pub(super) enum PageModel {
     Rebase(Box<RebasePage>),
     Request(Box<RequestPage>),
     UserSettings(Box<SettingsPage>),
+    Snippets(Box<SnippetsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
 }
@@ -71,6 +73,7 @@ impl PageState {
             PageModel::Log(l) => l.typing(),
             PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
+            PageModel::Snippets(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -100,6 +103,7 @@ impl PageState {
             PageModel::Log(l) => l.type_text(text),
             PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
+            PageModel::Snippets(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -255,6 +259,7 @@ impl App {
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
+            Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
             Some(PageModel::UserSettings(p)) => match &p.scope {
                 settings_page::Scope::You => "*settings*".to_string(),
                 settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
@@ -362,6 +367,7 @@ impl App {
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
             PageModel::Request(r) => git_request::layout(r, cols),
             PageModel::UserSettings(p) => settings_page::layout(p, cols),
+            PageModel::Snippets(p) => snippets_page::layout(p, cols),
             PageModel::Inbox(i) => review_inbox::layout(i, cols),
             PageModel::Review(r) => review_page::layout(r, cols),
         };
@@ -458,6 +464,10 @@ impl App {
             PageModel::UserSettings(p) => {
                 let action = p.key(key);
                 self.user_settings_action(id, action);
+            }
+            PageModel::Snippets(p) => {
+                let action = p.key(key);
+                self.snippets_action(id, action);
             }
             PageModel::Inbox(i) => {
                 let action = i.key(key);
