@@ -384,6 +384,44 @@ pub fn setting(key: &str) -> Option<&'static Setting> {
     settings().iter().find(|s| s.key == key)
 }
 
+/// Every setting as a Markdown table, by category -- the README's copy,
+/// which a test keeps in step with this list.
+pub fn markdown_table() -> String {
+    let mut out = String::from("| Setting | Takes | Default | What it does |
+|---|---|---|---|
+");
+    for category in Category::ALL {
+        out.push_str(&format!("| **{}** | | | |
+", category.label()));
+        for s in settings().iter().filter(|s| s.category == category) {
+            let takes = match s.kind {
+                Kind::Bool => "true / false".to_string(),
+                Kind::Int { min, max } => format!("{min}–{max}"),
+                Kind::Float { min, max } => format!("{min}–{max}"),
+                Kind::Minutes => "minutes".to_string(),
+                Kind::Text | Kind::Font | Kind::Theme => "text".to_string(),
+                Kind::Path => "a path".to_string(),
+                Kind::Choice(c) => c.join(" / "),
+                Kind::List => "a list".to_string(),
+                Kind::Map { key, value, .. } => format!("{} = {}", key.to_lowercase(), value.to_lowercase()),
+                Kind::Records(fields) => format!("[[tables]] of {}", fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")),
+                Kind::Secret(_) => "credential store".to_string(),
+            };
+            let mut help = s.help.replace('|', r"\|");
+            if s.project {
+                help.push_str(" *A project can set it.*");
+            }
+            if s.restart {
+                help.push_str(" *Needs a restart.*");
+            }
+            let key = if matches!(s.kind, Kind::Secret(_)) { format!("{} (not in the file)", s.label) } else { format!("`{}`", s.key) };
+            out.push_str(&format!("| {key} | {takes} | {} | {help} |
+", if s.default.is_empty() { "–" } else { s.default }));
+        }
+    }
+    out
+}
+
 // -- Values ----------------------------------------------------------------
 
 impl Value {
@@ -602,6 +640,22 @@ mod tests {
         assert!(layout.kind.parse("tabs").unwrap_err().contains("page, panes"));
         let hosts = setting("vnc.hosts").unwrap();
         assert!(hosts.kind.check(&Value::Records(vec![vec!["a".into(), "h".into(), "70000".into()]])).unwrap_err().contains("Port"));
+    }
+
+    /// The README lists every setting; this is what keeps it true. When
+    /// it fails, paste `markdown_table()` over the README's table (run
+    /// `cargo test -p fenix-config print_the_settings_table -- --ignored
+    /// --nocapture`).
+    #[test]
+    fn the_readme_lists_every_setting_as_the_schema_declares_it() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap().replace('\r', "");
+        assert!(readme.contains(&markdown_table()), "README.md's settings table is out of date");
+    }
+
+    #[test]
+    #[ignore]
+    fn print_the_settings_table() {
+        print!("{}", markdown_table());
     }
 
     #[test]
