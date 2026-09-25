@@ -17,6 +17,7 @@ mod git_log_page;
 mod git_rebase_page;
 mod git_request_page;
 mod migrate;
+mod settings_host;
 mod review_host;
 use tool_sessions::LspKey;
 
@@ -6859,6 +6860,12 @@ pub struct App {
     /// Where API tokens are kept: the credential store, or (in tests) a
     /// store that lasts only the run.
     secret_store: Box<dyn fenix_config::SecretStore>,
+    /// When `settings.toml` last changed, as the disk poll last saw it:
+    /// a change it didn't make is read again.
+    settings_stamp: Option<std::time::SystemTime>,
+    /// The focused project's own settings (`.fenix/settings.toml`),
+    /// with the root they're for.
+    project_settings: Option<(PathBuf, fenix_config::ProjectSettings)>,
 
     /// Configured SCOS-2000 MIB roots (`config.mib_roots`), rebuilt
     /// (`persist_mib_roots`) whenever `SPC m a`/`SPC m d` changes the
@@ -7664,6 +7671,8 @@ impl App {
             theme,
             config,
             secret_store,
+            settings_stamp: None,
+            project_settings: None,
             mib_roots,
             mib_index: None,
             mib_root_prompt: None,
@@ -8356,6 +8365,7 @@ impl App {
 
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        self.refresh_project_settings(false);
         self.refresh_embedded_indicator();
         self.sync_lsp_for_focused_buffer();
     }
@@ -16865,6 +16875,8 @@ impl App {
         self.tick_home();
         self.refresh_python_environments();
         self.refresh_git_pages(true);
+        self.reload_settings_if_changed();
+        self.refresh_project_settings(true);
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -25273,7 +25285,7 @@ impl App {
     fn tab_stops_for(&self, id: BufferId) -> TabStops {
         match self.table_views.get(&id) {
             Some(view) => TabStops::Custom(view.stops.clone()),
-            None => TabStops::Fixed(self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH)),
+            None => TabStops::Fixed(self.effective_tab_width()),
         }
     }
 

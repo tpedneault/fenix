@@ -152,6 +152,7 @@ impl CommandRegistry {
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
+        registry.register("settings.open", "Every setting, on one page: search, change, reset", cmd_settings_open);
         registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
         registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
@@ -1041,6 +1042,10 @@ fn cmd_git_close_view(ctx: &mut CommandCtx) {
 
 fn cmd_git_pull_request(ctx: &mut CommandCtx) {
     ctx.app.open_new_request();
+}
+
+fn cmd_settings_open(ctx: &mut CommandCtx) {
+    ctx.app.open_settings_page(crate::settings_page::Scope::You, None);
 }
 
 fn cmd_git_log(ctx: &mut CommandCtx) {

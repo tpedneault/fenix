@@ -12,6 +12,7 @@ use super::*;
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
+use crate::settings_page::{self, SettingsPage};
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -35,6 +36,7 @@ pub(super) enum PageModel {
     Log(Box<GitLog>),
     Rebase(Box<RebasePage>),
     Request(Box<RequestPage>),
+    UserSettings(Box<SettingsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
 }
@@ -68,6 +70,7 @@ impl PageState {
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Request(r) => r.editing.is_some(),
+            PageModel::UserSettings(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -79,6 +82,7 @@ impl PageState {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Settings(s) => s.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
+                PageModel::UserSettings(p) => p.claims_space(),
                 _ => false,
             }
     }
@@ -95,6 +99,7 @@ impl PageState {
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
             PageModel::Request(r) => r.paste(text),
+            PageModel::UserSettings(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -135,6 +140,8 @@ pub enum PageEvent {
     RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
     /// The status page's branch's request.
     GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
+    /// A line for the settings page: a token's test came back.
+    SettingsNote { buffer: BufferId, note: (String, bool) },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -248,6 +255,10 @@ impl App {
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
+            Some(PageModel::UserSettings(p)) => match &p.scope {
+                settings_page::Scope::You => "*settings*".to_string(),
+                settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
+            },
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
         }
@@ -350,6 +361,7 @@ impl App {
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
             PageModel::Request(r) => git_request::layout(r, cols),
+            PageModel::UserSettings(p) => settings_page::layout(p, cols),
             PageModel::Inbox(i) => review_inbox::layout(i, cols),
             PageModel::Review(r) => review_page::layout(r, cols),
         };
@@ -443,6 +455,10 @@ impl App {
                 let action = r.key(key);
                 self.request_action(id, action);
             }
+            PageModel::UserSettings(p) => {
+                let action = p.key(key);
+                self.user_settings_action(id, action);
+            }
             PageModel::Inbox(i) => {
                 let action = i.key(key);
                 self.inbox_action(id, action);
@@ -469,6 +485,7 @@ impl App {
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            event @ PageEvent::SettingsNote { .. } => self.apply_settings_event(event),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
@@ -998,7 +1015,10 @@ impl App {
                 self.cmd_project_new();
             }
             Action::Doctor(root) => self.open_doctor(root),
-            Action::Settings(root) => self.open_settings(root),
+            Action::Settings(root) => {
+                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+                self.open_settings_page(crate::settings_page::Scope::Project { root, name }, None);
+            }
             Action::TogglePin(root) => {
                 let pinned = !self.project_meta.is_pinned(&root);
                 self.project_meta.set_pinned(&root, pinned);
@@ -1166,9 +1186,11 @@ impl App {
     // --------------------------------------------------------------
 
     /// `SPC p ,`: the focused buffer's project's settings.
+    /// `SPC p ,`: the focused project's settings page, which leads to
+    /// its own page (kind, group, tasks, launch) too.
     pub(crate) fn cmd_project_settings(&mut self) {
         match self.project_root.clone() {
-            Some(root) => self.open_settings(root),
+            Some(_) => self.open_project_settings_page(),
             None => self.set_error("not in a project -- SPC p p, then , on one"),
         }
     }

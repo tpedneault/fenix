@@ -231,7 +231,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('p')], "projects", "project.hub");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('P')], "quick switch", "project.switch_project");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('h')], "doctor", "project.doctor");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char(',')], "settings", "project.settings");
+        t.insert(&[spc, KeyPress::char('p'), KeyPress::char(',')], "this project's settings", "project.settings");
+        t.insert(&[spc, KeyPress::char(',')], "settings", "settings.open");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('c')], "new project", "project.new");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
         t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");

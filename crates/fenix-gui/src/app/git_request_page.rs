@@ -13,6 +13,11 @@ use crate::git_status::{overall, Job, RequestLine};
 /// `.fenix/project.ini` `[git] reviewers` when it names anyone, else
 /// `[git] reviewers` from the config.
 fn default_reviewers(root: &Path, configured: &[String]) -> Vec<String> {
+    if let Some(fenix_config::Value::List(names)) = fenix_config::ProjectSettings::load(root).get("git.reviewers") {
+        if !names.is_empty() {
+            return names.clone();
+        }
+    }
     match fenix_project::meta::reviewers(root).map(|v| fenix_config::names(&v)).filter(|n| !n.is_empty()) {
         Some(names) => names,
         None => configured.to_vec(),
@@ -56,7 +61,7 @@ impl App {
                 return;
             }
         };
-        let Some(base_ref) = fenix_git::resolve_base(&root, self.config.git_base_branch.as_deref()) else {
+        let Some(base_ref) = fenix_git::resolve_base(&root, self.base_branch_for(&root).as_deref()) else {
             self.set_error("no base branch to open it against -- set one in SPC , (Git)");
             return;
         };

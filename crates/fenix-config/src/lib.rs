@@ -18,6 +18,7 @@
 
 mod ini;
 mod legacy;
+mod project;
 pub mod schema;
 pub mod secrets;
 
@@ -29,6 +30,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
+pub use project::ProjectSettings;
 pub use secrets::{MemoryStore, Secret, SecretStore};
 
 /// What "Blocked" means for one Jira project -- see `Config::jira_blocked`.
@@ -337,7 +339,7 @@ impl std::fmt::Display for Problem {
 }
 
 /// Walks `key`'s dotted path in `doc`.
-fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
+pub(crate) fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
     let mut item = doc.as_item();
     for part in key.split('.') {
         item = item.as_table_like()?.get(part)?;
@@ -347,7 +349,7 @@ fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edi
 
 /// Sets (or, with `None`, removes) `key`'s dotted path in `doc`, making
 /// the tables on the way as it goes.
-fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_edit::Item>) {
+pub(crate) fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_edit::Item>) {
     let parts: Vec<&str> = key.split('.').collect();
     let (last, parents) = parts.split_last().expect("a key");
     let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
@@ -375,7 +377,7 @@ fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<toml_edit::It
 }
 
 /// The 1-based line `offset` falls on in `text`.
-fn line_of(text: &str, offset: usize) -> usize {
+pub(crate) fn line_of(text: &str, offset: usize) -> usize {
     text[..offset.min(text.len())].matches('\n').count() + 1
 }
 

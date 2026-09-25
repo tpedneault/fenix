@@ -309,7 +309,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("editor.watch_files", Files, "Watch files on disk", Kind::Bool, "Notice when an open file changes on disk, and reload it when you haven't edited it.", field!(watch_files, bool_get, bool_set)).default("on"),
         // Completion & LSP
         s("completion.symbols_file", Completion, "Extra words file", Kind::Path, "A text file of words, one per line, offered by completion everywhere.", field!(completion_symbols_file, path_get, path_set)),
-        s("lsp.servers", Completion, "Language servers", Kind::Map { key: "Language", value: "Command", paths: false }, "A language server to run for a language, as the command line that starts it.", field!(lsp_servers, map_get, map_set)).project(),
+        s("lsp.servers", Completion, "Language servers", Kind::Map { key: "Language", value: "Command", paths: false }, "A language server to run for a language, as the command line that starts it.", field!(lsp_servers, map_get, map_set)),
         // Git
         s("git.base_branch", Git, "Base branch", Kind::Text, "The branch pull requests and comparisons start from.", field!(git_base_branch, text_get, text_set)).default("main or master").project(),
         s("git.reviewers", Git, "Reviewers", Kind::List, "Usernames asked to review a new pull request.", (|c: &Config| list_get(&c.git_reviewers), |c: &mut Config, v| {
