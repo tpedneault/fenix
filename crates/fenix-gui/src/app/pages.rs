@@ -9,6 +9,12 @@
 
 use super::projects::kind_color;
 use super::*;
+use crate::git_log::{self, GitLog};
+use crate::git_rebase::{self, RebasePage};
+use crate::git_request::{self, RequestPage};
+use crate::review_inbox::{self, Inbox};
+use crate::review_page::{self, ReviewPage};
+use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
 use crate::project_hub::{self, Hub, HubProject};
@@ -25,15 +31,21 @@ pub(super) enum PageModel {
     Hub(Hub),
     Doctor(DoctorPage),
     Settings(Settings),
+    Git(Box<GitStatus>),
+    Log(Box<GitLog>),
+    Rebase(Box<RebasePage>),
+    Request(Box<RequestPage>),
+    Inbox(Box<Inbox>),
+    Review(Box<ReviewPage>),
 }
 
 pub(super) struct PageState {
     pub(super) model: PageModel,
-    page: Page,
+    pub(super) page: Page,
     /// The pane width `page` was laid out for, and whether the model has
     /// changed since.
     cols: usize,
-    stale: bool,
+    pub(super) stale: bool,
     /// Bumped for every background job started, so what a superseded job
     /// sends (a step since retried, a check since restarted) is dropped.
     generation: u64,
@@ -53,6 +65,10 @@ impl PageState {
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
             PageModel::Doctor(_) => false,
             PageModel::Settings(s) => s.editing.is_some(),
+            PageModel::Git(g) => g.typing(),
+            PageModel::Log(l) => l.typing(),
+            PageModel::Request(r) => r.editing.is_some(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
 
@@ -62,6 +78,7 @@ impl PageState {
             || match &self.model {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Settings(s) => s.claims_space(),
+                PageModel::Request(r) => r.field == git_request::Field::Draft,
                 _ => false,
             }
     }
@@ -75,6 +92,10 @@ impl PageState {
                 target.extend(text.chars().filter(|c| !c.is_control()));
             }
             PageModel::Doctor(_) => {}
+            PageModel::Git(g) => g.type_text(text),
+            PageModel::Log(l) => l.type_text(text),
+            PageModel::Request(r) => r.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
     }
@@ -88,9 +109,35 @@ pub enum PageEvent {
     Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
     HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
     Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
+    GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
+    GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
+    GitDone { buffer: BufferId, label: String, result: Result<String, String> },
+    /// A question for the page to ask -- an undo's preview.
+    GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
+    /// A file's blame, read off the UI thread.
+    Blame { path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String> },
+    GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
+    GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
+    GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
+    /// Where the focused file's repository stands, for the modeline.
+    ChromeGit(Box<super::git_editor::ChromeGit>),
+    /// A background fetch finished.
+    AutoFetched { ok: bool },
+    InboxData { buffer: BufferId, result: Result<Vec<review_inbox::Entry>, String> },
+    ReviewData { buffer: BufferId, result: Result<Box<review_page::ReviewData>, String> },
+    ReviewSince { buffer: BufferId, result: Result<Vec<review_page::FileView>, String> },
+    ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
+    ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
+    /// The request already open for the new request page's branch.
+    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String> },
+    /// The new request was opened -- with a word about what didn't go
+    /// on it -- or wasn't.
+    RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
+    /// The status page's branch's request.
+    GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
 }
 
-type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
+pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
 
 /// Sends every line `stream` prints. Progress bars rewrite a line with
 /// `\r`; only the last state of each is worth a line in the log.
@@ -197,6 +244,12 @@ impl App {
             Some(PageModel::Hub(_)) => "*projects*".to_string(),
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
             Some(PageModel::Settings(s)) => format!("*settings: {}*", s.name),
+            Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
+            Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
+            Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
+            Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
+            Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
         }
     }
 
@@ -206,19 +259,19 @@ impl App {
 
     /// The open page of one kind, if there is one -- the wizard, the hub
     /// and the settings page each exist at most once.
-    fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
+    pub(super) fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
         self.pages.iter().find(|(_, s)| is(&s.model)).map(|(id, _)| *id)
     }
 
     /// Opens `model` as a page in the focused pane.
-    fn open_page(&mut self, model: PageModel) -> BufferId {
+    pub(super) fn open_page(&mut self, model: PageModel) -> BufferId {
         let buffer = self.buffers.open_page("");
         self.pages.insert(buffer, PageState::new(model));
         self.show_page(buffer);
         buffer
     }
 
-    fn show_page(&mut self, buffer: BufferId) {
+    pub(super) fn show_page(&mut self, buffer: BufferId) {
         self.open_buffer_in_focused_pane(buffer);
         self.main_view = MainView::Editor;
         self.refresh_project_root();
@@ -241,7 +294,7 @@ impl App {
     /// Runs `job` off the UI thread, handing it a way to send events back
     /// -- or, with no event loop (tests), runs it here and applies what
     /// it sent.
-    fn page_spawn(&mut self, job: impl FnOnce(Sender) + Send + 'static) {
+    pub(super) fn page_spawn(&mut self, job: impl FnOnce(Sender) + Send + 'static) {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 let proxy = Mutex::new(proxy);
@@ -293,6 +346,12 @@ impl App {
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
             PageModel::Settings(s) => project_settings::layout(s, cols),
+            PageModel::Git(g) => git_status::layout(g, cols),
+            PageModel::Log(l) => git_log::layout(l, cols),
+            PageModel::Rebase(r) => git_rebase::layout(r, cols),
+            PageModel::Request(r) => git_request::layout(r, cols),
+            PageModel::Inbox(i) => review_inbox::layout(i, cols),
+            PageModel::Review(r) => review_page::layout(r, cols),
         };
         state.cols = cols;
         state.stale = false;
@@ -368,6 +427,30 @@ impl App {
                 let action = s.key(key);
                 self.settings_action(id, action);
             }
+            PageModel::Git(g) => {
+                let action = g.key(key);
+                self.git_page_action(id, action);
+            }
+            PageModel::Log(l) => {
+                let action = l.key(key);
+                self.git_log_action(id, action);
+            }
+            PageModel::Rebase(r) => {
+                let action = r.key(key);
+                self.git_rebase_action(id, action);
+            }
+            PageModel::Request(r) => {
+                let action = r.key(key);
+                self.request_action(id, action);
+            }
+            PageModel::Inbox(i) => {
+                let action = i.key(key);
+                self.inbox_action(id, action);
+            }
+            PageModel::Review(r) => {
+                let action = r.key(key);
+                self.review_action(id, action);
+            }
         }
         self.wake_caret();
         true
@@ -376,6 +459,25 @@ impl App {
     /// A background job's news for its page.
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
+            PageEvent::GitDone { buffer, .. } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Log(_))) => self.apply_git_log_event(event),
+            PageEvent::GitDone { buffer, label, result } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Rebase(_))) => {
+                self.apply_git_rebase_done(buffer, label, result)
+            }
+            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
+                self.apply_git_page_event(event)
+            }
+            event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
+            PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
+            PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
+            event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
+                self.apply_review_event(event)
+            }
+            PageEvent::AutoFetched { ok } => {
+                if ok {
+                    self.refresh_git_pages(false);
+                }
+            }
             PageEvent::Output { buffer, generation, line } => {
                 let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
                 state.stale = true;

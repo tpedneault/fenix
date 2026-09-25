@@ -417,14 +417,14 @@ pub fn render_status(
     // finish or abandon it.
     if let Some(op) = in_progress {
         b.push(
-            &format!("  {}  --  SPC g R continue, SPC g A abort", op.label()),
+            &format!("  {}  --  SPC g x c continue, SPC g x a abort", op.label()),
             Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }),
         );
     }
     if conflicts > 0 {
         let (badge, color) = (format!("  [{conflicts}] "), GitBadgeColor::Bad);
         b.push(
-            &format!("{badge}conflicted file{}  --  SPC g x to resolve", if conflicts == 1 { "" } else { "s" }),
+            &format!("{badge}conflicted file{}  --  SPC g x x to resolve", if conflicts == 1 { "" } else { "s" }),
             Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: None, badge: Some((badge.chars().count(), color)) }),
         );
         // Which branch each side of the markers actually is. During a
@@ -854,7 +854,7 @@ mod tests {
         assert!(!one.text.contains("conflicted files"), "got:
 {}", one.text);
         // And the row says where to go do something about it.
-        assert!(one.text.contains("SPC g x to resolve"), "got:
+        assert!(one.text.contains("SPC g x x to resolve"), "got:
 {}", one.text);
     }
 

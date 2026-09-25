@@ -11,6 +11,12 @@ mod local_leader;
 mod xml;
 mod projects;
 mod pages;
+mod git_page;
+mod git_editor;
+mod git_log_page;
+mod git_rebase_page;
+mod git_request_page;
+mod review_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -636,6 +642,20 @@ enum ComposePurpose {
     /// single-line prompt means no body, no bullet list, and no way to
     /// see what you have written.
     CommitMessage { repo_root: PathBuf },
+    /// A commit, amend or reword from the Git status page -- the mode
+    /// and flags its commit menu chose.
+    GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
+    /// A reword's new message, for the rebase page `page`.
+    RebaseMessage { page: BufferId, hash: String },
+    /// A comment for the review on page `page`, held until it's
+    /// submitted -- a new one, or pending comment `index` edited.
+    ReviewPending { page: BufferId, pending: Box<crate::review_store::Pending>, index: Option<usize> },
+    /// A reply to a review thread, sent straight away.
+    ReviewReply { page: BufferId, thread: String },
+    /// The summary a review is submitted with.
+    ReviewSummary { page: BufferId },
+    /// The description of the request on new request page `page`.
+    RequestDescription { page: BufferId },
     /// An agenda task's description (`E`), seeded with the current one --
     /// saved locally and, on a linked task, sent to Jira.
     TaskDescription { task: TaskId },
@@ -661,6 +681,16 @@ impl ComposePurpose {
                 (format!("Comment on !{number} {}:{line}", position.new_path), "send")
             }
             ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
+            ComposePurpose::GitCommit { compose, .. } => match compose {
+                crate::git_status::Compose::New(_) => ("Commit message".to_string(), "commit"),
+                crate::git_status::Compose::Amend(_) => ("Amend the last commit".to_string(), "amend"),
+                crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
+            },
+            ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
+            ComposePurpose::ReviewPending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
+            ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
+            ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
+            ComposePurpose::RequestDescription { .. } => ("Description".to_string(), "keep"),
             ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
             ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
             ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
@@ -1769,7 +1799,7 @@ struct GitSession {
     /// real Lazygit-accurate behavior, not a simplification).
     status: Option<fenix_git::RepoStatus>,
     /// A suspended rebase/merge/cherry-pick, if the repo is in one --
-    /// what the Status pane's banner reports and what `SPC g R`/`SPC g A`
+    /// what the Status pane's banner reports and what `SPC g x c`/`SPC g x a`
     /// act on.
     in_progress: Option<fenix_git::InProgress>,
     /// Which branch each side of a conflict's markers actually is,
@@ -1896,10 +1926,15 @@ enum GitConfirmAction {
     DiscardDir { path: String },
     DeleteBranch { name: String },
     DropStash { index: usize },
-    /// Rewrite a published branch (`SPC g F`). Always
+    /// Rewrite a published branch (`git.force_push`). Always
     /// `--force-with-lease`, but still confirmed: it changes history
     /// someone else may already have.
     ForcePush,
+    /// Throw away the hunk under the cursor in a file buffer (`SPC g d`),
+    /// by the file line it covers.
+    DiscardEditorHunk { buffer: BufferId, line: usize },
+    /// Local changes stop a branch switch: stash them, then switch.
+    SwitchWithStash { branch: String },
     /// Throw away one hunk of the working tree (`d` in the diff pane).
     /// Carries the buffer and anchor rather than a rebuilt patch so the
     /// patch is regenerated from the model at confirm time -- one less
@@ -2627,6 +2662,9 @@ enum ActivePicker {
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
     MergeFrom(fenix_picker::PickerState<String>),
+    /// The Git status page's `b b`: a branch to switch to -- local ones
+    /// first, then remote branches with no local counterpart.
+    SwitchBranch(fenix_picker::PickerState<String>),
     /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
     /// subsystem, confirming opens its detail view (`mib_show_
     /// telecommand`). Same candidate list as `MibTelecommandInsert`,
@@ -2779,6 +2817,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::CompareBase(s) => s.push_char(c),
         ActivePicker::RebaseOnto(s) => s.push_char(c),
         ActivePicker::MergeFrom(s) => s.push_char(c),
+        ActivePicker::SwitchBranch(s) => s.push_char(c),
         ActivePicker::AgendaStatus(s) => s.push_char(c),
         ActivePicker::AgendaPriority(s) => s.push_char(c),
         ActivePicker::AgendaCategory(s) => s.push_char(c),
@@ -2829,6 +2868,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.backspace(),
         ActivePicker::RebaseOnto(s) => s.backspace(),
         ActivePicker::MergeFrom(s) => s.backspace(),
+        ActivePicker::SwitchBranch(s) => s.backspace(),
         ActivePicker::AgendaStatus(s) => s.backspace(),
         ActivePicker::AgendaPriority(s) => s.backspace(),
         ActivePicker::AgendaCategory(s) => s.backspace(),
@@ -2879,6 +2919,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::CompareBase(s) => s.move_selection(delta),
         ActivePicker::RebaseOnto(s) => s.move_selection(delta),
         ActivePicker::MergeFrom(s) => s.move_selection(delta),
+        ActivePicker::SwitchBranch(s) => s.move_selection(delta),
         ActivePicker::AgendaStatus(s) => s.move_selection(delta),
         ActivePicker::AgendaPriority(s) => s.move_selection(delta),
         ActivePicker::AgendaCategory(s) => s.move_selection(delta),
@@ -2932,6 +2973,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::CompareBase(s) => s.toggle_mark(),
         ActivePicker::RebaseOnto(s) => s.toggle_mark(),
         ActivePicker::MergeFrom(s) => s.toggle_mark(),
+        ActivePicker::SwitchBranch(s) => s.toggle_mark(),
         ActivePicker::AgendaStatus(s) => s.toggle_mark(),
         ActivePicker::AgendaPriority(s) => s.toggle_mark(),
         ActivePicker::AgendaCategory(s) => s.toggle_mark(),
@@ -2982,6 +3024,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::CompareBase(s) => s.query(),
         ActivePicker::RebaseOnto(s) => s.query(),
         ActivePicker::MergeFrom(s) => s.query(),
+        ActivePicker::SwitchBranch(s) => s.query(),
         ActivePicker::AgendaStatus(s) => s.query(),
         ActivePicker::AgendaPriority(s) => s.query(),
         ActivePicker::AgendaCategory(s) => s.query(),
@@ -3032,6 +3075,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.len(),
         ActivePicker::RebaseOnto(s) => s.len(),
         ActivePicker::MergeFrom(s) => s.len(),
+        ActivePicker::SwitchBranch(s) => s.len(),
         ActivePicker::AgendaStatus(s) => s.len(),
         ActivePicker::AgendaPriority(s) => s.len(),
         ActivePicker::AgendaCategory(s) => s.len(),
@@ -3082,6 +3126,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::CompareBase(s) => s.selected_row(),
         ActivePicker::RebaseOnto(s) => s.selected_row(),
         ActivePicker::MergeFrom(s) => s.selected_row(),
+        ActivePicker::SwitchBranch(s) => s.selected_row(),
         ActivePicker::AgendaStatus(s) => s.selected_row(),
         ActivePicker::AgendaPriority(s) => s.selected_row(),
         ActivePicker::AgendaCategory(s) => s.selected_row(),
@@ -3148,6 +3193,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SwitchBranch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaStatus(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaPriority(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaCategory(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -3462,6 +3508,54 @@ fn ease_out_cubic(t: f32) -> f32 {
 /// coordinates -- shared by the real caret rect and the completion
 /// popup's `BelowPoint` anchor, which both need to land on exactly the
 /// same spot.
+/// Where the focused page is drawn, for placing its popup.
+#[derive(Debug, Clone, Copy)]
+struct PagePopupAt {
+    buffer: BufferId,
+    pane: fenix_window::Rect,
+    /// The first page line in view, and how far into it the pane has
+    /// scrolled.
+    first_line: usize,
+    frac: f32,
+    gutter_px: f32,
+}
+
+/// A `width` x `height` popup beside page line `line`: under it with its
+/// text starting at column `col`, or over it when there's no room below
+/// `bottom` -- kept inside the pane and the window. `None` while the line
+/// is scrolled out of view.
+#[allow(clippy::too_many_arguments)]
+fn popup_beside_row(
+    at: PagePopupAt,
+    line: usize,
+    col: usize,
+    width: f32,
+    height: f32,
+    bottom: f32,
+    window_width: f32,
+    char_width: f32,
+    line_height: f32,
+) -> Option<fenix_window::Rect> {
+    let row = line.checked_sub(at.first_line)?;
+    let (x, top) = caret_pixel_pos(at.pane, row, col, at.gutter_px, at.frac, char_width, line_height);
+    if top >= bottom {
+        return None;
+    }
+    const GAP: f32 = 2.0;
+    let below = top + line_height + GAP;
+    let y = if below + height <= bottom {
+        below
+    } else if top - GAP - height >= at.pane.y {
+        top - GAP - height
+    } else {
+        // Room on neither side: as low as it fits.
+        (bottom - height).max(at.pane.y)
+    };
+    let right = (at.pane.x + at.pane.w).min(window_width);
+    let x = (x - text::PAD_LEFT).min(right - width).max(at.pane.x.max(0.0));
+    Some(fenix_window::Rect { x, y, w: width, h: height })
+}
+
 fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: f32, content_frac: f32, char_width: f32, line_height: f32) -> (f32, f32) {
     let content_x = rect.x + text::PAD_LEFT + gutter_px;
     let x = content_x + col as f32 * char_width;
@@ -4133,8 +4227,10 @@ fn forge_thread_annotations(discussions: &[fenix_forge::Discussion]) -> Vec<diff
 /// has to succeed: an instance without approval rules answers 404 on
 /// `/approvals`, and a diff that's too large to return shouldn't take
 /// the description and branch names down with it.
-fn fetch_forge_detail(client: &fenix_gitlab::GitLab, number: u64) -> Result<ForgeDetail, String> {
-    use fenix_forge::Forge;
+/// A forge client, GitHub's or GitLab's.
+pub(crate) type ForgeClient = Box<dyn fenix_forge::Forge + Send + Sync>;
+
+fn fetch_forge_detail(client: &dyn fenix_forge::Forge, number: u64) -> Result<ForgeDetail, String> {
     let request = client.merge_request(number)?;
     let approvals = client.approvals(number).ok();
     let (files, error) = match client.changed_files(number) {
@@ -6329,6 +6425,15 @@ pub struct App {
     /// not any particular view of it, same reasoning `BufferList`'s own
     /// dirty-tracking is buffer-scoped rather than per-pane.
     gutter_hunks: HashMap<BufferId, Vec<GutterMark>>,
+    /// The diff each buffer's gutter marks came from, with its
+    /// repository's root -- what `]h`, `SPC g a`/`d`/`i` act on.
+    gutter_diffs: HashMap<BufferId, (PathBuf, fenix_diff::FileDiff)>,
+    /// Blame shown beside a file (`SPC g B`), by path.
+    blames: HashMap<PathBuf, git_editor::Blame>,
+    /// Where the focused file's repository stands, for the modeline.
+    chrome_git: Option<git_editor::ChromeGit>,
+    /// When `[git] auto_fetch` last tried each repository.
+    fetch_attempts: HashMap<PathBuf, Instant>,
     /// Collapsed structural scope headers, keyed by buffer. The rendered
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
@@ -7423,6 +7528,10 @@ impl App {
             docker_menu_open: false,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
+            gutter_diffs: HashMap::new(),
+            blames: HashMap::new(),
+            chrome_git: None,
+            fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
             docker_session: None,
             task_session: None,
@@ -8081,16 +8190,18 @@ impl App {
     /// already no-op there.
     fn refresh_gutter_hunks(&mut self, buffer_id: BufferId) {
         match self.compute_gutter_hunks(buffer_id) {
-            Some(marks) if !marks.is_empty() => {
-                self.gutter_hunks.insert(buffer_id, marks);
+            Some((root, file)) if !file.hunks.is_empty() => {
+                self.gutter_hunks.insert(buffer_id, gutter_marks_from_hunks(&file.hunks));
+                self.gutter_diffs.insert(buffer_id, (root, file));
             }
             _ => {
                 self.gutter_hunks.remove(&buffer_id);
+                self.gutter_diffs.remove(&buffer_id);
             }
         }
     }
 
-    fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<Vec<GutterMark>> {
+    fn compute_gutter_hunks(&self, buffer_id: BufferId) -> Option<(PathBuf, fenix_diff::FileDiff)> {
         let path = self.buffers.get(buffer_id)?.buffer.path()?.to_path_buf();
         // Resolved from `path` itself, not `self.project_root` -- that
         // field tracks a single global "current project" derived from
@@ -8100,10 +8211,14 @@ impl App {
         // `None` while one of those is focused). Every open buffer's own
         // gutter marks need its own file's real repo root, independent of
         // what else happens to be focused when this runs.
-        let repo_root = fenix_project::find_project_root(&path)?;
-        let diff_text = fenix_git::file_diff(&repo_root, &path.to_string_lossy(), false).ok()?;
+        // The repository's own root, not the project's: a patch built
+        // from this diff names paths from the top of the repository,
+        // which is where `git apply` has to run.
+        let repo_root = git_editor::repository_of(&path)?;
+        let absolute = std::fs::canonicalize(&path).unwrap_or(path);
+        let diff_text = fenix_git::file_diff(&repo_root, &absolute.to_string_lossy(), false).ok()?;
         let file = fenix_diff::parse(&diff_text).into_iter().next()?;
-        Some(gutter_marks_from_hunks(&file.hunks))
+        Some((repo_root, file))
     }
 
     /// `refresh_gutter_hunks` for every currently open buffer -- restoring
@@ -15846,7 +15961,7 @@ impl App {
         // can't be staged at all -- resolving the conflict is what
         // stages it.
         if model.files.get(anchor.file).is_some_and(|f| f.is_combined) {
-            self.set_error("this file is conflicted -- resolve it (SPC g o/t/b) rather than staging a hunk".to_string());
+            self.set_error("this file is conflicted -- resolve it (SPC g x o/t/b) rather than staging a hunk".to_string());
             return;
         }
         let allowed = match (model.source, target) {
@@ -16473,6 +16588,9 @@ impl App {
     /// The repo any Git action should target: whichever Git-ish view is
     /// open, else the focused buffer's project.
     fn git_action_repo_root(&self) -> PathBuf {
+        if let Some(root) = self.focused_git_page_root() {
+            return root;
+        }
         self.git_session
             .as_ref()
             .map(|s| s.repo_root.clone())
@@ -16494,7 +16612,7 @@ impl App {
         match result {
             Ok(_) => self.set_message(format!("{what} finished")),
             Err(err) => match fenix_git::in_progress(&repo_root) {
-                Some(op) => self.set_error(format!("{} -- resolve the conflicts, then SPC g R to continue", op.label())),
+                Some(op) => self.set_error(format!("{} -- resolve the conflicts, then SPC g x c to continue", op.label())),
                 None => self.set_error(format!("{what} failed: {}", err.trim().lines().next().unwrap_or("").trim())),
             },
         }
@@ -16720,6 +16838,7 @@ impl App {
         self.checkpoint_session();
         self.tick_home();
         self.refresh_python_environments();
+        self.refresh_git_pages(true);
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
@@ -16942,6 +17061,7 @@ impl App {
         if self.merge_session.is_some() {
             self.merge_refresh();
         }
+        self.refresh_git_pages(false);
     }
 
     // -- Merge Requests view (`SPC g M`) -------------------------------
@@ -16952,17 +17072,28 @@ impl App {
     /// `[gitlab] base_url`/`token` in `config.ini`, and an `origin`
     /// remote whose URL names a project. Nothing is configured per
     /// repo -- the checkout already knows which project it came from.
-    fn forge_client(&self, repo_root: &Path) -> Result<fenix_gitlab::GitLab, String> {
+    fn forge_client(&self, repo_root: &Path) -> Result<ForgeClient, String> {
+        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
+            return Err("this repo has no `origin` remote to work out the project from".to_string());
+        };
+        // GitHub by its host; anything else is taken to be GitLab, which
+        // is routinely self-hosted under any name.
+        if fenix_github::repository(&url).is_some() {
+            let token = fenix_github::gh_token().or_else(|| self.config.github_token.clone().filter(|t| !t.trim().is_empty())).ok_or_else(|| {
+                "sign the GitHub CLI in (gh auth login), or set [github] token in config.ini".to_string()
+            })?;
+            return fenix_github::GitHub::from_remote(token, &url)
+                .map(|c| Box::new(c) as ForgeClient)
+                .ok_or_else(|| format!("couldn't read owner/repo out of origin's URL ({url})"));
+        }
         let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
             return Err("set [gitlab] base_url in config.ini first".to_string());
         };
         let Some(token) = self.config.gitlab_token.clone().filter(|t| !t.trim().is_empty()) else {
             return Err("set [gitlab] token in config.ini first (a personal access token with `api` scope)".to_string());
         };
-        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
-            return Err("this repo has no `origin` remote to work out the project from".to_string());
-        };
         fenix_gitlab::GitLab::from_remote(base_url, token, &url)
+            .map(|c| Box::new(c) as ForgeClient)
             .ok_or_else(|| format!("couldn't read a GitLab project path out of origin's URL ({url})"))
     }
 
@@ -16981,7 +17112,7 @@ impl App {
         // Checked before a workspace is opened: a view that can only
         // ever show one error message isn't worth two panes.
         let project = match self.forge_client(&repo_root) {
-            Ok(client) => fenix_forge::Forge::project(&client).to_string(),
+            Ok(client) => fenix_forge::Forge::project(client.as_ref()).to_string(),
             Err(err) => {
                 self.set_error(err);
                 return;
@@ -17141,7 +17272,7 @@ impl App {
                 return;
             }
         };
-        match fenix_forge::Forge::resolve(&client, number, &discussion, !was_resolved) {
+        match fenix_forge::Forge::resolve(client.as_ref(), number, &discussion, !was_resolved) {
             Ok(()) => {
                 self.set_message(if was_resolved { "thread reopened" } else { "thread resolved" });
                 self.forge_select(number);
@@ -17214,9 +17345,9 @@ impl App {
             }
         };
         let result = if approved {
-            fenix_forge::Forge::unapprove(&client, number)
+            fenix_forge::Forge::unapprove(client.as_ref(), number)
         } else {
-            fenix_forge::Forge::approve(&client, number, sha.as_deref())
+            fenix_forge::Forge::approve(client.as_ref(), number, sha.as_deref())
         };
         match result {
             Ok(()) => {
@@ -17274,8 +17405,9 @@ impl App {
             // Sent so the forge refuses rather than merging something
             // that moved between reading the diff and pressing the key.
             sha: detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty()),
+            ..Default::default()
         };
-        match fenix_forge::Forge::merge(&client, number, &options) {
+        match fenix_forge::Forge::merge(client.as_ref(), number, &options) {
             Ok(()) => {
                 self.set_message(format!("merged !{number}"));
                 self.forge_refresh_list();
@@ -17291,7 +17423,6 @@ impl App {
     /// Fetches the merge request list for the current filter.
     fn forge_refresh_list(&mut self) {
         let Some(session) = self.forge_session.as_ref() else { return };
-        use fenix_forge::Forge;
         let (repo_root, filter) = (session.repo_root.clone(), session.filter);
         let client = match self.forge_client(&repo_root) {
             Ok(client) => client,
@@ -17383,12 +17514,12 @@ impl App {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 std::thread::spawn(move || {
-                    let result = Box::new(fetch_forge_detail(&client, number));
+                    let result = Box::new(fetch_forge_detail(client.as_ref(), number));
                     let _ = proxy.send_event(FenixUserEvent::ForgeDetailReady { request_id, number, result });
                 });
             }
             None => {
-                let result = fetch_forge_detail(&client, number);
+                let result = fetch_forge_detail(client.as_ref(), number);
                 self.apply_forge_detail(request_id, number, result);
             }
         }
@@ -17464,7 +17595,7 @@ impl App {
             }
         };
         let branch = format!("mr-{number}");
-        let refspec = fenix_forge::Forge::checkout_refspec(&client, number);
+        let refspec = fenix_forge::Forge::checkout_refspec(client.as_ref(), number);
         if let Err(err) = fenix_git::fetch_refspec(&repo_root, "origin", &refspec) {
             self.set_error(format!("couldn't fetch !{number}: {err}"));
             return;
@@ -17489,7 +17620,7 @@ impl App {
         }
     }
 
-    /// `SPC g Q`: closes the Merge Requests view.
+    /// `SPC g q` (in its workspace): closes the Merge Requests view.
     pub(crate) fn forge_close(&mut self) {
         let Some(session) = self.forge_session.take() else { return };
         for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
@@ -17628,6 +17759,26 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
+        if matches!(purpose, ComposePurpose::ReviewPending { .. } | ComposePurpose::ReviewReply { .. } | ComposePurpose::ReviewSummary { .. }) {
+            self.review_compose(purpose, body);
+            self.wake_caret();
+            return;
+        }
+        if let ComposePurpose::RequestDescription { page } = &purpose {
+            self.request_description(*page, body);
+            self.wake_caret();
+            return;
+        }
+        if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
+            self.git_rebase_message(*page, hash.clone(), body);
+            self.wake_caret();
+            return;
+        }
+        if let ComposePurpose::GitCommit { repo_root, compose } = &purpose {
+            self.git_page_commit(repo_root.clone(), compose.clone(), body);
+            self.wake_caret();
+            return;
+        }
         if let ComposePurpose::CommitMessage { repo_root } = &purpose {
             match fenix_git::commit(repo_root, &body) {
                 Ok(_) => {
@@ -17660,11 +17811,17 @@ impl App {
             }
         };
         let (number, result) = match &purpose {
-            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(&client, *number, discussion, &body)),
+            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(client.as_ref(), *number, discussion, &body)),
             ComposePurpose::NewComment { number, position } => {
-                (*number, fenix_forge::Forge::comment_on_line(&client, *number, position, &body))
+                (*number, fenix_forge::Forge::comment_on_line(client.as_ref(), *number, position, &body))
             }
             ComposePurpose::CommitMessage { .. }
+            | ComposePurpose::GitCommit { .. }
+            | ComposePurpose::RebaseMessage { .. }
+            | ComposePurpose::ReviewPending { .. }
+            | ComposePurpose::ReviewReply { .. }
+            | ComposePurpose::ReviewSummary { .. }
+            | ComposePurpose::RequestDescription { .. }
             | ComposePurpose::TaskDescription { .. }
             | ComposePurpose::TaskComment { .. }
             | ComposePurpose::IssueDescription { .. }
@@ -17686,7 +17843,7 @@ impl App {
 
     // -- Merge view (`SPC g x`) --------------------------------------------
 
-    /// `SPC g x`: opens (or refocuses and refreshes) the Merge view --
+    /// `SPC g x x`: opens (or refocuses and refreshes) the Merge view --
     /// every conflicted file on the left, the selected one shown as two
     /// aligned columns on the right.
     pub(crate) fn open_merge_view(&mut self) {
@@ -17927,7 +18084,7 @@ impl App {
             .or_else(|| lines.iter().skip(line).flatten().find_map(|l| l.conflict))
     }
 
-    /// `SPC g o`/`t`/`b` inside the Merge view: resolve the conflict
+    /// `SPC g x o`/`t`/`b` inside the Merge view: resolve the conflict
     /// under the cursor, on disk, and re-render.
     ///
     /// Writes the file rather than a buffer because the Merge pane isn't
@@ -17961,7 +18118,7 @@ impl App {
         };
         let left = fenix_git::find_conflicts(&resolved).len();
         self.set_message(if left == 0 {
-            format!("kept {kept} -- {path} is resolved, SPC g s stages it")
+            format!("kept {kept} -- {path} is resolved, SPC g x s stages it")
         } else {
             format!("kept {kept} -- {left} conflict(s) left in {path}")
         });
@@ -17971,7 +18128,7 @@ impl App {
         true
     }
 
-    /// `SPC g X`: closes the Merge view.
+    /// `SPC g q` (in its workspace): closes the Merge view.
     pub(crate) fn merge_close(&mut self) {
         let Some(session) = self.merge_session.take() else { return };
         for id in [session.files_buffer, session.merge_buffer] {
@@ -18014,17 +18171,23 @@ impl App {
 
     pub(crate) fn git_rebase_onto(&mut self, onto: &str) {
         let repo_root = self.git_action_repo_root();
-        let result = fenix_git::rebase(&repo_root, onto);
+        let before = fenix_git::oplog::rev(&repo_root, "HEAD");
+        let result = fenix_git::oplog::logged(&repo_root, &format!("rebase onto {onto}"), || fenix_git::rebase(&repo_root, onto), |_| {
+            fenix_git::oplog::Undo::Reset { to: before, soft: false, saved: None }
+        });
         self.run_git_operation(&format!("rebase onto {onto}"), result);
     }
 
     pub(crate) fn git_merge_from(&mut self, branch: &str) {
         let repo_root = self.git_action_repo_root();
-        let result = fenix_git::merge(&repo_root, branch);
+        let before = fenix_git::oplog::rev(&repo_root, "HEAD");
+        let result = fenix_git::oplog::logged(&repo_root, &format!("merge {branch}"), || fenix_git::merge(&repo_root, branch), |_| {
+            fenix_git::oplog::Undo::Reset { to: before, soft: false, saved: None }
+        });
         self.run_git_operation(&format!("merge {branch}"), result);
     }
 
-    /// `SPC g R`: carries on whichever operation is suspended.
+    /// `SPC g x c`: carries on whichever operation is suspended.
     ///
     /// One key for all of them because from the user's side it's one
     /// question -- "I've fixed it, keep going" -- and having to remember
@@ -18055,7 +18218,7 @@ impl App {
         self.run_git_operation("continue", result);
     }
 
-    /// `SPC g A`: abandons whichever operation is suspended, putting the
+    /// `SPC g x a`: abandons whichever operation is suspended, putting the
     /// tree back where it started.
     pub(crate) fn git_operation_abort(&mut self) {
         let repo_root = self.git_action_repo_root();
@@ -18082,7 +18245,7 @@ impl App {
         self.run_git_operation("pull --rebase", result);
     }
 
-    /// `SPC g F`: push after a rebase rewrote history.
+    /// `git.force_push`: push after a rebase rewrote history.
     ///
     /// Always `--force-with-lease`: it refuses if the remote moved since
     /// the last fetch, so it can't silently discard someone else's work.
@@ -18102,7 +18265,7 @@ impl App {
         fenix_git::find_conflicts(&self.open().buffer.text())
     }
 
-    /// `SPC g j`/`SPC g k`: move to the next/previous conflict in the
+    /// `SPC g x j`/`SPC g x k`: move to the next/previous conflict in the
     /// focused file.
     pub(crate) fn goto_conflict(&mut self, forward: bool) {
         if self.merge_goto_conflict(forward) {
@@ -18126,7 +18289,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g j`/`SPC g k` inside the Merge view: jump to the next or
+    /// `SPC g x j`/`SPC g x k` inside the Merge view: jump to the next or
     /// previous conflict's separator row. Returns whether it applied,
     /// so the plain-buffer path can take over when it didn't.
     fn merge_goto_conflict(&mut self, forward: bool) -> bool {
@@ -18162,7 +18325,7 @@ impl App {
         true
     }
 
-    /// `SPC g o`/`SPC g t`/`SPC g b`: resolve the conflict under the
+    /// `SPC g x o`/`t`/`b`: resolve the conflict under the
     /// cursor by keeping ours, theirs, or both.
     ///
     /// Edits the buffer rather than the file on disk, so it lands in the
@@ -18594,7 +18757,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g C`: closes the Compare view.
+    /// `SPC g q` (in its workspace): closes the Compare view.
     pub(crate) fn compare_close(&mut self) {
         let Some(session) = self.compare_session.take() else { return };
         for id in [session.commits_buffer, session.diff_buffer] {
@@ -18612,7 +18775,7 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC g L`: closes the History view.
+    /// `SPC g q` (in its workspace): closes the History view.
     pub(crate) fn history_close(&mut self) {
         let Some(session) = self.history_session.take() else { return };
         for id in [session.graph_buffer, session.refs_buffer, session.detail_buffer] {
@@ -18649,7 +18812,30 @@ impl App {
         }
     }
 
-    /// `SPC g q`: closes the whole Git session -- mirrors
+    /// `SPC g q`: closes whichever Git view the focused workspace holds
+    /// -- a panel view, or a Git page.
+    pub(crate) fn close_git_view(&mut self) {
+        let here = self.workspaces.active_index();
+        let panes = self.windows().windows();
+        if self.history_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.history_close();
+        } else if self.compare_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.compare_close();
+        } else if self.merge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.merge_close();
+        } else if self.forge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+            self.forge_close();
+        } else if self.git_session.as_ref().is_some_and(|s| panes.contains(&s.status_pane)) {
+            self.git_session_close();
+        } else if self.is_page_buffer(self.focused_buffer_id()) {
+            let id = self.focused_buffer_id();
+            self.close_page(id);
+        } else {
+            self.set_message("no Git view in front to close");
+        }
+    }
+
+    /// Closes the whole Git panel session -- mirrors
     /// `docker_session_close` exactly.
     pub(crate) fn git_session_close(&mut self) {
         let Some(session) = self.git_session.take() else { return };
@@ -18689,6 +18875,10 @@ impl App {
     fn git_confirm_text(&self) -> Option<String> {
         let action = self.git_confirm.as_ref()?;
         Some(match action {
+            GitConfirmAction::DiscardEditorHunk { .. } => "Discard this hunk? It goes back to what's staged -- U on the Git page undoes it (y/n)".to_string(),
+            GitConfirmAction::SwitchWithStash { branch } => {
+                format!("Your changes would be overwritten by switching to {branch} -- stash them and switch? They come back when you return (y/n)")
+            }
             GitConfirmAction::DiscardFile { path, .. } => format!("Discard changes to {path}? (y/n)"),
             GitConfirmAction::DiscardDir { path } => format!("Discard all changes under {path}/? (y/n)"),
             GitConfirmAction::DeleteBranch { name } => format!("Delete branch {name}? (y/n)"),
@@ -18710,6 +18900,24 @@ impl App {
     /// it, anything else cancels. Mirrors `docker_confirm_key`.
     fn git_confirm_key(&mut self, keypress: KeyPress) {
         let action = self.git_confirm.take();
+        match (keypress.code == KeyCode::Char('y'), action) {
+            (true, Some(GitConfirmAction::DiscardEditorHunk { buffer, line })) => {
+                self.git_hunk_discard(buffer, line);
+                self.wake_caret();
+                return;
+            }
+            (true, Some(GitConfirmAction::SwitchWithStash { branch })) => {
+                self.git_switch_stashing(&branch);
+                self.wake_caret();
+                return;
+            }
+            (_, Some(GitConfirmAction::DiscardEditorHunk { .. } | GitConfirmAction::SwitchWithStash { .. })) => {
+                self.wake_caret();
+                return;
+            }
+            (_, action) => self.git_confirm = action,
+        }
+        let action = self.git_confirm.take();
         if keypress.code == KeyCode::Char('y') {
             if let (Some(action), Some(session)) = (action, self.git_session.as_ref()) {
                 let repo_root = session.repo_root.clone();
@@ -18723,6 +18931,7 @@ impl App {
                         || Err("that hunk is no longer in the diff".to_string()),
                         |patch| fenix_git::apply_patch(&repo_root, &patch, fenix_git::ApplyTarget::Discard),
                     ),
+                    GitConfirmAction::DiscardEditorHunk { .. } | GitConfirmAction::SwitchWithStash { .. } => unreachable!("handled above"),
                 };
                 if let Err(err) = result {
                     self.set_error(format!("git action failed: {err}"));
@@ -20618,6 +20827,12 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.git_merge_from(&branch);
+            }
+            Some(ActivePicker::SwitchBranch(state)) => {
+                let Some(branch) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.git_switch_to(&branch);
             }
             Some(ActivePicker::MibTelecommandLookup(state)) => {
                 let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -22624,7 +22839,7 @@ impl App {
         // whatever workspace merely happened to be active at the time.
         let before = self.workspaces.active_index();
         match parse_workspace_action(action) {
-            WorkspaceAction::Git => self.open_git_panel(),
+            WorkspaceAction::Git => self.open_git(),
             WorkspaceAction::Jira => self.open_jira_panel(),
             WorkspaceAction::Docker => self.open_docker_panel(),
             WorkspaceAction::Vnc(host) => self.open_vnc_session(&host),
@@ -24388,6 +24603,7 @@ impl App {
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -24810,6 +25026,7 @@ impl App {
                 Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::RebaseOnto(_)) => ("REBASE ONTO", picker_len(picker)),
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
+                Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaStatus(_)) => ("AGENDA STATUS", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaPriority(_)) => ("AGENDA PRIORITY", picker_len(picker)),
@@ -24926,8 +25143,9 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let embedded_indicator = self.embedded.indicator.as_deref().unwrap_or_default();
+        let git_indicator = self.chrome_git_segment();
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -25197,8 +25415,7 @@ impl App {
     /// buffer) so a split's every visible pane gets a gutter sized to
     /// *its own* buffer's line count, not just the focused one's.
     fn gutter_chars(&self, ob: &OpenBuffer) -> usize {
-        if self.line_number_mode == LineNumberMode::Off
-            || ob.kind == BufferKind::Dashboard
+        if ob.kind == BufferKind::Dashboard
             || ob.kind == BufferKind::Explorer
             || ob.kind == BufferKind::Docker
             || ob.kind == BufferKind::Git
@@ -25230,7 +25447,11 @@ impl App {
         {
             return 0;
         }
-        ob.buffer.visual_line_count().max(1).to_string().len() + 1
+        let blame = self.blame_width(ob);
+        if self.line_number_mode == LineNumberMode::Off {
+            return blame;
+        }
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame
     }
 
     /// Rich-text spans for one pane's content area covering `rows` screen
@@ -25303,17 +25524,24 @@ impl App {
                     spans.push((" ".repeat(n), theme.fg));
                 }
             } else if gutter_chars > 0 {
-                let gutter = if has_line {
-                    let n = match self.line_number_mode {
-                        LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
-                        _ => buffer_line + 1,
+                let blame = self.blame_width(ob);
+                if blame > 0 {
+                    spans.push(self.blame_cell(ob, buffer_line, blame));
+                }
+                let numbers = gutter_chars - blame;
+                if numbers > 0 {
+                    let gutter = if has_line {
+                        let n = match self.line_number_mode {
+                            LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
+                            _ => buffer_line + 1,
+                        };
+                        format!("{:>width$} ", n, width = numbers - 1)
+                    } else {
+                        format!("{:<width$}", "~", width = numbers)
                     };
-                    format!("{:>width$} ", n, width = gutter_chars - 1)
-                } else {
-                    format!("{:<width$}", "~", width = gutter_chars)
-                };
-                let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
-                spans.push((gutter, color));
+                    let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
+                    spans.push((gutter, color));
+                }
             } else if !has_line {
                 spans.push(("~".to_string(), theme.gutter_fg));
             }
@@ -26206,6 +26434,47 @@ impl App {
     /// that truncating to `COMPLETION_MAX_ROWS` is enough, matching
     /// `hover_contents_text`'s own "legible enough, not actually
     /// rendered markdown" posture).
+    /// The focused page's popup -- a Git page's menu, field or question
+    /// -- in the same box every other popup here uses: on the panel
+    /// colour, with a border and a shadow. It opens under the row it's
+    /// about with its text lined up with the page's, and over the row
+    /// instead when there isn't room below, kept inside the pane.
+    fn page_popup(&self, at: Option<PagePopupAt>, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
+        let at = at?;
+        let popup = self.pages.get(&at.buffer)?.page.popup.as_ref()?;
+        let (char_width, line_height) = match &self.text {
+            Some(t) => (t.char_width(), t.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+        let theme = self.theme;
+        let color = |role: crate::page::Role| match role {
+            crate::page::Role::Title | crate::page::Role::Text => theme.fg_modeline,
+            crate::page::Role::Muted => theme.gutter_fg,
+            crate::page::Role::Accent => theme.caret_text,
+            crate::page::Role::Good => theme.git_staged,
+            crate::page::Role::Warn => theme.git_modified,
+            crate::page::Role::Bad => theme.git_conflicted,
+            crate::page::Role::Kind(kind) => projects::kind_color(kind, &theme),
+        };
+        let bottom = modeline_top.min(at.pane.y + at.pane.h);
+        let shown = popup::max_rows(bottom - at.pane.y, 0.0, line_height, WHICH_KEY_PADDING).min(popup.rows.len());
+        let mut spans: RowSpans = Vec::new();
+        for (i, row) in popup.rows[..shown].iter().enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), theme.fg_modeline, false));
+            }
+            if row.is_empty() {
+                spans.push((" ".to_string(), theme.fg_modeline, false));
+            }
+            for (piece, role) in row {
+                spans.push((piece.clone(), color(*role), false));
+            }
+        }
+        let width = (popup.cols() as f32 * char_width + 2.0 * text::PAD_LEFT).min(window_width);
+        let height = shown as f32 * line_height + WHICH_KEY_PADDING;
+        popup_beside_row(at, popup.line, popup.col, width, height, bottom, window_width, char_width, line_height).map(|rect| (rect, spans))
+    }
+
     fn hover_popup(
         &self,
         window_width: f32,
@@ -27094,6 +27363,8 @@ impl App {
         // that actually knows each pane's real current on-screen pixel
         // size.
         let mut pdf_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        // Where the focused page is scrolled to, for its popup.
+        let mut page_popup_at: Option<PagePopupAt> = None;
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -27506,6 +27777,9 @@ impl App {
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
             let gutter_px = gutter_chars as f32 * char_width;
+            if is_page && is_focused {
+                page_popup_at = Some(PagePopupAt { buffer: buffer_id, pane: rect, first_line: render_base_line, frac: render_frac, gutter_px });
+            }
             // Home's layout is already centred; an empty pad list just
             // keeps `~` off the rows past its last line.
             let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
@@ -27867,6 +28141,7 @@ impl App {
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
+        let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         let caret_alpha = self.caret_alpha();
 
         let (
@@ -28086,6 +28361,11 @@ impl App {
             let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_popup_rich(popup::PopupId::Prompt, rect.w, &refs);
             popup_rects.push((popup::PopupId::Prompt, *rect));
+        }
+        if let Some((rect, spans)) = &page_popup {
+            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_popup_rich(popup::PopupId::Page, rect.w, &refs);
+            popup_rects.push((popup::PopupId::Page, *rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
@@ -29225,6 +29505,7 @@ impl App {
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             _ => {}
         }
         self.after_vim_key(kp);
@@ -36133,6 +36414,24 @@ configure_board stm32
     }
 
     #[test]
+    fn a_page_popup_opens_under_its_row_or_over_it_near_the_bottom_and_stays_in_the_pane() {
+        let pane = fenix_window::Rect { x: 100.0, y: 50.0, w: 600.0, h: 400.0 };
+        let at = PagePopupAt { buffer: App::with_file(None).focused_buffer_id(), pane, first_line: 10, frac: 0.0, gutter_px: 0.0 };
+        let (cw, lh) = (8.0, 20.0);
+        // Line 12 is the third row: its top at 50 + 4 + 40.
+        let r = popup_beside_row(at, 12, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        assert_eq!((r.x, r.y), (100.0 + 4.0 * cw, 94.0 + lh + 2.0), "under the row, text lined up with column 4");
+        // Line 28 sits near the bottom: the popup goes over it instead.
+        let r = popup_beside_row(at, 28, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        let top = 54.0 + 18.0 * lh;
+        assert_eq!(r.y, top - 2.0 - 100.0);
+        // A wide one far right is kept inside the pane.
+        let r = popup_beside_row(at, 12, 70, 300.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
+        assert_eq!(r.x + r.w, 700.0);
+        assert!(popup_beside_row(at, 5, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).is_none(), "scrolled out of view above");
+    }
+
+    #[test]
     fn which_key_popup_is_none_when_nothing_is_pending() {
         let app = App::with_file(None);
         assert!(app.which_key_popup(800.0, 580.0).is_none());
@@ -39006,7 +39305,7 @@ configure_board stm32
 
         let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
         assert!(status.contains("REBASING"), "the banner has to say what's running:\n{status}");
-        assert!(status.contains("SPC g R continue"), "and how to get out of it:\n{status}");
+        assert!(status.contains("SPC g x c continue"), "and how to get out of it:\n{status}");
         assert!(status.contains("conflicted file"), "the conflict count belongs there too:\n{status}");
         // The message points at the next step rather than reading as a
         // plain failure -- a conflict is the normal middle of a rebase.
@@ -40809,7 +41108,7 @@ configure_board stm32
         app.git_rebase_onto("develop");
 
         let status = app.buffers.get(app.git_session.as_ref().unwrap().status_buffer).unwrap().buffer.text();
-        assert!(status.contains("SPC g x to resolve"), "the banner points at the view that explains it:\n{status}");
+        assert!(status.contains("SPC g x x to resolve"), "the banner points at the view that explains it:\n{status}");
         assert!(status.contains("ours: develop"), "got:\n{status}");
         assert!(status.contains("theirs: myfeature"), "got:\n{status}");
     }

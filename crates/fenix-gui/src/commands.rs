@@ -151,6 +151,18 @@ impl CommandRegistry {
         registry.register("git.history_close", "Close the History view", cmd_git_history_close);
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
         registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
+        registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
+        registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
+        registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
+        registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
+        registry.register("git.file_history", "Show the history of the focused file", cmd_git_file_history);
+        registry.register("git.line_history", "Show the history of the selected lines", cmd_git_line_history);
+        registry.register("git.hunk_stage", "Stage the changed hunk under the cursor", cmd_git_hunk_stage);
+        registry.register("git.hunk_discard", "Discard the changed hunk under the cursor", cmd_git_hunk_discard);
+        registry.register("git.hunk_preview", "Show the changed hunk under the cursor", cmd_git_hunk_preview);
+        registry.register("git.switch", "Switch branch, most recently used first", cmd_git_switch);
+        registry.register("git.blame", "Show or hide who last changed each line", cmd_git_blame);
+        registry.register("git.blame_explain", "Show the commit that last changed this line", cmd_git_blame_explain);
         registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
         registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
         registry.register("git.continue", "Continue the suspended rebase/merge", cmd_git_continue);
@@ -653,7 +665,7 @@ fn cmd_pdf_search(ctx: &mut CommandCtx) {
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {
-    ctx.app.open_git_panel();
+    ctx.app.open_git();
 }
 
 fn cmd_git_close(ctx: &mut CommandCtx) {
@@ -999,6 +1011,54 @@ fn cmd_git_fetch(ctx: &mut CommandCtx) {
     ctx.app.git_fetch();
 }
 
+fn cmd_git_hunk_stage(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_stage();
+}
+
+fn cmd_git_hunk_discard(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_discard_prompt();
+}
+
+fn cmd_git_hunk_preview(ctx: &mut CommandCtx) {
+    ctx.app.git_hunk_preview();
+}
+
+fn cmd_git_switch(ctx: &mut CommandCtx) {
+    ctx.app.start_switch_picker();
+}
+
+fn cmd_git_blame(ctx: &mut CommandCtx) {
+    ctx.app.git_blame_toggle();
+}
+
+fn cmd_git_blame_explain(ctx: &mut CommandCtx) {
+    ctx.app.git_blame_explain();
+}
+
+fn cmd_git_close_view(ctx: &mut CommandCtx) {
+    ctx.app.close_git_view();
+}
+
+fn cmd_git_pull_request(ctx: &mut CommandCtx) {
+    ctx.app.open_new_request();
+}
+
+fn cmd_git_log(ctx: &mut CommandCtx) {
+    ctx.app.open_git_log(crate::git_log::Scope::Branch);
+}
+
+fn cmd_git_file_history(ctx: &mut CommandCtx) {
+    ctx.app.open_file_history();
+}
+
+fn cmd_git_line_history(ctx: &mut CommandCtx) {
+    ctx.app.open_line_history();
+}
+
+fn cmd_git_operations(ctx: &mut CommandCtx) {
+    ctx.app.open_git_operations();
+}
+
 fn cmd_git_compare(ctx: &mut CommandCtx) {
     ctx.app.start_compare_picker();
 }
@@ -1052,7 +1112,7 @@ fn cmd_git_keep_both(ctx: &mut CommandCtx) {
 }
 
 fn cmd_git_merge_requests(ctx: &mut CommandCtx) {
-    ctx.app.open_forge_view();
+    ctx.app.open_reviews();
 }
 
 fn cmd_git_merge_requests_close(ctx: &mut CommandCtx) {

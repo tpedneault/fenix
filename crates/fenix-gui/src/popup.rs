@@ -57,6 +57,11 @@ pub enum PopupId {
     /// (`route_keypress`) the same way `DockerMenu`/`GitMenu`/`JiraMenu`
     /// are.
     Hover,
+    /// A page's own menu, field or question (the Git pages' commit,
+    /// push, branch... menus), beside the row it's about. Only the
+    /// focused pane's page has one, and a page takes the keyboard while
+    /// it's open, so nothing else here can be showing at the same time.
+    Page,
 }
 
 /// Where a popup wants to appear, before clamping to the window.

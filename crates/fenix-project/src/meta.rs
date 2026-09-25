@@ -93,6 +93,13 @@ pub fn jira_key(root: &Path) -> Option<String> {
     crate::kind::ini_value(&text, "project", "jira").filter(|v| !v.is_empty())
 }
 
+/// `[git] reviewers = alex, sam` -- who a new pull request for this
+/// project asks for a review, as written.
+pub fn reviewers(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(project_ini(root)).ok()?;
+    crate::kind::ini_value(&text, "git", "reviewers").filter(|v| !v.trim().is_empty())
+}
+
 /// Sets `key` in `[section]` of the INI file at `path` -- replacing the
 /// line if it's there, adding it (and the section) if not, removing it
 /// when `value` is `None` -- and leaves every other line as it was.

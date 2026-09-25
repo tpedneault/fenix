@@ -58,9 +58,47 @@ pub struct Page {
     pub focus: Option<(usize, Range<usize>)>,
     /// Cells tinted as a panel (a text field being edited).
     pub panels: Vec<(usize, Range<usize>)>,
+    /// A menu, field or question floating over the page.
+    pub popup: Option<Popup>,
+}
+
+/// A menu, field or question drawn over a page in the editor's own
+/// popup box -- bordered, shadowed, on the panel colour -- beside the
+/// row it's about, rather than written into the page between its rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Popup {
+    /// The page line it's about: it opens under it, or over it when
+    /// there's no room below.
+    pub line: usize,
+    /// The page column its text lines up with.
+    pub col: usize,
+    /// Its rows, each a run of pieces.
+    pub rows: Vec<Vec<(String, Role)>>,
+}
+
+impl Popup {
+    /// Its rows as plain text.
+    #[cfg(test)]
+    pub fn text(&self) -> String {
+        self.rows.iter().map(|r| r.iter().map(|(t, _)| t.as_str()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Its width in cells: the longest row.
+    pub fn cols(&self) -> usize {
+        self.rows.iter().map(|r| r.iter().map(|(t, _)| t.chars().count()).sum::<usize>()).max().unwrap_or(0)
+    }
 }
 
 impl Page {
+    /// The page's text with its popup's under it -- what a test reads.
+    #[cfg(test)]
+    pub fn all_text(&self) -> String {
+        match &self.popup {
+            Some(p) => format!("{}\n{}", self.text, p.text()),
+            None => self.text.clone(),
+        }
+    }
+
     /// Where the cursor sits: on the focused row, else the top.
     pub fn cursor(&self) -> (usize, usize) {
         self.focus.as_ref().map(|(line, cols)| (*line, cols.start + 1)).unwrap_or((0, 0))
@@ -74,6 +112,7 @@ pub struct Grid {
     rules: Vec<(usize, Range<usize>)>,
     pub panels: Vec<(usize, Range<usize>)>,
     pub focus: Option<(usize, Range<usize>)>,
+    pub popup: Option<Popup>,
 }
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.
@@ -131,7 +170,7 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None }
+        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None }
     }
 
     /// Writes `text` at (`line`, `col`); returns the column after it.
@@ -191,7 +230,7 @@ impl Grid {
 
     pub fn finish(self) -> Page {
         let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels }
+        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup }
     }
 }
 

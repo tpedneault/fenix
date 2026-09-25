@@ -125,9 +125,14 @@ pub struct MergeRequest {
 }
 
 impl MergeRequest {
-    /// `!42` -- how a merge request is referred to in conversation.
+    /// `!42` -- how a merge request is referred to in conversation; a
+    /// GitHub pull request is `#42`, told apart by its URL.
     pub fn reference(&self) -> String {
-        format!("!{}", self.number)
+        if self.web_url.contains("/pull/") {
+            format!("#{}", self.number)
+        } else {
+            format!("!{}", self.number)
+        }
     }
 
     /// The local branch name `checkout` creates for this merge request.
@@ -369,6 +374,65 @@ pub struct MergeOptions {
     /// forge refuses rather than merging something that moved under you
     /// between reading the diff and pressing the key.
     pub sha: Option<String>,
+    /// Rebase the commits onto the target instead of a merge commit
+    /// (GitHub's "rebase and merge"; ignored where a forge has none).
+    pub rebase: bool,
+    /// Merge once the checks pass, rather than now.
+    pub when_checks_pass: bool,
+}
+
+/// How a review ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl Verdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Approve => "approve",
+            Verdict::RequestChanges => "request changes",
+            Verdict::Comment => "comment",
+        }
+    }
+}
+
+/// A comment written during a review and sent with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftComment {
+    pub position: Position,
+    /// For a range: the first line, on the same side as the position's
+    /// own line (which is the last).
+    pub start_line: Option<usize>,
+    pub body: String,
+}
+
+/// One CI job or check run on a request's head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Check {
+    /// The forge's id for it -- what its log and a retry are asked by.
+    pub id: String,
+    pub name: String,
+    /// A pipeline stage or workflow, to group by.
+    pub group: String,
+    pub status: PipelineStatus,
+    pub url: String,
+    /// Seconds it ran, when known.
+    pub seconds: Option<u64>,
+}
+
+/// A request to open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewRequest {
+    pub source_branch: String,
+    pub target_branch: String,
+    pub title: String,
+    pub description: String,
+    pub draft: bool,
+    /// Labels to put on it; ones the project doesn't have yet are made.
+    pub labels: Vec<String>,
 }
 
 /// Which merge requests to list.
@@ -378,6 +442,8 @@ pub enum MrFilter {
     Mine,
     /// Assigned to, or requested for review by, the authenticated user.
     ForMe,
+    /// Waiting on the authenticated user's review.
+    ReviewRequested,
     /// Every open one in the project.
     AllOpen,
 }
@@ -387,6 +453,7 @@ impl MrFilter {
         match self {
             MrFilter::Mine => "mine",
             MrFilter::ForMe => "for me",
+            MrFilter::ReviewRequested => "needs your review",
             MrFilter::AllOpen => "all open",
         }
     }
@@ -396,6 +463,7 @@ impl MrFilter {
         match self {
             MrFilter::Mine => MrFilter::ForMe,
             MrFilter::ForMe => MrFilter::AllOpen,
+            MrFilter::ReviewRequested => MrFilter::Mine,
             MrFilter::AllOpen => MrFilter::Mine,
         }
     }
@@ -457,6 +525,54 @@ pub trait Forge {
     fn unapprove(&self, number: u64) -> Result<(), String>;
 
     fn merge(&self, number: u64, options: &MergeOptions) -> Result<(), String>;
+
+    // -- The whole review, and the rest of a request's life ------------
+
+    /// Who the token belongs to.
+    fn current_user(&self) -> Result<String, String> {
+        Err("this forge can't say who you are".to_string())
+    }
+
+    /// The open request whose source is `branch`, if there is one.
+    fn request_for_branch(&self, branch: &str) -> Result<Option<MergeRequest>, String> {
+        let _ = branch;
+        Ok(None)
+    }
+
+    fn create_request(&self, request: &NewRequest) -> Result<MergeRequest, String> {
+        let _ = request;
+        Err("this forge can't open a request from Fenix yet".to_string())
+    }
+
+    /// Finishes a review: every comment in `comments`, then the verdict
+    /// and its summary, for the head `head_sha` that was reviewed.
+    fn submit_review(&self, number: u64, head_sha: &str, verdict: Verdict, body: &str, comments: &[DraftComment]) -> Result<(), String> {
+        let _ = (number, head_sha, verdict, body, comments);
+        Err("this forge can't submit a review from Fenix yet".to_string())
+    }
+
+    /// Asks these people to review again.
+    fn request_review(&self, number: u64, users: &[String]) -> Result<(), String> {
+        let _ = (number, users);
+        Err("this forge can't re-request a review from Fenix".to_string())
+    }
+
+    /// The CI jobs on `head_sha`.
+    fn checks(&self, number: u64, head_sha: &str) -> Result<Vec<Check>, String> {
+        let _ = (number, head_sha);
+        Ok(Vec::new())
+    }
+
+    /// A job's log, as plain text.
+    fn job_log(&self, check: &Check) -> Result<String, String> {
+        let _ = check;
+        Err("this forge can't show a job's log in Fenix".to_string())
+    }
+
+    fn retry(&self, check: &Check) -> Result<(), String> {
+        let _ = check;
+        Err("this forge can't rerun a job from Fenix".to_string())
+    }
 }
 
 #[cfg(test)]

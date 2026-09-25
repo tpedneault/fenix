@@ -161,6 +161,8 @@ pub enum VimEvent {
 pub enum BracketTarget {
     /// `]t`/`[t`: a TODO/FIXME/NOTE-style comment keyword.
     Todo,
+    /// `]h`/`[h`: a changed hunk, from the git gutter.
+    Hunk,
 }
 
 /// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::
@@ -585,6 +587,12 @@ impl VimState {
     /// together with the cursor position to render the selection.
     pub fn visual_anchor(&self) -> usize {
         self.visual_anchor
+    }
+
+    /// The last Visual selection's two ends (char offsets), what `gv`
+    /// would reselect -- `None` before there's been one.
+    pub fn last_visual_range(&self) -> Option<(usize, usize)> {
+        self.last_visual.map(|(_, anchor, cursor)| (anchor.min(cursor), anchor.max(cursor)))
     }
 
     /// The unnamed register's current contents (text, linewise) -- for a

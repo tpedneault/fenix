@@ -155,6 +155,8 @@ pub struct Config {
     /// values covers every repo on the instance.
     pub gitlab_base_url: Option<String>,
     pub gitlab_token: Option<String>,
+    /// `[github] token`: used when the GitHub CLI isn't signed in.
+    pub github_token: Option<String>,
     /// Frequently-read documents, `(display name, path)`, in the order
     /// they appear in `config.ini`'s `[documents]` section -- what the
     /// reader's `SPC r f` index picks from. Same numbered-key `docN =
@@ -213,6 +215,17 @@ pub struct Config {
     /// different advance width knocks every row out of alignment, which
     /// is why it isn't the default (see `graph_view::GraphStyle`).
     pub git_graph_style: Option<String>,
+    /// `SPC g g`: `page` (default) opens the Git status page; `panes`
+    /// keeps the older seven-pane panel.
+    pub git_layout: Option<String>,
+    /// `[git] auto_fetch = 5m`: fetch the focused repository in the
+    /// background when its last fetch is older than this many minutes.
+    /// Off unless set.
+    pub git_auto_fetch_minutes: Option<u64>,
+    /// `[git] reviewers = alex, sam`: who a new pull request asks for a
+    /// review, prefilled on its page (`SPC g P`). A project's own
+    /// `.fenix/project.ini` `[git] reviewers` takes its place.
+    pub git_reviewers: Vec<String>,
     /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
     /// `[vnc]` list convention `mib_roots`/`jira_projects` already
     /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
@@ -348,7 +361,11 @@ impl Config {
             git_base_branch: git.and_then(|s| s.get("base_branch")).cloned(),
             gitlab_base_url: gitlab.and_then(|s| s.get("base_url")).cloned(),
             gitlab_token: gitlab.and_then(|s| s.get("token")).cloned(),
+            github_token: sections.get("github").and_then(|s| s.get("token")).cloned(),
             git_graph_style: git.and_then(|s| s.get("graph_style")).cloned(),
+            git_layout: git.and_then(|s| s.get("layout")).cloned(),
+            git_auto_fetch_minutes: git.and_then(|s| s.get("auto_fetch")).and_then(|v| v.trim().trim_end_matches('m').trim().parse().ok()).filter(|m| *m > 0),
+            git_reviewers: git.and_then(|s| s.get("reviewers")).map(|v| names(v)).unwrap_or_default(),
             vnc_hosts: vnc.map(parse_vnc_hosts).unwrap_or_default(),
             documents: documents.map(parse_documents).unwrap_or_default(),
             windows: windows.map(parse_windows).unwrap_or_default(),
@@ -397,7 +414,11 @@ impl Config {
             git_base_branch: None,
             gitlab_base_url: None,
             gitlab_token: None,
+            github_token: None,
             git_graph_style: None,
+            git_layout: None,
+            git_auto_fetch_minutes: None,
+            git_reviewers: Vec::new(),
             vnc_hosts: Vec::new(),
             documents: Vec::new(),
             windows: Vec::new(),
@@ -556,6 +577,18 @@ impl Config {
         if let Some(base) = &self.git_base_branch {
             out.push_str(&format!("base_branch = {}\n", ini::quote_if_needed(base)));
         }
+        if let Some(style) = &self.git_graph_style {
+            out.push_str(&format!("graph_style = {}\n", ini::quote_if_needed(style)));
+        }
+        if let Some(layout) = &self.git_layout {
+            out.push_str(&format!("layout = {}\n", ini::quote_if_needed(layout)));
+        }
+        if let Some(minutes) = self.git_auto_fetch_minutes {
+            out.push_str(&format!("auto_fetch = {minutes}m\n"));
+        }
+        if !self.git_reviewers.is_empty() {
+            out.push_str(&format!("reviewers = {}\n", ini::quote_if_needed(&self.git_reviewers.join(", "))));
+        }
         out.push('\n');
         out.push_str("[gitlab]\n");
         if let Some(url) = &self.gitlab_base_url {
@@ -565,6 +598,11 @@ impl Config {
             out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
         }
         out.push('\n');
+        if let Some(token) = &self.github_token {
+            out.push_str("[github]\n");
+            out.push_str(&format!("token = {}\n", ini::quote_if_needed(token)));
+            out.push('\n');
+        }
         out.push_str("[vnc]\n");
         for (i, (name, host, port)) in vnc_hosts.iter().enumerate() {
             out.push_str(&format!("host{} = {name}|{host}|{port}\n", i + 1));
@@ -754,6 +792,11 @@ fn parse_single_list(section: &std::collections::BTreeMap<String, String>, prefi
         .collect();
     entries.sort_by_key(|(n, _)| *n);
     entries.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Usernames written with commas or spaces between them, `@` or not.
+pub fn names(text: &str) -> Vec<String> {
+    text.split([',', ' ']).map(|n| n.trim().trim_start_matches('@')).filter(|n| !n.is_empty()).map(str::to_string).collect()
 }
 
 #[cfg(test)]
@@ -1254,11 +1297,19 @@ mod tests {
         let mut config = Config::load_or_default(path.clone());
         config.git_graph_limit = Some(500);
         config.git_base_branch = Some("develop".to_string());
+        config.git_graph_style = Some("unicode".to_string());
+        config.git_layout = Some("panes".to_string());
+        config.git_auto_fetch_minutes = Some(5);
+        config.git_reviewers = vec!["alex".to_string(), "sam".to_string()];
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.git_graph_limit, Some(500));
         assert_eq!(reloaded.git_base_branch, Some("develop".to_string()));
+        assert_eq!(reloaded.git_graph_style, Some("unicode".to_string()), "graph_style used to be dropped on save");
+        assert_eq!(reloaded.git_layout, Some("panes".to_string()));
+        assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
+        assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1267,6 +1318,13 @@ mod tests {
         let config = Config::load(temp_path("git_absent")).unwrap();
         assert_eq!(config.git_graph_limit, None);
         assert_eq!(config.git_base_branch, None);
+        assert!(config.git_reviewers.is_empty());
+    }
+
+    #[test]
+    fn reviewers_are_read_with_commas_spaces_or_at_signs() {
+        assert_eq!(names("alex, @sam  jo"), ["alex", "sam", "jo"]);
+        assert!(names(" , ").is_empty());
     }
 
     #[test]

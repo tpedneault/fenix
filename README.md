@@ -503,7 +503,93 @@ for anyone curious to poke around or build on it.
   never wrap, so they stay aligned. `SPC d b` builds an image from the
   current project root's `Dockerfile`; `SPC d q` closes the whole
   session.
-- **Git panel** (Lazygit-style): `SPC g g` opens a real, seven-pane
+- **Git status page** (`SPC g g`): one page for the repository the
+  focused file is in. The header says where the branch stands -- its
+  upstream (ahead/behind, when it was last fetched, or "not pushed yet")
+  and its base branch (`[git] base_branch`, else `main`/`master`,
+  preferring `origin`'s copy) -- and a suspended rebase or merge leads
+  the page with its keys. Below: Conflicted, Untracked, Unstaged,
+  Staged, Stashes, Unpulled, Unpushed and Recent commits, each folding
+  with `Tab`. `Tab` on a file opens its diff inline, under its name;
+  `s`/`S` stage and unstage a file, a hunk, or -- with `V` over some
+  diff lines -- just those lines, and `d` discards (asking first; an
+  untracked file is named as deleted). `Enter` opens the file at the
+  line. Every verb with more than one form is a menu that opens under
+  the row you're on: `c` commit (commit, amend, extend, reword, fixup,
+  fixup-and-squash; flags `-a` all tracked, `-s` sign-off, `-n` skip
+  hooks), `P` push (a new branch's first push sets its upstream; a push
+  that would replace commits on the remote shows exactly which, and
+  offers `--force-with-lease`), `p` pull (rebase, merge, fetch), `b`
+  branch (switch, create, rename, merge in, rebase onto, delete branches
+  whose upstream is gone), `z` stash (everything, with untracked, staged
+  only, this file), `l` log, `r` rebase (continue/skip/abort while one
+  is suspended). `Enter` on a commit is its own menu: fix it up with
+  what's staged (folded in at once by an autosquash rebase), reword,
+  revert, branch or tag there, reset to it. Operations run off the UI
+  thread, one at a time; the page says what's running and how it ended,
+  and `$` shows the full output. It refreshes itself every couple of
+  seconds while it's visible.
+  **Every operation is logged, and `U` takes the last one back** --
+  after showing what it will do ("feature goes back to d42f6e1 ... brings
+  back 3 commits and the uncommitted changes saved before it"). Before
+  anything that throws work away runs (a discard, a hard reset, a
+  dropped stash), Fenix saves that work as git objects first, so it
+  can come back. Undoing a commit leaves its changes staged; undoing an
+  undo redoes it. The log lives in the repository's own git dir
+  (`.git/fenix/oplog`, never committed); `SPC g z` opens the page on
+  its Operations section, where `U` on any entry undoes that one. A
+  push can't be taken back, and says so.
+- **Git in the file you're editing**: `]h`/`[h` move between the
+  changed hunks the gutter marks, `SPC g a` stages the one under the
+  cursor, `SPC g d` discards it (asking first; `U` brings it back), and
+  `SPC g i` shows it in a popup. `SPC g B` puts blame beside the text --
+  commit, author and age on the first line of each run from one commit,
+  coloured by how recent the change is -- read from the buffer as it
+  stands, so unsaved lines read "not committed yet" and it follows your
+  edits; `SPC g e` shows the full commit behind the cursor's line.
+  `SPC g w` switches branch, the one you left most recently first (from
+  the reflog), with ahead/behind and age; a remote-only branch becomes a
+  local one tracking it. When local changes are in the way it offers to
+  stash them, and they come back when you switch back to that branch.
+  The modeline carries the focused file's branch, how far it is ahead
+  and behind its upstream, and how many files have changes
+  (`feature/x ↑2 •3`) -- and while a rebase or merge is stopped, says so
+  loudly, with its keys, in every window. `[git] auto_fetch = 5m` fetches
+  in the background when the last fetch is older than that, so those
+  numbers are true.
+- **Git log** (`SPC g l`): history that acts. The current branch, or
+  every branch as a graph (`a`); `SPC g h` is the focused file's history
+  (following renames) and `SPC g H` the history of the lines last
+  selected in Visual mode (`git log -L`), each commit with the patch that
+  changed them. `Tab` opens a commit to its files and a file to its diff,
+  inline; `/` filters by words in the message or `author:name`. `Enter`
+  on a commit is its menu -- fix it up with what's staged, reword the
+  last one, revert, cherry-pick one from another branch, check it out,
+  branch or tag there, reset to it -- each logged, so `U` on the Git
+  page takes it back. The graph view with its refs tree is `SPC g G`.
+- **Interactive rebase** (`r i` on the Git page, from the upstream or
+  base; `i` on a commit in the Log page, from that commit): the commits
+  it would replay, newest first, with one key per verb -- `p` pick, `r`
+  reword (the message is written in the compose buffer), `e` edit, `s`
+  squash, `f` fixup, `d` drop -- and `J`/`K` to move one. `fixup!` and
+  `squash!` commits start out next to the commit they name. Below the
+  list, the branch as it will be: which commits survive, what folds into
+  them, what's dropped, and a warning when some are already pushed.
+  Nothing runs until `C-c C-c`; Fenix writes the todo list itself and
+  git does the rest, and a stop for `edit` or a conflict hands over to
+  the Git page's banner (`r c` / `r a`). The whole rebase is one entry
+  in the operation log -- `U` takes it back.
+- **Worktrees** (`w` on the Git page): `w a` checks a branch out --
+  existing or new -- in a folder beside the repository
+  (`fenix.hotfix` next to `fenix`) and opens it as a workspace of its
+  own, so looking at another branch never means stashing your work.
+  When there's more than one, the Git page lists them; `Enter` opens
+  one, `w d` removes one (refused while it has uncommitted changes), `w
+  p` forgets ones whose folder is gone. Switching to a branch that's
+  checked out in another worktree opens that worktree instead of
+  failing. `[git] layout = panes` keeps the older
+  panel below.
+- **Git panel** (Lazygit-style; `[git] layout = panes`): a seven-pane
   workspace -- Status/Staged/Unstaged/Branches/Commits/Stash stacked on
   the left (each its own real, Vim-navigable buffer with a title bar),
   Main on the right showing a diff of whatever's under the cursor in
@@ -546,7 +632,7 @@ for anyone curious to poke around or build on it.
   selection already superseded) so scrolling through many files never
   blocks the UI waiting on a `git` subprocess. `SPC g q` closes the
   whole session.
-- **History / commit graph** (`SPC g l`): a real commit DAG across
+- **History / commit graph** (`SPC g G`): a real commit DAG across
   *every* branch (`git log --all`), drawn the way `git log --graph`
   draws it -- two columns per lane, with a connector row below a merge
   (`|\`) and above the commit that branches converge on (`|/`), so the
@@ -569,7 +655,7 @@ for anyone curious to poke around or build on it.
   there's no upstream at all -- led by how long ago you last fetched,
   since every one of those badges is only as current as that. `SPC g f`
   fetches (`--all --prune`, so deleted remote branches actually
-  disappear and `[gone]` becomes true); `u` refreshes; `SPC g L` closes.
+  disappear and `[gone]` becomes true); `u` refreshes; `SPC g q` closes.
 - **Compare refs** (`SPC g c`): pick any two refs -- branches, remote
   branches or tags -- and see what one adds over the other: the commits
   between them beside the full diff, hunk-navigable like every other
@@ -577,7 +663,7 @@ for anyone curious to poke around or build on it.
   merge base: "what does this branch actually do", the same thing a
   merge request shows), with `t` toggling two-dot (`base..head`, every
   difference between the two trees, including what the base gained
-  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g C`
+  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g q`
   closes. The base picker leads with `[git] base_branch` from
   `config.ini`, falling back to whichever of `main`/`master` the repo
   actually has, so "how does this differ from the mainline" is two keys
@@ -585,16 +671,16 @@ for anyone curious to poke around or build on it.
   second echoes the base you already chose (`master...?`).
 - **Rebase, merge and conflicts**: `SPC g r` rebases the current branch
   onto a ref you pick, `SPC g m` merges one in, `SPC g p` pulls with
-  `--rebase`, and `SPC g F` force-pushes -- always
-  `--force-with-lease`, never a bare `--force`, so a rebase-and-push
+  `--rebase`, and a push from the Git page's push menu with `-f` is
+  always `--force-with-lease`, never a bare `--force`, so a rebase-and-push
   can't silently discard what someone else pushed in between. When one
   of those stops, the Status pane leads with a banner naming what's
-  suspended and how far it got (`REBASING 3/7 -- SPC g R continue,
-  SPC g A abort`), and lists the conflicted files as their own section;
-  `SPC g R` and `SPC g A` finish or undo whichever operation it is --
+  suspended and how far it got (`REBASING 3/7 -- SPC g x c continue,
+  SPC g x a abort`), and lists the conflicted files as their own section;
+  `SPC g x c` and `SPC g x a` finish or undo whichever operation it is --
   rebase, merge, cherry-pick or revert -- so there's one pair of keys to
-  remember rather than one per operation. In a conflicted file, `SPC g j`
-  and `SPC g k` walk the markers and `SPC g o`/`SPC g t`/`SPC g b` keep
+  remember rather than one per operation. In a conflicted file, `SPC g x j`
+  and `SPC g x k` walk the markers and `SPC g x o`/`t`/`b` keep
   ours, theirs, or both for the conflict under the cursor, markers
   removed. Anything that rewrites the working tree also re-reads the
   files you already have open, so a buffer never keeps showing what a
@@ -602,7 +688,7 @@ for anyone curious to poke around or build on it.
   written it straight back over git's conflict markers. A file with
   unsaved edits is left alone and counted in a message instead: your own
   work always outranks the refresh.
-- **Resolving conflicts** (`SPC g x`): the conflicted files on the
+- **Resolving conflicts** (`SPC g x x`): the conflicted files on the
   left, the selected one shown as **two aligned columns** on the right
   -- your side and the incoming side on the same row, with shared text
   spanning the full width so it still reads as one file. `o` keeps the
@@ -623,7 +709,47 @@ for anyone curious to poke around or build on it.
   (`kept develop`, `o = keep myfeature`) and spell out its role. Opening
   a conflicted file directly still works, and its markers are colored
   with the same two colors the columns use.
-- **GitLab merge requests** (`SPC g M`): the project's open merge
+- **Pull requests, on GitHub and GitLab**. Which forge a repository is
+  on is read from its `origin` remote: `github.com` is GitHub, anything
+  else the GitLab of `[gitlab] base_url`. GitHub signs in through the
+  GitHub CLI (`gh auth login`) when it's installed, else `[github]
+  token`; nothing is configured per repository.
+  - **Opening one** (`SPC g P`, or `o` on the Git page): a page
+    prefilled from the branch -- the title from its one commit or its
+    name as a sentence, the description a summary of its commits, the
+    base from `[git] base_branch`, a Jira key in the branch name
+    (`feature/FNX-58-...`) linked as `Refs FNX-58`, and the reviewers
+    from `[git] reviewers` (or the project's own `.fenix/project.ini`).
+    `Enter` edits a field in place, `e` writes the description in a
+    buffer, `d` toggles draft. Under the form are the commits it brings
+    and what's worth knowing first: whether it's pushed, whether it
+    merges into the base without conflicts, how far the base moved, and
+    `fixup!` commits not folded in yet. `C-c C-c` opens it -- pushing the
+    branch first when it isn't, and never asking you to review your own.
+    From then on the Git page's header says how it stands: draft,
+    checks, who approved, how many threads are still open.
+  - **The inbox** (`SPC g M`): what's waiting on your review first, then
+    yours and every open one (`Tab`), with a dot on the ones that moved
+    since you last looked. `Enter` reviews one here, `w` in a worktree
+    of its own beside the repository, so your own work stays where it
+    is.
+  - **The review page**: every changed file, with the ones you've
+    marked viewed folded away until they change again. Comments are
+    held as **pending** until you submit the review -- approve, request
+    changes or just comment -- in one go, with a summary; a `suggestion`
+    block proposes the exact lines. Replies and resolving a thread go
+    straight away. `i` shows only what changed since your last review.
+    The checks are listed with how long each took; `Enter` on a failed
+    one opens its log and puts every `file:line` in it in the quickfix
+    list, and `r` runs it again. `m` merges -- squashed, rebased, or
+    once the checks pass.
+
+  Tested against real forges: `cargo test -p fenix-github --test live
+  -- --ignored` on a GitHub repository of your own (`FENIX_GITHUB_SANDBOX`)
+  and the containerised GitLab below, and `cargo test -p fenix-gui
+  live_ -- --ignored` drives the pages end to end on both.
+- **GitLab merge requests, the older panel** (`SPC g M` with `[git]
+  layout = panes`): the project's open merge
   requests on the left, the selected one in full on the right --
   author, source -> target, state, pipeline result, approvals, comment
   count, description, and the list of changed files. `f` cycles the
@@ -1150,27 +1276,33 @@ popup shows what keys continue it.
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
 | `SPC d b` | Build an image from the current project's `Dockerfile` |
 | `SPC d q` | Close the Docker panel session |
-| `SPC g g` | Open (or refocus/refresh) the Git panel |
-| `SPC g q` | Close the Git panel session |
-| `SPC g l` | Open the History view (commit graph, refs, commit diff) |
-| `SPC g L` | Close the History view |
-| `SPC g f` | Fetch all remotes and prune deleted branches |
+| `SPC g g` | Open the Git status page (or the panel, with `[git] layout = panes`) |
+| `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
+| `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
+| `SPC g G` | Open the graph view (commit graph, refs, commit diff) |
 | `SPC g c` | Compare two refs (pick base, then head) |
-| `SPC g C` | Close the Compare view |
+| `SPC g z` | The operation log -- undo what Fenix ran on the repository |
+| `SPC g w` / `SPC g f` / `SPC g p` | Switch branch (most recently used first) / fetch all remotes and prune / pull with `--rebase` |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
-| `SPC g p` / `SPC g F` | Pull with `--rebase` / push `--force-with-lease` |
-| `SPC g R` / `SPC g A` | Continue / abort the suspended operation |
-| `SPC g j` / `SPC g k` | Next / previous conflict in the focused file |
-| `SPC g o` / `SPC g t` / `SPC g b` | Keep ours / theirs / both for the conflict under the cursor |
-| `SPC g x` / `SPC g X` | Open / close the Merge view (conflicts side by side) |
-| `SPC g M` / `SPC g Q` | Open / close the GitLab Merge Requests view |
+| `SPC g P` | Open a pull request for this branch, prefilled from its commits |
+| `SPC g M` | The review inbox (the older Merge Requests view with `[git] layout = panes`) |
+| `]h` / `[h` | Next / previous changed hunk in the file |
+| `SPC g a` / `SPC g d` / `SPC g i` | Stage / discard / preview the hunk under the cursor |
+| `SPC g B` / `SPC g e` | Blame beside the text / the commit behind this line |
+| `SPC g x x` | Resolve conflicts side by side (the Merge view) |
+| `SPC g x j` / `SPC g x k` | Next / previous conflict in the focused file |
+| `SPC g x o` / `t` / `b` | Keep ours / theirs / both for the conflict under the cursor |
+| `SPC g x s` | Stage the conflicted file as resolved |
+| `SPC g x c` / `SPC g x a` | Continue / abort the suspended rebase, merge, cherry-pick or revert |
+| `SPC g q` | Close the Git view in front -- the panel, graph, comparison, conflicts or merge requests view, or a Git page |
+| `o` / `M` (Git page) | This branch's pull request -- review it, or open one / the review inbox |
+| `C-c C-c` / `Enter` / `e` / `d` (New pull request) | Open it (press twice) / edit a field / write the description / toggle draft |
 | `1` / `2` (Merge Requests) | Jump to the list / detail pane |
 | `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
 | `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
 | `r` / `R` / `C` (Review pane) | Reply to this thread / resolve or reopen it / comment on this line |
 | `A` / `m` (Merge Requests) | Approve or withdraw / merge (press twice) |
 | `Enter` / `q` (Compose) | Send what's written / discard it (also used for commit messages) |
-| `SPC g s` | Stage the selected conflicted file as resolved |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
 | `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
@@ -1361,7 +1493,7 @@ Only these are special, and only on the pane named:
 | `u` | any | Refresh the whole session |
 | `x` | Containers, Images, Volumes, Networks | Show this pane's available keys |
 
-### Git panel (`SPC g g`)
+### Git panel (`SPC g g` with `[git] layout = panes`)
 
 Opens its own workspace with six real, titled panes -- Status, Files,
 Branches, Commits, and Stash stacked on the left, Main on the right.
@@ -1737,6 +1869,10 @@ window2 = 4480,0,1920,1040|true
 | `gitlab` | `token` | A GitLab personal access token with `api` scope. There is deliberately no project setting: it's read from each repo's `origin` remote |
 | `git` | `base_branch` | The ref `SPC g c`'s base picker leads with, e.g. `develop`; unset falls back to whichever of `main`/`master` exists |
 | `git` | `graph_style` | `ascii` (default) or `unicode` -- which characters the commit graph's rails are drawn with. Unicode only lines up if your font actually has the box-drawing glyphs |
+| `git` | `layout` | `page` (default) or `panes` -- what `SPC g g` opens: the Git status page, or the older seven-pane panel |
+| `git` | `reviewers` | e.g. `alex, sam` -- who a new pull request (`SPC g P`) asks for a review, prefilled on its page. A project's own `.fenix/project.ini` `[git] reviewers` takes its place; you're left out of it when it's you |
+| `github` | `token` | A GitHub token, for when the GitHub CLI isn't signed in (`gh auth login` is used first) |
+| `git` | `auto_fetch` | e.g. `5m` -- fetch the focused repository in the background when its last fetch is older than that. Off unless set; a remote that asks for a password is tried once per interval, never prompted |
 | `vnc` | `host1`, `host2`, ... | A configured VNC target, as `NAME\|HOST\|PORT` (numbered, same convention as `mib`'s `root1`/`root2`) — see the VNC console panes feature above. No authentication support — every host is assumed to be unauthenticated and reachable only over a trusted network |
 | `windows` | `restore_windows` | `true`/`false` -- whether to reopen last session's OS windows on their monitors at startup; unset defaults to `true` |
 | `windows` | `workspace_per_project` | `true`/`false` -- whether opening a project from the hub gives it its own workspace (and returns to it); unset defaults to `true` |

@@ -75,6 +75,19 @@ pub fn pipeline_status(raw: &str) -> PipelineStatus {
     }
 }
 
+/// One job of `GET /projects/:id/pipelines/:pid/jobs`.
+pub fn job(value: &Value) -> Option<fenix_forge::Check> {
+    let id = value.get("id")?.as_u64()?;
+    Some(fenix_forge::Check {
+        id: id.to_string(),
+        name: string(value, "name"),
+        group: string(value, "stage"),
+        status: pipeline_status(&string(value, "status")),
+        url: string(value, "web_url"),
+        seconds: value.get("duration").and_then(Value::as_f64).map(|d| d as u64),
+    })
+}
+
 /// `GET /projects/:id/merge_requests/:iid/approvals`.
 ///
 /// `approvals_required`/`approvals_left` are Premium-tier fields: on a
@@ -362,6 +375,14 @@ mod tests {
             let value = json!({"iid": 1, "state": raw});
             assert_eq!(merge_request(&value).unwrap().state, expected, "for {raw}");
         }
+    }
+
+    #[test]
+    fn a_job_reads_its_stage_status_and_duration() {
+        let job = job(&serde_json::json!({"id": 7, "name": "pytest", "stage": "test", "status": "failed", "web_url": "http://x/jobs/7", "duration": 61.4})).unwrap();
+        assert_eq!((job.id.as_str(), job.name.as_str(), job.group.as_str()), ("7", "pytest", "test"));
+        assert_eq!(job.status, PipelineStatus::Failed);
+        assert_eq!(job.seconds, Some(61));
     }
 
     #[test]
