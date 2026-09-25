@@ -2130,7 +2130,7 @@ fn layout_time(g: &mut Grid, page: &AgendaPage, ctx: &Ctx, sel: Option<Row>, lef
     let mut x = left + name_w;
     for &i in &shown_days {
         x += cell;
-        put_right(g, *y, x, &format_minutes(days[i]), Role::Text);
+        put_right(g, *y, x, &if days[i] == 0 { "-".to_string() } else { format_minutes(days[i]) }, if days[i] == 0 { Role::Muted } else { Role::Text });
     }
     x += cell;
     put_right(g, *y, x, &format_minutes(days.iter().sum()), Role::Title);
@@ -2246,8 +2246,7 @@ fn layout_task(g: &mut Grid, ctx: &Ctx, id: TaskId, sel: Option<Row>, left: usiz
 
     // Description.
     *y += 1;
-    g.heading(*y, left, width, "Description");
-    g.put(*y, (left + width).saturating_sub(8), "E edits", Role::Muted);
+    heading_with_hint(g, *y, left, width, "Description", "E edits");
     *y += 1;
     let first = *y;
     if t.description.trim().is_empty() {
@@ -2311,8 +2310,7 @@ fn layout_task(g: &mut Grid, ctx: &Ctx, id: TaskId, sel: Option<Row>, left: usiz
 
     // Activity: your notes and Jira's comments.
     *y += 1;
-    g.heading(*y, left, width, "Activity");
-    g.put(*y, (left + width).saturating_sub(25), if t.jira.is_some() { "N note · C comment" } else { "N note" }, Role::Muted);
+    heading_with_hint(g, *y, left, width, "Activity", if t.jira.is_some() { "N note · C comment" } else { "N note" });
     *y += 1;
     for a in activity(t) {
         let (row, who, when, body) = match a {
@@ -2364,6 +2362,13 @@ fn layout_task(g: &mut Grid, ctx: &Ctx, id: TaskId, sel: Option<Row>, left: usiz
     g.put(*y, left + 1, "+ log time", Role::Accent);
     focus(g, Row::AddTime(id), *y, left);
     *y += 1;
+}
+
+/// A section heading whose rule stops short of a hint at its right end.
+fn heading_with_hint(g: &mut Grid, y: usize, left: usize, width: usize, title: &str, hint: &str) {
+    let n = hint.chars().count();
+    g.heading(y, left, width.saturating_sub(n + 2), title);
+    g.put(y, (left + width).saturating_sub(n), hint, Role::Muted);
 }
 
 fn ago(at: DateTime<Local>, now: DateTime<Local>) -> String {
