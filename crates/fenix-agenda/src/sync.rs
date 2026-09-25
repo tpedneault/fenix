@@ -49,6 +49,7 @@ impl AgendaStore {
             task.title = update.snapshot.summary.clone();
             task.description = update.snapshot.description.clone();
             task.priority = update.priority;
+            task.due = parse_due(update.snapshot.due.as_deref());
             task.updated_at = now;
         }
         if self.task(id).is_some_and(|t| t.status != update.status) {
@@ -177,12 +178,13 @@ impl AgendaStore {
             SyncField::Description => theirs.description != base.description,
             SyncField::Status => theirs.status_id != base.status_id || theirs.flagged != base.flagged,
             SyncField::Priority => theirs.priority != base.priority,
+            SyncField::Due => theirs.due != base.due,
         };
         let pending: Vec<SyncField> = self.pending_for(id).filter_map(|op| op.kind.field()).collect();
 
         let mut new_conflicts = Vec::new();
         let mut take = Vec::new();
-        for field in [SyncField::Title, SyncField::Description, SyncField::Status, SyncField::Priority] {
+        for field in SyncField::ALL {
             if !changed(field) {
                 continue;
             }
@@ -251,6 +253,7 @@ impl AgendaStore {
             SyncField::Title => self.set_title(id, theirs.summary.clone()),
             SyncField::Description => self.set_description(id, theirs.description.clone()),
             SyncField::Priority => self.set_priority(id, update.priority),
+            SyncField::Due => self.set_due(id, parse_due(theirs.due.as_deref())),
             SyncField::Status => {
                 if self.task(id).is_some_and(|t| t.status != update.status) {
                     self.move_to_status(id, update.status);
@@ -328,12 +331,18 @@ impl AgendaStore {
     }
 }
 
+/// Jira's `YYYY-MM-DD` as a date; anything else is no date.
+pub fn parse_due(due: Option<&str>) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(due?, "%Y-%m-%d").ok()
+}
+
 fn copy_field(field: SyncField, from: &RemoteUpdate, base: &mut crate::jira::RemoteSnapshot) {
     let theirs = &from.snapshot;
     match field {
         SyncField::Title => base.summary = theirs.summary.clone(),
         SyncField::Description => base.description = theirs.description.clone(),
         SyncField::Priority => base.priority = theirs.priority.clone(),
+        SyncField::Due => base.due = theirs.due.clone(),
         SyncField::Status => {
             base.status_id = theirs.status_id.clone();
             base.status_name = theirs.status_name.clone();
@@ -384,6 +393,26 @@ mod tests {
         assert_eq!(task.jira_key(), Some("PROJ-1"));
         assert!(task.notes[0].text.contains("my own notes"));
         assert_eq!(store.find_by_key("PROJ-1"), Some(id));
+    }
+
+    #[test]
+    fn a_due_date_follows_jira_and_conflicts_like_any_field() {
+        let (mut store, id) = linked();
+        let due = |s: &str| Some(s.to_string());
+        store.apply_remote(id, update(RemoteSnapshot { due: due("2026-10-02"), ..snapshot("Fix it") }));
+        assert_eq!(store.task(id).unwrap().due, NaiveDate::from_ymd_opt(2026, 10, 2));
+
+        let date = NaiveDate::from_ymd_opt(2026, 10, 9);
+        store.set_due(id, date);
+        store.enqueue(id, OpKind::SetDue(due("2026-10-09")));
+        store.apply_remote(id, update(RemoteSnapshot { due: due("2026-10-05"), ..snapshot("Fix it") }));
+        let link = store.task(id).unwrap().jira.as_ref().unwrap();
+        assert_eq!(link.conflicts[0].field, SyncField::Due);
+        assert_eq!(store.task(id).unwrap().due, date, "yours stays until you choose");
+
+        store.resolve_conflict(id, SyncField::Due, false);
+        assert_eq!(store.task(id).unwrap().due, NaiveDate::from_ymd_opt(2026, 10, 5));
+        assert!(store.outbox.is_empty());
     }
 
     #[test]

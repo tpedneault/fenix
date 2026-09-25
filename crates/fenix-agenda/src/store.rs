@@ -59,6 +59,7 @@ impl AgendaStore {
             archived: false,
             order,
             jira: None,
+            due: None,
         });
         id
     }
@@ -82,6 +83,13 @@ impl AgendaStore {
     pub fn set_category(&mut self, id: TaskId, category: Option<String>) {
         if let Some(task) = self.task_mut(id) {
             task.category = category;
+            task.updated_at = Local::now();
+        }
+    }
+
+    pub fn set_due(&mut self, id: TaskId, due: Option<chrono::NaiveDate>) {
+        if let Some(task) = self.task_mut(id) {
+            task.due = due;
             task.updated_at = Local::now();
         }
     }
@@ -140,6 +148,33 @@ impl AgendaStore {
                 task.updated_at = Local::now();
             }
         }
+    }
+
+    /// Corrects a logged time entry's start and end. Refused (false) when
+    /// the end isn't after the start. A corrected entry that had been sent
+    /// to Jira stays sent: Jira keeps what it was sent.
+    pub fn edit_time_entry(&mut self, id: TaskId, index: usize, start: DateTime<Local>, end: DateTime<Local>) -> bool {
+        if end <= start {
+            return false;
+        }
+        let Some(task) = self.task_mut(id) else { return false };
+        let Some(entry) = task.time_entries.get_mut(index) else { return false };
+        entry.start = start;
+        entry.end = end;
+        task.updated_at = Local::now();
+        true
+    }
+
+    /// Logs a span of time that already happened, `start` to `end`.
+    pub fn log_span(&mut self, id: TaskId, start: DateTime<Local>, end: DateTime<Local>) -> bool {
+        if end <= start {
+            return false;
+        }
+        let Some(task) = self.task_mut(id) else { return false };
+        task.time_entries.push(TimeEntry { start, end, source: TimeSource::Manual, sent: false });
+        task.time_entries.sort_by_key(|e| e.start);
+        task.updated_at = Local::now();
+        true
     }
 
     pub fn add_subtask(&mut self, id: TaskId, text: String) {
@@ -354,6 +389,33 @@ mod tests {
         let mut store = AgendaStore::default();
         let id = store.create_task("Write the plan".to_string(), "".to_string(), Priority::Medium, None);
         (store, id)
+    }
+
+    #[test]
+    fn a_time_entry_is_corrected_in_place_and_a_backwards_one_refused() {
+        let (mut store, id) = store_with_task();
+        let at = |h: u32, m: u32| Local::now().date_naive().and_hms_opt(h, m, 0).unwrap().and_local_timezone(Local).unwrap();
+        assert!(store.log_span(id, at(10, 0), at(11, 30)));
+        assert!(store.log_span(id, at(8, 0), at(9, 0)));
+        assert_eq!(store.task(id).unwrap().time_entries[0].start, at(8, 0), "kept in order");
+
+        assert!(store.edit_time_entry(id, 1, at(10, 15), at(11, 0)));
+        assert_eq!(store.task(id).unwrap().time_entries[1].duration(), chrono::Duration::minutes(45));
+        assert!(!store.edit_time_entry(id, 1, at(11, 0), at(10, 0)));
+        assert!(!store.log_span(id, at(9, 0), at(9, 0)));
+    }
+
+    #[test]
+    fn a_task_is_in_a_project_by_its_category_or_its_issue() {
+        let (mut store, id) = store_with_task();
+        assert!(!store.task(id).unwrap().in_project("fenix", Some("FEN")));
+        store.set_category(id, Some("Fenix".to_string()));
+        assert!(store.task(id).unwrap().in_project("fenix", None), "a category named like the project");
+        let other = store.create_task("x".to_string(), String::new(), Priority::Low, None);
+        let update = crate::RemoteUpdate { snapshot: Default::default(), status: Status::Todo, priority: Priority::Low, mine: None };
+        store.link(other, "FEN-12".to_string(), update);
+        assert!(store.task(other).unwrap().in_project("fenix", Some("FEN")));
+        assert!(!store.task(other).unwrap().in_project("fenix", Some("OPS")));
     }
 
     #[test]

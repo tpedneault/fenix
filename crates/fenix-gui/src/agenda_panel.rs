@@ -649,12 +649,7 @@ pub fn render_detail(store: &AgendaStore, id: TaskId) -> AgendaPanel {
             b.push_blank();
             b.push_section("Conflicts -- Enter to choose");
             for conflict in &link.conflicts {
-                let mine = match conflict.field {
-                    SyncField::Title => task.title.clone(),
-                    SyncField::Description => task.description.clone(),
-                    SyncField::Status => task.status.label().to_string(),
-                    SyncField::Priority => task.priority.label().to_string(),
-                };
+                let mine = task.sync_value(conflict.field);
                 let line = format!(
                     "  {PROBLEM_MARK} {}: Jira has \"{}\", you have \"{}\"",
                     conflict.field.label(),

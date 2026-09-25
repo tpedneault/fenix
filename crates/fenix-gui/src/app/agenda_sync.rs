@@ -197,6 +197,7 @@ impl App {
                 assignee_id: d.assignee_id.clone(),
                 flagged: d.flagged,
                 updated: d.updated.clone(),
+                due: d.due.clone(),
                 comments: d
                     .comments
                     .iter()
@@ -388,6 +389,7 @@ impl App {
                 OpKind::AddComment(body) => client.add_comment(&key, body),
                 OpKind::SetAssignee { id, .. } => client.update_assignee(&key, id),
                 OpKind::Transition { id, .. } => client.apply_transition(&key, id),
+                OpKind::SetDue(due) => client.update_due(&key, due.as_deref()),
                 OpKind::SetFlag(on) => {
                     let field = match known_flag {
                         Some(field) => Ok(field),
@@ -955,12 +957,7 @@ impl App {
     pub(super) fn agenda_start_conflict_picker(&mut self, id: TaskId, field: SyncField) {
         let Some(task) = self.agenda_store.task(id) else { return };
         let Some(conflict) = task.jira.as_ref().and_then(|l| l.conflicts.iter().find(|c| c.field == field)) else { return };
-        let mine = match field {
-            SyncField::Title => task.title.clone(),
-            SyncField::Description => task.description.clone(),
-            SyncField::Status => task.status.label().to_string(),
-            SyncField::Priority => task.priority.label().to_string(),
-        };
+        let mine = task.sync_value(field);
         let clip = |s: &str| s.lines().next().unwrap_or_default().chars().take(60).collect::<String>();
         let candidates = vec![
             fenix_picker::Candidate::new(format!("Keep mine: {}", clip(&mine)), SyncPick::KeepMine),

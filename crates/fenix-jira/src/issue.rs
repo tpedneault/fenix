@@ -47,6 +47,8 @@ pub struct IssueDetail {
     pub created: String,
     pub updated: String,
     pub comments: Vec<Comment>,
+    /// The due date, `YYYY-MM-DD`, when the issue has one.
+    pub due: Option<String>,
 }
 
 /// The JQL for "every issue assigned to `user_id`, scoped to whichever
@@ -90,7 +92,7 @@ pub fn project_of(key: &str) -> &str {
     key.rsplit_once('-').map_or(key, |(project, _)| project)
 }
 
-const DETAIL_FIELDS: &str = "summary,description,status,priority,assignee,reporter,created,updated,comment";
+const DETAIL_FIELDS: &str = "summary,description,status,priority,assignee,reporter,created,updated,comment,duedate";
 
 pub fn build_jql(user_id: &str, project_keys: &[String], excluded_statuses: &[String]) -> String {
     let mut jql = format!("assignee = \"{user_id}\"");
@@ -227,6 +229,7 @@ fn parse_issue_detail(v: &serde_json::Value, flag_field: Option<&str>) -> Option
         created: text_field(fields, "created").unwrap_or_default(),
         updated: text_field(fields, "updated").unwrap_or_default(),
         comments,
+        due: text_field(fields, "duedate"),
     })
 }
 
@@ -367,6 +370,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_issue_detail_reads_the_due_date() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"key": "PROJ-4", "fields": {"summary": "S", "duedate": "2026-10-02"}}"#).unwrap();
+        assert_eq!(parse_issue_detail(&v, None).unwrap().due.as_deref(), Some("2026-10-02"));
+    }
+
+    #[test]
     fn parse_issue_detail_returns_none_for_a_malformed_body() {
         let v: serde_json::Value = serde_json::from_str(r#"{"nope": true}"#).unwrap();
         assert!(parse_issue_detail(&v, None).is_none());
@@ -410,6 +419,7 @@ mod tests {
         assert_eq!(detail.assignee_id.as_deref(), Some("jo1"));
         assert!(detail.flagged);
         assert_eq!(detail.comments[0].id, "77");
+        assert_eq!(detail.due, None);
         assert!(!parse_issue_detail(&v, None).unwrap().flagged, "no flag field named means not flagged");
     }
 }
