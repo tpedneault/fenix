@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 
-use crate::page::{fit, frame, wrap, Grid, Key, Page, Popup, Role};
+use crate::page::{fit, fit_tail, frame, wrap, Grid, Key, Page, Popup, Role};
 
 /// Whose settings the page is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,9 @@ pub enum Action {
     TestSecret(Secret),
     /// Open the file, at a setting's line when there's one.
     OpenFile(Option<&'static str>),
+    /// Pick a path in the explorer, starting from `start`: a folder, or
+    /// a file. What's picked comes back through `SettingsPage::browsed`.
+    Browse { start: Option<PathBuf>, folder: bool },
     /// Show `scope` instead.
     SwitchScope(Scope),
     /// Something the project's own section asked for: its kind, group,
@@ -130,6 +133,9 @@ pub struct SettingsPage {
     pub note: Option<(String, bool)>,
     /// `d` once asks; `d` again deletes.
     armed_delete: bool,
+    /// The setting a path is being picked for in the explorer, when
+    /// it's set straight from there rather than into a field being typed.
+    browsing: Option<&'static str>,
     /// In a project's scope, the project's own section: its kind, group,
     /// Jira key, tasks, language servers and debug launch.
     pub project_page: Option<crate::project_settings::Settings>,
@@ -162,9 +168,20 @@ fn is_list(kind: &Kind) -> bool {
     matches!(kind, Kind::Map { .. } | Kind::Records(_))
 }
 
+/// Whether field `at` of `kind` holds a path, and if so whether it's a
+/// folder's: a `Path` setting's value is a file; a list of paths names
+/// which in its value's label.
+fn path_field(kind: &Kind, at: usize) -> Option<bool> {
+    match kind {
+        Kind::Path => Some(false),
+        Kind::Map { value, paths: true, .. } if at == 1 => Some(*value == "Folder"),
+        _ => None,
+    }
+}
+
 impl SettingsPage {
     pub fn new(scope: Scope, snap: Snapshot) -> Self {
-        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, project_page: None };
+        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, browsing: None, project_page: None };
         page.set_scope(scope);
         page
     }
@@ -481,6 +498,11 @@ impl SettingsPage {
             Key::Escape if self.search.is_some() => self.search = None,
             Key::Char('q') | Key::Escape => return Action::Close,
             Key::Char('e') => return Action::OpenFile(s.map(|s| s.key)),
+            Key::Char('b') => {
+                if let Some(action) = row.and_then(|r| self.browse(r)) {
+                    return action;
+                }
+            }
             Key::Char('p') | Key::Char('P') => {
                 return match (&self.scope, &self.snap.project) {
                     (Scope::You, Some((root, name))) => Action::SwitchScope(Scope::Project { root: root.clone(), name: name.clone() }),
@@ -586,6 +608,50 @@ impl SettingsPage {
         Action::None
     }
 
+    /// `b`: pick the row's path in the explorer. A path setting is set
+    /// from what's picked; an entry of a list of paths opens its form,
+    /// on the path, to be filled and kept (`+ add` a new one).
+    fn browse(&mut self, row: Row) -> Option<Action> {
+        let s = Self::setting_of(row)?;
+        let folder = path_field(&s.kind, 1).or_else(|| path_field(&s.kind, 0))?;
+        if s.kind == Kind::Path {
+            let start = match self.value(s) {
+                Some(Value::Text(t)) => Some(PathBuf::from(t)),
+                _ => None,
+            };
+            self.browsing = Some(s.key);
+            return Some(Action::Browse { start, folder });
+        }
+        let (index, fields) = match row {
+            Row::Entry(_, i) => (Some(i), entries(&s.kind, self.snap.here.get(s.key)).get(i).cloned().unwrap_or_default()),
+            _ => (None, vec![String::new(); field_labels(&s.kind).len()]),
+        };
+        let start = Some(PathBuf::from(fields[1].trim())).filter(|p| !p.as_os_str().is_empty());
+        self.edit = Some(Edit::Entry { key: s.key, index, fields, at: 1 });
+        self.browsing = None;
+        Some(Action::Browse { start, folder })
+    }
+
+    /// The path picked in the explorer: into the field being typed, or
+    /// straight into the setting `b` was pressed on.
+    pub fn browsed(&mut self, path: &std::path::Path) -> Action {
+        let text = path.display().to_string();
+        if let Some(target) = self.typed() {
+            *target = text;
+            return Action::None;
+        }
+        match self.browsing.take().and_then(fenix_config::setting) {
+            Some(s) => match s.kind.parse(&text) {
+                Ok(v) => self.set(s.key, Some(v)),
+                Err(why) => {
+                    self.refused = Some((s.key, why));
+                    Action::None
+                }
+            },
+            None => Action::None,
+        }
+    }
+
     fn set_entries(&mut self, s: &'static Setting, list: Vec<Vec<String>>) -> Action {
         let value = match s.kind {
             _ if list.is_empty() => None,
@@ -603,6 +669,15 @@ impl SettingsPage {
 
     fn edit_key(&mut self, edit: Edit, key: Key) -> Action {
         match key {
+            Key::CtrlO => {
+                let (k, at, text) = match &edit {
+                    Edit::Inline { key, text } => (*key, 0, text.clone()),
+                    Edit::Entry { key, fields, at, .. } => (*key, *at, fields[*at].clone()),
+                };
+                let Some(folder) = fenix_config::setting(k).and_then(|s| path_field(&s.kind, at)) else { return Action::None };
+                self.browsing = None;
+                return Action::Browse { start: Some(PathBuf::from(text.trim())).filter(|p| !p.as_os_str().is_empty()), folder };
+            }
             Key::Escape => {
                 self.edit = None;
                 self.refused = None;
@@ -747,6 +822,9 @@ fn hint(page: &SettingsPage, s: &Setting) -> String {
     }
 }
 
+/// The most of a value an entry's form shows; past it, the end.
+const FORM_FIELD_WIDTH: usize = 60;
+
 pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 132);
     let mut g = Grid::new();
@@ -854,7 +932,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 if editing {
                     let Some(Edit::Inline { text, .. }) = &page.edit else { unreachable!() };
                     let shown = if matches!(s.kind, Kind::Secret(_)) { "•".repeat(text.chars().count()) } else { text.clone() };
-                    let end = g.put(y, vx, &fit(&format!("{shown}▏"), room.max(10)), Role::Title);
+                    let end = g.put(y, vx, &fit_tail(&format!("{shown}▏"), room.max(10)), Role::Title);
                     g.panels.push((y, vx.saturating_sub(1)..(end + 1).max(vx + 24).min(sx + sw)));
                 } else {
                     let (text, role) = shown(page, s);
@@ -931,7 +1009,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
             let mut rows = vec![vec![(format!("{} · {}", s.label, if index.is_some() { "edit" } else { "new" }), Role::Title)], Vec::new()];
             for (i, (label, value)) in labels.iter().zip(fields).enumerate() {
                 let on = i == *at;
-                let shown = if on { format!("{value}▏") } else { value.clone() };
+                let shown = if on { fit_tail(&format!("{value}▏"), FORM_FIELD_WIDTH) } else { fit(value, FORM_FIELD_WIDTH) };
                 rows.push(vec![(format!("{label:<label_w$}"), if on { Role::Accent } else { Role::Muted }), (format!("{shown:<40}"), if on { Role::Title } else { Role::Text })]);
             }
             if let Some((k, why)) = &page.refused {
@@ -941,7 +1019,8 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 }
             }
             rows.push(Vec::new());
-            rows.push(vec![("Tab next field · Enter saves · Esc cancels".into(), Role::Muted)]);
+            let browse = if path_field(&s.kind, *at).is_some() { " · Ctrl-O browse" } else { "" };
+            rows.push(vec![(format!("Tab next field · Enter saves · Esc cancels{browse}"), Role::Muted)]);
             g.popup = Some(Popup { line, col: vx, rows });
         }
     }
@@ -952,14 +1031,20 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         vec![("j/k", "row"), ("Enter", "edit"), ("h/l", "change"), ("a", "add"), ("d", "delete"), ("t", "run task"), ("e", "open tools.json"), ("Tab", "sections"), ("p", "yours"), ("q", "close")]
     } else if page.searching {
         vec![("Enter", "go to the results"), ("Esc", "clear")]
-    } else if matches!(page.edit, Some(Edit::Inline { .. })) {
-        vec![("Enter", "keep"), ("Esc", "put it back")]
+    } else if let Some(Edit::Inline { key, .. }) = &page.edit {
+        let mut keys = vec![("Enter", "keep"), ("Esc", "put it back")];
+        if fenix_config::setting(key).is_some_and(|s| s.kind == Kind::Path) {
+            keys.push(("Ctrl-O", "browse"));
+        }
+        keys
     } else if page.edit.is_some() {
         vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
     } else {
         match selected {
+            Some(Row::Setting(s)) if s.kind == Kind::Path => vec![("Enter", "edit"), ("b", "browse"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
             Some(Row::Setting(Setting { kind: Kind::Secret(_), .. })) => vec![("Enter", "set"), ("t", "test"), ("x", "clear"), ("/", "search"), ("e", "open the file"), ("q", "close")],
             Some(Row::Setting(s)) if is_list(&s.kind) => vec![("a", "add"), ("Enter", "add"), ("r", "clear all"), ("/", "search"), ("e", "open the file"), ("q", "close")],
+            Some(Row::Entry(s, _)) if path_field(&s.kind, 1).is_some() => vec![("Enter", "edit"), ("b", "browse"), ("d", "delete"), ("J/K", "move"), ("a", "add"), ("q", "close")],
             Some(Row::Entry(..)) => vec![("Enter", "edit"), ("d", "delete"), ("J/K", "move"), ("a", "add"), ("q", "close")],
             _ => vec![("j/k", "setting"), ("Tab", "categories"), ("h/l", "change"), ("Space", "toggle"), ("Enter", "edit"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("p", "project"), ("q", "close")],
         }
@@ -1134,6 +1219,64 @@ mod tests {
         p.key(Key::Enter);
         let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Enter) else { panic!() };
         assert_eq!(rows.last().unwrap(), &["lab", "10.1.1.1", "5900"]);
+    }
+
+    #[test]
+    fn a_long_value_being_typed_shows_its_end() {
+        let mut p = page();
+        goto(&mut p, "completion.symbols_file");
+        p.key(Key::Enter);
+        let long = format!("C:/{}/words-end.txt", "deep/".repeat(30));
+        p.paste(&long);
+        let text = layout(&p, 130).text;
+        assert!(text.contains("words-end.txt▏"), "{text}");
+        assert!(!text.contains("C:/deep"), "the front gives way: {text}");
+    }
+
+    #[test]
+    fn b_picks_a_path_setting_in_the_explorer_and_sets_it() {
+        let mut p = page();
+        goto(&mut p, "completion.symbols_file");
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: false });
+        assert!(!p.typing());
+        let picked = p.browsed(std::path::Path::new("C:/words.txt"));
+        assert_eq!(picked, Action::Set { key: "completion.symbols_file", value: Some(Value::Text("C:/words.txt".into())) });
+        // Only a path's row browses.
+        goto(&mut p, "editor.font_size");
+        assert_eq!(p.key(Key::Char('b')), Action::None);
+    }
+
+    #[test]
+    fn ctrl_o_while_typing_a_path_fills_it_in_to_be_kept() {
+        let mut p = page();
+        goto(&mut p, "completion.symbols_file");
+        p.key(Key::Enter);
+        p.paste("C:/old/words.txt");
+        assert_eq!(p.key(Key::CtrlO), Action::Browse { start: Some(PathBuf::from("C:/old/words.txt")), folder: false });
+        assert_eq!(p.browsed(std::path::Path::new("C:/new/words.txt")), Action::None);
+        assert!(p.typing(), "still being typed");
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "completion.symbols_file", value: Some(Value::Text("C:/new/words.txt".into())) });
+        // Not on a value that isn't a path.
+        goto(&mut p, "git.base_branch");
+        p.key(Key::Enter);
+        assert_eq!(p.key(Key::CtrlO), Action::None);
+    }
+
+    #[test]
+    fn a_list_of_paths_browses_into_its_form() {
+        let mut p = page();
+        goto(&mut p, "mib.roots");
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: true }, "MIB roots are folders");
+        p.key(Key::Escape);
+        goto(&mut p, "documents");
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: false });
+        p.browsed(std::path::Path::new("C:/docs/manual.pdf"));
+        assert!(layout(&p, 130).popup.unwrap().text().contains("C:/docs/manual.pdf"));
+        p.key(Key::BackTab);
+        p.paste("manual");
+        p.key(Key::Enter);
+        let Action::Set { value: Some(Value::Map(m)), .. } = p.key(Key::Enter) else { panic!() };
+        assert_eq!(m, [("manual".to_string(), "C:/docs/manual.pdf".to_string())]);
     }
 
     #[test]

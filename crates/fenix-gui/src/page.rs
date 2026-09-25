@@ -25,6 +25,8 @@ pub enum Key {
     Backspace,
     Char(char),
     CtrlC,
+    /// Browse for a path, while one is being typed.
+    CtrlO,
 }
 
 /// A colour role, resolved against the theme by `App`.
@@ -125,6 +127,22 @@ pub fn fit(s: &str, max: usize) -> String {
     }
     let mut out: String = s.chars().take(max - 1).collect();
     out.push('…');
+    out
+}
+
+/// `s` in at most `max` columns keeping its end, `…` marking what went
+/// off the front -- for a field being typed, where the end is where the
+/// typing is.
+pub fn fit_tail(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::from('…');
+    out.extend(s.chars().skip(n - (max - 1)));
     out
 }
 
@@ -299,5 +317,12 @@ mod tests {
         assert_eq!(fit("abc", 3), "abc");
         assert_eq!(fit("abcd", 3), "ab…");
         assert_eq!(fit("abcd", 0), "");
+    }
+
+    #[test]
+    fn fit_tail_keeps_the_end_and_marks_the_front() {
+        assert_eq!(fit_tail("abc", 3), "abc");
+        assert_eq!(fit_tail("abcd", 3), "…cd");
+        assert_eq!(fit_tail("abcd", 0), "");
     }
 }
