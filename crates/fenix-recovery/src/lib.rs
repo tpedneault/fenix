@@ -57,14 +57,14 @@ impl Snapshot {
     }
 }
 
-/// Where snapshots live: `<config>/fenix/recovery`.
+/// Where snapshots live: `recovery`, with this machine's state.
 ///
-/// Alongside `config.ini` rather than in a temp directory, because a
-/// temp directory is exactly what an operating system is entitled to
-/// empty out from under you -- and this is the copy that exists for
-/// when things went wrong.
+/// Not in a temp directory, because a temp directory is exactly what an
+/// operating system is entitled to empty out from under you -- and this
+/// is the copy that exists for when things went wrong. Not roaming
+/// either: an unsaved buffer belongs to the machine it was typed on.
 pub fn default_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("fenix").join("recovery"))
+    fenix_storage::paths::recovery_dir()
 }
 
 /// The snapshot file for `original`, inside `dir`.

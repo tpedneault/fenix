@@ -1,26 +1,5 @@
 use std::collections::BTreeMap;
 
-/// The write-side counterpart to `parse`'s quote handling: `raw` as-is
-/// if trimming it wouldn't change anything (the common case -- keeps
-/// the file looking like a normal INI for every ordinary value), or
-/// wrapped in double quotes if `raw` has any leading/trailing
-/// whitespace `parse` would otherwise strip back out on the next load
-/// (including `raw` being *entirely* whitespace). An empty `raw` is
-/// also quoted -- not required for correctness (an unquoted empty
-/// value already round-trips fine, `parse` just inserts an empty
-/// string), but `key = ""` reads as a deliberate choice where `key = `
-/// looks like a mistake. Doesn't escape an embedded `"` -- not needed
-/// for any value this crate currently writes, and adding blanket
-/// escaping for a case that can't occur would just be unused
-/// complexity.
-pub(crate) fn quote_if_needed(raw: &str) -> String {
-    if raw.trim() == raw && !raw.is_empty() {
-        raw.to_string()
-    } else {
-        format!("\"{raw}\"")
-    }
-}
-
 /// A minimal INI reader: `[section]` headers, `key = value` pairs (split
 /// on the *first* `=`, both sides trimmed), blank lines, and `;`/`#`-
 /// prefixed comment lines. Anything else -- a malformed line, or a
@@ -28,7 +7,8 @@ pub(crate) fn quote_if_needed(raw: &str) -> String {
 /// an error, matching every other persisted-setting reader in this
 /// project (missing/corrupt input degrades gracefully rather than
 /// failing outright). Returns `section name -> (key -> raw string
-/// value)`; `Config::load` does the typed extraction on top of this.
+/// value)`; `legacy::load` does the typed extraction on top of this --
+/// only ever to move an old `config.ini` over to `settings.toml`.
 ///
 /// A value wrapped in a matching pair of double quotes (`key = " "`)
 /// has its quotes stripped and its *inner* content taken verbatim, not

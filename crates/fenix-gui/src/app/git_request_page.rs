@@ -57,7 +57,7 @@ impl App {
             }
         };
         let Some(base_ref) = fenix_git::resolve_base(&root, self.config.git_base_branch.as_deref()) else {
-            self.set_error("no base branch to open it against -- set [git] base_branch in config.ini");
+            self.set_error("no base branch to open it against -- set one in SPC , (Git)");
             return;
         };
         let base = base_ref.strip_prefix("origin/").unwrap_or(&base_ref).to_string();

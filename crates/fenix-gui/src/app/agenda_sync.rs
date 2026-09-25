@@ -866,7 +866,7 @@ impl App {
             return None;
         };
         let Some(base_url) = self.config.jira_base_url.clone() else {
-            self.set_error("Jira isn't configured yet: set base_url in the [jira] section of config.ini");
+            self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
             return None;
         };
         Some(format!("{}/browse/{key}", base_url.trim_end_matches('/')))
@@ -899,7 +899,7 @@ impl App {
     pub(crate) fn jira_open_in_browser(&mut self) {
         let Some(key) = self.jira_current_issue_key() else { return };
         let Some(base_url) = self.config.jira_base_url.clone() else {
-            self.set_error("Jira isn't configured yet: set base_url in the [jira] section of config.ini");
+            self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
             return;
         };
         self.open_url(&format!("{}/browse/{key}", base_url.trim_end_matches('/')));
@@ -1075,7 +1075,7 @@ impl App {
                 let Some(project) = project else { return };
                 self.config.set_jira_blocked(&project, blocked.clone());
                 if let Err(err) = self.config.save() {
-                    self.set_error(format!("couldn't save config.ini: {err}"));
+                    self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
                 let meaning = match &blocked {
                     JiraBlocked::Status { name, .. } => format!("moves the issue to \"{name}\""),
@@ -1302,7 +1302,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.agenda_store = fenix_agenda::AgendaStore::default();
         app.agenda_path = dir.join("agenda.json");
-        app.config = fenix_config::Config::load_or_default(dir.join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.join("settings.toml"));
         app
     }
 
@@ -1413,7 +1413,7 @@ mod tests {
         app.agenda_set_status(id, Status::Done);
 
         assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Todo);
-        assert!(last_error(&app).unwrap().contains("Jira isn't configured"));
+        assert!(last_error(&app).unwrap().contains("Jira isn't set up"));
     }
 
     #[test]
@@ -1493,7 +1493,7 @@ mod tests {
 
         assert_eq!(app.config.jira_blocked_for("PROJ"), Some(&JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() }));
         let reloaded = fenix_config::Config::load(app.config.path().to_path_buf()).unwrap();
-        assert!(reloaded.jira_blocked_for("PROJ").is_some(), "the choice is saved to config.ini");
+        assert!(reloaded.jira_blocked_for("PROJ").is_some(), "the choice is saved to settings.toml");
         assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Blocked);
         assert!(matches!(&app.agenda_store.outbox[0].kind, OpKind::Transition { to_id, .. } if to_id == "9"));
     }

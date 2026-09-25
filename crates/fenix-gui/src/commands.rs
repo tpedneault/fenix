@@ -135,7 +135,7 @@ impl CommandRegistry {
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
         registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
-        registry.register("pdf.documents", "Open a document from the config.ini [documents] index", cmd_pdf_documents);
+        registry.register("pdf.documents", "Open a document from the document index (SPC , Documents)", cmd_pdf_documents);
         registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
         registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
         registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);

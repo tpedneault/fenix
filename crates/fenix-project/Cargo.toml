@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+fenix-storage = { path = "../fenix-storage" }
 dirs = "6"
 fenix-mib = { path = "../fenix-mib" }
 fenix-picker = { path = "../fenix-picker" }

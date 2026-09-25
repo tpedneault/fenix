@@ -744,7 +744,7 @@ mod tests {
     /// depends on (or runs) a real arduino-cli.
     fn app_in(dir: &Path) -> App {
         let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(dir.join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.join("settings.toml"));
         let fake = |name: &str| {
             let path = dir.join("tools").join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

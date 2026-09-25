@@ -1,7 +1,7 @@
 //! What you've said about your projects beyond where they are: which are
 //! pinned and which group each belongs to ("Mission ops", "Class labs").
-//! That's yours, not the project's, so it lives beside `projects.txt` in
-//! the config directory rather than in the repository. What *is* the
+//! That's yours, not the project's, so it lives beside the known
+//! projects in `state/projects.json` rather than in the repository. What *is* the
 //! project's -- its declared kind, its Jira key -- lives in its own
 //! `.fenix/project.ini`, written here with `set_ini_value`.
 
@@ -21,24 +21,29 @@ pub struct ProjectMeta {
 }
 
 impl ProjectMeta {
-    /// `config_dir/fenix/project_meta.json`.
+    /// `state/projects.json`, beside the known projects.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fenix").join("project_meta.json"))
+        fenix_storage::paths::state_file("projects.json")
     }
 
     /// Loads it, starting empty when the file is missing or unreadable
     /// -- a convenience, not critical data.
     pub fn load_or_default(path: PathBuf) -> Self {
-        let mut meta: Self = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        let mut meta: Self = fenix_storage::state::read(&path, "meta").ok().flatten().unwrap_or_default();
         meta.path = path;
         meta
     }
 
+    /// The whole-file `project_meta.json` it used to be kept in, for
+    /// moving it over; `None` when there's none to read.
+    pub fn read_legacy(path: &Path, into: PathBuf) -> Option<Self> {
+        let mut meta: Self = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        meta.path = into;
+        Some(meta)
+    }
+
     pub fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, serde_json::to_string_pretty(self).map_err(io::Error::other)? + "\n")
+        fenix_storage::state::write(&self.path, "meta", self)
     }
 
     pub fn is_pinned(&self, root: &Path) -> bool {

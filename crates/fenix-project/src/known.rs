@@ -2,31 +2,24 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// A remembered, most-recently-used-ordered list of project roots --
-/// persisted as a plain newline-separated path list. Not TOML/JSON: a
-/// flat list of paths doesn't need a serialization format, so this
-/// avoids a `serde` dependency for something this simple.
+/// the `known` key of `state/projects.json`, which it shares with the
+/// projects' groups and pins (`ProjectMeta`).
 pub struct KnownProjects {
     path: PathBuf,
     roots: Vec<PathBuf>,
 }
 
 impl KnownProjects {
-    /// The default location: `dirs::config_dir()/fenix/projects.txt`.
-    /// `None` on the rare platform where `dirs::config_dir()` itself
-    /// returns `None` (no notion of a config directory at all).
+    /// `state/projects.json`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("fenix").join("projects.txt"))
+        fenix_storage::paths::state_file("projects.json")
     }
 
     /// Loads the known-projects list from `path`. A missing file means
     /// "no known projects yet," not an error -- the common case on first
     /// run, before anything's ever been saved.
     pub fn load(path: PathBuf) -> io::Result<Self> {
-        let roots = match std::fs::read_to_string(&path) {
-            Ok(contents) => contents.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e),
-        };
+        let roots = fenix_storage::state::read(&path, KEY)?.unwrap_or_default();
         Ok(Self { path, roots })
     }
 
@@ -66,12 +59,17 @@ impl KnownProjects {
     }
 
     pub fn save(&self) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let contents: String = self.roots.iter().map(|r| format!("{}\n", r.display())).collect();
-        std::fs::write(&self.path, contents)
+        fenix_storage::state::write(&self.path, KEY, &self.roots)
     }
+}
+
+const KEY: &str = "known";
+
+/// A list of paths, one per line -- how `projects.txt`, `recent_files.txt`
+/// and `recent_dirs.txt` were kept before the state files. For moving
+/// them over.
+pub fn read_path_list(path: &Path) -> io::Result<Vec<PathBuf>> {
+    Ok(std::fs::read_to_string(path)?.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
 
 #[cfg(test)]

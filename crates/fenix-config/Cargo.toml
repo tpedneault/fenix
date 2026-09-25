@@ -6,3 +6,8 @@ edition.workspace = true
 [dependencies]
 fenix-storage = { path = "../fenix-storage" }
 dirs = "6"
+serde = { version = "1", features = ["derive"] }
+toml_edit = "0.22"
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+keyring = { version = "3", features = ["windows-native", "apple-native"] }

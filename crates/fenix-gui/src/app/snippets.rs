@@ -20,14 +20,7 @@ pub(super) struct SnippetChoice {
 
 impl App {
     pub(super) fn snippet_catalog(&self) -> Catalog {
-        Catalog::load(
-            &self
-                .config
-                .path()
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join("snippets"),
-        )
+        Catalog::load(&fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")))
     }
 
     pub(super) fn snippet_scope(&self) -> String {
@@ -285,7 +278,7 @@ mod tests {
         let file = dir.path().join("test.tcl");
         std::fs::write(&file, text).unwrap();
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.config = fenix_config::Config::load_or_default(dir.path().join("config.ini"));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         app.test_vim_key(KeyPress::char('i'));
         app.focused_buffer_and_cursor_mut().1.char_idx = text.chars().count();
         (dir, app)
