@@ -30,7 +30,7 @@ pub enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretState {
     pub set: bool,
-    /// Where it comes from: "Credential Manager", "FENIX_GITLAB_TOKEN",
+    /// Where it comes from: "settings.toml", "FENIX_GITLAB_TOKEN",
     /// "gh CLI".
     pub source: String,
 }
@@ -855,7 +855,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                         g.put(y, vx, &line, Role::Muted);
                         y += 1;
                     }
-                    let key_line = if matches!(s.kind, Kind::Secret(_)) { format!("{} · never written to a file", page.snap.secrets.get(&secret_of(s)).map(|x| x.source.as_str()).unwrap_or("")) } else { s.key.to_string() };
+                    let key_line = if matches!(s.kind, Kind::Secret(_)) { format!("{} · {}", s.key, page.snap.secrets.get(&secret_of(s)).map(|x| x.source.as_str()).unwrap_or("not set")) } else { s.key.to_string() };
                     g.put(y, vx, &fit(&key_line, sw.saturating_sub(label_w + 2)), Role::Accent);
                     y += 1;
                 }
@@ -946,7 +946,7 @@ mod tests {
         here.insert("editor.font_size", Value::Float(18.0));
         here.insert("vnc.hosts", Value::Records(vec![vec!["test-vm".into(), "127.0.0.1".into(), "5900".into()], vec!["build".into(), "10.0.0.5".into(), "5901".into()]]));
         let mut secrets = HashMap::new();
-        secrets.insert(Secret::GitLab, SecretState { set: true, source: "Credential Manager".into() });
+        secrets.insert(Secret::GitLab, SecretState { set: true, source: "settings.toml".into() });
         Snapshot { here, secrets, themes: vec!["Orbit Dark".into(), "Nord".into()], file: PathBuf::from("settings.toml"), ..Default::default() }
     }
 
@@ -1074,7 +1074,7 @@ mod tests {
         assert!(!text.contains("Font size"));
         p.key(Key::Enter);
         assert!(matches!(p.selected(), Some(Row::Setting(s)) if s.key == "gitlab.token"));
-        assert!(layout(&p, 130).text.contains("Credential Manager · never written to a file"));
+        assert!(layout(&p, 130).text.contains("gitlab.token · settings.toml"));
     }
 
     #[test]

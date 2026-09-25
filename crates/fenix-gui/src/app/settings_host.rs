@@ -32,7 +32,7 @@ impl App {
             return SecretState { set: true, source: secret.env().to_string() };
         }
         if self.config.token(secret).is_some() {
-            return SecretState { set: true, source: self.secret_store.name().to_string() };
+            return SecretState { set: true, source: "settings.toml".to_string() };
         }
         if secret == Secret::GitHub && fenix_github::gh_token().is_some() {
             return SecretState { set: true, source: "from the gh CLI".to_string() };
@@ -158,11 +158,17 @@ impl App {
                 self.refresh_settings_pages();
             }
             SettingsAction::SetSecret { secret, token } => {
-                let result = self.config.set_token(self.secret_store.as_ref(), secret, token.as_deref());
+                // A token is a setting like any other, kept in the file.
+                let key = fenix_config::settings().iter().find(|s| s.kind == Kind::Secret(secret)).map(|s| s.key);
+                let result = match key {
+                    Some(key) => self.set_setting(key, token.clone().map(fenix_config::Value::Text)),
+                    None => Err("no such token".to_string()),
+                };
                 let note = match (&result, &token) {
-                    (Ok(()), Some(_)) => (format!("stored in the {}", self.secret_store.name()), false),
-                    (Ok(()), None) => (format!("removed from the {}", self.secret_store.name()), false),
-                    (Err(e), _) => (format!("the {} said: {e}", self.secret_store.name()), true),
+                    (Ok(()), Some(_)) if secret.from_env().is_some() => (format!("saved -- but {} is set, and it's the one used", secret.env()), true),
+                    (Ok(()), Some(_)) => ("saved in settings.toml".to_string(), false),
+                    (Ok(()), None) => ("removed from settings.toml".to_string(), false),
+                    (Err(e), _) => (e.clone(), true),
                 };
                 if let Some(page) = self.settings_page(id) {
                     page.note = Some(note);
@@ -324,8 +330,8 @@ impl App {
     /// Checks a token against its server, off the UI thread.
     fn test_secret(&mut self, id: BufferId, secret: Secret) {
         let token = match secret {
-            Secret::GitHub => self.config.token(secret).map(str::to_string).or_else(fenix_github::gh_token),
-            _ => self.config.token(secret).map(str::to_string),
+            Secret::GitHub => self.config.token(secret).or_else(fenix_github::gh_token),
+            _ => self.config.token(secret),
         };
         let Some(token) = token else {
             if let Some(page) = self.settings_page(id) {
@@ -432,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_goes_to_the_store_and_never_to_the_file() {
+    fn a_token_typed_on_the_page_is_kept_in_settings_toml() {
         let mut app = App::with_file(None);
         app.open_settings_page(Scope::You, Some("gitlab.token"));
         assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
@@ -441,9 +447,11 @@ mod tests {
         }
         assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
         assert_eq!(app.config.gitlab_token.as_deref(), Some("glpat-123"));
-        assert_eq!(app.secret_store.get(Secret::GitLab).unwrap().as_deref(), Some("glpat-123"));
-        assert!(!std::fs::read_to_string(app.config.path()).unwrap_or_default().contains("glpat"));
-        assert_eq!(page(&mut app).snap.secrets[&Secret::GitLab].source, "test");
+        assert!(std::fs::read_to_string(app.config.path()).unwrap().contains("token = \"glpat-123\""));
+        assert_eq!(page(&mut app).snap.secrets[&Secret::GitLab].source, "settings.toml");
+        assert!(app.page_key(KeyPress::char('x')), "cleared");
+        assert_eq!(app.config.gitlab_token, None);
+        assert!(!std::fs::read_to_string(app.config.path()).unwrap().contains("glpat"));
     }
 
     #[test]

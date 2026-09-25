@@ -10,8 +10,7 @@ use crate::ini;
 use crate::{names, Config, JiraBlocked, WindowLayout};
 
 /// Everything `config.ini` at `path` held, as a `Config` whose own path
-/// is `into` -- tokens included, so the caller can put them in the
-/// credential store.
+/// is `into`, tokens included.
 pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) -> io::Result<Config> {
     let sections = match std::fs::read_to_string(path) {
         Ok(contents) => ini::parse(&contents),

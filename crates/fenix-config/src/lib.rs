@@ -1,8 +1,8 @@
 //! Fenix's settings: `settings.toml` (`%AppData%\fenix\settings.toml` on
-//! Windows, `~/.config/fenix/settings.toml` on Linux), with API tokens in
-//! the credential store and window placement and explorer bookmarks in
-//! state files beside the other things Fenix remembers about this
-//! machine (see `fenix_storage::paths`).
+//! Windows, `~/.config/fenix/settings.toml` on Linux), API tokens
+//! included, with window placement and explorer bookmarks in state files
+//! beside the other things Fenix remembers about this machine (see
+//! `fenix_storage::paths`).
 //!
 //! Every field is `Option<T>` (or an empty list): "set in the file" vs
 //! not. What a default *is* lives with the code that uses the setting,
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
 pub use project::ProjectSettings;
-pub use secrets::{MemoryStore, Secret, SecretStore};
+pub use secrets::Secret;
 
 /// What "Blocked" means for one Jira project -- see `Config::jira_blocked`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,8 @@ pub struct Config {
     /// `https://jira.mycompany.com`), and a personal access token for
     /// it -- plaintext, same as every other setting in this file (a
     /// deliberate choice, not an oversight: `fenix-jira`'s own design
-    /// notes cover the tradeoff against an OS credential store).
+    /// notes cover the tradeoff against an OS credential store, which is
+    /// planned).
     pub jira_base_url: Option<String>,
     pub jira_token: Option<String>,
     /// Tracked projects, `(key, display name)` -- same numbered-key
@@ -518,14 +519,6 @@ impl Config {
         let doc = parsed.into_mut();
         for setting in schema::settings() {
             let Some(item) = lookup(&doc, setting.key) else { continue };
-            if matches!(setting.kind, Kind::Secret(_)) {
-                self.problems.push(Problem {
-                    key: Some(setting.key.into()),
-                    line: lines.get(setting.key).copied(),
-                    message: "tokens don't belong in this file -- SPC , puts it in the credential store; this one is ignored".into(),
-                });
-                continue;
-            }
             let result = setting.kind.read(item).and_then(|value| setting.set(self, Some(value)));
             if let Err(message) = result {
                 self.problems.push(Problem { key: Some(setting.key.into()), line: lines.get(setting.key).copied(), message });
@@ -596,9 +589,6 @@ impl Config {
         };
         let mut baseline = self.baseline.borrow_mut();
         for setting in schema::settings() {
-            if matches!(setting.kind, Kind::Secret(_)) {
-                continue;
-            }
             let now = setting.get(self);
             if baseline.get(setting.key) == Some(&now) {
                 continue;
@@ -634,7 +624,7 @@ impl Config {
 
     /// Reads the file again after it changed on disk. When it parses, its
     /// settings replace these; when it doesn't, these stay in use and
-    /// `problems` says why. Tokens and state are left alone.
+    /// `problems` says why. State is left alone.
     pub fn reload(&mut self) {
         let mut fresh = Self::empty(self.path.clone(), self.state_dir.clone());
         match std::fs::read_to_string(&self.path) {
@@ -650,9 +640,6 @@ impl Config {
             return;
         }
         for setting in schema::settings() {
-            if matches!(setting.kind, Kind::Secret(_)) {
-                continue;
-            }
             // Checked already, so this can't fail.
             let _ = setting.set(self, setting.get(&fresh));
         }
@@ -662,50 +649,27 @@ impl Config {
         self.remember();
     }
 
-    /// The tokens, from the environment or `store`.
-    pub fn load_secrets(&mut self, store: &dyn SecretStore) {
-        for secret in Secret::ALL {
-            let token = secret.from_env().or_else(|| store.get(secret).ok().flatten());
-            *self.token_mut(secret) = token;
-        }
+    /// A token: from the environment when it's set there, else from the
+    /// file.
+    pub fn token(&self, secret: Secret) -> Option<String> {
+        secret.from_env().or_else(|| {
+            match secret {
+                Secret::GitLab => &self.gitlab_token,
+                Secret::Jira => &self.jira_token,
+                Secret::GitHub => &self.github_token,
+            }
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+        })
     }
 
-    pub fn token(&self, secret: Secret) -> Option<&str> {
-        match secret {
-            Secret::GitLab => self.gitlab_token.as_deref(),
-            Secret::Jira => self.jira_token.as_deref(),
-            Secret::GitHub => self.github_token.as_deref(),
-        }
-    }
-
-    fn token_mut(&mut self, secret: Secret) -> &mut Option<String> {
-        match secret {
-            Secret::GitLab => &mut self.gitlab_token,
-            Secret::Jira => &mut self.jira_token,
-            Secret::GitHub => &mut self.github_token,
-        }
-    }
-
-    /// Stores (or, with `None`, forgets) a token in `store`, and uses it.
-    pub fn set_token(&mut self, store: &dyn SecretStore, secret: Secret, token: Option<&str>) -> Result<(), String> {
-        match token.map(str::trim).filter(|t| !t.is_empty()) {
-            Some(token) => store.set(secret, token)?,
-            None => store.delete(secret)?,
-        }
-        *self.token_mut(secret) = token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).or_else(|| secret.from_env());
-        Ok(())
-    }
-
-    /// Moves `config.ini` at `ini` into this file: every setting it had
-    /// is written here, its tokens go to `store`, its window placement
-    /// and bookmarks to the state files. `ini` itself isn't touched.
-    pub fn migrate_ini(ini: &std::path::Path, path: PathBuf, state_dir: PathBuf, store: &dyn SecretStore) -> io::Result<Self> {
+    /// Moves `config.ini` at `ini` into this file: every setting it had,
+    /// tokens included, is written here, its window placement and
+    /// bookmarks to the state files. `ini` itself isn't touched.
+    pub fn migrate_ini(ini: &std::path::Path, path: PathBuf, state_dir: PathBuf) -> io::Result<Self> {
         let old = legacy::load(ini, path.clone(), state_dir.clone())?;
         let mut config = Self::load_at(path, state_dir)?;
         for setting in schema::settings() {
-            if matches!(setting.kind, Kind::Secret(_)) {
-                continue;
-            }
             // A value the old file had that the new one doesn't take (a
             // theme name with a typo, say) is dropped, not fatal.
             if let Some(value) = setting.get(&old) {
@@ -716,12 +680,6 @@ impl Config {
         }
         config.windows = old.windows.clone();
         config.explorer_bookmarks = old.explorer_bookmarks.clone();
-        for secret in Secret::ALL {
-            if let Some(token) = old.token(secret).filter(|t| !t.trim().is_empty()) {
-                store.set(secret, token).map_err(io::Error::other)?;
-                *config.token_mut(secret) = Some(token.to_string());
-            }
-        }
         config.save()?;
         Ok(config)
     }
@@ -963,8 +921,7 @@ mod tests {
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.jira_base_url, Some("https://jira.example.com".to_string()));
-        assert_eq!(reloaded.jira_token, None, "a token is never written to the file");
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("secret-token-value"));
+        assert_eq!(reloaded.jira_token, Some("secret-token-value".to_string()));
         assert_eq!(
             reloaded.jira_projects,
             vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other Project".to_string())]
@@ -1020,7 +977,7 @@ mod tests {
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.gitlab_base_url.as_deref(), Some("https://gitlab.example.com"));
-        assert_eq!(reloaded.gitlab_token, None, "a token is never written to the file");
+        assert_eq!(reloaded.gitlab_token.as_deref(), Some("glpat-secret"));
         // No project key: which project a repo belongs to comes from
         // its own `origin` remote, so one pair covers every repo.
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1270,21 +1227,23 @@ mod tests {
     }
 
     #[test]
-    fn a_token_in_the_file_is_ignored_and_pointed_out_and_tokens_come_from_the_store() {
+    fn a_token_is_kept_in_the_file_and_the_environment_wins_without_being_saved() {
         let path = temp_path("tokens");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[gitlab]\nbase_url = \"https://gitlab.example.com\"\ntoken = \"glpat-in-the-file\"\n").unwrap();
         let mut config = Config::load(path.clone()).unwrap();
-        assert_eq!(config.gitlab_token, None);
-        assert!(config.problems[0].to_string().starts_with("settings.toml:3 -- gitlab.token: tokens don't belong in this file"), "{:?}", config.problems);
-        let store = MemoryStore::new("test");
-        config.set_token(&store, Secret::GitLab, Some(" glpat-stored ")).unwrap();
-        assert_eq!(config.token(Secret::GitLab), Some("glpat-stored"));
-        let mut again = Config::load(path.clone()).unwrap();
-        again.load_secrets(&store);
-        assert_eq!(again.gitlab_token.as_deref(), Some("glpat-stored"));
-        config.set_token(&store, Secret::GitLab, None).unwrap();
-        assert_eq!(store.get(Secret::GitLab).unwrap(), None);
+        config.gitlab_token = Some("glpat-in-the-file".into());
+        config.save().unwrap();
+        let again = Config::load(path.clone()).unwrap();
+        assert!(again.problems.is_empty(), "{:?}", again.problems);
+        assert_eq!(again.token(Secret::GitLab).as_deref(), Some("glpat-in-the-file"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("[gitlab]\ntoken = \"glpat-in-the-file\""));
+        // Jira's variable, which nothing else in the tests sets.
+        std::env::set_var("FENIX_JIRA_TOKEN", "from-the-environment");
+        let mut config = Config::load(path.clone()).unwrap();
+        assert_eq!(config.token(Secret::Jira).as_deref(), Some("from-the-environment"));
+        config.font_size = Some(20.0);
+        config.save().unwrap();
+        std::env::remove_var("FENIX_JIRA_TOKEN");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("from-the-environment"), "never written");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1330,14 +1289,11 @@ mod tests {
             "[editor]\ntheme = Visual Studio Dark\nfont_size = 16\nanimations = false\n\n[lsp]\nserver1 = python|C:\\tools\\pyright-langserver.exe --stdio\n\n[mib]\nroot1 = missionc|C:\\mib\\missionc\n\n[jira]\ntoken = jira-token\nuser1 = th096939|Thomas Pedneault\nblocked1 = FNX|10103|On Hold\n\n[gitlab]\nbase_url = http://localhost:8929\ntoken = glpat-old\n\n[git]\nauto_fetch = 5m\nreviewers = alex, sam\n\n[vnc]\nhost1 = test-vm|127.0.0.1|5900\nhost2 = build-vm|10.0.0.5|5901\n\n[explorer]\nbookmark1 = src|C:\\code\\src\n\n[windows]\nwindow1 = -8,-8,2560,1369|true\nrestore_session = false\n",
         )
         .unwrap();
-        let store = MemoryStore::new("test");
         let path = dir.join("settings.toml");
-        let config = Config::migrate_ini(&ini, path.clone(), dir.join("state"), &store).unwrap();
+        let config = Config::migrate_ini(&ini, path.clone(), dir.join("state")).unwrap();
         assert!(config.problems.is_empty(), "{:?}", config.problems);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("glpat-old") && !text.contains("jira-token"), "tokens stay out of the file:\n{text}");
-        assert_eq!(store.get(Secret::GitLab).unwrap().as_deref(), Some("glpat-old"));
-        assert_eq!(store.get(Secret::Jira).unwrap().as_deref(), Some("jira-token"));
+        assert!(text.contains("token = \"glpat-old\"") && text.contains("token = \"jira-token\""), "tokens come along:\n{text}");
         let reloaded = Config::load_at(path, dir.join("state")).unwrap();
         assert_eq!(reloaded.theme.as_deref(), Some("Visual Studio Dark"));
         assert_eq!(reloaded.animations, Some(false));

@@ -6858,9 +6858,6 @@ pub struct App {
     /// this one struct on every change (`apply_theme`, `adjust_font_
     /// size`, `VimEvent::IndentWidthChanged`).
     config: fenix_config::Config,
-    /// Where API tokens are kept: the credential store, or (in tests) a
-    /// store that lasts only the run.
-    secret_store: Box<dyn fenix_config::SecretStore>,
     /// When `settings.toml` last changed, as the disk poll last saw it:
     /// a change it didn't make is read again.
     settings_stamp: Option<std::time::SystemTime>,
@@ -7328,7 +7325,7 @@ impl App {
         // Before anything is read: an installation from before the
         // settings revamp moves to where things live now.
         let migrated = match (fenix_storage::paths::legacy_dir(), fenix_storage::paths::Roots::current()) {
-            (Some(legacy), Some(roots)) => Some((migrate::run(&legacy, &roots, fenix_config::secrets::system().as_ref()), roots.backup())),
+            (Some(legacy), Some(roots)) => Some((migrate::run(&legacy, &roots), roots.backup())),
             _ => None,
         };
         let mut app = Self::with_file(file_arg.clone());
@@ -7373,7 +7370,7 @@ impl App {
             if let Some(failed) = report.failed.first() {
                 app.set_error(format!("couldn't move {failed} -- it's left where it was and tried again next time"));
             } else if !report.moved.is_empty() {
-                app.set_message(format!("Moved Fenix's files to where they live now: settings.toml, tokens in the {}. The old files are in {}", app.secret_store.name(), backup.display()));
+                app.set_message(format!("Moved Fenix's files to where they live now: your settings are in settings.toml. The old files are in {}", backup.display()));
             }
         }
         // Linked agenda tasks stay current while Fenix runs, and changes
@@ -7461,11 +7458,8 @@ impl App {
             Some(roots) => (roots.settings_file(), roots.local.join("state")),
             None => (PathBuf::from("settings.toml"), PathBuf::from("state")),
         };
-        let secret_store: Box<dyn fenix_config::SecretStore> =
-            if cfg!(test) { Box::new(fenix_config::MemoryStore::new("test")) } else { fenix_config::secrets::system() };
         let config_existed = config_path.exists();
-        let mut config = fenix_config::Config::load_at_or_default(config_path, state_dir);
-        config.load_secrets(secret_store.as_ref());
+        let config = fenix_config::Config::load_at_or_default(config_path, state_dir);
         // First launch on this machine: write the file straight away, so
         // `settings.toml` is there to find (and hand-edit) from the start.
         if !config_existed {
@@ -7678,7 +7672,6 @@ impl App {
             explorer_matcher: fenix_explorer::explorer_trie().matcher(),
             theme,
             config,
-            secret_store,
             settings_stamp: None,
             project_settings: None,
             snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
@@ -17130,7 +17123,7 @@ impl App {
         // GitHub by its host; anything else is taken to be GitLab, which
         // is routinely self-hosted under any name.
         if fenix_github::repository(&url).is_some() {
-            let token = fenix_github::gh_token().or_else(|| self.config.github_token.clone().filter(|t| !t.trim().is_empty())).ok_or_else(|| {
+            let token = self.config.token(fenix_config::Secret::GitHub).or_else(fenix_github::gh_token).ok_or_else(|| {
                 "sign the GitHub CLI in (gh auth login), or set the GitHub token in SPC , (Forges)".to_string()
             })?;
             return fenix_github::GitHub::from_remote(token, &url)
@@ -17140,7 +17133,7 @@ impl App {
         let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
             return Err("set the GitLab server in SPC , (Forges) first".to_string());
         };
-        let Some(token) = self.config.gitlab_token.clone().filter(|t| !t.trim().is_empty()) else {
+        let Some(token) = self.config.token(fenix_config::Secret::GitLab) else {
             return Err("set the GitLab token in SPC , (Forges) first -- a personal access token with the api scope".to_string());
         };
         fenix_gitlab::GitLab::from_remote(base_url, token, &url)
@@ -20030,7 +20023,7 @@ impl App {
     /// `base_url` or `token` isn't configured yet.
     fn jira_client(&mut self) -> Option<fenix_jira::JiraClient> {
         let base_url = self.config.jira_base_url.clone();
-        let token = self.config.jira_token.clone();
+        let token = self.config.token(fenix_config::Secret::Jira);
         match (base_url, token) {
             (Some(base_url), Some(token)) => Some(fenix_jira::JiraClient::new(base_url, token)),
             _ => {

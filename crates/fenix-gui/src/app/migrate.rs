@@ -9,7 +9,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fenix_config::SecretStore;
 use fenix_storage::paths::Roots;
 
 /// What was moved, one line each, and what couldn't be.
@@ -61,7 +60,7 @@ fn back_up(file: &Path, roots: &Roots) -> io::Result<PathBuf> {
     Ok(to)
 }
 
-pub(crate) fn run(legacy: &Path, roots: &Roots, store: &dyn SecretStore) -> Report {
+pub(crate) fn run(legacy: &Path, roots: &Roots) -> Report {
     let mut report = Report::default();
     let mut step = |what: String, result: io::Result<()>| match result {
         Ok(()) => report.moved.push(what),
@@ -69,12 +68,12 @@ pub(crate) fn run(legacy: &Path, roots: &Roots, store: &dyn SecretStore) -> Repo
     };
     let old = |name: &str| Some(legacy.join(name)).filter(|p| p.exists());
 
-    // Settings: config.ini becomes settings.toml; its tokens go to the
-    // credential store, its windows and bookmarks to state files.
+    // Settings: config.ini becomes settings.toml, tokens and all; its
+    // windows and bookmarks go to state files.
     if let Some(ini) = old("config.ini") {
         if !roots.settings_file().exists() {
-            let result = fenix_config::Config::migrate_ini(&ini, roots.settings_file(), roots.local.join("state"), store).and_then(|_| back_up(&ini, roots).map(|_| ()));
-            step(format!("config.ini → {} (tokens to the {})", roots.settings_file().display(), store.name()), result);
+            let result = fenix_config::Config::migrate_ini(&ini, roots.settings_file(), roots.local.join("state")).and_then(|_| back_up(&ini, roots).map(|_| ()));
+            step(format!("config.ini → {}", roots.settings_file().display()), result);
         }
     }
 
@@ -155,7 +154,7 @@ pub(crate) fn run(legacy: &Path, roots: &Roots, store: &dyn SecretStore) -> Repo
 /// Says what moved in `backup/MIGRATION.txt`, for after the message on
 /// the status line is gone.
 fn write_log(roots: &Roots, report: &Report) {
-    let mut text = String::from("Fenix moved its files to where they live now: settings in settings.toml,\ntokens in the credential store, this machine's state under state/.\nThe files they replaced are in this folder, as they were.\n\n");
+    let mut text = String::from("Fenix moved its files to where they live now: settings in settings.toml,\nthis machine's state under state/.\nThe files they replaced are in this folder, as they were.\n\n");
     for line in &report.moved {
         text.push_str(&format!("moved   {line}\n"));
     }
@@ -171,7 +170,7 @@ fn write_log(roots: &Roots, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fenix_config::{MemoryStore, Secret};
+    use fenix_config::Secret;
 
     #[test]
     fn an_old_installation_moves_over_once_and_leaves_its_files_in_backup() {
@@ -189,19 +188,11 @@ mod tests {
         std::fs::write(legacy.join("recovery").join("x.fenixsave"), "unsaved").unwrap();
         std::fs::write(legacy.join("tools").join("clangd").join("clangd.exe"), "binary").unwrap();
         std::fs::create_dir_all(legacy.join("snippets")).unwrap();
-        std::fs::write(legacy.join("snippets").join("proc.snippet"), "# key: proc
-# scope: tcl
-# --
-proc x {} {}
-").unwrap();
-        std::fs::write(legacy.join("snippets").join("todo.snippet"), "# key: todo
-# --
-TODO
-").unwrap();
+        std::fs::write(legacy.join("snippets").join("proc.snippet"), "# key: proc\n# scope: tcl\n# --\nproc x {} {}\n").unwrap();
+        std::fs::write(legacy.join("snippets").join("todo.snippet"), "# key: todo\n# --\nTODO\n").unwrap();
         let roots = Roots { settings: legacy.clone(), data: legacy.join("data"), local: base.join("Local").join("fenix") };
-        let store = MemoryStore::new("test");
 
-        let report = run(&legacy, &roots, &store);
+        let report = run(&legacy, &roots);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert_eq!(report.moved.len(), 10, "{:?}", report.moved);
         assert!(legacy.join("snippets").join("tcl").join("proc.snippet").is_file() && legacy.join("snippets").join("all").join("todo.snippet").is_file());
@@ -210,7 +201,7 @@ TODO
         let config = fenix_config::Config::load_at(roots.settings_file(), roots.local.join("state")).unwrap();
         assert_eq!(config.theme.as_deref(), Some("Nord"));
         assert_eq!(config.windows.len(), 1);
-        assert_eq!(store.get(Secret::GitLab).unwrap().as_deref(), Some("glpat-x"));
+        assert_eq!(config.token(Secret::GitLab).as_deref(), Some("glpat-x"), "the token came along");
         let known = fenix_project::KnownProjects::load(roots.state("projects.json")).unwrap();
         assert_eq!(known.roots(), [PathBuf::from(r"C:\code\fenix"), PathBuf::from(r"C:\code\widget")], "in the same order");
         assert!(fenix_project::meta::ProjectMeta::load_or_default(roots.state("projects.json")).is_pinned(Path::new(r"C:\code\fenix")));
@@ -224,7 +215,7 @@ TODO
             assert!(roots.backup().join(name).is_file(), "{name} kept in backup");
         }
 
-        let again = run(&legacy, &roots, &store);
+        let again = run(&legacy, &roots);
         assert!(again.moved.is_empty() && again.failed.is_empty(), "a second run has nothing to do: {again:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -239,7 +230,7 @@ TODO
         let roots = Roots::portable(&legacy);
         // The state folder is a file: the new projects.json can't be written.
         std::fs::write(legacy.join("state"), "in the way").unwrap();
-        let report = run(&legacy, &roots, &MemoryStore::new("test"));
+        let report = run(&legacy, &roots);
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert!(legacy.join("projects.txt").is_file(), "still there");
         let _ = std::fs::remove_dir_all(&base);

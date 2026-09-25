@@ -56,7 +56,8 @@ pub enum Kind {
     /// Named entries; `key` and `value` label the two halves.
     Map { key: &'static str, value: &'static str, paths: bool },
     Records(&'static [Field]),
-    /// Kept in the credential store, never in the file.
+    /// A token: typed masked on the page, and an environment variable
+    /// overrides it.
     Secret(Secret),
 }
 
@@ -405,7 +406,7 @@ pub fn markdown_table() -> String {
                 Kind::List => "a list".to_string(),
                 Kind::Map { key, value, .. } => format!("{} = {}", key.to_lowercase(), value.to_lowercase()),
                 Kind::Records(fields) => format!("[[tables]] of {}", fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")),
-                Kind::Secret(_) => "credential store".to_string(),
+                Kind::Secret(_) => "text (a token)".to_string(),
             };
             let mut help = s.help.replace('|', r"\|");
             if s.project {
@@ -414,7 +415,7 @@ pub fn markdown_table() -> String {
             if s.restart {
                 help.push_str(" *Needs a restart.*");
             }
-            let key = if matches!(s.kind, Kind::Secret(_)) { format!("{} (not in the file)", s.label) } else { format!("`{}`", s.key) };
+            let key = format!("`{}`", s.key);
             out.push_str(&format!("| {key} | {takes} | {} | {help} |
 ", if s.default.is_empty() { "–" } else { s.default }));
         }

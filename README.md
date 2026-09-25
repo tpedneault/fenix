@@ -807,7 +807,7 @@ for anyone curious to poke around or build on it.
 
   The only configuration is the GitLab server and token in `SPC ,`
   (Forges): the instance root, *not* `/api/v4`, and a personal access
-  token with `api` scope, kept in the Credential Manager. Which project a repo belongs to is read from
+  token with `api` scope. Which project a repo belongs to is read from
   its own `origin` remote -- SSH, `ssh://`, or HTTPS -- so one pair of
   values covers every repo on the instance, and nothing is configured
   per checkout. Each of the three ways that can fail says which one it
@@ -1783,7 +1783,6 @@ with the reason -- and a change applies at once and is saved at once.
 | Your data: the agenda | `%AppData%\fenix\data` | `~/.local/share/fenix` |
 | This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
-| API tokens | Windows Credential Manager (`fenix/gitlab`, `fenix/jira`, `fenix/github`) | `FENIX_GITLAB_TOKEN`, ... |
 
 What you chose roams with your Windows profile; what Fenix noticed about
 this machine, and what it downloaded, doesn't. `FENIX_HOME=<folder>`
@@ -1791,9 +1790,8 @@ puts all of it in one folder instead -- a portable install, or a test
 run that mustn't touch your real settings.
 
 An installation from before `settings.toml` moves over by itself the
-first time Fenix starts: `config.ini` becomes `settings.toml`, its
-tokens go to the Credential Manager, the other files go to their new
-places, and everything replaced is kept in `backup\` with a
+first time Fenix starts: `config.ini` becomes `settings.toml`, the
+other files go to their new places, and everything replaced is kept in `backup\` with a
 `MIGRATION.txt` saying what moved.
 
 ### settings.toml
@@ -1822,7 +1820,7 @@ auto_fetch = 5
 
 [gitlab]
 base_url = "https://gitlab.example.com"
-# the token is in the Credential Manager: SPC , > Forges
+token = "glpat-..."      # SPC , > Forges types it masked
 
 [[vnc.hosts]]
 name = "build-vm"
@@ -1832,13 +1830,13 @@ host = "10.0.0.5"         # port defaults to 5900
 "Space Packet Protocol" = 'C:\refs\133x0b2e2.pdf'
 ```
 
-Tokens are never written to a file. `SPC ,` sets them (typed masked),
-tests them against their server (`t`) and clears them (`x`). A token
-found in `settings.toml` is ignored and pointed out. Where there's no
-credential store (Linux without one), `FENIX_GITLAB_TOKEN`,
-`FENIX_JIRA_TOKEN` and `FENIX_GITHUB_TOKEN` are read instead; GitHub
-also uses the GitHub CLI's sign-in (`gh auth login`) when there's no
-token.
+API tokens are kept in `settings.toml` with everything else -- mind that
+before sharing the file. `SPC ,` sets them (typed masked), tests them
+against their server (`t`) and clears them (`x`). `FENIX_GITLAB_TOKEN`,
+`FENIX_JIRA_TOKEN` and `FENIX_GITHUB_TOKEN` override the file when
+they're set, and are never written to it; GitHub also uses the GitHub
+CLI's sign-in (`gh auth login`) when there's no token. (Keeping them in
+the operating system's credential store instead is planned.)
 
 ### A project's own settings
 
@@ -1883,11 +1881,11 @@ when it's out of date).
 | `git.graph_limit` | 10–100000 | 200 | How many commits the graph view reads. |
 | **Forges** | | | |
 | `gitlab.base_url` | text | – | The GitLab instance's address, like https://gitlab.example.com. |
-| GitLab token (not in the file) | credential store | – | A personal access token with the api scope. |
-| GitHub token (not in the file) | credential store | – | Used when the GitHub CLI isn't signed in (gh auth login). |
+| `gitlab.token` | text (a token) | – | A personal access token with the api scope. |
+| `github.token` | text (a token) | – | Used when the GitHub CLI isn't signed in (gh auth login). |
 | **Jira & agenda** | | | |
 | `jira.base_url` | text | – | Your Jira Server or Data Center's address. |
-| Jira token (not in the file) | credential store | – | A personal access token for the Jira server. |
+| `jira.token` | text (a token) | – | A personal access token for the Jira server. |
 | `jira.sync_minutes` | minutes | 10 | How often linked agenda tasks are brought up to date, in minutes. |
 | `jira.projects` | key = name | – | Jira projects the dashboard tracks. |
 | `jira.users` | id = name | – | People the dashboard tracks. |
@@ -1944,7 +1942,7 @@ crates, each independently unit-tested (`cargo test --workspace`):
 | `fenix-diff` | Unified-diff parsing (files/hunks/lines, both sides' line numbers) and single-hunk patch synthesis — pure, no I/O; what hunk staging and diff rendering are both built on |
 | `fenix-git` | Shells out to `git`: status/files/branches/remotes/tags, commit graph topology and lane assignment, diffs (working tree, commit, ref-to-ref), fetch, and applying a patch to stage/unstage/discard one hunk |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
-| `fenix-config` | `settings.toml`: every setting declared once (the schema), read, checked and saved in place; the project layer; tokens in the credential store |
+| `fenix-config` | `settings.toml`: every setting declared once (the schema), read, checked and saved in place; the project layer |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) and terminal-query replies for both terminal surfaces — no thread/event-loop knowledge of its own |
 | `fenix-gui` | Everything GPU/window-facing: `wgpu` rendering, `winit` input, and `App`, which wires all of the above together |
 
