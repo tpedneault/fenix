@@ -433,6 +433,8 @@ pub struct NewRequest {
     pub draft: bool,
     /// Labels to put on it; ones the project doesn't have yet are made.
     pub labels: Vec<String>,
+    /// Usernames to assign it to.
+    pub assignees: Vec<String>,
 }
 
 /// Which merge requests to list.
@@ -542,6 +544,13 @@ pub trait Forge {
     fn create_request(&self, request: &NewRequest) -> Result<MergeRequest, String> {
         let _ = request;
         Err("this forge can't open a request from Fenix yet".to_string())
+    }
+
+    /// The description template set on the project itself (GitLab's
+    /// Settings > Merge requests > Default description template), when
+    /// the forge has such a thing and the project sets one.
+    fn default_description(&self) -> Result<Option<String>, String> {
+        Ok(None)
     }
 
     /// Finishes a review: every comment in `comments`, then the verdict

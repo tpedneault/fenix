@@ -146,7 +146,9 @@ pub enum PageEvent {
     ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
     ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
     /// The request already open for the new request page's branch.
-    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String> },
+    /// With who the token belongs to, for the assignee, and the project's
+    /// default description template on the forge.
+    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String>, me: Option<String>, template: Option<String> },
     /// The new request was opened -- with a word about what didn't go
     /// on it -- or wasn't.
     RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },

@@ -37,6 +37,7 @@ fn pull() -> fenix_forge::MergeRequest {
         description: "Opened by Fenix's live tests.".into(),
         draft: false,
         labels: Vec::new(),
+        assignees: Vec::new(),
     };
     let created = gh.create_request(&request).unwrap();
     gh.merge_request(created.number).unwrap()
@@ -146,6 +147,7 @@ fn a_draft_opens_with_its_labels() {
         description: "From the live tests.".into(),
         draft: true,
         labels: vec!["fenix".into()],
+        assignees: Vec::new(),
     };
     let made = gh_client.create_request(&request).unwrap();
     let labels = gh(&["api", &format!("repos/{repo}/issues/{}/labels", made.number), "--jq", ".[].name"]);

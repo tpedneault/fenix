@@ -289,6 +289,11 @@ impl Forge for GitHub {
             self.send("POST", &self.repo_path(&format!("/issues/{}/labels", made.number)), &json!({ "labels": request.labels }))
                 .map_err(|e| format!("opened {}, but the labels didn't go on: {e}", made.reference()))?;
         }
+        // So are its assignees.
+        if !request.assignees.is_empty() {
+            self.send("POST", &self.repo_path(&format!("/issues/{}/assignees", made.number)), &json!({ "assignees": request.assignees }))
+                .map_err(|e| format!("opened {}, but assigning {} didn't work: {e}", made.reference(), request.assignees.join(", ")))?;
+        }
         Ok(made)
     }
 

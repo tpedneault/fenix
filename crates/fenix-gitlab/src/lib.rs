@@ -112,6 +112,12 @@ impl GitLab {
         response.into_string().map_err(|err| format!("couldn't read response body: {err}"))
     }
 
+    /// A username's id, which is what GitLab assigns and asks reviews by.
+    fn user_id(&self, user: &str) -> Result<u64, String> {
+        let found = self.get("/users", &[("username", user)])?;
+        found.as_array().and_then(|l| l.first()).and_then(|u| u.get("id")).and_then(Value::as_u64).ok_or_else(|| format!("no GitLab user called {user}"))
+    }
+
     fn mr_path(&self, number: u64, suffix: &str) -> String {
         format!("/projects/{}/merge_requests/{number}{suffix}", self.encoded)
     }
@@ -259,6 +265,11 @@ impl Forge for GitLab {
         user.get("username").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "GitLab didn't say who the token belongs to".to_string())
     }
 
+    fn default_description(&self) -> Result<Option<String>, String> {
+        let project = self.get(&format!("/projects/{}", self.encoded), &[])?;
+        Ok(parse::default_description(&project))
+    }
+
     fn request_for_branch(&self, branch: &str) -> Result<Option<MergeRequest>, String> {
         let value = self.get(&format!("/projects/{}/merge_requests", self.encoded), &[("state", "opened"), ("source_branch", branch)])?;
         match value.as_array().and_then(|list| list.first()).and_then(parse::merge_request) {
@@ -271,12 +282,15 @@ impl Forge for GitLab {
     fn create_request(&self, request: &NewRequest) -> Result<MergeRequest, String> {
         // GitLab marks a draft by its title.
         let title = if request.draft { format!("Draft: {}", request.title) } else { request.title.clone() };
+        // GitLab assigns by user id, not name.
+        let assignees = request.assignees.iter().map(|user| self.user_id(user)).collect::<Result<Vec<u64>, String>>()?;
         let body = serde_json::json!({
             "source_branch": request.source_branch,
             "target_branch": request.target_branch,
             "title": title,
             "description": request.description,
             "labels": request.labels.join(","),
+            "assignee_ids": assignees,
         });
         let value = self.send_json("POST", &format!("/projects/{}/merge_requests", self.encoded), &body)?;
         parse::merge_request(&value).ok_or_else(|| "GitLab didn't say what it made".to_string())
@@ -315,9 +329,7 @@ impl Forge for GitLab {
     fn request_review(&self, number: u64, users: &[String]) -> Result<(), String> {
         let mut ids = Vec::new();
         for user in users {
-            let found = self.get("/users", &[("username", user.as_str())])?;
-            let id = found.as_array().and_then(|l| l.first()).and_then(|u| u.get("id")).and_then(Value::as_u64).ok_or_else(|| format!("no GitLab user called {user}"))?;
-            ids.push(id);
+            ids.push(self.user_id(user)?);
         }
         self.send("PUT", &self.mr_path(number, ""), &serde_json::json!({ "reviewer_ids": ids }))
     }
