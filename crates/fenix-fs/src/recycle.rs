@@ -72,14 +72,34 @@ pub fn permanently(paths: &[PathBuf]) -> Vec<Outcome> {
             // `symlink_metadata`, not `metadata`: deleting a link to a
             // directory must remove the link, never walk through it and
             // empty the directory it points at.
-            let is_dir = std::fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false);
-            let result = if is_dir { remove_dir_all(path) } else { std::fs::remove_file(path) };
+            let result = match std::fs::symlink_metadata(path).map(|m| m.file_type()) {
+                Ok(file_type) if file_type.is_symlink() => remove_link(path, file_type),
+                Ok(file_type) if file_type.is_dir() => remove_dir_all(path),
+                _ => std::fs::remove_file(path),
+            };
             match result {
                 Ok(()) => Outcome::ok(path.clone()),
                 Err(err) => Outcome::failed(path.clone(), err),
             }
         })
         .collect()
+}
+
+/// Removes a link itself. Windows keeps a link to a directory (a
+/// directory symlink or a junction) as a directory entry, which only
+/// `remove_dir` takes away -- `remove_file` is refused with "Access is
+/// denied". Everywhere else a link is a file.
+fn remove_link(path: &Path, file_type: std::fs::FileType) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if file_type.is_symlink_dir() {
+            return std::fs::remove_dir(path);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = file_type;
+    std::fs::remove_file(path)
 }
 
 /// `fs::remove_dir_all` with one addition: a read-only file inside the

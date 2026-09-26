@@ -3,8 +3,13 @@ resolver = "2"
 members = ["crates/fenix-agenda", "crates/fenix-embedded", "crates/fenix-brand", "crates/fenix-snippets", "crates/fenix-storage", "crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-core", "crates/fenix-dap", "crates/fenix-diff", "crates/fenix-docker", "crates/fenix-explorer", "crates/fenix-forge", "crates/fenix-format", "crates/fenix-fs", "crates/fenix-git", "crates/fenix-github", "crates/fenix-gitlab", "crates/fenix-gui", "crates/fenix-jira", "crates/fenix-keymap", "crates/fenix-lsp", "crates/fenix-mib", "crates/fenix-pdf", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-recovery", "crates/fenix-rpc", "crates/fenix-syntax", "crates/fenix-table", "crates/fenix-tasks", "crates/fenix-terminal", "crates/fenix-vim", "crates/fenix-vnc", "crates/fenix-window"]
 
 [workspace.package]
-version = "0.0.1"
+version = "1.0.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpedneault/fenix"
+authors = ["Thomas Pedneault <thomas@pedneault.dev>"]
+# The crates are Fenix's own building blocks, not libraries on crates.io.
+publish = false
 
 # `fenix-vnc` needs to know where one server `FramebufferUpdate` message
 # ends, which the published crate decodes but never surfaces -- without it

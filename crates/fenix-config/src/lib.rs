@@ -12,9 +12,9 @@
 //! in `problems`.
 //!
 //! `schema` declares every setting once; loading, saving, the settings
-//! page and the README's table all come from it. Saving changes only the
-//! lines of the settings that changed (`toml_edit`), so comments and hand
-//! edits survive it.
+//! page and the table in docs/CONFIGURATION.md all come from it. Saving
+//! changes only the lines of the settings that changed (`toml_edit`), so
+//! comments and hand edits survive it.
 
 mod ini;
 mod legacy;
