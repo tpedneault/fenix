@@ -1115,12 +1115,11 @@ impl Drop for TerminalReader {
 /// no owner left.
 struct TerminalState {
     session: fenix_terminal::Terminal,
-    /// `None` when opened without a real `event_proxy` (every test, per
-    /// `App::new`'s own doc comment) -- same "only a real, main.rs-
-    /// launched App spawns anything" posture `DockerSession::stats_
-    /// poller`/`GitSession::status_poller` already have. Never read
-    /// again once set -- held only for its `Drop` side effect, same
-    /// idiom as `stats_poller`/`log_follower`.
+    /// `None` only in tests that read the shell's output themselves
+    /// (`pump_until`); every spawn through `App` gets one, see
+    /// `App::spawn_terminal_reader`. Never read again once set -- held
+    /// only for its `Drop` side effect, same idiom as
+    /// `stats_poller`/`log_follower`.
     #[allow(dead_code)]
     reader: Option<TerminalReader>,
 }
@@ -10218,6 +10217,20 @@ impl App {
         self.wake_caret();
     }
 
+    /// Starts the thread that reads a freshly spawned shell's output.
+    ///
+    /// Without an event loop to forward to (every test) the output is
+    /// read and thrown away rather than left in the pipe. Until
+    /// Windows 11 24H2, `ClosePseudoConsole` blocks until the session's
+    /// output has been drained, so a shell nobody reads from hangs
+    /// whoever drops it -- here, the test, forever.
+    fn spawn_terminal_reader(&self, target: TerminalTarget, reader: Box<dyn std::io::Read + Send>) -> TerminalReader {
+        match self.event_proxy.clone() {
+            Some(proxy) => TerminalReader::spawn(target, reader, move |event| proxy.send_event(event).is_ok()),
+            None => TerminalReader::spawn(target, reader, |_| true),
+        }
+    }
+
     /// `FenixUserEvent::TerminalSpawned` handling: wires the freshly
     /// spawned shell's reader thread and, if the panel's still open
     /// (the user could have closed it again while the spawn was in
@@ -10231,10 +10244,8 @@ impl App {
         self.terminal_spawning = false;
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.event_proxy.clone().map(|proxy| {
-                    TerminalReader::spawn(TerminalTarget::Panel, reader, move |event| proxy.send_event(event).is_ok())
-                });
-                self.terminal = Some(TerminalState { session, reader: terminal_reader });
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Panel, reader);
+                self.terminal = Some(TerminalState { session, reader: Some(terminal_reader) });
                 if self.terminal_open {
                     self.terminal_focused = true;
                 }
@@ -10418,10 +10429,8 @@ impl App {
         }
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.event_proxy.clone().map(|proxy| {
-                    TerminalReader::spawn(TerminalTarget::Buffer(id), reader, move |event| proxy.send_event(event).is_ok())
-                });
-                self.terminal_buffers.insert(id, TerminalState { session, reader: terminal_reader });
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Buffer(id), reader);
+                self.terminal_buffers.insert(id, TerminalState { session, reader: Some(terminal_reader) });
                 self.focus_terminal_buffer(id);
             }
             Err(err) => {
