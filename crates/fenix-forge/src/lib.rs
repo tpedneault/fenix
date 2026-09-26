@@ -546,6 +546,13 @@ pub trait Forge {
         Err("this forge can't open a request from Fenix yet".to_string())
     }
 
+    /// The description template set on the project itself (GitLab's
+    /// Settings > Merge requests > Default description template), when
+    /// the forge has such a thing and the project sets one.
+    fn default_description(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     /// Finishes a review: every comment in `comments`, then the verdict
     /// and its summary, for the head `head_sha` that was reviewed.
     fn submit_review(&self, number: u64, head_sha: &str, verdict: Verdict, body: &str, comments: &[DraftComment]) -> Result<(), String> {

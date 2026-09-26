@@ -217,9 +217,24 @@ pub fn changed_file(value: &Value) -> Option<ChangedFile> {
     })
 }
 
+/// A project's default merge request description
+/// (`merge_requests_template`), when it has one that isn't blank.
+pub(crate) fn default_description(project: &Value) -> Option<String> {
+    project.get("merge_requests_template").and_then(Value::as_str).filter(|t| !t.trim().is_empty()).map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_projects_default_description_is_read_when_it_sets_one() {
+        let set = serde_json::json!({"id": 1, "merge_requests_template": "## What does this MR do?\n"});
+        assert_eq!(default_description(&set).as_deref(), Some("## What does this MR do?\n"));
+        assert_eq!(default_description(&serde_json::json!({"merge_requests_template": "  "})), None);
+        assert_eq!(default_description(&serde_json::json!({"merge_requests_template": null})), None);
+        assert_eq!(default_description(&serde_json::json!({"id": 1})), None, "not every edition sends it");
+    }
     use serde_json::json;
 
     fn diff_thread() -> Value {

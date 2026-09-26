@@ -91,7 +91,8 @@ impl App {
         self.page_spawn(move |send| {
             let result = client.request_for_branch(&branch);
             let me = client.current_user().ok();
-            send(PageEvent::RequestExisting { buffer: id, result, me });
+            let template = client.default_description().ok().flatten();
+            send(PageEvent::RequestExisting { buffer: id, result, me, template });
         });
     }
 
@@ -203,10 +204,13 @@ impl App {
 
     pub(super) fn apply_request_event(&mut self, event: PageEvent) {
         match event {
-            PageEvent::RequestExisting { buffer, result, me } => {
+            PageEvent::RequestExisting { buffer, result, me, template } => {
                 let Some(page) = self.request_page(buffer) else { return };
                 if let Some(me) = me {
                     page.assign_to_me(&me);
+                }
+                if let Some(template) = template {
+                    page.add_forge_template(template);
                 }
                 match result {
                     Ok(found) => page.existing = Some(found),

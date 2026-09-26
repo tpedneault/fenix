@@ -716,8 +716,9 @@ for anyone curious to poke around or build on it.
   token`; nothing is configured per repository.
   - **Opening one** (`SPC g P`, or `o` on the Git page): a page
     prefilled from the branch -- the title from its one commit or its
-    name as a sentence, the description from the repository's own
-    template (`.gitlab/merge_request_templates/`, GitHub's
+    name as a sentence, the description from the project's template --
+    GitLab's default description template (Settings > Merge requests),
+    else the repository's own (`.gitlab/merge_request_templates/`, GitHub's
     `pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE/`; with
     several, `Default` first and `h`/`l` on Template to switch) or else a
     summary of its commits, the base from `[git] base_branch`, you as the

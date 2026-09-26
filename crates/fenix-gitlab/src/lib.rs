@@ -265,6 +265,11 @@ impl Forge for GitLab {
         user.get("username").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "GitLab didn't say who the token belongs to".to_string())
     }
 
+    fn default_description(&self) -> Result<Option<String>, String> {
+        let project = self.get(&format!("/projects/{}", self.encoded), &[])?;
+        Ok(parse::default_description(&project))
+    }
+
     fn request_for_branch(&self, branch: &str) -> Result<Option<MergeRequest>, String> {
         let value = self.get(&format!("/projects/{}/merge_requests", self.encoded), &[("state", "opened"), ("source_branch", branch)])?;
         match value.as_array().and_then(|list| list.first()).and_then(parse::merge_request) {

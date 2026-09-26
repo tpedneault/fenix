@@ -350,6 +350,24 @@ impl RequestPage {
         self.field = fields[(at + by).clamp(0, fields.len() as isize - 1) as usize];
     }
 
+    /// The template set on the project in the forge's own settings: the
+    /// first choice, and the description too unless that was edited.
+    pub fn add_forge_template(&mut self, text: String) {
+        if self.templates.iter().any(|t| t.text.trim_end() == text.trim_end()) {
+            return;
+        }
+        self.templates.insert(0, Template { name: "project default".to_string(), text });
+        if self.description == self.filled {
+            self.template = 0;
+            self.description = description_for(&self.commits, self.jira.as_deref(), self.templates.first());
+            self.filled = self.description.clone();
+        } else {
+            // Still pointing at the one it was on.
+            self.template += 1;
+            self.message = Some((format!("{} has a default description template -- it's under Template; yours is kept", self.forge), false));
+        }
+    }
+
     /// You, as the assignee -- unless one's been typed already.
     pub fn assign_to_me(&mut self, me: &str) {
         if self.assignees.trim().is_empty() && !me.is_empty() && !(self.field == Field::Assignees && self.editing.is_some()) {
@@ -540,7 +558,7 @@ pub fn layout(page: &RequestPage, cols: usize) -> Page {
             }
             Field::Description => {
                 let from = match page.templates.get(page.template) {
-                    Some(t) if page.templates.len() == 1 => format!("from {} · e edits it in a buffer", t.name),
+                    Some(t) if page.templates.len() == 1 => format!("from the {} template · e edits it in a buffer", t.name),
                     _ => "e edits it in a buffer".to_string(),
                 };
                 g.put(y, value_x, &fit(&from, value_width), Role::Muted);
@@ -767,6 +785,21 @@ mod tests {
         assert_eq!(p.description, "My own words", "edited: asks first");
         p.key(Key::Char('l'));
         assert!(p.description.starts_with("## What does this MR do?"));
+    }
+
+    #[test]
+    fn the_projects_default_template_on_the_forge_comes_first() {
+        let mut p = page(vec![commit("a1", "One", "Body.")]);
+        assert_eq!(p.description, "Body.\n\nRefs FNX-58");
+        p.add_forge_template("## Why\n\n## How to test\n".into());
+        assert_eq!(p.description, "## Why\n\n## How to test\n\nRefs FNX-58", "untouched: the template replaces it");
+        assert!(layout(&p, 100).text.contains("from the project default template"));
+
+        let mut edited = page(vec![commit("a1", "One", "Body.")]);
+        edited.set_description("Mine".into());
+        edited.add_forge_template("## Why\n".into());
+        assert_eq!(edited.description, "Mine", "edited: kept");
+        assert_eq!(edited.templates[0].name, "project default");
     }
 
     #[test]
