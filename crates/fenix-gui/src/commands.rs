@@ -241,6 +241,12 @@ impl CommandRegistry {
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
+        registry.register("tab.close", "Close the focused pane's tab (the buffer stays open)", |ctx| ctx.app.close_focused_tab());
+        registry.register("tab.close_others", "Close every other tab in the focused pane", |ctx| ctx.app.close_other_tabs());
+        registry.register("tab.reopen", "Reopen the tab this pane closed last", |ctx| ctx.app.reopen_closed_tab());
+        registry.register("tab.keep", "Keep the preview tab as an ordinary tab", |ctx| ctx.app.keep_focused_preview());
+        registry.register("tab.move_left", "Move the tab one place left", |ctx| ctx.app.shift_focused_tab(-1));
+        registry.register("tab.move_right", "Move the tab one place right", |ctx| ctx.app.shift_focused_tab(1));
         registry.register("buffer.kill_force", "Close the focused buffer immediately, discarding any unsaved changes", cmd_kill_buffer_force);
         registry.register("buffer.save_and_kill", "Save the focused buffer (if needed) then close it", cmd_save_and_kill_buffer);
         registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);

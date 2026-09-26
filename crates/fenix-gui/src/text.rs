@@ -698,9 +698,16 @@ impl TextPipeline {
     /// the breadcrumb row below it is `set_pane_breadcrumb_rich`'s own
     /// separate buffer, not a second line of this one -- the only way to
     /// give the two rows independent on-screen heights).
-    pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
+    /// `italic` lists the segments drawn in italics -- a preview tab's
+    /// name.
+    pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)], italic: &[usize]) {
         let _profile = crate::profile::Scope::new("shape title");
-        let spans = self.rich_spans(segments);
+        let mut spans = self.rich_spans(segments);
+        for &i in italic {
+            if let Some((_, attrs)) = spans.get_mut(i) {
+                *attrs = attrs.clone().style(glyphon::cosmic_text::Style::Italic);
+            }
+        }
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.titles.contains_key(&pane) {

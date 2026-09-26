@@ -487,6 +487,12 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('n')], "next buffer", "buffer.next");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('p')], "prev buffer", "buffer.prev");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('k')], "kill buffer", "buffer.kill");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('d')], "close tab", "tab.close");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('o')], "close other tabs", "tab.close_others");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('u')], "reopen closed tab", "tab.reopen");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('P')], "keep preview tab", "tab.keep");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('<')], "move tab left", "tab.move_left");
+        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('>')], "move tab right", "tab.move_right");
         t.insert(&[spc, KeyPress::char('b'), KeyPress::char('X')], "scratch buffer", "buffer.scratch");
 
         let tab = KeyPress::named(FenixNamedKey::Tab);
@@ -1035,6 +1041,12 @@ mod tests {
         assert!(matches!(resolve(&['n']), fenix_keymap::Step::Matched(&"buffer.next")));
         assert!(matches!(resolve(&['p']), fenix_keymap::Step::Matched(&"buffer.prev")));
         assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"buffer.kill")));
+        assert!(matches!(resolve(&['d']), fenix_keymap::Step::Matched(&"tab.close")));
+        assert!(matches!(resolve(&['o']), fenix_keymap::Step::Matched(&"tab.close_others")));
+        assert!(matches!(resolve(&['u']), fenix_keymap::Step::Matched(&"tab.reopen")));
+        assert!(matches!(resolve(&['P']), fenix_keymap::Step::Matched(&"tab.keep")));
+        assert!(matches!(resolve(&['<']), fenix_keymap::Step::Matched(&"tab.move_left")));
+        assert!(matches!(resolve(&['>']), fenix_keymap::Step::Matched(&"tab.move_right")));
         assert!(matches!(resolve(&['X']), fenix_keymap::Step::Matched(&"buffer.scratch")));
     }
 

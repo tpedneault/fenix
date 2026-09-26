@@ -7,6 +7,13 @@
 use super::*;
 use fenix_vim::TabMove;
 
+/// How many closed tabs a pane remembers for `SPC b u`.
+pub(super) const CLOSED_TABS_KEPT: usize = 20;
+
+/// Two clicks on the same tab closer together than this are a
+/// double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// Where `mv` lands in `order` (Home first, then the pane's tabs) from
 /// `current`. `None` when there's nowhere to go: an empty order, or a
 /// `{n}gt` past the last tab. `Last` and `Home` aren't positional and
@@ -196,11 +203,183 @@ impl App {
             for ws in &mut list.workspaces {
                 ws.pane_tabs.values_mut().for_each(|tabs| tabs.retain(|&b| b != id));
                 ws.last_tab.retain(|_, b| *b != id);
+                ws.preview.retain(|_, b| *b != id);
+                ws.closed_tabs.values_mut().for_each(|closed| closed.retain(|(b, _)| *b != id));
             }
         }
         if self.snippet.as_ref().is_some_and(|s| active_panes.contains(&s.pane)) {
             self.snippet = None;
         }
+    }
+
+    /// Lists `id` in `pane`'s tabs if it isn't there yet: right after
+    /// `before` (the tab the pane was on), or, for a `preview`, in the
+    /// pane's preview tab -- replacing the file that was previewed there
+    /// rather than adding another tab. A buffer already listed stays
+    /// where it is, preview or not.
+    pub(super) fn list_tab(&mut self, pane: fenix_window::WindowId, before: Option<BufferId>, id: BufferId, preview: bool) {
+        let preview = preview && self.config.preview_tab != Some(false);
+        let Workspace { pane_tabs, preview: previews, home, .. } = self.workspaces.active_workspace_mut();
+        if *home == Some(id) {
+            return;
+        }
+        let tabs = pane_tabs.entry(pane).or_default();
+        if tabs.contains(&id) {
+            return;
+        }
+        let slot = previews.get(&pane).and_then(|p| tabs.iter().position(|b| b == p));
+        match slot.filter(|_| preview) {
+            Some(i) => tabs[i] = id,
+            None => {
+                let after = before.and_then(|b| tabs.iter().position(|&t| t == b));
+                tabs.insert(after.map_or(tabs.len(), |i| i + 1), id);
+            }
+        }
+        if preview {
+            previews.insert(pane, id);
+        }
+    }
+
+    /// `pane`'s preview becomes an ordinary tab.
+    pub(super) fn keep_preview(&mut self, pane: fenix_window::WindowId) {
+        self.workspaces.active_workspace_mut().preview.remove(&pane);
+    }
+
+    /// After a key: a preview that's just been edited is kept.
+    pub(super) fn keep_edited_preview(&mut self) {
+        let pane = self.focused_pane_id();
+        let Some(&id) = self.workspaces.active_workspace().preview.get(&pane) else { return };
+        if self.focused_buffer_id() == id && self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()) {
+            self.keep_preview(pane);
+        }
+    }
+
+    /// Whether `id` is `pane`'s preview tab -- drawn in italics.
+    pub(super) fn is_preview_tab(&self, pane: fenix_window::WindowId, id: BufferId) -> bool {
+        self.workspaces.active_workspace().preview.get(&pane) == Some(&id)
+    }
+
+    /// `SPC b d`: closes the focused pane's tab; the buffer stays open.
+    pub(crate) fn close_focused_tab(&mut self) {
+        let pane = self.focused_pane_id();
+        let id = self.focused_buffer_id();
+        if self.workspaces.active_workspace().home == Some(id) {
+            self.set_message("Home stays open");
+            return;
+        }
+        self.close_pane_tab(pane, id);
+        self.refresh_project_root();
+        self.wake_caret();
+    }
+
+    /// `SPC b o`: closes every tab in the focused pane but the one it's on
+    /// (and Home). `SPC b u` brings them back one at a time.
+    pub(crate) fn close_other_tabs(&mut self) {
+        let pane = self.focused_pane_id();
+        let current = self.focused_buffer_id();
+        let home = self.workspaces.active_workspace().home;
+        let others: Vec<BufferId> = self.pane_tab_order(pane).into_iter().filter(|&id| id != current && Some(id) != home).collect();
+        for id in others.into_iter().rev() {
+            self.close_pane_tab(pane, id);
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC b u`: reopens the tab this pane closed last, where it was.
+    /// Tabs whose buffer has since been killed are skipped.
+    pub(crate) fn reopen_closed_tab(&mut self) {
+        let pane = self.focused_pane_id();
+        loop {
+            let Some((id, at)) = self.workspaces.active_workspace_mut().closed_tabs.get_mut(&pane).and_then(Vec::pop) else {
+                self.set_message("no closed tab to reopen");
+                break;
+            };
+            if self.buffers.get(id).is_none() {
+                continue;
+            }
+            let tabs = self.workspaces.active_pane_tabs_mut().entry(pane).or_default();
+            if !tabs.contains(&id) {
+                tabs.insert(at.min(tabs.len()), id);
+            }
+            self.set_pane_content(pane, id);
+            self.refresh_project_root();
+            break;
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC b P`: the focused pane's preview becomes a tab you keep.
+    pub(crate) fn keep_focused_preview(&mut self) {
+        let pane = self.focused_pane_id();
+        if self.is_preview_tab(pane, self.focused_buffer_id()) {
+            self.keep_preview(pane);
+        } else {
+            self.set_message("this tab is already kept");
+        }
+        self.wake_caret();
+    }
+
+    /// `SPC b <` / `SPC b >`: moves the focused pane's tab one place left
+    /// (`-1`) or right (`1`). Home stays first.
+    pub(crate) fn shift_focused_tab(&mut self, by: isize) {
+        let pane = self.focused_pane_id();
+        let id = self.focused_buffer_id();
+        let shown = self.pane_tab_order(pane);
+        let ws = self.workspaces.active_workspace_mut();
+        let home = ws.home;
+        let Some(tabs) = ws.pane_tabs.get_mut(&pane) else { return };
+        // Only what the strip shows: Home and closed buffers dropped.
+        tabs.retain(|b| shown.contains(b) && Some(*b) != home);
+        let Some(i) = tabs.iter().position(|&b| b == id) else { return };
+        let j = i as isize + by;
+        if j >= 0 && (j as usize) < tabs.len() {
+            tabs.swap(i, j as usize);
+        }
+        self.wake_caret();
+    }
+
+    /// Moves `id` to where `onto` is within `pane`'s tabs -- a dragged
+    /// tab dropped on another.
+    fn move_tab_onto(&mut self, pane: fenix_window::WindowId, id: BufferId, onto: BufferId) {
+        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
+        let (Some(from), Some(to)) = (tabs.iter().position(|&b| b == id), tabs.iter().position(|&b| b == onto)) else { return };
+        let moved = tabs.remove(from);
+        tabs.insert(to, moved);
+    }
+
+    /// A click that switched to a tab: the second of two on a preview
+    /// keeps it.
+    pub(super) fn tab_clicked(&mut self, pane: fenix_window::WindowId, id: BufferId) {
+        let now = Instant::now();
+        let double = self.last_tab_click.is_some_and(|(at, p, b)| p == pane && b == id && now.duration_since(at) < DOUBLE_CLICK);
+        if double && self.is_preview_tab(pane, id) {
+            self.keep_preview(pane);
+        }
+        self.last_tab_click = if double { None } else { Some((now, pane, id)) };
+    }
+
+    /// The mouse over the tab strip, besides a plain click: a middle
+    /// click closes the tab, and the left button pressed on one tab and
+    /// released on another moves it there.
+    pub(super) fn tab_mouse(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) {
+        let hit = self.tab_geometry.iter().find(|(_, tab)| tab.body.contains_point(pos.0, pos.1)).map(|(pane, tab)| (*pane, tab.buffer));
+        let home = self.workspaces.active_workspace().home;
+        match (button, pressed, hit) {
+            (MouseButton::Middle, true, Some((pane, id))) if Some(id) != home => {
+                self.close_pane_tab(pane, id);
+                self.refresh_project_root();
+            }
+            (MouseButton::Left, true, hit) => self.tab_drag = hit.filter(|(_, id)| Some(*id) != home),
+            (MouseButton::Left, false, hit) => {
+                if let (Some((pane, id)), Some((over, onto))) = (self.tab_drag.take(), hit) {
+                    if pane == over && id != onto && Some(onto) != home {
+                        self.move_tab_onto(pane, id, onto);
+                    }
+                }
+            }
+            _ => return,
+        }
+        self.wake_caret();
     }
 
     /// Every workspace list with its index: 0 is the live frame's, the

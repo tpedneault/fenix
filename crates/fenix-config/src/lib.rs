@@ -98,6 +98,9 @@ pub struct Config {
     /// user who wants to rule animation cost in/out of a responsiveness
     /// complaint, or who just prefers snappier motion.
     pub animations: Option<bool>,
+    /// Whether a jump (`gd`, a search result, a symbol) opens in one
+    /// reusable preview tab until it's edited or kept. `None` means on.
+    pub preview_tab: Option<bool>,
     pub completion_symbols_file: Option<PathBuf>,
     /// Whether the snippets that come with Fenix are offered; yours and
     /// a project's always are.
@@ -416,6 +419,7 @@ impl Config {
             iskeyword_extra: None,
             tab_width: None,
             animations: None,
+            preview_tab: None,
             completion_symbols_file: None,
             snippets_builtin: None,
             lsp_servers: Vec::new(),

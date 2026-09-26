@@ -5043,6 +5043,12 @@ struct Workspace {
     home: Option<BufferId>,
     /// The buffer each pane showed before its current one -- `g<Tab>`.
     last_tab: HashMap<fenix_window::WindowId, BufferId>,
+    /// Each pane's preview tab, if it has one: the tab a jump (`gd`, a
+    /// search result) reuses until it's edited or kept.
+    preview: HashMap<fenix_window::WindowId, BufferId>,
+    /// Each pane's closed tabs, newest last, with the place each held --
+    /// what `SPC b u` reopens.
+    closed_tabs: HashMap<fenix_window::WindowId, Vec<(BufferId, usize)>>,
 }
 
 impl Workspace {
@@ -5051,7 +5057,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new() }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() }
     }
 }
 
@@ -5881,6 +5887,12 @@ pub struct App {
     /// A page saw `g` and is waiting to learn whether it's a tab key
     /// (`gt`, `gT`, `gh`, `g<Tab>`) -- see `App::page_key`.
     page_g_pending: bool,
+    /// The last tab clicked, and when -- a second click on it soon after
+    /// is a double-click, which keeps a preview.
+    last_tab_click: Option<(Instant, fenix_window::WindowId, BufferId)>,
+    /// A tab the left button went down on, carried to wherever it's
+    /// released to move it there.
+    tab_drag: Option<(fenix_window::WindowId, BufferId)>,
     /// A project workspace's Home data, by project root -- see
     /// `App::home_data_for`.
     home_project_data: HashMap<PathBuf, dashboard::HomeData>,
@@ -7035,6 +7047,8 @@ impl App {
             home_views: HashMap::new(),
             home_data: dashboard::HomeData::default(),
             page_g_pending: false,
+            last_tab_click: None,
+            tab_drag: None,
             home_project_data: HashMap::new(),
             home_logo: None,
             logo_pipeline: None,
@@ -7677,18 +7691,21 @@ impl App {
     /// from whatever it was showing before (which could easily be out of
     /// bounds for the new buffer's own length).
     fn set_pane_content(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId) {
+        self.set_pane_content_as(pane, buffer_id, false);
+    }
+
+    /// `set_pane_content`, with a buffer the pane has no tab for yet
+    /// opening in its preview tab when `preview` (see `App::list_tab`).
+    fn set_pane_content_as(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, preview: bool) {
         if self.snippet.as_ref().is_some_and(|s| s.pane == pane) { self.snippet = None; }
-        if let Some(&before) = self.windows().content(pane).filter(|&&b| b != buffer_id) {
+        let before = self.windows().content(pane).copied();
+        if let Some(before) = before.filter(|&b| b != buffer_id) {
             self.workspaces.active_workspace_mut().last_tab.insert(pane, before);
         }
         self.windows_mut().set_content(pane, buffer_id);
         let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
-        let home = self.workspaces.active_workspace().home;
-        let tabs = self.workspaces.active_pane_tabs_mut().entry(pane).or_default();
-        if !tabs.contains(&buffer_id) && home != Some(buffer_id) {
-            tabs.push(buffer_id);
-        }
+        self.list_tab(pane, before, buffer_id, preview);
         self.refresh_gutter_hunks(buffer_id);
     }
 
@@ -7816,12 +7833,18 @@ impl App {
     /// -- which was still showing the hijacked file, not VNC, making it
     /// look like reopening the session had silently done nothing.
     fn open_buffer_in_focused_pane(&mut self, id: BufferId) {
+        self.open_buffer_in_focused_pane_as(id, false);
+    }
+
+    /// `open_buffer_in_focused_pane`, in the pane's preview tab when
+    /// `preview` -- for a jump rather than a deliberate open.
+    fn open_buffer_in_focused_pane_as(&mut self, id: BufferId, preview: bool) {
         if self.focused_pane_holds_a_tracked_session() {
             let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
             self.workspaces.new_workspace(id, cursor);
         } else {
             let focused = self.focused_pane_id();
-            self.set_pane_content(focused, id);
+            self.set_pane_content_as(focused, id, preview);
         }
     }
 
@@ -8195,7 +8218,7 @@ impl App {
     /// range's start.
     fn goto_lsp_location(&mut self, location: &lsp_types::Location) {
         let Some(path) = fenix_lsp::uri_to_path(&location.uri) else { return };
-        self.open_file_from_picker(&path);
+        self.open_file_as_preview(&path);
         self.goto_lsp_position(location.range.start);
     }
 
@@ -9329,6 +9352,11 @@ impl App {
         if self.open().buffer.path().is_none() {
             self.set_error("no file path to save to yet; use :w <path>");
             return;
+        }
+        // Saving a preview says you mean to keep it.
+        let pane = self.focused_pane_id();
+        if self.workspaces.active_workspace().preview.get(&pane) == Some(&id) {
+            self.keep_preview(pane);
         }
         if !force {
             // Re-checked here rather than trusting the last sweep: the
@@ -12370,11 +12398,11 @@ impl App {
         let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         match entry {
             QuickfixEntry::Grep(m) | QuickfixEntry::Task(m) => {
-                self.open_file_from_picker(&m.path);
+                self.open_file_as_preview(&m.path);
                 self.jump_to_grep_match(&m);
             }
             QuickfixEntry::Lsp { path, position } => {
-                self.open_file_from_picker(&path);
+                self.open_file_as_preview(&path);
                 self.goto_lsp_position(position);
             }
         }
@@ -14857,7 +14885,7 @@ impl App {
     /// rather than a separate persistent highlight for v1.
     fn goto_debug_location(&mut self, path: &Path, line: usize) {
         let Some(buffer_id) = self.buffers.id_for_path(path) else {
-            self.open_file_from_picker(path);
+            self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
             return;
         };
@@ -14875,7 +14903,7 @@ impl App {
             }
         }
         if !shown_somewhere {
-            self.open_file_from_picker(path);
+            self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
         }
     }
@@ -18693,7 +18721,7 @@ impl App {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-                self.open_file_from_picker(&m.path);
+                self.open_file_as_preview(&m.path);
                 self.jump_to_grep_match(&m);
                 self.record_jump(from);
                 // So `SPC p n`/`SPC p N` continue from wherever the
@@ -18751,7 +18779,7 @@ impl App {
                 let Some(tag) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-                self.open_file_from_picker(&tag.file);
+                self.open_file_as_preview(&tag.file);
                 self.jump_to_tag(&tag);
                 self.record_jump(from);
             }
@@ -18909,13 +18937,28 @@ impl App {
     /// here, so confirming always means "this is current now, back to
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
+        self.open_file_as(path, false);
+        // Opened on purpose: a preview of this file is now a tab you keep.
+        let pane = self.focused_pane_id();
+        if self.workspaces.active_workspace().preview.get(&pane) == Some(&self.focused_buffer_id()) {
+            self.keep_preview(pane);
+        }
+    }
+
+    /// Where a jump lands (`gd`, a search result, a symbol, `Ctrl-O`):
+    /// the pane's preview tab, which the next jump reuses.
+    fn open_file_as_preview(&mut self, path: &Path) {
+        self.open_file_as(path, true);
+    }
+
+    fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
             self.open_pdf_path(path);
             return;
         }
         let id = self.buffers.open_path(path);
         self.note_disk_state(id);
-        self.open_buffer_in_focused_pane(id);
+        self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
         self.record_recent_file(path);
         self.main_view = MainView::Editor;
@@ -19158,6 +19201,7 @@ impl App {
     /// What happens after a key has been through Vim, whatever it did:
     /// today, finishing an XML tag the key just typed in Insert mode.
     fn after_vim_key(&mut self, key: KeyPress) {
+        self.keep_edited_preview();
         if let KeyCode::Char(c @ ('>' | '/')) = key.code {
             if key.mods == Mods::default() && self.vim.mode() == Mode::Insert {
                 self.xml_autoclose(c);
@@ -19284,7 +19328,8 @@ impl App {
     /// apply.
     fn goto_jump_entry(&mut self, entry: JumpEntry, linewise: bool) {
         if entry.buffer != self.focused_buffer_id() {
-            self.open_buffer_in_focused_pane(entry.buffer);
+            self.open_buffer_in_focused_pane_as(entry.buffer, true);
+            self.refresh_project_root();
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
@@ -24616,6 +24661,7 @@ impl App {
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
                 self.set_pane_content(pane, buffer);
+                self.tab_clicked(pane, buffer);
             }
             Some(ScrollTarget::CloseTab(pane, buffer)) if self.workspaces.active_workspace().home == Some(buffer) => {
                 self.windows_mut().focus(pane);
@@ -24644,8 +24690,18 @@ impl App {
         }
         let was_active = self.windows().content(pane) == Some(&buffer);
         let order = self.pane_tab_order(pane);
-        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
-        tabs.retain(|&id| id != buffer);
+        let ws = self.workspaces.active_workspace_mut();
+        let Some(tabs) = ws.pane_tabs.get_mut(&pane) else { return };
+        let Some(at) = tabs.iter().position(|&id| id == buffer) else { return };
+        tabs.remove(at);
+        let closed = ws.closed_tabs.entry(pane).or_default();
+        closed.push((buffer, at));
+        if closed.len() > tabs::CLOSED_TABS_KEPT {
+            closed.remove(0);
+        }
+        if ws.preview.get(&pane) == Some(&buffer) {
+            ws.preview.remove(&pane);
+        }
         if was_active {
             let target = tabs::tab_after_closing(&order, buffer).unwrap_or_else(|| self.ensure_workspace_home());
             self.set_pane_content(pane, target);
@@ -25049,6 +25105,8 @@ impl App {
             /// and an estimate built from character counts cannot match a
             /// row that mixes the body font with the much wider icon font.
             tab_ranges: Vec<(usize, usize, usize, usize)>,
+            /// Which of `tab_spans` are in italics: the preview tab's name.
+            tab_italic: Vec<usize>,
             /// The breadcrumb bar's rich-text spans, directly below the
             /// tab strip -- kept as its own field (not appended to `tab_
             /// spans` with a newline) since the two rows now render as
@@ -25215,6 +25273,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25302,6 +25361,7 @@ impl App {
                         tab_spans: Vec::new(),
                         breadcrumb_spans: Vec::new(),
                         tab_ranges: Vec::new(),
+                        tab_italic: Vec::new(),
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
@@ -25377,6 +25437,7 @@ impl App {
                         tab_spans: Vec::new(),
                         breadcrumb_spans: Vec::new(),
                         tab_ranges: Vec::new(),
+                        tab_italic: Vec::new(),
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
@@ -25417,6 +25478,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25455,6 +25517,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25654,7 +25717,7 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges) = if theme.show_tabs
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if theme.show_tabs
                 && !self.pane_titles.contains_key(&pane)
             {
                 // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
@@ -25682,6 +25745,7 @@ impl App {
                 let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
                 let mut active_flags: Vec<bool> = Vec::new();
                 let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+                let mut italic: Vec<usize> = Vec::new();
                 let mut byte = 0usize;
                 for tab in &layout {
                     let is_active = Some(tab.buffer) == active_buffer;
@@ -25726,13 +25790,16 @@ impl App {
                     byte += close_span.len();
                     ranges.push((tab_start, byte, close_start, byte));
                     spans.push((icon_span, theme.icon_file, true));
+                    if self.is_preview_tab(pane, tab.buffer) {
+                        italic.push(spans.len());
+                    }
                     spans.push((name_span, name_color, false));
                     spans.push((close_span, theme.gutter_fg, false));
                 }
                 let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
-                (layout, active_flags, spans, crumbs, ranges)
+                (layout, active_flags, spans, crumbs, ranges, italic)
             } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
             // Inline git gutter marks (Part 5) currently in view -- every
@@ -25795,6 +25862,7 @@ impl App {
                 tab_spans,
                 breadcrumb_spans,
                 tab_ranges,
+                tab_italic,
                 has_breadcrumb,
                 gutter_marks,
                 indent_guides,
@@ -25912,11 +25980,11 @@ impl App {
             let tab_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: tab_h };
             if pane.tabs_layout.is_empty() {
                 let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)]);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)], &[]);
             } else {
                 let refs: Vec<(&str, glyphon::Color, bool)> =
                     pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &refs);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &refs, &pane.tab_italic);
                 // Now that the strip is shaped, replace each tab's
                 // estimated rect with where its glyphs actually landed.
                 // This is the whole fix for the active tab's highlight
@@ -26963,6 +27031,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     if let Some(pos) = self.cursor_pos {
                         self.handle_click(pos);
                     }
+                }
+                if let Some(pos) = self.cursor_pos {
+                    self.tab_mouse(pos, button, state == ElementState::Pressed);
                 }
                 if let Some(pos) = self.cursor_pos {
                     self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
@@ -35872,6 +35943,137 @@ configure_board stm32
         app.close_pane_tab(pane, b);
         assert_eq!(app.focused_buffer_id(), c);
         assert_eq!(app.pane_tab_order(pane)[1..], [a, c]);
+    }
+
+    #[test]
+    fn a_new_tab_opens_right_after_the_one_you_were_on() {
+        let (mut app, dir, [home, a, b, c]) = app_with_three_tabs("tabs_insert");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.test_open_path(&dir.write("d.txt", "d"));
+        let d = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, d, b, c]);
+    }
+
+    #[test]
+    fn jumps_share_one_preview_tab_until_it_is_edited() {
+        let (mut app, dir, [home, a, b, c]) = app_with_three_tabs("tabs_preview");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        assert!(app.is_preview_tab(pane, p));
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, p, b, c]);
+
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, q, b, c], "the next jump reuses the preview's place");
+
+        app.test_route_key(KeyPress::char('x'));
+        assert!(!app.is_preview_tab(pane, q), "an edit keeps it");
+        app.open_file_as_preview(&dir.write("r.txt", "r"));
+        let r = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, q, r, b, c]);
+    }
+
+    #[test]
+    fn opening_a_previewed_file_on_purpose_keeps_it() {
+        let dir = TempDir::new("tabs_preview_keep");
+        let file = dir.write("p.txt", "p");
+        let mut app = App::with_file(None);
+        app.ensure_workspace_home();
+        let pane = app.focused_pane_id();
+        app.open_file_as_preview(&file);
+        assert!(app.is_preview_tab(pane, app.focused_buffer_id()));
+        app.open_file_from_picker(&file);
+        assert!(!app.is_preview_tab(pane, app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn keep_preview_and_a_double_click_keep_it() {
+        let dir = TempDir::new("tabs_preview_click");
+        let mut app = App::with_file(None);
+        app.ensure_workspace_home();
+        let pane = app.focused_pane_id();
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        app.tab_clicked(pane, p);
+        assert!(app.is_preview_tab(pane, p), "one click only switches");
+        app.tab_clicked(pane, p);
+        assert!(!app.is_preview_tab(pane, p));
+
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        app.keep_focused_preview();
+        assert!(!app.is_preview_tab(pane, q));
+    }
+
+    #[test]
+    fn with_previews_off_every_jump_is_a_tab() {
+        let dir = TempDir::new("tabs_preview_off");
+        let mut app = App::with_file(None);
+        app.config.preview_tab = Some(false);
+        let home = app.ensure_workspace_home();
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(app.focused_pane_id()), vec![home, p, q]);
+    }
+
+    #[test]
+    fn a_closed_tab_reopens_where_it_was() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_reopen");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, b);
+        app.close_focused_tab();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, c]);
+        assert!(app.buffers.get(b).is_some());
+        app.reopen_closed_tab();
+        assert_eq!(app.focused_buffer_id(), b);
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+    }
+
+    #[test]
+    fn closing_the_others_leaves_home_and_this_one_and_each_comes_back() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_others");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, b);
+        app.close_other_tabs();
+        assert_eq!(app.pane_tab_order(pane), vec![home, b]);
+        app.reopen_closed_tab();
+        app.reopen_closed_tab();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+    }
+
+    #[test]
+    fn a_tab_moves_left_and_right_but_home_stays_first() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_shift");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.shift_focused_tab(-1);
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+        app.shift_focused_tab(1);
+        assert_eq!(app.pane_tab_order(pane), vec![home, b, a, c]);
+    }
+
+    #[test]
+    fn the_mouse_closes_with_the_middle_button_and_drags_to_move() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_mouse");
+        let pane = app.focused_pane_id();
+        let rect = |x: f32| fenix_window::Rect { x, y: 0.0, w: 10.0, h: 10.0 };
+        app.tab_geometry = [home, a, b, c]
+            .iter()
+            .enumerate()
+            .map(|(i, &buffer)| (pane, TabRect { buffer, body: rect(i as f32 * 10.0), close: rect(i as f32 * 10.0 + 8.0) }))
+            .collect();
+        app.tab_mouse((12.0, 5.0), MouseButton::Left, true); // a
+        app.tab_mouse((32.0, 5.0), MouseButton::Left, false); // onto c
+        assert_eq!(app.pane_tab_order(pane), vec![home, b, c, a]);
+        app.tab_mouse((22.0, 5.0), MouseButton::Middle, true); // over what was b's place
+        assert_eq!(app.pane_tab_order(pane).len(), 3);
+        app.tab_mouse((2.0, 5.0), MouseButton::Middle, true); // Home
+        assert_eq!(app.pane_tab_order(pane)[0], home);
     }
 
     #[test]

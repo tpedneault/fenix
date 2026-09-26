@@ -405,7 +405,7 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new() });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }

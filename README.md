@@ -459,8 +459,12 @@ for anyone curious to poke around or build on it.
   a live local date/time clock flush against the right edge, ticking in
   place as you work (omitted rather than overlapping anything if the
   window's too narrow to fit it).
-- **Home** (the start-up dashboard, `SPC o d` to reopen it): the Fenix
-  logo and the date, a find field (`SPC SPC`), then three columns --
+- **Home** (the start-up dashboard; `gh` or `SPC o d` to go back to it):
+  every workspace has one, pinned as the first tab of every pane under
+  the workspace's name, and it never closes. A workspace opened from the
+  project hub gets a Home of that project -- its recent files and TODOs
+  only, with the project's name next to the date. The Fenix logo and
+  the date, a find field (`SPC SPC`), then three columns --
   the file to resume and recent files; known projects with their git
   branch; today's agenda tasks (the one on the clock first, with its
   running time) and the project's TODO comments -- over a recovery
@@ -1260,7 +1264,7 @@ popup shows what keys continue it.
 | `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |
 | `SPC s r` | Search and replace in the current buffer (Visual-scoped if invoked from Visual mode) |
 | `SPC s p` | Search and replace across the project |
-| `SPC o d` | Open Home, the start-up dashboard |
+| `SPC o d` | Go to this workspace's Home, the start-up dashboard (same as `gh`) |
 | `SPC o t` | Toggle the terminal panel |
 | `SPC o T` | Open a shell in the focused pane |
 | `SPC d d` | Open (or refocus/refresh) the Docker panel |
@@ -1382,7 +1386,16 @@ popup shows what keys continue it.
 | `SPC w Q` / `SPC w O` | Close this OS window / close all the others |
 | `SPC b b` | Switch buffer |
 | `SPC b n` / `SPC b p` | Next / previous buffer |
-| `SPC b k` | Kill (close) the focused buffer |
+| `SPC b k` | Kill (close) the focused buffer -- its tab goes from every pane |
+| `gt` / `gT` | Next / previous tab in the focused pane, wrapping round through Home |
+| `{n}gt` | Tab *n* (Home isn't numbered, so `1gt` is the first file) |
+| `g<Tab>` / `gh` | The tab you were on before / this workspace's Home |
+| `Ctrl-PgDn` / `Ctrl-PgUp` / `Ctrl-Tab` | Next / previous / last tab, in any mode |
+| `SPC b d` | Close the tab (the buffer stays open); the tab to its right takes its place, then the one to its left, then Home |
+| `SPC b o` | Close every other tab in the pane |
+| `SPC b u` | Reopen the tab this pane closed last, where it was |
+| `SPC b P` | Keep the preview tab -- the italic one a jump (`gd`, a search result, a symbol, `Ctrl-O`) reuses; editing it or saving it keeps it too |
+| `SPC b <` / `SPC b >` | Move the tab one place left / right (the mouse: drag it; a middle click closes it) |
 | `SPC b X` | New scratch buffer |
 | `SPC TAB n` | New workspace |
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
@@ -1866,6 +1879,7 @@ when it's out of date).
 | `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; h and l go through them. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
 | `editor.animations` | true / false | on | Smooth scrolling and the caret's fade. |
+| `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
 | **Files & explorer** | | | |
 | `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
 | **Completion & LSP** | | | |
