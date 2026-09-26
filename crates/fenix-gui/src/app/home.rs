@@ -68,6 +68,7 @@ impl App {
     pub(super) fn refresh_home_data(&mut self, with_todos: bool) {
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
+        let reading = self.home_reading(None);
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
@@ -141,6 +142,7 @@ impl App {
         let mut scoped = HashMap::new();
         for root in self.home_projects() {
             let (resume, recent) = self.home_recent_files(Some(&root));
+            let reading = self.home_reading(Some(&root));
             let todos = match self.home_project_data.get(&root) {
                 Some(previous) if !with_todos => previous.todos.clone(),
                 _ => self.home_todos(&root),
@@ -150,6 +152,7 @@ impl App {
                 date: format!("{name} · {date}"),
                 resume,
                 recent,
+                reading,
                 projects: projects.clone(),
                 today: today.clone(),
                 todos,
@@ -157,7 +160,7 @@ impl App {
             };
             scoped.insert(root, data);
         }
-        let data = HomeData { date, resume, recent, projects, today, todos, recovery };
+        let data = HomeData { date, resume, recent, reading, projects, today, todos, recovery };
         if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
             self.home_project_data = scoped;
@@ -174,11 +177,32 @@ impl App {
 
     /// The resume slot and the recent files, from anywhere or only from
     /// under `scope`.
+    /// PDFs read lately, with where you were in each -- Home's Reading.
+    fn home_reading(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
+        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
+        self.recent_files
+            .paths()
+            .iter()
+            .filter(|p| Self::looks_like_pdf(p) && p.is_file() && under(p))
+            .take(3)
+            .map(|path| {
+                let place = self.pdf_places.get(path).or_else(|| self.pdf_places.get(&fenix_project::plain_path(path.clone())));
+                dashboard::FileItem {
+                    path: path.clone(),
+                    name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    detail: place.map(|p| format!("p. {} / {}", p.page + 1, p.pages)).unwrap_or_default(),
+                    age: String::new(),
+                }
+            })
+            .collect()
+    }
+
     fn home_recent_files(&self, scope: Option<&Path>) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
         // Recent files are stored canonical (with Windows' `\\?\` prefix), project
         // roots normalized, so both are compared normalized.
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
-        let mut recent_files = self.recent_files.paths().iter().filter(|p| p.is_file() && under(p));
+        // PDFs have their own section, `home_reading`.
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| p.is_file() && under(p) && !Self::looks_like_pdf(p));
         let project_of = |path: &Path| -> Option<(String, Option<String>)> {
             let root = fenix_project::find_project_root(path)?;
             let name = root.file_name()?.to_string_lossy().into_owned();
@@ -456,5 +480,19 @@ mod tests {
         assert_eq!(format_elapsed(chrono::Duration::seconds(18 * 60 + 6)), "0:18");
         assert_eq!(format_elapsed(chrono::Duration::minutes(125)), "2:05");
     }
-}
 
+    #[test]
+    fn home_lists_what_you_are_reading() {
+        let mut app = App::with_file(None);
+        let dir = std::env::temp_dir().join(format!("fenix-home-reading-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = dir.join("read.pdf");
+        std::fs::write(&read, b"%PDF-1.4").unwrap();
+        app.recent_files.add(read.clone());
+        app.pdf_places.insert(read.clone(), crate::reader::SavedPlace { page: 37, frac: 0.0, zoom: crate::reader::Zoom::FitWidth, pages: 212, marks: Default::default() });
+        let reading = app.home_reading(None);
+        assert_eq!(reading.len(), 1);
+        assert_eq!((reading[0].name.as_str(), reading[0].detail.as_str()), ("read.pdf", "p. 38 / 212"));
+        assert!(app.home_recent_files(None).1.iter().all(|f| f.path != read), "not in Recent as well");
+    }
+}

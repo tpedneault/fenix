@@ -192,6 +192,10 @@ pub enum LspRequestKind {
     GoToDefinition,
     References,
     Hover,
+    /// `gf`: not a language server's -- the host opens the file named
+    /// under the cursor. It rides this path because it's the same shape:
+    /// a `g` key the host answers.
+    FileUnderCursor,
 }
 
 struct Register {

@@ -46,7 +46,8 @@ pub fn zoom_label(zoom: Zoom) -> String {
     }
 }
 
-/// Pixels between pages, and around them, before the scale factor.
+/// Pixels between pages, and around them, before the scale factor --
+/// `reader.page_gap`'s default.
 pub const PAGE_GAP: f32 = 12.0;
 
 /// Where one page sits in the document's column, in pixels from the
@@ -80,12 +81,13 @@ pub struct Layout {
 }
 
 /// Lays `pages` (sizes in points) out for `zoom` in a pane `pane` pixels
-/// big, on a screen of scale factor `dpi`. Fitting fits the widest page
-/// (and, for fit page, the tallest), so every page has one scale and a
-/// narrower one sits centred.
-pub fn layout(pages: &[(f32, f32)], zoom: Zoom, pane: (f32, f32), dpi: f32) -> Layout {
+/// big, on a screen of scale factor `dpi`, `gap` pixels (before scaling)
+/// between and around them. Fitting fits the widest page (and, for fit
+/// page, the tallest), so every page has one scale and a narrower one
+/// sits centred.
+pub fn layout(pages: &[(f32, f32)], zoom: Zoom, pane: (f32, f32), dpi: f32, gap: f32) -> Layout {
     let dpi = dpi.max(0.1);
-    let gap = (PAGE_GAP * dpi).round();
+    let gap = (gap.max(0.0) * dpi).round();
     let max_w = pages.iter().map(|p| p.0).fold(0.0f32, f32::max).max(1.0);
     let max_h = pages.iter().map(|p| p.1).fold(0.0f32, f32::max).max(1.0);
     let room = ((pane.0 - gap * 2.0).max(1.0), (pane.1 - gap * 2.0).max(1.0));
@@ -163,6 +165,100 @@ impl Layout {
     }
 }
 
+/// Where a document was left, as `reader.remember` keeps it between
+/// runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedPlace {
+    pub page: u32,
+    /// How far down the page the pane's top was, 0..1.
+    pub frac: f32,
+    pub zoom: Zoom,
+    /// The document's page count, for "p. 38 / 212".
+    pub pages: u32,
+    pub marks: std::collections::BTreeMap<char, (u32, f32)>,
+}
+
+fn zoom_text(zoom: Zoom) -> String {
+    match zoom {
+        Zoom::FitWidth => "width".to_string(),
+        Zoom::FitPage => "page".to_string(),
+        Zoom::Percent(p) => p.to_string(),
+    }
+}
+
+/// `width`, `page` or a percentage, as settings and the places file
+/// write a zoom.
+pub fn parse_zoom(text: &str) -> Option<Zoom> {
+    match text.trim() {
+        "width" => Some(Zoom::FitWidth),
+        "page" => Some(Zoom::FitPage),
+        p => p.parse().ok().map(|p: u32| Zoom::Percent(p.clamp(ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.len() - 1]))),
+    }
+}
+
+/// The places file: a line per document, tab-separated -- path, page,
+/// how far down it, zoom, page count, then marks as `a:3:0.25`. A line
+/// that doesn't read is skipped.
+pub fn parse_places(text: &str) -> std::collections::HashMap<std::path::PathBuf, SavedPlace> {
+    text.lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let path = std::path::PathBuf::from(f.next()?);
+            let page = f.next()?.parse().ok()?;
+            let frac = f.next()?.parse().ok()?;
+            let zoom = parse_zoom(f.next()?)?;
+            let pages = f.next()?.parse().ok()?;
+            let marks = f
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .filter_map(|m| {
+                    let mut p = m.split(':');
+                    let c = p.next()?.chars().next()?;
+                    Some((c, (p.next()?.parse().ok()?, p.next()?.parse().ok()?)))
+                })
+                .collect();
+            Some((path, SavedPlace { page, frac, zoom, pages, marks }))
+        })
+        .collect()
+}
+
+pub fn format_places(places: &std::collections::HashMap<std::path::PathBuf, SavedPlace>) -> String {
+    let mut lines: Vec<String> = places
+        .iter()
+        .map(|(path, p)| {
+            let marks: Vec<String> = p.marks.iter().map(|(c, (page, frac))| format!("{c}:{page}:{frac:.3}")).collect();
+            format!("{}\t{}\t{:.3}\t{}\t{}\t{}", path.display(), p.page, p.frac, zoom_text(p.zoom), p.pages, marks.join(","))
+        })
+        .collect();
+    lines.sort();
+    lines.join("\n") + "\n"
+}
+
+/// The file name under column `col` of `line`, and the page a
+/// `#page=38` after it asks for: what `gf` follows. A Markdown link's
+/// brackets and quotes around it aren't part of it, nor is a full stop
+/// or comma after it.
+pub fn link_at(line: &str, col: usize) -> Option<(String, Option<u32>)> {
+    let chars: Vec<char> = line.chars().collect();
+    let stop = |c: char| c.is_whitespace() || "()[]<>\"'`|".contains(c);
+    if col >= chars.len() || stop(chars[col]) {
+        return None;
+    }
+    let start = (0..col).rev().take_while(|&i| !stop(chars[i])).last().unwrap_or(col);
+    let end = (col..chars.len()).take_while(|&i| !stop(chars[i])).last()? + 1;
+    let mut token: String = chars[start..end].iter().collect();
+    while token.ends_with(['.', ',', ';', ':', '!', '?']) {
+        token.pop();
+    }
+    let (path, fragment) = match token.split_once('#') {
+        Some((path, fragment)) => (path.to_string(), Some(fragment)),
+        None => (token, None),
+    };
+    let page = fragment.and_then(|f| f.strip_prefix("page=")).and_then(|n| n.parse().ok());
+    (!path.is_empty()).then_some((path, page))
+}
+
 /// What a key in a PDF pane asks for. Counts are already folded in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cmd {
@@ -204,6 +300,8 @@ pub enum Cmd {
     /// `Esc` with nothing typed: hide the search's highlights, or close
     /// the sidebar.
     Escape,
+    /// `yp`: copy a link to this page (`file.pdf#page=38`).
+    CopyLink,
 }
 
 /// What `Keys::key` made of a key.
@@ -270,6 +368,7 @@ impl Keys {
                 ('z', KeyCode::Char('0')) => Cmd::ActualSize,
                 ('m', KeyCode::Char(c)) if c.is_ascii_alphabetic() => Cmd::SetMark(c),
                 ('\'', KeyCode::Char(c)) if c.is_ascii_alphabetic() => Cmd::GotoMark(c),
+                ('y', KeyCode::Char('p')) => Cmd::CopyLink,
                 _ => return Outcome::Dropped,
             };
             return Outcome::Run(cmd);
@@ -298,7 +397,7 @@ impl Keys {
         let cmd = match key.code {
             KeyCode::Char(c @ '1'..='9') => return self.digit(c),
             KeyCode::Char('0') if count.is_some() => return self.digit('0'),
-            KeyCode::Char(c @ ('g' | 'z' | 'm' | '\'')) => {
+            KeyCode::Char(c @ ('g' | 'z' | 'm' | 'y' | '\'')) => {
                 self.prefix = Some(c);
                 return Outcome::Pending;
             }
@@ -403,6 +502,12 @@ mod tests {
     }
 
     #[test]
+    fn yp_copies_a_link() {
+        assert_eq!(last("yp"), Outcome::Run(Cmd::CopyLink));
+        assert_eq!(last("yy"), Outcome::Dropped);
+    }
+
+    #[test]
     fn marks() {
         assert_eq!(last("ma"), Outcome::Run(Cmd::SetMark('a')));
         assert_eq!(last("'a"), Outcome::Run(Cmd::GotoMark('a')));
@@ -457,7 +562,7 @@ mod tests {
 
     #[test]
     fn fit_width_stacks_the_pages_one_under_the_other() {
-        let l = layout(&letter(3), Zoom::FitWidth, (636.0, 400.0), 1.0);
+        let l = layout(&letter(3), Zoom::FitWidth, (636.0, 400.0), 1.0, PAGE_GAP);
         assert_eq!(l.scale, 1.0);
         assert_eq!(l.pages[0], PageRect { x: 12.0, y: 12.0, w: 612.0, h: 792.0 });
         assert_eq!(l.pages[1].y, 12.0 + 792.0 + 12.0);
@@ -467,22 +572,22 @@ mod tests {
 
     #[test]
     fn a_narrower_page_is_centred_at_the_same_scale() {
-        let l = layout(&[(612.0, 792.0), (306.0, 396.0)], Zoom::FitWidth, (636.0, 400.0), 1.0);
+        let l = layout(&[(612.0, 792.0), (306.0, 396.0)], Zoom::FitWidth, (636.0, 400.0), 1.0, PAGE_GAP);
         assert_eq!((l.pages[1].w, l.pages[1].x), (306.0, 165.0));
     }
 
     #[test]
     fn fit_page_fits_the_tallest_page_and_a_percent_ignores_the_pane() {
-        let l = layout(&letter(2), Zoom::FitPage, (1000.0, 420.0), 1.0);
+        let l = layout(&letter(2), Zoom::FitPage, (1000.0, 420.0), 1.0, PAGE_GAP);
         assert_eq!(l.pages[0].h, 396.0);
-        let l = layout(&letter(2), Zoom::Percent(200), (100.0, 100.0), 1.5);
+        let l = layout(&letter(2), Zoom::Percent(200), (100.0, 100.0), 1.5, PAGE_GAP);
         assert_eq!(l.pages[0].w, 1836.0);
         assert!(l.width > 100.0, "wider than the pane, so it pans");
     }
 
     #[test]
     fn what_shows_and_what_is_being_read() {
-        let l = layout(&letter(5), Zoom::FitWidth, (636.0, 400.0), 1.0);
+        let l = layout(&letter(5), Zoom::FitWidth, (636.0, 400.0), 1.0, PAGE_GAP);
         assert_eq!(l.visible(0.0, 400.0), 0..1);
         assert_eq!(l.visible(700.0, 400.0), 0..2);
         assert_eq!(l.current(0.0, (636.0, 400.0)), 0);
@@ -494,13 +599,34 @@ mod tests {
 
     #[test]
     fn an_anchor_finds_the_same_place_at_another_zoom() {
-        let small = layout(&letter(5), Zoom::FitWidth, (336.0, 400.0), 1.0);
-        let big = layout(&letter(5), Zoom::FitWidth, (1236.0, 400.0), 1.0);
+        let small = layout(&letter(5), Zoom::FitWidth, (336.0, 400.0), 1.0, PAGE_GAP);
+        let big = layout(&letter(5), Zoom::FitWidth, (1236.0, 400.0), 1.0, PAGE_GAP);
         let y = small.pages[3].y + small.pages[3].h / 4.0;
         let anchor = small.anchor(y);
         assert_eq!(anchor.0, 3);
         assert!((anchor.1 - 0.25).abs() < 0.01);
         let again = big.scroll_for(anchor);
         assert_eq!(big.page_at(again), 3);
+    }
+    #[test]
+    fn places_read_back_what_was_written() {
+        let mut places = std::collections::HashMap::new();
+        let mut marks = std::collections::BTreeMap::new();
+        marks.insert('a', (3, 0.25));
+        places.insert(std::path::PathBuf::from("C:/refs/a b.pdf"), SavedPlace { page: 37, frac: 0.5, zoom: Zoom::Percent(125), pages: 212, marks });
+        places.insert(std::path::PathBuf::from("/x.pdf"), SavedPlace { page: 0, frac: 0.0, zoom: Zoom::FitWidth, pages: 3, marks: Default::default() });
+        let text = format_places(&places);
+        assert_eq!(parse_places(&text), places);
+        assert!(parse_places("garbage\nC:/y.pdf\tnope").is_empty(), "lines that don't read are skipped");
+    }
+
+    #[test]
+    fn a_link_under_the_cursor() {
+        let line = "see [the spec](specs/133x0b2e2.pdf#page=38), then more";
+        let at = line.find("133x").unwrap();
+        assert_eq!(link_at(line, at), Some(("specs/133x0b2e2.pdf".to_string(), Some(38))));
+        assert_eq!(link_at("open notes.md.", 7), Some(("notes.md".to_string(), None)), "a full stop isn't part of it");
+        assert_eq!(link_at("a b", 1), None, "not on a space");
+        assert_eq!(link_at("x.pdf#nameddest=intro", 0), Some(("x.pdf".to_string(), None)));
     }
 }

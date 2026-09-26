@@ -83,8 +83,13 @@ pub(super) struct PdfDoc {
     pub(super) marks: BTreeMap<char, Place>,
     /// Where the last view used was, so a new view -- the document shown
     /// in another pane, or reopened after its tab was closed -- continues
-    /// there instead of at page 1.
+    /// there instead of at page 1: the page at the pane's top, its zoom,
+    /// and how far down that page (`last_frac`).
     pub(super) last_place: (u32, Zoom),
+    pub(super) last_frac: f32,
+    /// When the file was last written, to reload it when a build
+    /// rewrites it.
+    pub(super) modified: Option<std::time::SystemTime>,
 }
 
 impl PdfDoc {
@@ -118,7 +123,7 @@ pub(super) struct PdfView {
     pub(super) dpi: f32,
     /// The document laid out for `zoom`, `pane` and `dpi`.
     pub(super) layout: Layout,
-    layout_for: Option<(Zoom, (f32, f32), f32, usize)>,
+    layout_for: Option<(Zoom, (f32, f32), f32, usize, f32)>,
     /// Top-left of what's shown, in the layout's pixels.
     pub(super) scroll: (f32, f32),
     /// A place to show at the pane's top once the layout is known --
@@ -212,6 +217,11 @@ impl App {
             };
             self.pdf_worker = Some(worker);
         }
+        // Where it was left last time, when `reader.remember` is on.
+        let saved = if self.pdf_remembers() { self.pdf_places.get(path).cloned() } else { None };
+        let last_place = saved.as_ref().map(|p| (p.page, p.zoom)).unwrap_or((0, self.pdf_default_zoom()));
+        let last_frac = saved.as_ref().map(|p| p.frac).unwrap_or(0.0);
+        let marks = saved.map(|p| p.marks).unwrap_or_default();
         let buffer = self.buffers.open_pdf();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
         let doc_key = fenix_pdf::PdfDocKey::new();
@@ -234,8 +244,10 @@ impl App {
                 current_match: None,
                 highlights: false,
                 jump_when_found: None,
-                marks: BTreeMap::new(),
-                last_place: (0, reader::DEFAULT_ZOOM),
+                marks,
+                last_place,
+                last_frac,
+                modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
             },
         );
         buffer
@@ -244,7 +256,7 @@ impl App {
     /// The view for `key`, made if the pane hasn't shown the document
     /// before. `None` when `key`'s buffer isn't a document.
     pub(super) fn pdf_ensure_view(&mut self, key: ViewKey) -> Option<&mut PdfView> {
-        let (page, zoom) = self.pdf_docs.get(&key.1)?.last_place;
+        let ((page, zoom), frac) = self.pdf_docs.get(&key.1).map(|d| (d.last_place, d.last_frac))?;
         if !self.pdf_views.contains_key(&key) {
             let id = self.pdf_next_id();
             self.pdf_views.insert(
@@ -257,7 +269,7 @@ impl App {
                     layout: Layout::default(),
                     layout_for: None,
                     scroll: (0.0, 0.0),
-                    pending_jump: Some((page, 0.0)),
+                    pending_jump: Some((page, frac)),
                     cache: HashMap::new(),
                     pending: HashMap::new(),
                     wanted: Vec::new(),
@@ -299,16 +311,17 @@ impl App {
     /// pending jump and keeps the scroll in bounds.
     pub(super) fn pdf_relayout(&mut self, key: ViewKey) {
         let Some(pages) = self.pdf_docs.get(&key.1).map(|doc| doc.pages.clone()) else { return };
+        let gap = self.pdf_gap();
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
         if view.pane.0 <= 0.0 || view.pane.1 <= 0.0 || pages.is_empty() {
             return;
         }
-        let inputs = (view.zoom, view.pane, view.dpi, pages.len());
+        let inputs = (view.zoom, view.pane, view.dpi, pages.len(), gap);
         if view.layout_for != Some(inputs) {
             let old = std::mem::take(&mut view.layout);
             let anchor = (!old.pages.is_empty()).then(|| old.anchor(view.scroll.1));
             let x_ratio = if old.width > 0.0 { (view.scroll.0 + view.pane.0 / 2.0) / old.width } else { 0.5 };
-            view.layout = reader::layout(&pages, view.zoom, view.pane, view.dpi);
+            view.layout = reader::layout(&pages, view.zoom, view.pane, view.dpi, gap);
             view.layout_for = Some(inputs);
             if let Some(anchor) = anchor {
                 view.scroll.1 = view.layout.scroll_for(anchor);
@@ -331,10 +344,16 @@ impl App {
     /// calls in place of drawing.
     pub(super) fn pdf_prepare_view(&mut self, key: ViewKey, pane: (f32, f32), cell: (f32, f32)) {
         let dpi = self.frame_scale();
+        let placement = self.config.reader.sidebar.clone();
         let Some(view) = self.pdf_ensure_view(key) else { return };
         let side_px = if view.sidebar.is_some() { (reader_sidebar::COLS as f32 * cell.0 + text::PAD_LEFT * 2.0).round() } else { 0.0 };
         view.side_px = side_px;
-        view.side_over = side_px > 0.0 && pane.0 < reader_sidebar::BESIDE_MIN_COLS as f32 * cell.0;
+        view.side_over = side_px > 0.0
+            && match placement.as_deref() {
+                Some("over") => true,
+                Some("beside") => false,
+                _ => pane.0 < reader_sidebar::BESIDE_MIN_COLS as f32 * cell.0,
+            };
         view.pane = (if view.side_over { pane.0 } else { (pane.0 - side_px).max(1.0) }, pane.1);
         view.dpi = dpi;
         self.pdf_relayout(key);
@@ -439,11 +458,87 @@ impl App {
     }
 
     fn pdf_remember_place(&mut self, key: ViewKey) {
-        let page = self.pdf_current_page(key);
+        let Some((page, frac)) = self.pdf_place(key) else { return };
         let Some(zoom) = self.pdf_views.get(&key).map(|view| view.zoom) else { return };
         if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
             doc.last_place = (page, zoom);
+            doc.last_frac = frac;
         }
+        self.pdf_store_place(key.1);
+    }
+
+    // -- Settings and remembering -----------------------------------------
+
+    pub(super) fn pdf_remembers(&self) -> bool {
+        self.config.reader.remember != Some(false)
+    }
+
+    fn pdf_default_zoom(&self) -> Zoom {
+        self.config.reader.zoom.as_deref().and_then(reader::parse_zoom).unwrap_or(reader::DEFAULT_ZOOM)
+    }
+
+    fn pdf_gap(&self) -> f32 {
+        self.config.reader.page_gap.map(|g| g as f32).unwrap_or(reader::PAGE_GAP)
+    }
+
+    /// Notes where `doc` is, for the places file.
+    fn pdf_store_place(&mut self, doc: BufferId) {
+        if !self.pdf_remembers() {
+            return;
+        }
+        let Some(d) = self.pdf_docs.get(&doc) else { return };
+        if d.pages.is_empty() {
+            return;
+        }
+        let place = reader::SavedPlace { page: d.last_place.0, frac: d.last_frac, zoom: d.last_place.1, pages: d.page_count(), marks: d.marks.clone() };
+        if self.pdf_places.get(&d.path) != Some(&place) {
+            self.pdf_places.insert(d.path.clone(), place);
+            self.pdf_places_dirty = true;
+        }
+    }
+
+    /// Writes the places file if anything changed -- from the regular
+    /// disk poll and when a document closes.
+    pub(super) fn pdf_save_places(&mut self) {
+        if !self.pdf_places_dirty {
+            return;
+        }
+        self.pdf_places_dirty = false;
+        if let Some(dir) = self.pdf_places_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(err) = std::fs::write(&self.pdf_places_path, reader::format_places(&self.pdf_places)) {
+            eprintln!("fenix: couldn't save PDF places: {err}");
+        }
+    }
+
+    /// Whether pages are drawn in the theme's colours
+    /// (`reader.colors = "theme"`): the colours white and black become.
+    pub(super) fn pdf_recolor(&self) -> Option<([f32; 3], [f32; 3])> {
+        (self.config.reader.colors.as_deref() == Some("theme")).then(|| {
+            let (bg, fg) = (self.theme.bg, glyphon_to_rgba(self.theme.fg));
+            ([bg[0], bg[1], bg[2]], [fg[0], fg[1], fg[2]])
+        })
+    }
+
+    /// A page not rendered yet: blank paper, or the theme's background.
+    pub(super) fn pdf_paper(&self) -> [f32; 4] {
+        if self.pdf_recolor().is_some() {
+            self.theme.bg
+        } else {
+            PAPER
+        }
+    }
+
+    /// `SPC r c`: switches `reader.colors` between paper and the theme,
+    /// and saves it.
+    pub(crate) fn pdf_toggle_colors(&mut self) {
+        let next = if self.pdf_recolor().is_some() { "paper" } else { "theme" };
+        match self.set_setting("reader.colors", Some(fenix_config::Value::Text(next.to_string()))) {
+            Ok(()) => self.set_message(if next == "theme" { "PDF pages in the theme's colours" } else { "PDF pages as printed" }),
+            Err(why) => self.set_error(why),
+        }
+        self.refresh_settings_pages();
     }
 
     /// The document whose worker name is `doc_key`.
@@ -460,6 +555,11 @@ impl App {
                 if let Some(doc) = self.pdf_docs.get_mut(&buffer) {
                     doc.last_place.0 = doc.last_place.0.min((pages.len() as u32).saturating_sub(1));
                     doc.pages = pages;
+                }
+                // Lay out again: a reload can change page sizes and keep
+                // the count.
+                for (_, view) in self.pdf_views.iter_mut().filter(|((_, b), _)| *b == buffer) {
+                    view.layout_for = None;
                 }
                 // The views lay themselves out on the next frame.
             }
@@ -546,6 +646,8 @@ impl App {
     /// of it and its views go with it. The buffer itself is the caller's
     /// to close.
     pub(super) fn pdf_close_doc(&mut self, buffer: BufferId) {
+        self.pdf_store_place(buffer);
+        self.pdf_save_places();
         let Some(doc) = self.pdf_docs.remove(&buffer) else { return };
         if let Some(worker) = &self.pdf_worker {
             worker.send(fenix_pdf::PdfRequest::Close { key: doc.doc_key });
@@ -615,6 +717,7 @@ impl App {
             Cmd::SetMark(c) => self.pdf_set_mark(c),
             Cmd::GotoMark(c) => self.pdf_goto_mark(c),
             Cmd::Escape => self.pdf_escape(),
+            Cmd::CopyLink => self.pdf_copy_link(),
         }
         self.wake_caret();
     }
@@ -740,6 +843,7 @@ impl App {
         if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
             doc.marks.insert(c, place);
         }
+        self.pdf_store_place(key.1);
         self.set_message(format!("mark {c} on page {}", place.0 + 1));
     }
 
@@ -957,6 +1061,14 @@ impl App {
             }
         }
 
+        // Pages in the theme's colours are the background's colour, so
+        // the gaps around them go a shade darker.
+        if self.pdf_recolor().is_some() {
+            if let Some((_, clip)) = self.pdf_page_area(key, rect) {
+                let bg = theme.bg;
+                chrome.rects.push(((clip.x, clip.y, clip.w, clip.h), [bg[0] * 0.72, bg[1] * 0.72, bg[2] * 0.72, 1.0]));
+            }
+        }
         let Some(side) = &view.sidebar else { return chrome };
         let (char_w, line_h) = cell;
         chrome.rects.push(((rect.x, rect.y, view.side_px, rect.h), theme.sidebar_bg));
@@ -1157,16 +1269,109 @@ impl App {
         }
         self.set_message(format!("match {}/{total} on page {}", at + 1, page + 1));
     }
+    // -- Links ------------------------------------------------------------
+
+    /// `yp`, `SPC r y`: copies a link to the page being read -- the path
+    /// from the project (or in full) and `#page=38` -- to the clipboard
+    /// and the unnamed register, for notes and tasks. `gf` on it opens
+    /// the document there.
+    pub(crate) fn pdf_copy_link(&mut self) {
+        let Some(key) = self.pdf_target() else { return };
+        let Some(path) = self.pdf_docs.get(&key.1).map(|d| d.path.clone()) else { return };
+        let shown = self.project_root.as_ref().and_then(|root| path.strip_prefix(root).ok()).map(Path::to_path_buf).unwrap_or(path);
+        let link = format!("{}#page={}", shown.display().to_string().replace('\\', "/"), self.pdf_current_page(key) + 1);
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(link.clone());
+        }
+        self.vim.set_register(link.clone(), false);
+        self.set_message(format!("copied {link}"));
+    }
+
+    /// `gf`: opens the file named under the cursor -- relative to the
+    /// buffer's folder, then the project -- in the preview tab. A PDF
+    /// with `#page=38` after it opens at that page.
+    pub(super) fn follow_link_under_cursor(&mut self) {
+        let (line, col) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        let Some((name, page)) = reader::link_at(text.trim_end_matches(['\n', '\r']), col) else {
+            self.set_message("no file name under the cursor");
+            return;
+        };
+        let here = self.open().buffer.path().and_then(Path::parent).map(Path::to_path_buf);
+        let named = PathBuf::from(&name);
+        let found = if named.is_absolute() {
+            named.exists().then_some(named)
+        } else {
+            [here, self.project_root.clone(), std::env::current_dir().ok()].into_iter().flatten().map(|dir| dir.join(&named)).find(|p| p.exists())
+        };
+        let Some(path) = found else {
+            self.set_message(format!("no file {name}"));
+            return;
+        };
+        if Self::looks_like_pdf(&path) {
+            self.open_pdf_path_as(&path, true);
+            if let Some(page) = page {
+                self.pdf_goto_page(page);
+            }
+        } else {
+            self.open_file_as(&path, true);
+        }
+    }
+
+    // -- Reload -----------------------------------------------------------
+
+    /// A PDF rewritten on disk (a build, a download) is read again, each
+    /// view keeping its place. From the regular disk poll.
+    pub(super) fn pdf_reload_changed(&mut self) {
+        let changed: Vec<(BufferId, Option<std::time::SystemTime>)> = self
+            .pdf_docs
+            .iter()
+            .filter_map(|(&id, d)| {
+                let now = std::fs::metadata(&d.path).and_then(|m| m.modified()).ok();
+                (now.is_some() && now != d.modified).then_some((id, now))
+            })
+            .collect();
+        for (id, modified) in changed {
+            let Some(d) = self.pdf_docs.get_mut(&id) else { continue };
+            d.modified = modified;
+            d.outline = None;
+            d.matches.clear();
+            d.current_match = None;
+            d.search_done = true;
+            let (key, path, name) = (d.doc_key, d.path.clone(), d.name.clone());
+            if let Some(worker) = &self.pdf_worker {
+                worker.send(fenix_pdf::PdfRequest::Close { key });
+                worker.send(fenix_pdf::PdfRequest::Open { key, path });
+            }
+            for ((_, b), view) in self.pdf_views.iter_mut() {
+                if *b == id {
+                    view.cache.clear();
+                    view.pending.clear();
+                    view.wanted.clear();
+                }
+            }
+            self.pdf_requests.retain(|_, ((_, b), _)| *b != id);
+            self.set_message(format!("{name} changed on disk -- reloaded"));
+        }
+    }
+
+    // -- Sessions ---------------------------------------------------------
+
+    /// The buffer for the PDF at `path`, opened if it isn't -- what a
+    /// restored session points a pane at.
+    pub(super) fn pdf_buffer_for(&mut self, path: &Path) -> BufferId {
+        let canonical = fenix_project::plain_path(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        match self.pdf_docs.iter().find(|(_, doc)| doc.path == canonical).map(|(id, _)| *id) {
+            Some(buffer) => buffer,
+            None => self.pdf_load(&canonical),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Each `App` below spawns a real `PdfWorker`, which binds pdfium --
-    /// a process-wide library that crashes when two threads bring it up
-    /// or tear it down at once, as parallel tests would.
-    static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A pane that fits a US Letter page's width at 100%, with the gaps.
     const PANE: (f32, f32) = (636.0, 400.0);
@@ -1754,5 +1959,182 @@ mod tests {
         let (_guard, _key, mut app) = test_open_pdf("pdf_keys_no_search.pdf");
         keys(&mut app, "n");
         assert!(app.modeline_text().contains("/ searches"), "{}", app.modeline_text());
+    }
+
+    // -- Settings, remembering, links, reload, sessions --------------------
+
+    /// A real (if not real-PDF) file, so paths exist and have a time.
+    fn pdf_file(dir: &std::path::Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"%PDF-1.4 not really").unwrap();
+        fenix_project::plain_path(std::fs::canonicalize(&path).unwrap())
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fenix-reader-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn open_file(app: &mut App, path: &Path) -> ViewKey {
+        app.open_pdf_path(path);
+        let key = app.pdf_view_in_pane(app.focused_pane_id()).unwrap();
+        app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 10];
+        app.pdf_prepare_view(key, PANE, CELL);
+        key
+    }
+
+    #[test]
+    fn a_pdf_reopens_where_it_was_left_with_its_zoom_and_marks() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused.pdf");
+        let dir = temp_dir("remember");
+        let path = pdf_file(&dir, "spec.pdf");
+        open_file(&mut app, &path);
+        app.pdf_goto_page(5);
+        app.pdf_scroll(100);
+        keys(&mut app, "ma");
+        app.pdf_set_zoom(Zoom::Percent(125));
+        app.kill_buffer_now();
+        let saved = app.pdf_places.get(&path).expect("kept").clone();
+        assert_eq!((saved.page, saved.zoom, saved.pages), (4, Zoom::Percent(125), 10));
+        assert!(saved.marks.contains_key(&'a'));
+        assert!(std::fs::read_to_string(&app.pdf_places_path).unwrap().contains("spec.pdf"), "written to the places file");
+
+        let key = open_file(&mut app, &path);
+        assert_eq!(page(&app, key), 4, "back where it was left");
+        assert_eq!(view(&app, key).zoom, Zoom::Percent(125));
+        keys(&mut app, "gg");
+        keys(&mut app, "'a");
+        assert_eq!(page(&app, key), 4, "the mark came back too");
+        let _ = key;
+    }
+
+    #[test]
+    fn with_remember_off_nothing_is_kept() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused2.pdf");
+        app.config.reader.remember = Some(false);
+        let dir = temp_dir("forget");
+        let path = pdf_file(&dir, "spec.pdf");
+        open_file(&mut app, &path);
+        app.pdf_goto_page(5);
+        app.kill_buffer_now();
+        assert!(!app.pdf_places.contains_key(&path));
+    }
+
+    #[test]
+    fn the_default_zoom_page_gap_and_sidebar_placement_are_settings() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused3.pdf");
+        app.config.reader.zoom = Some("page".into());
+        app.config.reader.page_gap = Some(0);
+        app.config.reader.sidebar = Some("over".into());
+        let dir = temp_dir("settings");
+        let key = open_file(&mut app, &pdf_file(&dir, "a.pdf"));
+        assert_eq!(view(&app, key).zoom, Zoom::FitPage);
+        assert_eq!(view(&app, key).layout.gap, 0.0);
+        keys(&mut app, "o");
+        app.pdf_prepare_view(key, (1600.0, 400.0), CELL);
+        assert!(view(&app, key).side_over, "over even in a wide pane");
+    }
+
+    #[test]
+    fn spc_r_c_switches_the_page_colours_setting() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_colors.pdf");
+        assert_eq!(app.pdf_recolor(), None);
+        assert_eq!(app.pdf_paper(), PAPER);
+        app.pdf_toggle_colors();
+        assert_eq!(app.config.reader.colors.as_deref(), Some("theme"));
+        assert!(app.pdf_recolor().is_some());
+        assert_eq!(app.pdf_paper(), app.theme.bg, "blank pages in the theme's background");
+        let chrome = app.pdf_chrome(key, fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 }, CELL);
+        assert!(!chrome.rects.is_empty(), "a darker backdrop, so the pages' edges show");
+        app.pdf_toggle_colors();
+        assert_eq!(app.config.reader.colors.as_deref(), Some("paper"));
+    }
+
+    #[test]
+    fn yp_copies_a_link_to_the_page() {
+        let (_guard, _key, mut app) = test_open_pdf("pdf_link.pdf");
+        app.pdf_goto_page(5);
+        keys(&mut app, "yp");
+        assert!(app.modeline_text().contains("pdf_link.pdf#page=5"), "{}", app.modeline_text());
+    }
+
+    #[test]
+    fn gf_on_a_link_opens_the_pdf_at_its_page() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused4.pdf");
+        let dir = temp_dir("gf");
+        let pdf = pdf_file(&dir, "spec.pdf");
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "See [the spec](spec.pdf#page=38).\n").unwrap();
+        app.open_file_from_picker(&notes);
+        let at = "See [the spec](".len() + 2;
+        app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+        app.follow_link_under_cursor();
+        let key = app.pdf_view_in_pane(app.focused_pane_id()).expect("the PDF opened here");
+        assert_eq!(app.pdf_docs[&key.1].path, pdf);
+        assert_eq!(app.pdf_docs[&key.1].last_place.0, 37, "at page 38 once it's laid out");
+        app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 50];
+        app.pdf_prepare_view(key, PANE, CELL);
+        assert_eq!(page(&app, key), 37);
+    }
+
+    #[test]
+    fn gf_on_nothing_says_so() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused5.pdf");
+        let dir = temp_dir("gf_none");
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "missing.pdf\n").unwrap();
+        app.open_file_from_picker(&notes);
+        app.follow_link_under_cursor();
+        assert!(app.modeline_text().contains("no file missing.pdf"), "{}", app.modeline_text());
+    }
+
+    #[test]
+    fn a_pdf_rewritten_on_disk_is_read_again_keeping_the_place() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused6.pdf");
+        let dir = temp_dir("reload");
+        let path = pdf_file(&dir, "built.pdf");
+        let key = open_file(&mut app, &path);
+        app.pdf_goto_page(4);
+        let (&first_page, &(request, _)) = view(&app, key).pending.iter().next().unwrap();
+        rendered(&mut app, request, first_page, 612);
+        app.pdf_docs.get_mut(&key.1).unwrap().modified = Some(std::time::SystemTime::UNIX_EPOCH);
+
+        app.pdf_reload_changed();
+
+        assert!(view(&app, key).cache.is_empty(), "its pages render again");
+        assert_eq!(page(&app, key), 3, "at the same place");
+        assert!(app.modeline_text().contains("built.pdf changed on disk"), "{}", app.modeline_text());
+        app.pdf_reload_changed();
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("changed on disk")), "unchanged since: nothing more");
+    }
+
+    #[test]
+    fn the_shelf_lists_yours_then_what_you_read_lately() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused8.pdf");
+        let dir = temp_dir("shelf");
+        let mine = pdf_file(&dir, "mine.pdf");
+        let read = pdf_file(&dir, "read.pdf");
+        app.config.documents = vec![("My spec".into(), mine.clone())];
+        app.recent_files.add(read.clone());
+        app.recent_files.add(mine.clone());
+        app.pdf_places.insert(read.clone(), crate::reader::SavedPlace { page: 37, frac: 0.0, zoom: Zoom::FitWidth, pages: 212, marks: Default::default() });
+        let shelf = app.document_shelf();
+        let labels: Vec<&str> = shelf.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels[0], "My spec");
+        assert!(labels.iter().any(|l| l.contains("read.pdf") && l.contains("p. 38 / 212")), "{labels:?}");
+        assert_eq!(labels.iter().filter(|l| l.contains("mine")).count(), 0, "listed once, under its name");
+    }
+
+    #[test]
+    fn an_open_pdf_is_found_for_a_session_not_opened_twice() {
+        let (_guard, _, mut app) = test_open_pdf("pdf_unused7.pdf");
+        let dir = temp_dir("session");
+        let path = pdf_file(&dir, "kept.pdf");
+        open_file(&mut app, &path);
+        let buffer = app.pdf_buffer_for(&path);
+        assert!(app.pdf_docs.contains_key(&buffer));
+        assert_eq!(app.pdf_docs.values().filter(|d| d.path == path).count(), 1);
     }
 }

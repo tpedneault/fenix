@@ -2929,6 +2929,13 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
 /// Under test, a file of `name` no other `App` shares: tests run in
 /// parallel, and one that saves a MIB root or a project must not leak it
 /// into another -- or into the Fenix you actually use.
+/// A test that opens a PDF spawns a real `PdfWorker`, which binds pdfium --
+/// a process-wide library that crashes when two threads bring it up or
+/// tear it down at once, as parallel tests would. Such tests hold this
+/// for as long as their `App` lives.
+#[cfg(test)]
+static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn isolated_test_path(name: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3116,6 +3123,33 @@ fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: 
 /// need to paint a flat rect rather than color glyphs, so this bridges
 /// the same two representations every `rgba`/`text_color` pair in
 /// `theme.rs` already keeps separate for every other field.
+/// PDFs under a project -- the `SPC r f` shelf's last group. A few
+/// levels deep, skipping build output and hidden folders, and at most 50.
+fn project_pdfs(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 4 || out.len() >= 50 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || matches!(name, "target" | "node_modules" | "build" | "dist" | "__pycache__") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if App::looks_like_pdf(&path) && out.len() < 50 {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 0, &mut out);
+    out
+}
+
 fn glyphon_to_rgba(color: glyphon::Color) -> [f32; 4] {
     [color.r() as f32 / 255.0, color.g() as f32 / 255.0, color.b() as f32 / 255.0, 1.0]
 }
@@ -6015,6 +6049,11 @@ pub struct App {
     pdf_next_id: u64,
     /// Renders asked for and not back yet: request -> the view and page.
     pdf_requests: HashMap<u64, (reader::ViewKey, u32)>,
+    /// Where each PDF was left (`reader.remember`), from the places file
+    /// next to the recent files; written when it changed.
+    pdf_places: HashMap<PathBuf, crate::reader::SavedPlace>,
+    pdf_places_path: PathBuf,
+    pdf_places_dirty: bool,
     /// The one pdfium worker for every document (pdfium can't be called
     /// from two threads), spawned with the first PDF opened.
     pdf_worker: Option<fenix_pdf::PdfWorker>,
@@ -6707,6 +6746,7 @@ impl App {
         } else {
             fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
         };
+        let pdf_places_path = if cfg!(test) { isolated_test_path("pdf_places.tsv") } else { recent_files_path.with_file_name("pdf_places.tsv") };
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
         // Read-only here, same posture as `known_projects`/`recent_files`
         // just above: a test that constructs `App` via `with_file` reads
@@ -6939,6 +6979,9 @@ impl App {
             pdf_keys_view: None,
             pdf_next_id: 0,
             pdf_requests: HashMap::new(),
+            pdf_places: crate::reader::parse_places(&std::fs::read_to_string(&pdf_places_path).unwrap_or_default()),
+            pdf_places_path,
+            pdf_places_dirty: false,
             pdf_worker: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -10420,17 +10463,51 @@ impl App {
     /// hand-editing `settings.toml`, so "no matches" would be indis-
     /// tinguishable from "you haven't set this up yet".
     pub(crate) fn start_document_picker(&mut self) {
-        if self.config.documents.is_empty() {
-            self.set_error("no documents yet -- add them in SPC , (Documents & workspaces)".to_string());
+        let candidates: Vec<fenix_picker::Candidate<PathBuf>> = self.document_shelf().into_iter().map(|(label, path)| fenix_picker::Candidate::new(label, path)).collect();
+        if candidates.is_empty() {
+            self.set_error("no documents yet -- add them in SPC , (PDF reader), or open a PDF and it's listed here".to_string());
             return;
         }
-        let candidates = self
-            .config
-            .documents
-            .iter()
-            .map(|(name, path)| fenix_picker::Candidate::new(name.clone(), path.clone()))
-            .collect();
         self.enter_picker(ActivePicker::Document(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC r f`'s list, in order: the project's own shelf, yours, PDFs
+    /// read lately (with where you were), and PDFs in the project not on
+    /// a shelf. A document is listed once, in the first group it's in.
+    fn document_shelf(&self) -> Vec<(String, PathBuf)> {
+        let mut list: Vec<(String, PathBuf)> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let key = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut add = |list: &mut Vec<(String, PathBuf)>, label: String, path: PathBuf| {
+            if seen.insert(key(&path)) {
+                list.push((label, path));
+            }
+        };
+        let root = self.project_root.clone();
+        if let (Some(root), Some((_, project))) = (&root, &self.project_settings) {
+            if let Some(fenix_config::Value::Map(entries)) = project.values().get("documents") {
+                for (name, path) in entries {
+                    let path = PathBuf::from(path);
+                    let path = if path.is_absolute() { path } else { root.join(path) };
+                    add(&mut list, format!("project \u{b7} {name}"), path);
+                }
+            }
+        }
+        for (name, path) in &self.config.documents {
+            add(&mut list, name.clone(), path.clone());
+        }
+        for path in self.recent_files.paths().iter().filter(|p| Self::looks_like_pdf(p) && p.exists()) {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let at = self.pdf_places.get(path).map(|p| format!("  p. {} / {}", p.page + 1, p.pages)).unwrap_or_default();
+            add(&mut list, format!("recent \u{b7} {name}{at}"), path.clone());
+        }
+        if let Some(root) = &root {
+            for path in project_pdfs(root) {
+                let shown = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+                add(&mut list, format!("in project \u{b7} {shown}"), path);
+            }
+        }
+        list
     }
 
     /// Opens one `[documents]` entry in the focused pane. A PDF goes
@@ -10447,7 +10524,7 @@ impl App {
     /// empty.
     fn open_document(&mut self, path: &Path) {
         if !path.exists() {
-            self.set_error(format!("{} no longer exists -- check its entry in SPC , (Documents & workspaces)", path.display()));
+            self.set_error(format!("{} no longer exists -- check its entry in SPC , (PDF reader)", path.display()));
             return;
         }
         if Self::looks_like_pdf(path) {
@@ -15319,9 +15396,11 @@ impl App {
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
+        self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
+        self.pdf_reload_changed();
         let sweep = self.reload_buffers_changed_on_disk();
         let Some(message) = sweep.message() else { return };
         if sweep.is_bad() {
@@ -21343,6 +21422,7 @@ impl App {
                 fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
                 fenix_vim::LspRequestKind::References => self.request_references(),
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
+                fenix_vim::LspRequestKind::FileUnderCursor => self.follow_link_under_cursor(),
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
@@ -24878,6 +24958,8 @@ impl App {
         // The pages each PDF pane shows, worked out while `self` is still
         // whole.
         let pdf_plans: Vec<(reader::ViewKey, Vec<reader::PageDraw>)> = pdf_panes.iter().map(|&(key, rect)| (key, self.pdf_draw_plan(key, rect))).collect();
+        let pdf_recolor = self.pdf_recolor();
+        let pdf_paper = self.pdf_paper();
 
         let (
             Some(window),
@@ -25215,7 +25297,7 @@ impl App {
             let Some(view) = self.pdf_views.get(key) else { continue };
             for draw in draws.iter().filter(|d| !view.cache.contains_key(&d.page)) {
                 let (x, y, w, h) = draw.dest;
-                bg_rect.push_rect(gpu, x, y, w, h, reader::PAPER);
+                bg_rect.push_rect(gpu, x, y, w, h, pdf_paper);
             }
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
@@ -25876,7 +25958,7 @@ impl App {
                 let Some(view) = self.pdf_views.get(key) else { continue };
                 for draw in draws {
                     let Some(texture) = view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()) else { continue };
-                    pdf_pipeline.draw_region(gpu, &mut pass, texture, slot, draw.dest, draw.uv);
+                    pdf_pipeline.draw_region(gpu, &mut pass, texture, slot, draw.dest, draw.uv, pdf_recolor);
                     slot += 1;
                 }
             }
@@ -40995,7 +41077,7 @@ configure_board stm32
 
         assert!(app.active_picker.is_none());
         assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("Documents & workspaces")));
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("SPC , (PDF reader)")));
     }
 
     #[test]

@@ -178,12 +178,13 @@ impl BufferKind {
             // placeholder pane shows, and a directory listing re-reads
             // the directory.
             BufferKind::Dashboard | BufferKind::Explorer => false,
+            // A PDF: reopened in the reader from its path.
+            BufferKind::Pdf => false,
             BufferKind::WorkspaceEdit
             | BufferKind::Docker
             | BufferKind::Git
             | BufferKind::SearchReplace
             | BufferKind::Vnc
-            | BufferKind::Pdf
             | BufferKind::TaskOutput
             | BufferKind::Debug
             | BufferKind::Diff
@@ -551,7 +552,6 @@ mod tests {
             BufferKind::Debug,
             BufferKind::Terminal,
             BufferKind::Vnc,
-            BufferKind::Pdf,
             BufferKind::TaskOutput,
             BufferKind::ToolStatus,
         ] {

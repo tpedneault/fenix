@@ -227,6 +227,7 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
     t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
     t.insert(&[KeyPress::char('K')], "hover", VimAction::RequestLsp(crate::state::LspRequestKind::Hover));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('f')], "file under cursor", VimAction::RequestLsp(crate::state::LspRequestKind::FileUnderCursor));
     t.insert(&[KeyPress::char('g'), KeyPress::char('t')], "next tab", VimAction::Tab(crate::state::TabMove::Next));
     t.insert(&[KeyPress::char('g'), KeyPress::char('T')], "previous tab", VimAction::Tab(crate::state::TabMove::Prev(1)));
     t.insert(&[KeyPress::char('g'), KeyPress::named(fenix_keymap::NamedKey::Tab)], "last tab", VimAction::Tab(crate::state::TabMove::Last));

@@ -123,6 +123,8 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('f')], "fit page (zp)", "pdf.fit_page");
                 t.insert(&[KeyPress::char('o')], "outline sidebar (o)", "pdf.toggle_outline");
                 t.insert(&[KeyPress::char('t')], "go to a heading", "pdf.headings");
+                t.insert(&[KeyPress::char('c')], "paper / theme colours", "pdf.colors");
+                t.insert(&[KeyPress::char('y')], "copy a link to this page (yp)", "pdf.copy_link");
                 t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
                 t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
             }
@@ -446,6 +448,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "outline sidebar", "pdf.toggle_outline");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('t')], "go to a heading", "pdf.headings");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('c')], "paper / theme colours", "pdf.colors");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('y')], "copy a link to this page", "pdf.copy_link");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");

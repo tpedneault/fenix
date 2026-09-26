@@ -157,6 +157,8 @@ impl CommandRegistry {
         registry.register("pdf.toggle_outline", "Toggle the focused PDF session's outline/bookmarks panel", cmd_pdf_toggle_outline);
         registry.register("pdf.search", "Search the focused PDF session's text for a word or phrase", cmd_pdf_search);
         registry.register("pdf.headings", "Go to one of the PDF's headings, picked by name", cmd_pdf_headings);
+        registry.register("pdf.colors", "Draw PDF pages as printed or in the theme's colours", cmd_pdf_colors);
+        registry.register("pdf.copy_link", "Copy a link to the PDF page being read", cmd_pdf_copy_link);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("git.history", "Show the commit graph, refs and commit detail", cmd_git_history);
@@ -683,6 +685,14 @@ fn cmd_pdf_search(ctx: &mut CommandCtx) {
 
 fn cmd_pdf_headings(ctx: &mut CommandCtx) {
     ctx.app.pdf_pick_heading();
+}
+
+fn cmd_pdf_colors(ctx: &mut CommandCtx) {
+    ctx.app.pdf_toggle_colors();
+}
+
+fn cmd_pdf_copy_link(ctx: &mut CommandCtx) {
+    ctx.app.pdf_copy_link();
 }
 
 fn cmd_git_open(ctx: &mut CommandCtx) {
