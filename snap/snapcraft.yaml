@@ -21,6 +21,7 @@ license: MIT OR Apache-2.0
 website: https://github.com/tpedneault/fenix
 source-code: https://github.com/tpedneault/fenix
 issues: https://github.com/tpedneault/fenix/issues
+contact: https://github.com/tpedneault/fenix/issues
 icon: snap/gui/fenix.png
 
 base: core24
