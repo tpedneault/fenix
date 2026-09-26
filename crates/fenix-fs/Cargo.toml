@@ -2,6 +2,10 @@
 name = "fenix-fs"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
 # Moves files to the platform's real Recycle Bin (Windows' own

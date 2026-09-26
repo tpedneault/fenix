@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-agenda"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -654,14 +654,14 @@ dependencies = [
 
 [[package]]
 name = "fenix-brand"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "fenix-buffers"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-core",
  "fenix-syntax",
@@ -669,11 +669,11 @@ dependencies = [
 
 [[package]]
 name = "fenix-completion"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-config"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "fenix-storage",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-core"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-storage",
  "ropey",
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-dap"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "debug-adapter-protocol",
  "fenix-rpc",
@@ -701,18 +701,18 @@ dependencies = [
 
 [[package]]
 name = "fenix-diff"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-docker"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "fenix-embedded"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "fenix-lsp",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-explorer"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-fs",
  "fenix-keymap",
@@ -731,29 +731,29 @@ dependencies = [
 
 [[package]]
 name = "fenix-forge"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-format"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-fs"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "trash",
 ]
 
 [[package]]
 name = "fenix-git"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-diff",
 ]
 
 [[package]]
 name = "fenix-github"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-diff",
  "fenix-forge",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-gitlab"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-diff",
  "fenix-forge",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-gui"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-jira"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "ureq",
@@ -837,11 +837,11 @@ dependencies = [
 
 [[package]]
 name = "fenix-keymap"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-lsp"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-rpc",
  "lsp-types",
@@ -852,22 +852,22 @@ dependencies = [
 
 [[package]]
 name = "fenix-mib"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-pdf"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "pdfium-render",
 ]
 
 [[package]]
 name = "fenix-picker"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-project"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "fenix-mib",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-recovery"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "fenix-storage",
@@ -889,11 +889,11 @@ dependencies = [
 
 [[package]]
 name = "fenix-rpc"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-snippets"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "fenix-core",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-storage"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "dirs",
  "serde",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-syntax"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "roxmltree",
  "tree-sitter",
@@ -937,11 +937,11 @@ dependencies = [
 
 [[package]]
 name = "fenix-table"
-version = "0.0.1"
+version = "1.0.0"
 
 [[package]]
 name = "fenix-tasks"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-rpc",
  "libc",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-terminal"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "portable-pty",
  "vt100",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-vim"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-core",
  "fenix-keymap",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-vnc"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "fenix-keymap",
  "tokio",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-window"
-version = "0.0.1"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
