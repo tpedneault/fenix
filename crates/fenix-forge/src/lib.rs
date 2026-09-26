@@ -433,6 +433,8 @@ pub struct NewRequest {
     pub draft: bool,
     /// Labels to put on it; ones the project doesn't have yet are made.
     pub labels: Vec<String>,
+    /// Usernames to assign it to.
+    pub assignees: Vec<String>,
 }
 
 /// Which merge requests to list.

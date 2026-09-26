@@ -1,12 +1,12 @@
 //! The new pull request page (`SPC g P`, or `o` after a push): a form
 //! prefilled from the branch -- the title from its one commit or its
-//! name, the description from the commits, the base from `[git]
-//! base_branch`, a Jira key named in the branch linked -- and under it
-//! the commits it brings and what's worth knowing before opening it.
-//! Nothing is sent until `C-c C-c`; a branch that isn't pushed is
-//! pushed first.
+//! name, the description from the repository's own template (else from
+//! the commits), the base from `[git] base_branch`, you as the assignee,
+//! a Jira key named in the branch linked -- and under it the commits it
+//! brings and what's worth knowing before opening it. Nothing is sent
+//! until `C-c C-c`; a branch that isn't pushed is pushed first.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fenix_forge::{MergeRequest, NewRequest};
 
@@ -18,12 +18,16 @@ pub enum Field {
     Base,
     Title,
     Draft,
+    Assignees,
     Reviewers,
     Labels,
+    /// Which of the repository's templates the description starts from
+    /// -- there only when it has more than one.
+    Template,
     Description,
 }
 
-const FIELDS: [Field; 6] = [Field::Base, Field::Title, Field::Draft, Field::Reviewers, Field::Labels, Field::Description];
+const FIELDS: [Field; 8] = [Field::Base, Field::Title, Field::Draft, Field::Assignees, Field::Reviewers, Field::Labels, Field::Template, Field::Description];
 
 impl Field {
     fn label(self) -> &'static str {
@@ -31,11 +35,86 @@ impl Field {
             Field::Base => "From",
             Field::Title => "Title",
             Field::Draft => "Draft",
+            Field::Assignees => "Assignee",
             Field::Reviewers => "Reviewers",
             Field::Labels => "Labels",
+            Field::Template => "Template",
             Field::Description => "Description",
         }
     }
+}
+
+/// One of the repository's description templates: its name (the file's,
+/// without `.md`) and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Template {
+    pub name: String,
+    pub text: String,
+}
+
+/// The `.md` files in `dir`, as templates, `Default` first and the rest
+/// by name.
+fn templates_in(dir: &Path) -> Vec<Template> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<Template> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")))
+        .filter_map(|p| {
+            let name = p.file_stem()?.to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&p).ok()?;
+            Some(Template { name, text })
+        })
+        .collect();
+    found.sort_by_key(|t| (!t.name.eq_ignore_ascii_case("default"), t.name.to_lowercase()));
+    found
+}
+
+/// A file in `dir` named `name` whatever its case -- GitHub takes
+/// `PULL_REQUEST_TEMPLATE.md` and `pull_request_template.md` alike.
+fn file_named(dir: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
+}
+
+/// Folders in `dir` named `name` whatever its case.
+fn dir_named(dir: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(dir).ok()?.filter_map(Result::ok).map(|e| e.path()).find(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name)))
+}
+
+fn github_templates(root: &Path) -> Vec<Template> {
+    let github = dir_named(root, ".github");
+    // Several, to choose from.
+    if let Some(dir) = github.as_deref().and_then(|g| dir_named(g, "PULL_REQUEST_TEMPLATE")) {
+        let found = templates_in(&dir);
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    // Or the one, where GitHub looks for it.
+    let places = [github.clone(), Some(root.to_path_buf()), dir_named(root, "docs")];
+    places
+        .iter()
+        .flatten()
+        .find_map(|dir| file_named(dir, "pull_request_template.md"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| vec![Template { name: "pull_request_template".to_string(), text }])
+        .unwrap_or_default()
+}
+
+fn gitlab_templates(root: &Path) -> Vec<Template> {
+    dir_named(root, ".gitlab").and_then(|g| dir_named(&g, "merge_request_templates")).map(|d| templates_in(&d)).unwrap_or_default()
+}
+
+/// The repository's own description templates, where `forge` keeps them
+/// (`.gitlab/merge_request_templates/`, or GitHub's
+/// `pull_request_template.md` and `.github/PULL_REQUEST_TEMPLATE/`) --
+/// the other forge's places too, when the repository has none of its
+/// own forge's.
+pub fn templates(root: &Path, forge: &str) -> Vec<Template> {
+    let (first, second): (fn(&Path) -> Vec<Template>, fn(&Path) -> Vec<Template>) =
+        if forge == "GitLab" { (gitlab_templates, github_templates) } else { (github_templates, gitlab_templates) };
+    let found = first(root);
+    if found.is_empty() { second(root) } else { found }
 }
 
 /// How the branch stands against its remote.
@@ -91,7 +170,18 @@ pub struct RequestPage {
     pub description: String,
     pub draft: bool,
     pub reviewers: String,
+    /// Who it's assigned to, with commas between; you, once the forge
+    /// says who you are.
+    pub assignees: String,
     pub labels: String,
+    /// The repository's description templates, and which one's in use.
+    pub templates: Vec<Template>,
+    pub template: usize,
+    /// The description as it was last filled in, to tell an edited one
+    /// from an untouched one.
+    filled: String,
+    /// Changing the template asks first when the description was edited.
+    armed_template: bool,
     /// Newest first.
     pub commits: Vec<Commit>,
     /// Files, lines added, lines removed.
@@ -106,6 +196,8 @@ pub struct RequestPage {
     pub message: Option<(String, bool)>,
     pub busy: bool,
     armed: bool,
+    /// The Jira key named in the branch, for the description.
+    jira: Option<String>,
 }
 
 /// A Jira key named in the branch -- `feature/FNX-58-status-page` --
@@ -168,14 +260,16 @@ pub fn title_for(branch: &str, commits: &[Commit], key: Option<&str>) -> String 
     }
 }
 
-/// The description: the one commit's body, else a summary of the
-/// commits, oldest first -- with the Jira key linked at the end.
-pub fn description_for(commits: &[Commit], key: Option<&str>) -> String {
+/// The description: the repository's template when it has one, else the
+/// one commit's body, else a summary of the commits, oldest first --
+/// with the Jira key linked at the end.
+pub fn description_for(commits: &[Commit], key: Option<&str>, template: Option<&Template>) -> String {
     let real: Vec<&Commit> = commits.iter().rev().filter(|c| !is_fixup(&c.subject)).collect();
-    let mut text = match real[..] {
-        [] => String::new(),
-        [only] => only.body.trim().to_string(),
-        _ => format!("## Summary\n\n{}", real.iter().map(|c| format!("- {}", c.subject)).collect::<Vec<_>>().join("\n")),
+    let mut text = match (template, &real[..]) {
+        (Some(t), _) => t.text.trim_end().to_string(),
+        (None, []) => String::new(),
+        (None, [only]) => only.body.trim().to_string(),
+        (None, _) => format!("## Summary\n\n{}", real.iter().map(|c| format!("- {}", c.subject)).collect::<Vec<_>>().join("\n")),
     };
     if let Some(key) = key {
         if !text.contains(key) {
@@ -194,7 +288,9 @@ impl RequestPage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(root: PathBuf, forge: String, project: String, branch: String, base: String, commits: Vec<Commit>, stat: (usize, usize, usize), standing: Standing, jira: Option<String>) -> Self {
         let title = title_for(&branch, &commits, jira.as_deref());
-        let description = description_for(&commits, jira.as_deref());
+        let templates = templates(&root, &forge);
+        let description = description_for(&commits, jira.as_deref(), templates.first());
+        let filled = description.clone();
         RequestPage {
             root,
             forge,
@@ -205,7 +301,13 @@ impl RequestPage {
             description,
             draft: false,
             reviewers: String::new(),
+            assignees: String::new(),
             labels: String::new(),
+            templates,
+            template: 0,
+            filled,
+            armed_template: false,
+            jira,
             commits,
             stat,
             standing,
@@ -230,15 +332,48 @@ impl RequestPage {
         match field {
             Field::Base => Some(&mut self.base),
             Field::Title => Some(&mut self.title),
+            Field::Assignees => Some(&mut self.assignees),
             Field::Reviewers => Some(&mut self.reviewers),
             Field::Labels => Some(&mut self.labels),
-            Field::Draft | Field::Description => None,
+            Field::Draft | Field::Template | Field::Description => None,
         }
     }
 
+    /// The fields the form shows: Template only when there's a choice.
+    fn fields(&self) -> Vec<Field> {
+        FIELDS.iter().copied().filter(|f| *f != Field::Template || self.templates.len() > 1).collect()
+    }
+
     fn step(&mut self, by: isize) {
-        let at = FIELDS.iter().position(|f| *f == self.field).unwrap_or(0) as isize;
-        self.field = FIELDS[(at + by).clamp(0, FIELDS.len() as isize - 1) as usize];
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.field).unwrap_or(0) as isize;
+        self.field = fields[(at + by).clamp(0, fields.len() as isize - 1) as usize];
+    }
+
+    /// You, as the assignee -- unless one's been typed already.
+    pub fn assign_to_me(&mut self, me: &str) {
+        if self.assignees.trim().is_empty() && !me.is_empty() && !(self.field == Field::Assignees && self.editing.is_some()) {
+            self.assignees = me.to_string();
+        }
+    }
+
+    /// The next (or previous) template. The description follows it, but
+    /// one that was edited is only replaced when asked twice.
+    fn cycle_template(&mut self, by: isize) {
+        let n = self.templates.len();
+        if n < 2 {
+            return;
+        }
+        if self.description != self.filled && !self.armed_template {
+            self.armed_template = true;
+            self.message = Some(("the description was edited -- again to replace it with the other template".to_string(), true));
+            return;
+        }
+        self.armed_template = false;
+        self.template = (self.template as isize + by).rem_euclid(n as isize) as usize;
+        self.description = description_for(&self.commits, self.jira.as_deref(), self.templates.get(self.template));
+        self.filled = self.description.clone();
+        self.message = Some((format!("the description is the {} template now", self.templates[self.template].name), false));
     }
 
     /// Text pasted while typing in a field.
@@ -300,6 +435,14 @@ impl RequestPage {
         if key != Key::CtrlC {
             self.armed = false;
         }
+        let template_key = self.field == Field::Template && matches!(key, Key::Char('h' | 'l') | Key::Left | Key::Right | Key::Enter | Key::Space);
+        if !template_key {
+            self.armed_template = false;
+        }
+        if template_key {
+            self.cycle_template(if matches!(key, Key::Char('h') | Key::Left) { -1 } else { 1 });
+            return RequestAction::None;
+        }
         match key {
             Key::Down | Key::Char('j') | Key::Tab => self.step(1),
             Key::Up | Key::Char('k') | Key::BackTab => self.step(-1),
@@ -345,6 +488,7 @@ impl RequestPage {
                     description: self.description.clone(),
                     draft: self.draft,
                     labels: names(&self.labels),
+                    assignees: names(&self.assignees),
                 };
                 let push = !matches!(self.standing.pushed, Pushed::UpToDate(_));
                 return RequestAction::Open { request, reviewers: names(&self.reviewers), push };
@@ -376,7 +520,7 @@ pub fn layout(page: &RequestPage, cols: usize) -> Page {
 
     let value_x = left + 13;
     let value_width = (left + width).saturating_sub(value_x);
-    for field in FIELDS {
+    for field in page.fields() {
         let on = field == page.field;
         g.put(y, left, field.label(), if on { Role::Accent } else { Role::Muted });
         let editing = on && page.editing.is_some();
@@ -395,11 +539,21 @@ pub fn layout(page: &RequestPage, cols: usize) -> Page {
                 g.put(y, value_x, text, if page.draft { Role::Warn } else { Role::Text });
             }
             Field::Description => {
-                g.put(y, value_x, "e edits it in a buffer", Role::Muted);
+                let from = match page.templates.get(page.template) {
+                    Some(t) if page.templates.len() == 1 => format!("from {} · e edits it in a buffer", t.name),
+                    _ => "e edits it in a buffer".to_string(),
+                };
+                g.put(y, value_x, &fit(&from, value_width), Role::Muted);
+            }
+            Field::Template => {
+                let name = page.templates.get(page.template).map(|t| t.name.as_str()).unwrap_or("none");
+                let x = g.put(y, value_x, &format!("‹ {name} ›"), Role::Text) + 2;
+                g.put(y, x, &format!("{} of {} · h/l changes it", page.template + 1, page.templates.len()), Role::Muted);
             }
             _ => {
                 let value = match field {
                     Field::Title => &page.title,
+                    Field::Assignees => &page.assignees,
                     Field::Reviewers => &page.reviewers,
                     _ => &page.labels,
                 };
@@ -410,6 +564,7 @@ pub fn layout(page: &RequestPage, cols: usize) -> Page {
                 } else if shown.is_empty() {
                     let hint = match field {
                         Field::Title => "none yet",
+                        Field::Assignees => "nobody -- usernames, with commas between",
                         Field::Reviewers => "none -- usernames, with commas between",
                         _ => "none",
                     };
@@ -533,10 +688,10 @@ mod tests {
     fn one_commit_gives_the_title_and_description_and_more_give_a_summary() {
         let one = [commit("a1", "Git: the push plan", "Pushes set the upstream.\n")];
         assert_eq!(title_for("feature/x", &one, None), "Git: the push plan");
-        assert_eq!(description_for(&one, Some("FNX-58")), "Pushes set the upstream.\n\nRefs FNX-58");
+        assert_eq!(description_for(&one, Some("FNX-58"), None), "Pushes set the upstream.\n\nRefs FNX-58");
         let two = [commit("b2", "fixup! Git: a status page", ""), commit("b1", "Git: the push plan", ""), commit("a1", "Git: a status page", "")];
         assert_eq!(title_for("feature/FNX-58-git-daily", &two, Some("FNX-58")), "Git daily");
-        assert_eq!(description_for(&two, None), "## Summary\n\n- Git: a status page\n- Git: the push plan");
+        assert_eq!(description_for(&two, None, None), "## Summary\n\n- Git: a status page\n- Git: the push plan");
         assert_eq!(title_for("feature/pus17", &[], None), "Pus17");
     }
 
@@ -544,6 +699,7 @@ mod tests {
     fn fields_are_typed_in_place_and_escape_puts_one_back() {
         let mut p = page(vec![commit("a1", "One", "")]);
         assert_eq!(p.field, Field::Title);
+        p.key(Key::Char('j'));
         p.key(Key::Char('j'));
         p.key(Key::Char('j'));
         assert_eq!(p.field, Field::Reviewers);
@@ -560,10 +716,73 @@ mod tests {
         assert_eq!(p.labels, "", "Esc put it back");
         p.key(Key::Char('k'));
         p.key(Key::Char('k'));
+        p.key(Key::Char('k'));
         p.key(Key::Enter);
         assert_eq!(p.field, Field::Draft);
         assert!(p.draft && layout(&p, 100).text.contains("[x] open as draft"));
         assert_eq!(p.key(Key::Char('e')), RequestAction::EditDescription);
+    }
+
+    fn write(dir: &Path, path: &str, text: &str) {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn templates_are_found_where_each_forge_keeps_them() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(templates(dir.path(), "GitLab").is_empty());
+        write(dir.path(), ".github/PULL_REQUEST_TEMPLATE.md", "## What\n");
+        let found = templates(dir.path(), "GitHub");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "## What\n");
+        assert_eq!(templates(dir.path(), "GitLab"), found, "the other forge's, when there's none of its own");
+
+        write(dir.path(), ".gitlab/merge_request_templates/Bug.md", "## Bug\n");
+        write(dir.path(), ".gitlab/merge_request_templates/Default.md", "## Change\n");
+        write(dir.path(), ".gitlab/merge_request_templates/notes.txt", "not a template");
+        let names: Vec<String> = templates(dir.path(), "GitLab").into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["Default", "Bug"], "Default first, then by name");
+    }
+
+    #[test]
+    fn the_description_is_the_repositorys_template_and_the_template_can_be_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), ".gitlab/merge_request_templates/Default.md", "## What does this MR do?\n\n## How to test\n");
+        write(dir.path(), ".gitlab/merge_request_templates/Bug.md", "## Bug\n");
+        let mut p = RequestPage::new(dir.path().to_path_buf(), "GitLab".into(), "g/fenix".into(), "feature/FNX-58-x".into(), "master".into(), vec![commit("a1", "One", "Body.")], (1, 1, 0), standing(), Some("FNX-58".into()));
+        assert_eq!(p.description, "## What does this MR do?\n\n## How to test\n\nRefs FNX-58");
+        let text = layout(&p, 100).text;
+        assert!(text.contains("‹ Default ›") && text.contains("1 of 2"), "{text}");
+
+        while p.field != Field::Template {
+            p.key(Key::Char('j'));
+        }
+        p.key(Key::Char('l'));
+        assert!(p.description.starts_with("## Bug"), "untouched: follows the template");
+
+        p.set_description("My own words".into());
+        p.key(Key::Char('l'));
+        assert_eq!(p.description, "My own words", "edited: asks first");
+        p.key(Key::Char('l'));
+        assert!(p.description.starts_with("## What does this MR do?"));
+    }
+
+    #[test]
+    fn you_are_the_assignee_unless_someone_else_was_typed() {
+        let mut p = page(vec![commit("a1", "One", "")]);
+        p.assign_to_me("tpedneault");
+        assert_eq!(p.assignees, "tpedneault");
+        assert!(layout(&p, 100).text.contains("Assignee"));
+        p.assignees = "alex".into();
+        p.assign_to_me("tpedneault");
+        assert_eq!(p.assignees, "alex");
+        p.existing = Some(None);
+        p.assignees = "alex, sam".into();
+        p.key(Key::CtrlC);
+        let RequestAction::Open { request, .. } = p.key(Key::CtrlC) else { panic!() };
+        assert_eq!(request.assignees, ["alex", "sam"]);
     }
 
     #[test]

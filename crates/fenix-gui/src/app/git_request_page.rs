@@ -90,7 +90,8 @@ impl App {
         let id = self.open_page(PageModel::Request(Box::new(page)));
         self.page_spawn(move |send| {
             let result = client.request_for_branch(&branch);
-            send(PageEvent::RequestExisting { buffer: id, result });
+            let me = client.current_user().ok();
+            send(PageEvent::RequestExisting { buffer: id, result, me });
         });
     }
 
@@ -202,8 +203,11 @@ impl App {
 
     pub(super) fn apply_request_event(&mut self, event: PageEvent) {
         match event {
-            PageEvent::RequestExisting { buffer, result } => {
+            PageEvent::RequestExisting { buffer, result, me } => {
                 let Some(page) = self.request_page(buffer) else { return };
+                if let Some(me) = me {
+                    page.assign_to_me(&me);
+                }
                 match result {
                     Ok(found) => page.existing = Some(found),
                     Err(err) => {

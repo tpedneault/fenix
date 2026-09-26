@@ -716,10 +716,14 @@ for anyone curious to poke around or build on it.
   token`; nothing is configured per repository.
   - **Opening one** (`SPC g P`, or `o` on the Git page): a page
     prefilled from the branch -- the title from its one commit or its
-    name as a sentence, the description a summary of its commits, the
-    base from `[git] base_branch`, a Jira key in the branch name
-    (`feature/FNX-58-...`) linked as `Refs FNX-58`, and the reviewers
-    from `[git] reviewers` (or the project's own `.fenix/settings.toml`).
+    name as a sentence, the description from the repository's own
+    template (`.gitlab/merge_request_templates/`, GitHub's
+    `pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE/`; with
+    several, `Default` first and `h`/`l` on Template to switch) or else a
+    summary of its commits, the base from `[git] base_branch`, you as the
+    assignee, a Jira key in the branch name (`feature/FNX-58-...`) linked
+    as `Refs FNX-58`, and the reviewers from `[git] reviewers` (or the
+    project's own `.fenix/settings.toml`).
     `Enter` edits a field in place, `e` writes the description in a
     buffer, `d` toggles draft. Under the form are the commits it brings
     and what's worth knowing first: whether it's pushed, whether it

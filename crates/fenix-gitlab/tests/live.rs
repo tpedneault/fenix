@@ -382,6 +382,7 @@ fn a_request_is_opened_from_a_new_branch() {
         description: "From the live tests.".to_string(),
         draft: true,
         labels: vec!["fenix".to_string()],
+        assignees: Vec::new(),
     };
     let created = gl.create_request(&request).unwrap();
     assert!(created.draft && created.title.contains("Opened by Fenix"), "{created:?}");
