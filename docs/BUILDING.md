@@ -26,7 +26,8 @@ and degrade gracefully (never a hard error) if they're not:
   completion for Tcl (`SPC m s`, `SPC m T` in a Tcl file). If it's missing, exits
   non-zero, or produces output this parser doesn't recognize, the
   reason is logged to stderr rather than just silently yielding no
-  definitions — check the terminal Fenix was launched from.
+  definitions — start Fenix with `--console` to read it (see
+  [Reading what Fenix prints](#reading-what-fenix-prints)).
 - [`docker`](https://docs.docker.com/engine/) or [`podman`](https://podman.io/)
   — the Docker panel (`SPC d d`). Fenix probes `docker` first and falls
   back to `podman` if `docker` isn't runnable (auto-detected once per
@@ -69,3 +70,22 @@ auto-detected:
 ```bash
 cargo test --workspace
 ```
+
+## Reading what Fenix prints
+
+Fenix writes problems it can't show on screen, such as a language
+server that won't start or a ctags failure, to stderr. On Windows it
+starts without a console window, so run it with `--console` to see
+them:
+
+```powershell
+fenix --console              # from a terminal: prints there
+fenix --console 2> fenix.log # or keep it in a file
+```
+
+Started from a terminal, Fenix prints into that terminal. Note that
+PowerShell and `cmd` don't wait for a windowed program, so their prompt
+comes back straight away and the output arrives underneath it. Started
+from a shortcut or Explorer, Fenix opens a console window of its own;
+closing that window closes Fenix too. On Linux, starting Fenix from a
+terminal is enough, and the flag does nothing.

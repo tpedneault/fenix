@@ -20,4 +20,5 @@ labels: bug
 - Fenix: <!-- the release, or the commit you built -->
 - OS: <!-- e.g. Windows 11 24H2, Ubuntu 24.04 -->
 
-**Anything Fenix printed to the terminal, or a screenshot**
+**Anything Fenix printed, or a screenshot**
+<!-- On Windows, start Fenix with `fenix --console` to see what it prints. -->

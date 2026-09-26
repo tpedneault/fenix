@@ -66,6 +66,8 @@ with Vim editing and a `SPC` leader layer, for Windows and Linux.
   restore of windows, splits, cursors and scroll positions.
 - Settings in `settings.toml`, edited by hand or on the settings page
   (`SPC ,`), with a per-project layer.
+- On Windows, Fenix runs without a console window; `fenix --console`
+  opens one to show what it prints.
 
 [Unreleased]: https://github.com/tpedneault/fenix/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/tpedneault/fenix/releases/tag/v1.0.0

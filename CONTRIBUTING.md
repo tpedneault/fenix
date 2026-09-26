@@ -10,8 +10,8 @@ Open an [issue](https://github.com/tpedneault/fenix/issues) with:
 - what you did, what you expected, and what happened instead;
 - the Fenix version (the release you downloaded, or the commit you
   built) and your operating system;
-- anything Fenix printed to the terminal it was started from, and a
-  screenshot if the problem is visual.
+- anything Fenix printed (on Windows, start it with `fenix --console`
+  to see it), and a screenshot if the problem is visual.
 
 ## Building and testing
 
