@@ -426,7 +426,7 @@ for anyone curious to poke around or build on it.
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
   workspaces (`SPC TAB`) -- name one (`SPC TAB r`), jump straight to it
   by name instead of only cycling (`SPC TAB TAB`), or define a shelf of
-  them in `SPC ,` (Documents & workspaces) and open-or-switch-to one on
+  them in `SPC ,` (Workspaces) and open-or-switch-to one on
   demand (`SPC TAB f`). Every pane shows a small title bar naming its
   buffer (the filename, or a placeholder like `*dashboard*`/`*docker*`/
   a dired buffer's own directory for one with no path) -- with a split
@@ -874,7 +874,12 @@ for anyone curious to poke around or build on it.
   marked), the search's matches and your marks; `/` searches as you
   type, highlighting every match on the page, and `n`/`N` go through
   them one by one; `m{a}` and `'{a}` set and use marks, and `Ctrl-o`
-  comes back from a jump. `SPC r t` picks a heading by name. `SPC m` lists the reader's commands, and
+  comes back from a jump. `SPC r t` picks a heading by name. Pages can be
+  drawn as printed or in the theme's colours (`SPC r c`, or `reader.colors`
+  in `SPC ,`); each PDF reopens where you left it, Home lists what you're
+  reading, `yp` copies a `file.pdf#page=38` link that `gf` follows from
+  any note, a PDF your build rewrites reloads in place, and sessions bring
+  PDF panes back. `SPC m` lists the reader's commands, and
   `SPC r` works from any pane on the PDF read last. Requires
   `pdfium.dll` (see [Optional external tools](#optional-external-tools))
   -- without it, opening a PDF shows an error instead of a blank pane.
@@ -1368,6 +1373,8 @@ popup shows what keys continue it.
 | `SPC r 0` / `SPC r w` | Fit the page / its width to the pane |
 | `SPC r o` | Open or close the sidebar (outline, matches, marks) |
 | `SPC r t` | Go to a heading of the PDF, picked by name |
+| `SPC r c` | Draw PDF pages as printed or in the theme's colours |
+| `SPC r y` | Copy a link to the PDF page being read (`file.pdf#page=38`) |
 | `SPC r /` | Search the document's text |
 | wheel, `j` / `k`, `{n}j` | Scroll the column of pages; `Ctrl` + wheel zooms (PDF panes) |
 | `Ctrl-d` / `Ctrl-u`, `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | Half a screen / a screen (PDF panes) |
@@ -1377,7 +1384,9 @@ popup shows what keys continue it.
 | `+` / `-` / `=` / `zw` / `zp` / `z0` | Zoom in / out, fit width or page in turn, fit width, fit page, 100% (PDF panes) |
 | `o` / `/` / `n` / `N` | Sidebar, search, next / previous match (PDF panes) |
 | `m{a}` / `'{a}`, `Ctrl-o` / `Ctrl-i` | Set / go to a mark, back / forward through jumps (PDF panes) |
+| `yp` | Copy a link to this page (PDF panes) |
 | `gd` | Go to definition (LSP) |
+| `gf` | Open the file named under the cursor, in the preview tab -- a `spec.pdf#page=38` link opens the PDF at that page |
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
@@ -1436,7 +1445,7 @@ popup shows what keys continue it.
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
 | `SPC TAB d` | Remove the active workspace |
 | `SPC TAB TAB` | Switch to an open workspace by name |
-| `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Documents & workspaces) -- switches to it if already open, otherwise creates it |
+| `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
 ### File explorer sidebar (`SPC e t`)
@@ -1723,12 +1732,14 @@ the reader's commands.
 | `Esc` | Hide the matches' highlights, or close the sidebar |
 | `m{a}` / `'{a}` | Set a mark here / go back to it |
 | `Ctrl-o` / `Ctrl-i` | Back / forward through jumps (`gg`, `G`, `{n}G`, headings, matches, marks) |
+| `yp`, `SPC r y` | Copy a link to this page, `file.pdf#page=38` |
+| `SPC r c` | Pages as printed, or in the theme's colours |
 
 `SPC r ...` also works from another pane -- the outline, or the code
 you're reading the document for -- and acts on the PDF read last.
 
-`SPC r f` opens a fuzzy picker over a **document index** you keep in
-`SPC ,` (Documents & workspaces), or by hand in `settings.toml`:
+`SPC r f` opens the **shelf**: a fuzzy picker over the documents you
+keep by name in `SPC ,` (PDF reader), or by hand in `settings.toml`:
 
 ```toml
 [documents]
@@ -1736,13 +1747,13 @@ you're reading the document for -- and acts on the PDF read last.
 "Time Code Formats" = 'C:\refs\301x0b4.pdf'
 ```
 
-Each entry is a display name and a path. The picker lists and
-fuzzy-matches the *names*, so a reference you open constantly is two
-keystrokes and a few characters away. It opens as a tab in the focused
-pane, like any PDF. An entry can point at any file Fenix opens, not just
-a PDF. A path that has since moved is reported by name instead of
-opening an empty buffer, and an empty index says so rather than opening
-a picker over nothing.
+A project can keep a shelf of its own in its `.fenix/settings.toml`
+(paths from the project), listed first as `project · Name`. Then come
+yours, then PDFs you've read lately (`recent · spec.pdf  p. 38 / 212`),
+then PDFs in the project that aren't on a shelf (`in project ·
+docs/icd.pdf`). A document is listed once. An entry can point at any
+file Fenix opens, not just a PDF; a path that has since moved is
+reported by name.
 
 The status line shows `Page N/M` (the page across the middle of the
 pane) and the zoom (`Fit width`, `Fit page`,
@@ -1779,6 +1790,31 @@ percentage, which stays where you left it. A zoom percentage is of the
 page's real size on this screen, so 100% looks the same on a scaled
 display. Every page of a document shares one scale; a narrower page sits
 centred.
+
+**Colours**: `reader.colors` (`SPC ,` > PDF reader > Page colours) draws
+pages as printed -- `paper`, the default -- or in the current `theme`'s
+colours: white becomes the theme's background, black its text, and
+colours keep their hue, with the gaps between pages a shade darker.
+`SPC r c` switches it; every open PDF changes at once. Photos are
+recoloured too.
+
+**Where you were**: each PDF reopens at the place, zoom and marks you
+left it with (`reader.remember`, on), kept in `pdf_places.tsv` beside
+your recent files. Home lists the PDFs you're reading with the page
+you're on, and sessions bring PDF panes back. `reader.zoom` sets how a
+PDF opens the first time (fit width or fit page), `reader.page_gap` the
+space between pages, and `reader.sidebar` whether the sidebar sits beside
+the pages, over them, or beside them when there's room.
+
+**Links**: `yp` (or `SPC r y`) copies a link to the page you're on --
+`specs/133x0b2e2.pdf#page=38`, from the project when the PDF is in it --
+to the clipboard. `gf` on such a link, in any buffer (a Markdown note, a
+task, a code comment), opens the PDF at that page in the preview tab;
+`gf` on any other file name opens that file.
+
+**Rebuilt PDFs**: with `editor.watch_files` on, a PDF rewritten on disk
+-- LaTeX, Typst, Doxygen, a datasheet downloaded again -- is read again,
+every view keeping its place.
 
 A PDF pane's buffer is empty and pathless -- the pages live in GPU
 textures -- so `:w` on one does nothing and can't overwrite the PDF.
@@ -1954,6 +1990,13 @@ when it's out of date).
 | `motion.layout` | true / false | with full | Splitting, closing and resizing panes move their edges instead of jumping. |
 | `motion.theme_fade` | true / false | with subtle | Changing theme fades from the old colours to the new. |
 | `motion.splash` | true / false | on | While Fenix starts, the mark and a line that fills as it loads show until the editor is ready. It moves unless animations are off; only this setting hides it. |
+| **PDF reader** | | | |
+| `documents` | name = file | – | The SPC r f shelf: a name and the file it opens. A project's own shelf is listed first. *A project can set it.* |
+| `reader.colors` | paper / theme | paper | Paper shows pages as printed. Theme draws them in the current theme's colours. SPC r c switches; open PDFs change at once. |
+| `reader.zoom` | width / page | width | How a PDF opens the first time: its pages' width fills the pane, or a whole page fits. After that it opens as you left it. |
+| `reader.page_gap` | 0–40 | 12 | Pixels between pages. |
+| `reader.remember` | true / false | on | Reopen each PDF where you left it, with its zoom and marks. |
+| `reader.sidebar` | auto / beside / over | auto | Where o opens the outline: beside the pages, over them, or beside them when the pane is wide enough. |
 | **Files & explorer** | | | |
 | `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
 | **Completion & LSP** | | | |
@@ -1996,13 +2039,14 @@ when it's out of date).
 | `mib.telecommand_argument_separator` | text | – | What goes between arguments. |
 | **VNC** | | | |
 | `vnc.hosts` | [[tables]] of name, host, port | – | Machines SPC v connects to. No passwords: every host is taken to be on a trusted network. |
-| **Documents & workspaces** | | | |
-| `documents` | name = file | – | The SPC r f document index: a name and the file it opens. |
+| **Workspaces** | | | |
 | `workspaces` | name = opens | – | SPC TAB f: git, jira, docker, vnc:HOST, project:PATH, or nothing. |
 | **Windows & session** | | | |
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

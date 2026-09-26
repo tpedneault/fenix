@@ -90,6 +90,21 @@ pub struct MotionSettings {
     pub splash: Option<bool>,
 }
 
+/// `[reader]`: the PDF reader.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReaderSettings {
+    /// `paper` (as printed) or `theme` (the current theme's colours).
+    pub colors: Option<String>,
+    /// How a document opens the first time: `width` or `page`.
+    pub zoom: Option<String>,
+    /// Pixels between pages.
+    pub page_gap: Option<usize>,
+    /// Reopen each document where it was left.
+    pub remember: Option<bool>,
+    /// Where the sidebar goes: `auto`, `beside` or `over`.
+    pub sidebar: Option<String>,
+}
+
 /// The static polish, under `[appearance]` and `[diagnostics]`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Polish {
@@ -160,6 +175,8 @@ pub struct Config {
     pub animations: Option<bool>,
     /// `[motion]`: how much moves, feature by feature.
     pub motion: MotionSettings,
+    /// `[reader]`: the PDF reader.
+    pub reader: ReaderSettings,
     /// The static polish: corners, the overview ruler, sticky scroll,
     /// dimming, inline diagnostics and the rest.
     pub polish: Polish,
@@ -485,6 +502,7 @@ impl Config {
             tab_width: None,
             animations: None,
             motion: MotionSettings::default(),
+            reader: ReaderSettings::default(),
             polish: Polish::default(),
             preview_tab: None,
             completion_symbols_file: None,

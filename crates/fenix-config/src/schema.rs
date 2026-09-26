@@ -67,6 +67,7 @@ pub enum Category {
     Editor,
     Appearance,
     Motion,
+    Reader,
     Files,
     Completion,
     Git,
@@ -79,10 +80,11 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 12] = [
+    pub const ALL: [Category; 13] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
+        Category::Reader,
         Category::Files,
         Category::Completion,
         Category::Git,
@@ -99,6 +101,7 @@ impl Category {
             Category::Editor => "Editor",
             Category::Appearance => "Appearance",
             Category::Motion => "Motion",
+            Category::Reader => "PDF reader",
             Category::Files => "Files & explorer",
             Category::Completion => "Completion & LSP",
             Category::Git => "Git",
@@ -106,7 +109,7 @@ impl Category {
             Category::Jira => "Jira & agenda",
             Category::Embedded => "Embedded & MIB",
             Category::Vnc => "VNC",
-            Category::Documents => "Documents & workspaces",
+            Category::Documents => "Workspaces",
             Category::Session => "Windows & session",
         }
     }
@@ -425,7 +428,12 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             Ok(())
         })),
         // Documents & workspaces
-        s("documents", Documents, "Documents", Kind::Map { key: "Name", value: "File", paths: true }, "The SPC r f document index: a name and the file it opens.", field!(documents, path_map_get, path_map_set)),
+        s("documents", Reader, "Documents", Kind::Map { key: "Name", value: "File", paths: true }, "The SPC r f shelf: a name and the file it opens. A project's own shelf is listed first.", field!(documents, path_map_get, path_map_set)).project(),
+        s("reader.colors", Reader, "Page colours", Kind::Choice(&["paper", "theme"]), "Paper shows pages as printed. Theme draws them in the current theme's colours. SPC r c switches; open PDFs change at once.", sub!(reader.colors, text_get, text_set)).default("paper"),
+        s("reader.zoom", Reader, "Default zoom", Kind::Choice(&["width", "page"]), "How a PDF opens the first time: its pages' width fills the pane, or a whole page fits. After that it opens as you left it.", sub!(reader.zoom, text_get, text_set)).default("width"),
+        s("reader.page_gap", Reader, "Page gap", Kind::Int { min: 0, max: 40 }, "Pixels between pages.", sub!(reader.page_gap, usize_get, usize_set)).default("12"),
+        s("reader.remember", Reader, "Remember position", Kind::Bool, "Reopen each PDF where you left it, with its zoom and marks.", sub!(reader.remember, bool_get, bool_set)).default("on"),
+        s("reader.sidebar", Reader, "Sidebar", Kind::Choice(&["auto", "beside", "over"]), "Where o opens the outline: beside the pages, over them, or beside them when the pane is wide enough.", sub!(reader.sidebar, text_get, text_set)).default("auto"),
         s("workspaces", Documents, "Workspace shelf", Kind::Map { key: "Name", value: "Opens", paths: false }, "SPC TAB f: git, jira, docker, vnc:HOST, project:PATH, or nothing.", field!(workspaces, map_get, map_set)),
         // Windows & session
         s("session.restore_windows", Session, "Reopen windows", Kind::Bool, "Put Fenix's windows back where they were, on the monitors they were on.", field!(restore_windows, bool_get, bool_set)).default("on").restart(),

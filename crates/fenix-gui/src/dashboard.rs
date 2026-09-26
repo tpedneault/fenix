@@ -26,6 +26,8 @@ pub struct HomeData {
     pub date: String,
     pub resume: Option<FileItem>,
     pub recent: Vec<FileItem>,
+    /// PDFs read lately; `detail` is where you were ("p. 38 / 212").
+    pub reading: Vec<FileItem>,
     pub projects: Vec<ProjectItem>,
     pub today: Vec<TaskItem>,
     pub todos: Vec<TodoItem>,
@@ -270,6 +272,7 @@ impl Grid {
 #[derive(Clone, Copy)]
 enum Section {
     Resume,
+    Reading,
     Recent,
     Projects,
     Today,
@@ -318,9 +321,9 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     let columns = if width >= 96 { 3 } else if width >= 60 { 2 } else { 1 };
     let col_width = (width - GAP * (columns - 1)) / columns;
     let groups: Vec<Vec<Section>> = match columns {
-        3 => vec![vec![Section::Resume, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
-        2 => vec![vec![Section::Resume, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
-        _ => vec![vec![Section::Resume, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
+        3 => vec![vec![Section::Resume, Section::Reading, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
+        2 => vec![vec![Section::Resume, Section::Reading, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
+        _ => vec![vec![Section::Resume, Section::Reading, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
     };
     let body = find + 5;
     let mut content_end = body;
@@ -339,6 +342,18 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     g.put(y + 1, x + 2, &fit(&item.detail, col_width - 2), Role::Muted);
                     slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number: None, entry: HomeEntry::Resume(item.path.clone()) });
                     y += 2;
+                }
+                Section::Reading => {
+                    if data.reading.is_empty() {
+                        continue;
+                    }
+                    g.header(y, x, col_width, "reading", Some(data.reading.len()), "SPC r f");
+                    y += 1;
+                    for item in &data.reading {
+                        g.row(y, x + 2, col_width - 2, &item.name, Role::Text, &item.detail, Role::Muted);
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::RecentFile(item.path.clone()) });
+                        y += 1;
+                    }
                 }
                 Section::Recent => {
                     if data.recent.is_empty() {
@@ -552,6 +567,7 @@ mod tests {
                 FileItem { path: "/p/a.rs".into(), name: "a.rs".into(), detail: String::new(), age: "2 h".into() },
                 FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
+            reading: Vec::new(),
             projects: vec![
                 ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
                 ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
@@ -624,6 +640,15 @@ mod tests {
     #[test]
     fn empty_sections_are_left_out_and_projects_says_how_to_add_one() {
         let data = HomeData { date: "d".into(), ..HomeData::default() };
+        assert!(!layout(&data, 140, 45).text.contains("reading"), "no PDFs read, no section");
+        let reading = HomeData {
+            date: "d".into(),
+            reading: vec![FileItem { path: "/r/spec.pdf".into(), name: "spec.pdf".into(), detail: "p. 38 / 212".into(), age: String::new() }],
+            ..HomeData::default()
+        };
+        let view = layout(&reading, 140, 45);
+        assert!(view.text.contains("reading") && view.text.contains("spec.pdf") && view.text.contains("p. 38 / 212"), "{}", view.text);
+        assert!(view.slots.iter().any(|s| s.entry == HomeEntry::RecentFile("/r/spec.pdf".into())));
         let view = layout(&data, 140, 45);
         assert!(!view.text.contains("recent") && !view.text.contains("today") && !view.text.contains("resume"));
         assert!(view.text.contains("none yet"));
