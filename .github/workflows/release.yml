@@ -1,0 +1,123 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds Fenix for Windows and Linux and publishes
+# a GitHub release with the binaries and that version's CHANGELOG.md
+# entry. The release stays a draft until every build has uploaded, so
+# a failed build never leaves a half-published release behind.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    name: Draft the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check the tag matches the version in Cargo.toml
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG doesn't match the workspace version $version in Cargo.toml"
+            exit 1
+          fi
+      - name: Take this version's notes from CHANGELOG.md
+        run: |
+          version=${TAG#v}
+          awk -v v="$version" '
+            /^## \[/ { if (found) exit; if (index($0, "## [" v "]") == 1) { found = 1; next } }
+            /^\[[^]]+\]: / { if (found) exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no entry for $version"
+            exit 1
+          fi
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" --draft --verify-tag --title "Fenix ${TAG#v}" --notes-file notes.md
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: draft
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            exe: fenix.exe
+          - name: Linux x64
+            # The oldest supported runner, so the binary runs on any
+            # distribution with glibc 2.35 or newer.
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: fenix
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
+          rustup override set stable
+      - name: Build
+        run: cargo build --release --locked -p fenix-gui --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="fenix-${TAG#v}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY.md "$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          sha256sum "$archive" > "$archive.sha256"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Upload to the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$TAG" --draft=false --latest
