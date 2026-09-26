@@ -51,7 +51,9 @@ gates yet: strict Clippy covers the storage, tasks, LSP and project
 crates, and is widened as the rest are cleaned up.
 
 Releases are built by a separate workflow, `release.yml`, when a `v*`
-tag is pushed.
+tag is pushed. The `snap.yml` workflow builds the snap package on every
+push and pull request and keeps it as a download on the run.
 
-Action references: [checkout](https://github.com/actions/checkout) and
-[upload-artifact](https://github.com/actions/upload-artifact).
+Action references: [checkout](https://github.com/actions/checkout),
+[upload-artifact](https://github.com/actions/upload-artifact), and
+[snapcore/action-build](https://github.com/snapcore/action-build).

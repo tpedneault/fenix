@@ -1,0 +1,65 @@
+name: fenix
+title: Fenix
+summary: A keyboard-first text editor, written from scratch in Rust
+description: |
+  Fenix is a modal editor: Vim's editing grammar, with a Doom Emacs-style
+  SPC leader layer on top for everything else. It's GPU-rendered, and
+  brings the tools of a working day into the editor as pages you move
+  between with the keyboard: projects, Git and code review, tasks,
+  terminals, containers, and more.
+
+  - Real Vim editing: motions, operators, text objects, registers, macros
+  - Projects: a hub, fuzzy pickers, ripgrep search and replace, templates
+  - Code intelligence: tree-sitter, language servers, a debugger, tasks
+  - Git and code review: status, staging, blame, rebase, GitHub and GitLab
+  - Terminals in panes, a Docker/Podman panel, a PDF viewer, an agenda
+
+  Fenix uses the tools it finds on your PATH, such as git, rg, ctags,
+  docker and language servers, which is why it runs with classic
+  confinement.
+license: MIT OR Apache-2.0
+website: https://github.com/tpedneault/fenix
+source-code: https://github.com/tpedneault/fenix
+issues: https://github.com/tpedneault/fenix/issues
+icon: snap/gui/fenix.png
+
+base: core24
+grade: stable
+# An editor opens files anywhere and runs whatever tools your projects
+# use (git, compilers, language servers, your shell). Strict confinement
+# would cut it off from all of them.
+confinement: classic
+adopt-info: fenix
+
+platforms:
+  amd64:
+
+apps:
+  fenix:
+    command: bin/fenix
+    # snap/gui/fenix.desktop is picked up by name and installed as the
+    # launcher for this app.
+
+parts:
+  fenix:
+    plugin: rust
+    source: .
+    rust-path: [crates/fenix-gui]
+    rust-channel: stable
+    build-packages:
+      - build-essential
+      - git
+    # Classic snaps run on the host's filesystem; pointing the binary at
+    # core24's loader and libraries keeps it independent of the host's
+    # glibc version.
+    build-attributes: [enable-patchelf]
+    override-pull: |
+      craftctl default
+      # The workspace version, plus the commit for a build that isn't a
+      # tagged release: 1.0.0, or 1.0.0+git.bab335d.
+      version="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)"
+      if ! git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+        commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+        [ -n "$commit" ] && version="$version+git.$commit"
+      fi
+      craftctl set version="$version"

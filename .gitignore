@@ -1,1 +1,7 @@
 /target
+
+# snapcraft
+/*.snap
+/parts/
+/stage/
+/prime/

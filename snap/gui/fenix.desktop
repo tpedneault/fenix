@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Fenix
+GenericName=Text Editor
+Comment=A keyboard-first text editor
+Exec=fenix %F
+Icon=${SNAP}/meta/gui/fenix.png
+Terminal=false
+Categories=Development;TextEditor;
+Keywords=editor;vim;code;text;
+MimeType=text/plain;text/markdown;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-python;text/x-tcl;text/rust;application/json;application/xml;application/toml;
+StartupNotify=true
+# The app ID Fenix gives its windows (LINUX_APP_ID in fenix-gui), so the
+# dock matches a running Fenix to this launcher.
+StartupWMClass=fenix

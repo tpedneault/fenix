@@ -89,3 +89,26 @@ comes back straight away and the output arrives underneath it. Started
 from a shortcut or Explorer, Fenix opens a console window of its own;
 closing that window closes Fenix too. On Linux, starting Fenix from a
 terminal is enough, and the flag does nothing.
+
+## The snap package
+
+`snap/snapcraft.yaml` packages Fenix as a snap for Ubuntu and other Linux
+distributions. It uses classic confinement, because an editor has to open
+files anywhere and run the tools your projects use.
+
+Every push builds it in CI (the **Snap** workflow), and the run keeps
+the `.snap` as a download named `fenix-snap`. To build one yourself:
+
+```bash
+sudo snap install snapcraft --classic
+snapcraft pack                      # builds in an LXD container
+```
+
+Either way, install the file with:
+
+```bash
+sudo snap install --dangerous --classic ./fenix_*.snap
+```
+
+`--dangerous` is needed because the file isn't signed by the Snap Store.
+
