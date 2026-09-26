@@ -66,6 +66,7 @@ pub enum Kind {
 pub enum Category {
     Editor,
     Appearance,
+    Motion,
     Files,
     Completion,
     Git,
@@ -78,9 +79,10 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 11] = [
+    pub const ALL: [Category; 12] = [
         Category::Editor,
         Category::Appearance,
+        Category::Motion,
         Category::Files,
         Category::Completion,
         Category::Git,
@@ -96,6 +98,7 @@ impl Category {
         match self {
             Category::Editor => "Editor",
             Category::Appearance => "Appearance",
+            Category::Motion => "Motion",
             Category::Files => "Files & explorer",
             Category::Completion => "Completion & LSP",
             Category::Git => "Git",
@@ -288,6 +291,16 @@ macro_rules! field {
     };
 }
 
+/// A field of one of `Config`'s grouped settings: `sub!(motion.beacon, ...)`.
+macro_rules! sub {
+    ($group:ident . $f:ident, $get:expr, $set:expr) => {
+        (|c: &Config| $get(&c.$group.$f), |c: &mut Config, v: Option<Value>| {
+            c.$group.$f = $set(v)?;
+            Ok(())
+        })
+    };
+}
+
 const HOST: &[Field] = &[
     Field { name: "name", label: "Name", range: None, default: None },
     Field { name: "host", label: "Host", range: None, default: None },
@@ -305,13 +318,53 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("editor.theme", Appearance, "Theme", Kind::Theme, "The colour theme; h and l preview each one.", field!(theme, text_get, text_set)).default("Orbit Dark"),
         s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; h and l go through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
         s("editor.font_size", Appearance, "Font size", Kind::Float { min: 6.0, max: 48.0 }, "Text size, in points.", field!(font_size, f32_get, f32_set)).default("16"),
-        s("editor.animations", Appearance, "Animations", Kind::Bool, "Smooth scrolling and the caret's fade.", field!(animations, bool_get, bool_set)).default("on"),
+        s("editor.animations", Motion, "Animations", Kind::Bool, "Off stops every animation, whatever the settings below say.", field!(animations, bool_get, bool_set)).default("on"),
+        s("motion.level", Motion, "Level", Kind::Choice(&["off", "subtle", "full"]), "How much moves. Subtle: short animations that show what changed. Full adds the caret gliding, folds opening and panes moving. Each animation below can be turned on or off on its own. SPC t a cycles it.", sub!(motion.level, text_get, text_set)).default("subtle"),
+        s("motion.speed", Motion, "Duration scale", Kind::Float { min: 0.25, max: 4.0 }, "Multiplies every animation's length: 2 is half as fast, 0.5 twice as fast.", sub!(motion.speed, f32_get, f32_set)).default("1"),
+        s("motion.caret_fade", Motion, "Caret blink fade", Kind::Bool, "The caret fades in and out when it blinks instead of switching.", sub!(motion.caret_fade, bool_get, bool_set)).default("with subtle"),
+        s("motion.smooth_scroll", Motion, "Smooth scrolling", Kind::Bool, "The view eases to where it scrolls: up and down, sideways, and from one mouse-wheel notch to the next.", sub!(motion.smooth_scroll, bool_get, bool_set)).default("with subtle"),
+        s("motion.scroll_ms", Motion, "Scroll length", Kind::Int { min: 20, max: 1000 }, "Milliseconds a scroll takes.", sub!(motion.scroll_ms, u64_get, u64_set)).default("150"),
+        s("motion.yank_pulse", Motion, "Yank and paste pulse", Kind::Bool, "What you yank or paste flashes once.", sub!(motion.yank_pulse, bool_get, bool_set)).default("with subtle"),
+        s("motion.beacon", Motion, "Jump beacon", Kind::Bool, "After a jump (gd, a search, Ctrl-O, a picker, a mark) the line you land on flashes once.", sub!(motion.beacon, bool_get, bool_set)).default("with subtle"),
+        s("motion.beacon_ms", Motion, "Beacon length", Kind::Int { min: 50, max: 2000 }, "Milliseconds the jump beacon takes to fade.", sub!(motion.beacon_ms, u64_get, u64_set)).default("300"),
+        s("motion.beacon_on_focus", Motion, "Beacon on pane switch", Kind::Bool, "Moving to another pane with the keyboard flashes its cursor line.", sub!(motion.beacon_on_focus, bool_get, bool_set)).default("with subtle"),
+        s("motion.change_pulse", Motion, "Change pulse", Kind::Bool, "Undo, redo, . and :s flash what they changed; a deletion flashes a bar where the text was.", sub!(motion.change_pulse, bool_get, bool_set)).default("with subtle"),
+        s("motion.popups", Motion, "Popups fade", Kind::Bool, "Which-key, completion, hover, prompts and menus fade in rising from where they open.", sub!(motion.popups, bool_get, bool_set)).default("with subtle"),
+        s("motion.messages", Motion, "Messages fade", Kind::Bool, "Messages in the modeline fade in and out instead of appearing and cutting off.", sub!(motion.messages, bool_get, bool_set)).default("with subtle"),
+        s("motion.error_flash", Motion, "Error flash", Kind::Bool, "An error flashes the mode rail red once.", sub!(motion.error_flash, bool_get, bool_set)).default("with subtle"),
+        s("motion.progress", Motion, "Progress spinner", Kind::Bool, "Work in the background (a fetch, a sync, a language server starting) shows in the modeline with the Fenix mark turning.", sub!(motion.progress, bool_get, bool_set)).default("with subtle"),
+        s("motion.mode_fade", Motion, "Mode colour fade", Kind::Bool, "Changing mode blends the rail and the caret to the new mode's colour.", sub!(motion.mode_fade, bool_get, bool_set)).default("with subtle"),
+        s("motion.tabs", Motion, "Tabs slide", Kind::Bool, "The active tab's accent slides to the tab you move to.", sub!(motion.tabs, bool_get, bool_set)).default("with subtle"),
+        s("motion.caret_glide", Motion, "Caret glide", Kind::Bool, "The caret slides to where a motion takes it instead of jumping. Never while typing.", sub!(motion.caret_glide, bool_get, bool_set)).default("with full"),
+        s("motion.glide_ms", Motion, "Glide length", Kind::Int { min: 20, max: 500 }, "Milliseconds the caret takes to glide.", sub!(motion.glide_ms, u64_get, u64_set)).default("45"),
+        s("motion.folds", Motion, "Folds open", Kind::Bool, "Rows revealed by unfolding (a folder, a code fold) open downwards.", sub!(motion.folds, bool_get, bool_set)).default("with full"),
+        s("motion.layout", Motion, "Panes move", Kind::Bool, "Splitting, closing and resizing panes move their edges instead of jumping.", sub!(motion.layout, bool_get, bool_set)).default("with full"),
+        s("motion.theme_fade", Motion, "Theme cross-fade", Kind::Bool, "Changing theme fades from the old colours to the new.", sub!(motion.theme_fade, bool_get, bool_set)).default("with subtle"),
+        s("motion.splash", Motion, "Launch splash", Kind::Bool, "While Fenix starts, the mark and a line that fills as it loads show until the editor is ready. It moves unless animations are off; only this setting hides it.", sub!(motion.splash, bool_get, bool_set)).default("on"),
+        s("appearance.corner_radius", Appearance, "Corner radius", Kind::Int { min: 0, max: 16 }, "Pixels of rounding on popups and floating boxes. 0 keeps them square.", sub!(polish.corner_radius, usize_get, usize_set)).default("the theme's"),
+        s("appearance.shadows", Appearance, "Shadows", Kind::Bool, "Popups cast a soft shadow.", sub!(polish.shadows, bool_get, bool_set)).default("on"),
+        s("appearance.indent_guides", Appearance, "Indent guides", Kind::Bool, "A thin line for each indent level.", sub!(polish.indent_guides, bool_get, bool_set)).default("on"),
+        s("appearance.active_indent_guide", Appearance, "Active indent guide", Kind::Bool, "The guide of the block the cursor is in is brighter.", sub!(polish.active_indent_guide, bool_get, bool_set)).default("on"),
+        s("appearance.overview_ruler", Appearance, "Overview ruler", Kind::Bool, "A track on each code pane's right edge showing the visible part, search matches, problems, changes and the cursor. Click it to jump.", sub!(polish.overview_ruler, bool_get, bool_set)).default("on"),
+        s("appearance.sticky_scroll", Appearance, "Sticky scroll", Kind::Bool, "The first lines of the function and class you're inside stay at the top of the pane.", sub!(polish.sticky_scroll, bool_get, bool_set)).default("on"),
+        s("appearance.sticky_lines", Appearance, "Sticky lines", Kind::Int { min: 1, max: 6 }, "How many enclosing lines sticky scroll keeps at most.", sub!(polish.sticky_lines, usize_get, usize_set)).default("3"),
+        s("appearance.rounded_selection", Appearance, "Rounded selection", Kind::Bool, "A Visual selection's outer corners are rounded, so it reads as one shape.", sub!(polish.rounded_selection, bool_get, bool_set)).default("on"),
+        s("appearance.selection_whitespace", Appearance, "Whitespace in selection", Kind::Bool, "Spaces show as dots and tabs as arrows inside a Visual selection.", sub!(polish.selection_whitespace, bool_get, bool_set)).default("on"),
+        s("appearance.dim_unfocused", Appearance, "Dim unfocused panes", Kind::Bool, "Panes that don't have the keyboard are drawn dimmer.", sub!(polish.dim_unfocused, bool_get, bool_set)).default("on"),
+        s("appearance.dim_amount", Appearance, "Dim amount", Kind::Int { min: 5, max: 80 }, "How much dimmer, in percent.", sub!(polish.dim_amount, usize_get, usize_set)).default("30"),
+        s("which_key.delay_ms", Appearance, "Key menu delay", Kind::Int { min: 0, max: 2000 }, "Milliseconds a leader key (SPC, g, ...) waits before the menu of what comes next opens. Once open, deeper levels show at once.", sub!(polish.which_key_delay_ms, u64_get, u64_set)).default("250"),
+        s("which_key.order", Appearance, "Key menu order", Kind::Choice(&["key", "label"]), "The key menu's order: by key, so a key never moves, or by what it does.", sub!(polish.which_key_order, text_get, text_set)).default("key"),
+        s("appearance.rainbow_brackets", Appearance, "Rainbow brackets", Kind::Bool, "Brackets are coloured by how deeply they're nested.", sub!(polish.rainbow_brackets, bool_get, bool_set)).default("off"),
+        s("appearance.tabs", Appearance, "Tabs", Kind::Choice(&["auto", "block", "underline", "off"]), "How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then.", sub!(polish.tabs, text_get, text_set)).default("auto"),
         s("editor.preview_tab", Appearance, "Preview tabs", Kind::Bool, "A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P.", field!(preview_tab, bool_get, bool_set)).default("on"),
         // Files
         s("editor.watch_files", Files, "Watch files on disk", Kind::Bool, "Notice when an open file changes on disk, and reload it when you haven't edited it.", field!(watch_files, bool_get, bool_set)).default("on"),
         // Completion & LSP
         s("completion.symbols_file", Completion, "Extra words file", Kind::Path, "A text file of words, one per line, offered by completion everywhere.", field!(completion_symbols_file, path_get, path_set)),
         s("snippets.builtin", Completion, "Built-in snippets", Kind::Bool, "Offer the snippets that come with Fenix; yours and a project's always are. SPC i S manages them.", field!(snippets_builtin, bool_get, bool_set)).default("on"),
+        s("diagnostics.inline", Completion, "Inline problems", Kind::Choice(&["all", "errors", "off"]), "Problems from language servers are underlined in the text, with a dot in the gutter. SPC t d cycles it.", sub!(polish.diagnostics_inline, text_get, text_set)).default("all"),
+        s("diagnostics.message", Completion, "Problem messages", Kind::Choice(&["cursor", "all", "off"]), "Which lines show their problem's message at the end: the cursor's line, every line, or none.", sub!(polish.diagnostics_message, text_get, text_set)).default("cursor"),
+        s("diagnostics.delay_ms", Completion, "Problems while typing", Kind::Int { min: 0, max: 5000 }, "Milliseconds after you stop typing in Insert before new problems are drawn.", sub!(polish.diagnostics_delay_ms, u64_get, u64_set)).default("400"),
         s("lsp.servers", Completion, "Language servers", Kind::Map { key: "Language", value: "Command", paths: false }, "A language server to run for a language, as the command line that starts it.", field!(lsp_servers, map_get, map_set)),
         // Git
         s("git.base_branch", Git, "Base branch", Kind::Text, "The branch pull requests and comparisons start from.", field!(git_base_branch, text_get, text_set)).default("main or master").project(),

@@ -59,6 +59,66 @@ impl Config {
     }
 }
 
+/// `[motion]`. Each feature unset follows `level`: `subtle` turns on
+/// the short, informative ones, `full` adds the rest. `editor.animations
+/// = false` still turns every one of them off.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MotionSettings {
+    /// `off`, `subtle` or `full`.
+    pub level: Option<String>,
+    /// Multiplies every duration: 2.0 is half as fast.
+    pub speed: Option<f32>,
+    pub caret_fade: Option<bool>,
+    pub smooth_scroll: Option<bool>,
+    pub scroll_ms: Option<u64>,
+    pub yank_pulse: Option<bool>,
+    pub beacon: Option<bool>,
+    pub beacon_ms: Option<u64>,
+    pub beacon_on_focus: Option<bool>,
+    pub change_pulse: Option<bool>,
+    pub popups: Option<bool>,
+    pub messages: Option<bool>,
+    pub error_flash: Option<bool>,
+    pub progress: Option<bool>,
+    pub mode_fade: Option<bool>,
+    pub tabs: Option<bool>,
+    pub caret_glide: Option<bool>,
+    pub glide_ms: Option<u64>,
+    pub folds: Option<bool>,
+    pub layout: Option<bool>,
+    pub theme_fade: Option<bool>,
+    pub splash: Option<bool>,
+}
+
+/// The static polish, under `[appearance]` and `[diagnostics]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Polish {
+    pub corner_radius: Option<usize>,
+    pub shadows: Option<bool>,
+    pub overview_ruler: Option<bool>,
+    pub sticky_scroll: Option<bool>,
+    pub sticky_lines: Option<usize>,
+    pub indent_guides: Option<bool>,
+    pub active_indent_guide: Option<bool>,
+    pub rounded_selection: Option<bool>,
+    pub selection_whitespace: Option<bool>,
+    pub dim_unfocused: Option<bool>,
+    /// How much an unfocused pane is dimmed, in percent.
+    pub dim_amount: Option<usize>,
+    pub rainbow_brackets: Option<bool>,
+    /// `all`, `errors` or `off`.
+    pub diagnostics_inline: Option<String>,
+    /// `cursor`, `all` or `off`: which lines show their message.
+    pub diagnostics_message: Option<String>,
+    pub diagnostics_delay_ms: Option<u64>,
+    /// `auto`, `block`, `underline` or `off`: how pane tabs are drawn.
+    pub tabs: Option<String>,
+    /// How long a leader key waits before the which-key menu shows.
+    pub which_key_delay_ms: Option<u64>,
+    /// `key` or `label`: how the menu orders its keys.
+    pub which_key_order: Option<String>,
+}
+
 pub struct Config {
     path: PathBuf,
     /// Where window placement and explorer bookmarks are kept.
@@ -98,6 +158,11 @@ pub struct Config {
     /// user who wants to rule animation cost in/out of a responsiveness
     /// complaint, or who just prefers snappier motion.
     pub animations: Option<bool>,
+    /// `[motion]`: how much moves, feature by feature.
+    pub motion: MotionSettings,
+    /// The static polish: corners, the overview ruler, sticky scroll,
+    /// dimming, inline diagnostics and the rest.
+    pub polish: Polish,
     /// Whether a jump (`gd`, a search result, a symbol) opens in one
     /// reusable preview tab until it's edited or kept. `None` means on.
     pub preview_tab: Option<bool>,
@@ -419,6 +484,8 @@ impl Config {
             iskeyword_extra: None,
             tab_width: None,
             animations: None,
+            motion: MotionSettings::default(),
+            polish: Polish::default(),
             preview_tab: None,
             completion_symbols_file: None,
             snippets_builtin: None,

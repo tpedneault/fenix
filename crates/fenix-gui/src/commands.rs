@@ -59,7 +59,8 @@ impl CommandRegistry {
         );
         registry.register("view.pick_theme", "Pick a theme by name", cmd_pick_theme);
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
-        registry.register("view.toggle_animations", "Toggle caret/scroll/pulse animations", cmd_toggle_animations);
+        registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
+        registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",

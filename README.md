@@ -974,6 +974,43 @@ for anyone curious to poke around or build on it.
   project's own launch target -- required for anything that isn't "the
   script I have open" -- comes from `.fenix/tools.json`'s `launch`
   (`program`, `args`, `cwd`, `env`; `SPC p ,` edits it).
+- **Key menu**: pause after `SPC` (or Vim's `g`, `z`, `]`, `[`, or `SPC m`)
+  and a drawer opens up out of the modeline showing what can come next.
+  Its header is the keys pressed so far as keycaps and the group's name;
+  below, the keys in columns, groups first (each marked `+` with how many
+  commands it holds) then commands, or a group's own sections (git's
+  View / Branch & remote / This change). Keys are ordered by key, so none
+  moves when a label changes (`which_key.order = "label"` sorts by what
+  they do). Backspace goes up a level; a group too big for 40% of the
+  window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
+  waits `which_key.delay_ms` (250 ms) before opening, so a quick
+  `SPC f f` never flashes it; once open, deeper levels show at once.
+- **Motion and polish**: the window opens at once with a launch splash --
+  the Fenix mark assembling, then breathing, over a line that fills as
+  startup gets further -- drawn from its own thread, so a slow start
+  never looks like a hang; it holds still with animations off and only
+  `motion.splash = false` hides it. While editing, a jump (`gd`, a
+  search, `Ctrl-O`, a picker, a mark, a debugger stop) flashes the line
+  it lands on; undo, redo, `.` and `:s` flash what they changed and mark
+  where text went; popups fade in rising from where they open and fade
+  out; modeline messages fade instead of cutting off, and an error
+  flashes the mode rail; background work (a fetch, a task, a Jira sync,
+  a language server starting) shows in the modeline beside the mark's
+  blades lighting in turn; the mode colour blends between modes; the
+  active tab's accent slides to the next tab; sideways scrolling eases;
+  a theme change cross-fades. `full` adds the caret gliding along a
+  motion, unfolded rows opening downwards, and panes moving to a split
+  or close. Popups get rounded corners and soft shadows; problems from
+  language servers are underlined with a wave, with the cursor line's
+  message at its end; an overview ruler down each code pane's right edge
+  shows the visible part, search matches, problems and changes (click
+  it to jump); sticky scroll pins the headers of the scopes you're
+  inside; a Visual selection is rounded and shows its whitespace;
+  unfocused panes are dimmed; brackets can be coloured by depth.
+  `motion.level` (`SPC t a`) sets how much moves, every animation and
+  every piece of polish has its own setting (the Motion and Appearance
+  categories of `SPC ,`), and `editor.animations = false` still stops
+  them all.
 - **Tool status**: `SPC l m` opens a single-pane listing of every
   language with a built-in LSP server or DAP adapter -- the exact
   command that would be launched (a `[lsp]` override if configured,
@@ -1225,7 +1262,8 @@ popup shows what keys continue it.
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
-| `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
+| `SPC t a` | Cycle motion: off, subtle, full |
+| `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e d` | Two listings side by side (copy/move default to the other one) |
 | `SPC e o` / `SPC e O` | Open with the system's default app / show it in Explorer |
@@ -1878,13 +1916,54 @@ when it's out of date).
 | `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
 | `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; h and l go through them. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
-| `editor.animations` | true / false | on | Smooth scrolling and the caret's fade. |
+| `appearance.corner_radius` | 0–16 | the theme's | Pixels of rounding on popups and floating boxes. 0 keeps them square. |
+| `appearance.shadows` | true / false | on | Popups cast a soft shadow. |
+| `appearance.indent_guides` | true / false | on | A thin line for each indent level. |
+| `appearance.active_indent_guide` | true / false | on | The guide of the block the cursor is in is brighter. |
+| `appearance.overview_ruler` | true / false | on | A track on each code pane's right edge showing the visible part, search matches, problems, changes and the cursor. Click it to jump. |
+| `appearance.sticky_scroll` | true / false | on | The first lines of the function and class you're inside stay at the top of the pane. |
+| `appearance.sticky_lines` | 1–6 | 3 | How many enclosing lines sticky scroll keeps at most. |
+| `appearance.rounded_selection` | true / false | on | A Visual selection's outer corners are rounded, so it reads as one shape. |
+| `appearance.selection_whitespace` | true / false | on | Spaces show as dots and tabs as arrows inside a Visual selection. |
+| `appearance.dim_unfocused` | true / false | on | Panes that don't have the keyboard are drawn dimmer. |
+| `appearance.dim_amount` | 5–80 | 30 | How much dimmer, in percent. |
+| `which_key.delay_ms` | 0–2000 | 250 | Milliseconds a leader key (SPC, g, ...) waits before the menu of what comes next opens. Once open, deeper levels show at once. |
+| `which_key.order` | key / label | key | The key menu's order: by key, so a key never moves, or by what it does. |
+| `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
+| `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
+| **Motion** | | | |
+| `editor.animations` | true / false | on | Off stops every animation, whatever the settings below say. |
+| `motion.level` | off / subtle / full | subtle | How much moves. Subtle: short animations that show what changed. Full adds the caret gliding, folds opening and panes moving. Each animation below can be turned on or off on its own. SPC t a cycles it. |
+| `motion.speed` | 0.25–4 | 1 | Multiplies every animation's length: 2 is half as fast, 0.5 twice as fast. |
+| `motion.caret_fade` | true / false | with subtle | The caret fades in and out when it blinks instead of switching. |
+| `motion.smooth_scroll` | true / false | with subtle | The view eases to where it scrolls: up and down, sideways, and from one mouse-wheel notch to the next. |
+| `motion.scroll_ms` | 20–1000 | 150 | Milliseconds a scroll takes. |
+| `motion.yank_pulse` | true / false | with subtle | What you yank or paste flashes once. |
+| `motion.beacon` | true / false | with subtle | After a jump (gd, a search, Ctrl-O, a picker, a mark) the line you land on flashes once. |
+| `motion.beacon_ms` | 50–2000 | 300 | Milliseconds the jump beacon takes to fade. |
+| `motion.beacon_on_focus` | true / false | with subtle | Moving to another pane with the keyboard flashes its cursor line. |
+| `motion.change_pulse` | true / false | with subtle | Undo, redo, . and :s flash what they changed; a deletion flashes a bar where the text was. |
+| `motion.popups` | true / false | with subtle | Which-key, completion, hover, prompts and menus fade in rising from where they open. |
+| `motion.messages` | true / false | with subtle | Messages in the modeline fade in and out instead of appearing and cutting off. |
+| `motion.error_flash` | true / false | with subtle | An error flashes the mode rail red once. |
+| `motion.progress` | true / false | with subtle | Work in the background (a fetch, a sync, a language server starting) shows in the modeline with the Fenix mark turning. |
+| `motion.mode_fade` | true / false | with subtle | Changing mode blends the rail and the caret to the new mode's colour. |
+| `motion.tabs` | true / false | with subtle | The active tab's accent slides to the tab you move to. |
+| `motion.caret_glide` | true / false | with full | The caret slides to where a motion takes it instead of jumping. Never while typing. |
+| `motion.glide_ms` | 20–500 | 45 | Milliseconds the caret takes to glide. |
+| `motion.folds` | true / false | with full | Rows revealed by unfolding (a folder, a code fold) open downwards. |
+| `motion.layout` | true / false | with full | Splitting, closing and resizing panes move their edges instead of jumping. |
+| `motion.theme_fade` | true / false | with subtle | Changing theme fades from the old colours to the new. |
+| `motion.splash` | true / false | on | While Fenix starts, the mark and a line that fills as it loads show until the editor is ready. It moves unless animations are off; only this setting hides it. |
 | **Files & explorer** | | | |
 | `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
 | **Completion & LSP** | | | |
 | `completion.symbols_file` | a path | – | A text file of words, one per line, offered by completion everywhere. |
 | `snippets.builtin` | true / false | on | Offer the snippets that come with Fenix; yours and a project's always are. SPC i S manages them. |
+| `diagnostics.inline` | all / errors / off | all | Problems from language servers are underlined in the text, with a dot in the gutter. SPC t d cycles it. |
+| `diagnostics.message` | cursor / all / off | cursor | Which lines show their problem's message at the end: the cursor's line, every line, or none. |
+| `diagnostics.delay_ms` | 0–5000 | 400 | Milliseconds after you stop typing in Insert before new problems are drawn. |
 | `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
 | **Git** | | | |
 | `git.base_branch` | text | main or master | The branch pull requests and comparisons start from. *A project can set it.* |

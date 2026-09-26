@@ -144,6 +144,10 @@ pub fn local_trie(contexts: &[LocalContext]) -> &'static KeyTrie<&'static str> {
 ///
 /// Deliberately sparse: only wires groups that have a real command
 /// behind them today.
+/// The order sections come in within a which-key group; any other
+/// section follows these, and unsectioned keys come last.
+pub const WHICH_KEY_SECTIONS: &[&str] = &["View", "Branch & remote", "This change"];
+
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -192,7 +196,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('f')], "fullscreen", "view.toggle_fullscreen");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "animations", "view.toggle_animations");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "motion", "view.toggle_animations");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('d')], "inline problems", "view.cycle_diagnostics");
 
         t.label_group(&[spc, KeyPress::char('e')], "explorer");
         t.insert(
@@ -314,6 +319,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // most of what's done to a repository; these are the ways in,
         // and what's done from the file being edited.
         t.label_group(&[spc, KeyPress::char('g')], "git");
+        // The which-key drawer lists git's keys in these sections, in
+        // this order (`WHICH_KEY_SECTIONS`).
+        for (keys, section) in [("glGhHBec", "View"), ("wfprmPMz", "Branch & remote"), ("adix", "This change")] {
+            for key in keys.chars() {
+                t.set_section(&[spc, KeyPress::char('g'), KeyPress::char(key)], section);
+            }
+        }
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "status page", "git.open");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log", "git.log");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");

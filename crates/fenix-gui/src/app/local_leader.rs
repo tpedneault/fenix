@@ -83,7 +83,7 @@ mod tests {
     }
 
     fn hint_labels(app: &App) -> Vec<&'static str> {
-        let mut labels: Vec<&str> = app.pending_hints().into_iter().map(|(_, l)| l).collect();
+        let mut labels: Vec<&str> = app.which_key_pending().map(|p| p.hints).unwrap_or_default().into_iter().map(|h| h.label).collect();
         labels.sort();
         labels
     }
@@ -125,7 +125,7 @@ mod tests {
         let mut app = open(&file);
         app.start_local_leader();
         assert!(app.local_matcher.is_none());
-        assert!(app.pending_hints().is_empty());
+        assert!(app.which_key_pending().is_none());
         assert!(app.status_message.as_ref().unwrap().text.contains("nothing for this buffer"));
     }
 

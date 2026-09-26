@@ -258,7 +258,9 @@ impl App {
     pub(super) fn apply_setting(&mut self, key: &str) {
         match key {
             "editor.theme" => {
+                let old = self.theme;
                 self.theme = self.config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
+                self.fade_theme_from(old);
             }
             "editor.font_size" | "editor.font_family" => {
                 self.apply_font_size();
