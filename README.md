@@ -1914,7 +1914,7 @@ when it's out of date).
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
 | **Appearance** | | | |
 | `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
-| `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; h and l go through them. |
+| `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; Enter lists them to pick from, h and l step through them. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
 | `appearance.corner_radius` | 0–16 | the theme's | Pixels of rounding on popups and floating boxes. 0 keeps them square. |
 | `appearance.shadows` | true / false | on | Popups cast a soft shadow. |

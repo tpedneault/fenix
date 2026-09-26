@@ -316,7 +316,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
         // Appearance
         s("editor.theme", Appearance, "Theme", Kind::Theme, "The colour theme; h and l preview each one.", field!(theme, text_get, text_set)).default("Orbit Dark"),
-        s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; h and l go through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
+        s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; Enter lists them to pick from, h and l step through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
         s("editor.font_size", Appearance, "Font size", Kind::Float { min: 6.0, max: 48.0 }, "Text size, in points.", field!(font_size, f32_get, f32_set)).default("16"),
         s("editor.animations", Motion, "Animations", Kind::Bool, "Off stops every animation, whatever the settings below say.", field!(animations, bool_get, bool_set)).default("on"),
         s("motion.level", Motion, "Level", Kind::Choice(&["off", "subtle", "full"]), "How much moves. Subtle: short animations that show what changed. Full adds the caret gliding, folds opening and panes moving. Each animation below can be turned on or off on its own. SPC t a cycles it.", sub!(motion.level, text_get, text_set)).default("subtle"),

@@ -71,6 +71,9 @@ pub enum Action {
     /// Pick a path in the explorer, starting from `start`: a folder, or
     /// a file. What's picked comes back through `SettingsPage::browsed`.
     Browse { start: Option<PathBuf>, folder: bool },
+    /// Pick the setting's value from a list, starting on `current`.
+    /// What's picked comes back through `SettingsPage::chose`.
+    Choose { key: &'static str, choices: Vec<String>, current: Option<String> },
     /// Show `scope` instead.
     SwitchScope(Scope),
     /// Something the project's own section asked for: its kind, group,
@@ -589,6 +592,11 @@ impl SettingsPage {
             Key::Enter => match row {
                 Some(Row::Setting(s)) => match s.kind {
                     Kind::Bool | Kind::Choice(_) | Kind::Theme => return self.step(s, true),
+                    // Too many to step through: a list to pick from.
+                    Kind::Font => {
+                        let current = self.value(s).map(Value::show);
+                        return Action::Choose { key: s.key, choices: self.snap.fonts.clone(), current };
+                    }
                     Kind::Map { .. } | Kind::Records(_) => {
                         self.edit = Some(Edit::Entry { key: s.key, index: None, fields: vec![String::new(); field_labels(&s.kind).len()], at: 0 });
                     }
@@ -649,6 +657,18 @@ impl SettingsPage {
                 }
             },
             None => Action::None,
+        }
+    }
+
+    /// The value picked from the list `Enter` opened.
+    pub fn chose(&mut self, key: &'static str, text: &str) -> Action {
+        let Some(s) = fenix_config::setting(key) else { return Action::None };
+        match s.kind.parse(text) {
+            Ok(v) => self.set(s.key, Some(v)),
+            Err(why) => {
+                self.refused = Some((s.key, why));
+                Action::None
+            }
         }
     }
 
@@ -1041,6 +1061,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
     } else {
         match selected {
+            Some(Row::Setting(s)) if s.kind == Kind::Font => vec![("Enter", "choose"), ("h/l", "change"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
             Some(Row::Setting(s)) if s.kind == Kind::Path => vec![("Enter", "edit"), ("b", "browse"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
             Some(Row::Setting(Setting { kind: Kind::Secret(_), .. })) => vec![("Enter", "set"), ("t", "test"), ("x", "clear"), ("/", "search"), ("e", "open the file"), ("q", "close")],
             Some(Row::Setting(s)) if is_list(&s.kind) => vec![("a", "add"), ("Enter", "add"), ("r", "clear all"), ("/", "search"), ("e", "open the file"), ("q", "close")],
@@ -1113,6 +1134,20 @@ mod tests {
         assert!(text.contains("• Font size") && text.contains("‹ 18 ›") && text.contains("default 16"), "{text}");
         assert!(text.contains("Text size, in points.") && text.contains("editor.font_size"), "the selected one explains itself:\n{text}");
         assert!(text.contains("Appearance") && text.contains("• 1"), "{text}");
+    }
+
+    #[test]
+    fn enter_on_the_font_lists_the_installed_ones_starting_on_the_current_one() {
+        let mut p = page();
+        p.snap.fonts = vec!["Consolas".into(), "Fira Code".into(), "JetBrains Mono".into()];
+        p.snap.here.insert("editor.font_family", Value::Text("Fira Code".into()));
+        goto(&mut p, "editor.font_family");
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::Choose { key: "editor.font_family", choices: p.snap.fonts.clone(), current: Some("Fira Code".into()) }
+        );
+        assert_eq!(p.chose("editor.font_family", "JetBrains Mono"), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) });
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) }, "h and l still step");
     }
 
     #[test]

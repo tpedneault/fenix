@@ -2481,6 +2481,10 @@ enum ActivePicker {
     /// `SPC g c`, step two: pick the ref being compared. Carries the
     /// already-chosen base, since confirming needs both.
     CompareHead { base: String, picker: fenix_picker::PickerState<String> },
+    /// Enter on a settings-page row with more choices than `h`/`l` should
+    /// step through (the installed fonts): one of them, by name. What
+    /// it's for is `key`; confirming hands the choice back to the page.
+    SettingChoice { key: &'static str, picker: fenix_picker::PickerState<String> },
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2622,6 +2626,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
+        ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2662,6 +2667,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
+        ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2702,6 +2708,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
+        ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2745,6 +2752,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
+        ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2785,6 +2793,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
+        ActivePicker::SettingChoice { picker, .. } => picker.query(),
     }
 }
 
@@ -2825,6 +2834,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
+        ActivePicker::SettingChoice { picker, .. } => picker.len(),
     }
 }
 
@@ -2865,6 +2875,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
+        ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2909,6 +2920,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -18827,6 +18839,13 @@ impl App {
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
             }
+            Some(ActivePicker::SettingChoice { key, picker }) => {
+                let Some(value) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let key = *key;
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.setting_chosen(key, &value);
+            }
             Some(ActivePicker::CompareHead { base, picker }) => {
                 let Some(head) = picker.selected().map(|c| c.payload.clone()) else { return };
                 let base = base.clone();
@@ -22904,6 +22923,7 @@ impl App {
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
