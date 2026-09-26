@@ -195,6 +195,14 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         }
         // Only ever acted on in the queue, by `coalesce_render_requests`.
         PdfRequest::Cancel { .. } => {}
+        PdfRequest::Text { key, page } => {
+            let doc = docs.get(&key)?;
+            sink(PdfResponse::Text { key, page, chars: page_chars(doc, page) });
+        }
+        PdfRequest::Links { key, page } => {
+            let doc = docs.get(&key)?;
+            sink(PdfResponse::Links { key, page, links: page_links(doc, page) });
+        }
     }
     None
 }
@@ -290,6 +298,64 @@ fn search_pages(doc: &PdfDocument, query: &str, match_case: bool, pages: std::op
         }
     }
     matches
+}
+
+/// A page's characters in reading order, each with its box in points from
+/// the page's top-left. Empty when pdfium can't read the page's text.
+fn page_chars(doc: &PdfDocument, page_index: u32) -> Vec<crate::text::PageChar> {
+    let Ok(page) = doc.pages().get(page_index as i32) else { return Vec::new() };
+    let page_h = page.height().value;
+    let Ok(text) = page.text() else { return Vec::new() };
+    text.chars()
+        .iter()
+        .filter_map(|ch| {
+            let c = ch.unicode_char()?;
+            let c = if c == '\r' { '\n' } else { c };
+            let rect = match ch.loose_bounds() {
+                Ok(b) if c != '\n' => [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value],
+                _ => [0.0; 4],
+            };
+            Some(crate::text::PageChar { c, rect })
+        })
+        // pdfium ends a line with "\r\n": one break is enough.
+        .fold(Vec::new(), |mut out: Vec<crate::text::PageChar>, ch| {
+            if !(ch.c == '\n' && out.last().is_some_and(|last| last.c == '\n')) {
+                out.push(ch);
+            }
+            out
+        })
+}
+
+/// A page's links, with where each goes, in points from its top-left.
+fn page_links(doc: &PdfDocument, page_index: u32) -> Vec<crate::text::PageLink> {
+    use crate::text::{LinkTarget, PageLink};
+    let Ok(page) = doc.pages().get(page_index as i32) else { return Vec::new() };
+    let page_h = page.height().value;
+    let links = page.links();
+    links
+        .iter()
+        .filter_map(|link| {
+            let b = link.rect().ok()?;
+            let rect = [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value];
+            let to_page = |dest: PdfDestination| {
+                let page = dest.page_index().ok()? as u32;
+                let y = match dest.view_settings() {
+                    Ok(PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _) | PdfDestinationViewSettings::FitPageHorizontallyToWindow(y)) => y.map(|y| {
+                        let target_h = doc.pages().page_size(page as i32).map(|r| r.height().value).unwrap_or(page_h);
+                        target_h - y.value
+                    }),
+                    _ => None,
+                };
+                Some(LinkTarget::Page { page, y })
+            };
+            let to = match link.action() {
+                Some(PdfAction::Uri(uri)) => LinkTarget::Uri(uri.uri().ok()?),
+                Some(PdfAction::LocalDestination(local)) => to_page(local.destination().ok()?)?,
+                _ => to_page(link.destination()?)?,
+            };
+            Some(PageLink { rect, to })
+        })
+        .collect()
 }
 
 /// Builds a short, single-line context snippet around one match, from a
