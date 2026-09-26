@@ -271,6 +271,8 @@ pub struct TextPipeline {
     /// Same lazy-create/retain lifecycle as `titles`; empty for any pane
     /// without a tab strip.
     breadcrumbs: HashMap<PaneId, GlyphBuffer>,
+    /// Sticky scroll's pinned rows, per pane that has any.
+    sticky: HashMap<PaneId, GlyphBuffer>,
     popups: HashMap<PopupId, GlyphBuffer>,
     modeline: GlyphBuffer,
     /// The modeline's right-aligned date/time clock -- a *separate*
@@ -412,6 +414,7 @@ impl TextPipeline {
             content_buffers: HashMap::new(),
             titles: HashMap::new(),
             breadcrumbs: HashMap::new(),
+            sticky: HashMap::new(),
             popups: HashMap::new(),
             modeline,
             clock,
@@ -763,7 +766,28 @@ impl TextPipeline {
     /// reasoning as `retain_panes`. The two buffers share one pane
     /// lifecycle (a breadcrumb bar never outlives its pane's tab strip),
     /// so one `keep` list retires both together.
+    /// Sets a pane's sticky rows (one line each), or clears them when
+    /// there are none.
+    pub fn set_pane_sticky(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
+        if segments.is_empty() {
+            self.sticky.remove(&pane);
+            return;
+        }
+        let spans = self.rich_spans(segments);
+        let default_attrs = Attrs::new().family(self.content_family());
+        if !self.sticky.contains_key(&pane) {
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
+            buf.set_wrap(Wrap::None);
+            self.sticky.insert(pane, buf);
+        }
+        let buf = self.sticky.get_mut(&pane).expect("just inserted if missing");
+        buf.set_size(Some(w), None);
+        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+    }
+
     pub fn retain_titles(&mut self, keep: &[PaneId]) {
+        self.sticky.retain(|id, _| keep.contains(id));
         self.titles.retain(|id, _| keep.contains(id));
         self.breadcrumbs.retain(|id, _| keep.contains(id));
     }
@@ -893,7 +917,7 @@ impl TextPipeline {
         &mut self,
         gpu: &GpuState,
         theme: &Theme,
-        panes: &[(PaneId, Rect, f32)],
+        panes: &[(PaneId, Rect, f32, usize)],
         titles: &[(PaneId, Rect)],
         breadcrumbs: &[(PaneId, Rect)],
         sidebar_open: bool,
@@ -907,8 +931,11 @@ impl TextPipeline {
         let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
         let mut areas = Vec::with_capacity(panes.len() + titles.len() + breadcrumbs.len() + 2);
-        for &(pane, rect, content_frac) in panes {
+        for &(pane, rect, content_frac, sticky_rows) in panes {
             let Some(buffer) = self.content_buffers.get(&pane) else { continue };
+            // Sticky rows cover the pane's top; its own text is cut off
+            // under them rather than showing through.
+            let sticky_bottom = if sticky_rows > 0 { rect.y + PAD_TOP + sticky_rows as f32 * self.line_height } else { rect.y };
             areas.push(TextArea {
                 buffer,
                 left: rect.x + PAD_LEFT,
@@ -916,13 +943,29 @@ impl TextPipeline {
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
-                    top: rect.y as i32,
+                    top: sticky_bottom as i32,
                     right: (rect.x + rect.w) as i32,
                     bottom: (rect.y + rect.h) as i32,
                 },
                 default_color: theme.fg,
                 custom_glyphs: &[],
             });
+            if let Some(sticky) = self.sticky.get(&pane).filter(|_| sticky_rows > 0) {
+                areas.push(TextArea {
+                    buffer: sticky,
+                    left: rect.x + PAD_LEFT,
+                    top: rect.y + PAD_TOP,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: rect.x as i32,
+                        top: rect.y as i32,
+                        right: (rect.x + rect.w) as i32,
+                        bottom: sticky_bottom as i32,
+                    },
+                    default_color: theme.fg,
+                    custom_glyphs: &[],
+                });
+            }
         }
 
         // A pane's tab strip -- `rect` here is the strip's own bar (its
@@ -1049,25 +1092,28 @@ impl TextPipeline {
     /// The overlay layer: just popup text, prepared for a second
     /// `render()` call in a second render pass (`LoadOp::Load`) drawn
     /// after the base layer -- see `prepare`'s own doc comment for why.
-    pub fn prepare_popups(&mut self, gpu: &GpuState, theme: &Theme, popups: &[(PopupId, Rect)]) {
+    /// Each popup comes with where its text starts inside it (`inset`:
+    /// left, top) and the line below which nothing of it shows (`clip`) --
+    /// the which-key drawer slides up from behind the modeline.
+    pub fn prepare_popups(&mut self, gpu: &GpuState, theme: &Theme, popups: &[(PopupId, Rect, (f32, f32), f32)]) {
         self.viewport.update(
             &gpu.queue,
             Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
         let mut areas = Vec::with_capacity(popups.len());
-        for &(id, rect) in popups {
+        for &(id, rect, (inset_x, inset_y), clip) in popups {
             let Some(buffer) = self.popups.get(&id) else { continue };
             areas.push(TextArea {
                 buffer,
-                left: rect.x + PAD_LEFT,
-                top: rect.y + 4.0,
+                left: rect.x + inset_x,
+                top: rect.y + inset_y,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
                     top: rect.y as i32,
                     right: (rect.x + rect.w) as i32,
-                    bottom: (rect.y + rect.h) as i32,
+                    bottom: (rect.y + rect.h).min(clip) as i32,
                 },
                 default_color: theme.fg_modeline,
                 custom_glyphs: &[],

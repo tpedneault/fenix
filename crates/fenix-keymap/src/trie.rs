@@ -5,13 +5,33 @@ use crate::key::KeyPress;
 struct Node<A> {
     leaf: Option<A>,
     label: Option<&'static str>,
+    /// Where the which-key menu lists it within its group: "View",
+    /// "Branch & remote"... `None` lists it with the rest.
+    section: Option<&'static str>,
     children: HashMap<KeyPress, Node<A>>,
 }
 
 impl<A> Node<A> {
     fn new() -> Self {
-        Self { leaf: None, label: None, children: HashMap::new() }
+        Self { leaf: None, label: None, section: None, children: HashMap::new() }
     }
+
+    /// Actions reachable under this node.
+    fn leaves(&self) -> usize {
+        self.children.values().map(|c| usize::from(c.leaf.is_some()) + c.leaves()).sum()
+    }
+}
+
+/// One key the which-key menu offers from where a sequence has got to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hint {
+    pub key: KeyPress,
+    pub label: &'static str,
+    /// It opens more keys rather than running something.
+    pub group: bool,
+    /// For a group, how many commands are under it.
+    pub count: usize,
+    pub section: Option<&'static str>,
 }
 
 /// A trie over key sequences. Used both for Vim's multi-key commands
@@ -59,8 +79,18 @@ impl<A> KeyTrie<A> {
         node.label = Some(label);
     }
 
+    /// Files the binding (or group) at `seq` under a section of its
+    /// group's which-key menu.
+    pub fn set_section(&mut self, seq: &[KeyPress], section: &'static str) {
+        let mut node = &mut self.root;
+        for key in seq {
+            node = node.children.entry(*key).or_insert_with(Node::new);
+        }
+        node.section = Some(section);
+    }
+
     pub fn matcher(&self) -> Matcher<'_, A> {
-        Matcher { trie: self, current: None }
+        Matcher { trie: self, current: None, path: Vec::new() }
     }
 }
 
@@ -78,9 +108,57 @@ pub enum Step<'a, A> {
 pub struct Matcher<'a, A> {
     trie: &'a KeyTrie<A>,
     current: Option<&'a Node<A>>,
+    /// The keys fed since the root, while a sequence is pending.
+    path: Vec<KeyPress>,
 }
 
 impl<'a, A> Matcher<'a, A> {
+    /// The label of the group the pending sequence is in: "git" after
+    /// `SPC g`.
+    pub fn label(&self) -> Option<&'static str> {
+        self.current.and_then(|n| n.label)
+    }
+
+    /// The keys pressed so far in the pending sequence.
+    pub fn path(&self) -> &[KeyPress] {
+        &self.path
+    }
+
+    /// Every key on offer from here, with what the which-key menu needs
+    /// to draw it.
+    pub fn pending_hints(&self) -> Vec<Hint> {
+        let node = self.current.unwrap_or(&self.trie.root);
+        node.children
+            .iter()
+            .map(|(k, n)| {
+                let group = n.leaf.is_none() && !n.children.is_empty();
+                Hint { key: *k, label: n.label.unwrap_or(""), group, count: if group { n.leaves() } else { 0 }, section: n.section }
+            })
+            .collect()
+    }
+
+    /// Goes back one key: `SPC g` becomes `SPC`. Back from the first key
+    /// of a sequence ends it. Says whether anything is still pending.
+    pub fn back(&mut self) -> bool {
+        self.path.pop();
+        if self.path.is_empty() {
+            self.cancel();
+            return false;
+        }
+        let mut node = &self.trie.root;
+        for key in &self.path {
+            match node.children.get(key) {
+                Some(next) => node = next,
+                None => {
+                    self.cancel();
+                    return false;
+                }
+            }
+        }
+        self.current = Some(node);
+        true
+    }
+
     pub fn is_pending(&self) -> bool {
         self.current.is_some()
     }
@@ -94,19 +172,21 @@ impl<'a, A> Matcher<'a, A> {
     pub fn feed(&mut self, key: KeyPress) -> Step<'a, A> {
         let node = self.current.unwrap_or(&self.trie.root);
         let Some(next) = node.children.get(&key) else {
-            self.current = None;
+            self.cancel();
             return Step::NoMatch;
         };
         if let Some(action) = &next.leaf {
-            self.current = None;
+            self.cancel();
             return Step::Matched(action);
         }
         self.current = Some(next);
+        self.path.push(key);
         Step::Pending(children_labels(next))
     }
 
     pub fn cancel(&mut self) {
         self.current = None;
+        self.path.clear();
     }
 }
 
@@ -179,6 +259,42 @@ mod tests {
         m.feed(KeyPress::char(' '));
         let Step::Pending(children) = m.feed(KeyPress::char('f')) else { panic!("expected Pending") };
         assert_eq!(children, vec![(KeyPress::char('s'), "save")]);
+    }
+
+    #[test]
+    fn hints_tell_groups_from_commands_and_count_whats_inside() {
+        let mut trie = KeyTrie::new();
+        let spc = KeyPress::char(' ');
+        trie.label_group(&[spc, KeyPress::char('g')], "git");
+        trie.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", 1);
+        trie.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull", 2);
+        trie.insert(&[spc, KeyPress::char(',')], "settings", 3);
+        trie.set_section(&[spc, KeyPress::char('g'), KeyPress::char('f')], "Remote");
+        let mut m = trie.matcher();
+        m.feed(spc);
+        let mut hints = m.pending_hints();
+        hints.sort_by_key(|h| h.label);
+        assert_eq!((hints[0].label, hints[0].group, hints[0].count), ("git", true, 2));
+        assert_eq!((hints[1].label, hints[1].group), ("settings", false));
+        m.feed(KeyPress::char('g'));
+        assert_eq!(m.path(), &[spc, KeyPress::char('g')]);
+        let fetch = m.pending_hints().into_iter().find(|h| h.label == "fetch").unwrap();
+        assert_eq!(fetch.section, Some("Remote"));
+    }
+
+    #[test]
+    fn back_goes_up_one_level_and_ends_at_the_root() {
+        let mut trie = KeyTrie::new();
+        let spc = KeyPress::char(' ');
+        trie.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", 1);
+        let mut m = trie.matcher();
+        m.feed(spc);
+        m.feed(KeyPress::char('g'));
+        assert!(m.back());
+        assert_eq!(m.path(), &[spc]);
+        assert!(m.pending_hints().iter().any(|h| h.key == KeyPress::char('g')));
+        assert!(!m.back());
+        assert!(!m.is_pending());
     }
 
     #[test]

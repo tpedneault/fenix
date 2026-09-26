@@ -23,6 +23,9 @@ mod migrate;
 mod settings_host;
 mod snippets_host;
 mod review_host;
+mod motion_host;
+mod polish;
+mod which_key;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -89,14 +92,18 @@ const BLINK_FADE: Duration = Duration::from_millis(120);
 /// below instead -- see the plan's "animations are short bursts, not
 /// continuous idle work" rationale.
 const ANIM_TICK: Duration = Duration::from_millis(16);
-/// How long a yank/paste pulse stays visible before fully fading out.
+/// How long a yank/paste pulse stays visible before fully fading out, by
+/// default -- `motion.speed` scales the real one (`Prefs::pulse_d`).
 /// Modeled on orbit-emacs's own yank/paste pulse feature.
+#[cfg(test)]
 const PULSE_DURATION: Duration = Duration::from_millis(300);
 /// Alpha the pulse starts at before fading -- brighter than the steady
 /// Visual-selection overlay so it reads as a distinct flash, not a
 /// held selection.
 const PULSE_PEAK_ALPHA: f32 = 0.45;
-/// How long the viewport takes to ease to a new scroll position.
+/// How long the viewport takes to ease to a new scroll position, by
+/// default -- `motion.scroll_ms` sets the real one (`Prefs::scroll_d`).
+#[cfg(test)]
 const SCROLL_DURATION: Duration = Duration::from_millis(150);
 /// How long a status/error message (`App::set_message`/`set_error`)
 /// stays visible in the modeline before the normal filename/Ln/Col
@@ -203,7 +210,7 @@ const COMPLETION_MARGIN: f32 = 4.0;
 /// room to render it).
 const COMPLETION_MAX_ROWS: usize = 10;
 
-/// An active yank/paste highlight, fading out over `PULSE_DURATION`.
+/// An active yank/paste highlight, fading out over `Prefs::pulse_d`.
 struct Pulse {
     range: std::ops::Range<usize>,
     started: Instant,
@@ -2474,6 +2481,10 @@ enum ActivePicker {
     /// `SPC g c`, step two: pick the ref being compared. Carries the
     /// already-chosen base, since confirming needs both.
     CompareHead { base: String, picker: fenix_picker::PickerState<String> },
+    /// Enter on a settings-page row with more choices than `h`/`l` should
+    /// step through (the installed fonts): one of them, by name. What
+    /// it's for is `key`; confirming hands the choice back to the page.
+    SettingChoice { key: &'static str, picker: fenix_picker::PickerState<String> },
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2615,6 +2626,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
+        ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2655,6 +2667,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
+        ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2695,6 +2708,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
+        ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2738,6 +2752,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
+        ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2778,6 +2793,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
+        ActivePicker::SettingChoice { picker, .. } => picker.query(),
     }
 }
 
@@ -2818,6 +2834,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
+        ActivePicker::SettingChoice { picker, .. } => picker.len(),
     }
 }
 
@@ -2858,6 +2875,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
+        ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2902,6 +2920,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -5433,6 +5452,7 @@ struct FrameState {
     bg_rect: Option<RectRenderer>,
     popup_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    motion_gpu: Option<motion_host::MotionGpu>,
     workspaces: WorkspaceList,
     cursor_pos: Option<(f32, f32)>,
     /// This frame's top-left corner in desktop coordinates -- see
@@ -5547,6 +5567,8 @@ pub struct App {
     /// while the mode badge -- pushed second -- stayed put.
     popup_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    /// What the animations and polish draw with -- see `MotionGpu`.
+    motion_gpu: Option<motion_host::MotionGpu>,
     /// The textured-quad pipeline every open VNC session's live
     /// framebuffer is drawn through -- one pipeline shared by every
     /// session (each owns its own `VncTexture`, see `VncSession`).
@@ -6415,6 +6437,10 @@ pub struct App {
     blink_transition_start: Instant,
     next_blink: Instant,
     pulse: Option<Pulse>,
+    /// Everything else that's animating -- see `motion_host`.
+    motion: motion_host::MotionState,
+    /// The launch splash, fading out over the first frames.
+    splash_fade: Option<crate::splash::SplashFade>,
     /// The most recent status/error message, if any and not yet expired
     /// -- see `StatusMessage`'s own doc comment. Set via `set_message`/
     /// `set_error`; read (and its expiry checked) by `modeline_pieces`.
@@ -6991,6 +7017,7 @@ impl App {
             bg_rect: None,
             popup_rect: None,
             caret_rect: None,
+            motion_gpu: None,
             vnc_pipeline: None,
             pdf_pipeline: None,
             buffers,
@@ -7181,6 +7208,8 @@ impl App {
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
             pulse: None,
+            motion: motion_host::MotionState::default(),
+            splash_fade: None,
             status_message: None,
             quit_confirm: false,
         }
@@ -7239,6 +7268,7 @@ impl App {
             bg_rect: std::mem::replace(&mut self.bg_rect, incoming.bg_rect),
             popup_rect: std::mem::replace(&mut self.popup_rect, incoming.popup_rect),
             caret_rect: std::mem::replace(&mut self.caret_rect, incoming.caret_rect),
+            motion_gpu: std::mem::replace(&mut self.motion_gpu, incoming.motion_gpu),
             workspaces: std::mem::replace(&mut self.workspaces, incoming.workspaces),
             cursor_pos: std::mem::replace(&mut self.cursor_pos, incoming.cursor_pos),
             origin: std::mem::replace(&mut self.frame_origin, incoming.origin),
@@ -7362,6 +7392,7 @@ impl App {
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
+        let motion_gpu = motion_host::MotionGpu::new(&gpu);
 
         let buffer = self.focused_buffer_id();
         let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
@@ -7372,6 +7403,7 @@ impl App {
             bg_rect: Some(bg_rect),
             popup_rect: Some(popup_rect),
             caret_rect: Some(caret_rect),
+            motion_gpu: Some(motion_gpu),
             workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
             cursor_pos: None,
             origin: (0, 0),
@@ -14887,6 +14919,7 @@ impl App {
         let Some(buffer_id) = self.buffers.id_for_path(path) else {
             self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+            self.beacon_here();
             return;
         };
         let mut shown_somewhere = false;
@@ -14905,6 +14938,12 @@ impl App {
         if !shown_somewhere {
             self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+            self.beacon_here();
+        } else {
+            let prefs = self.motion();
+            if prefs.beacon {
+                self.start_beacon(buffer_id, line.saturating_sub(1), Instant::now(), prefs.beacon_d);
+            }
         }
     }
 
@@ -18126,6 +18165,7 @@ impl App {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 self.set_message("fetching...");
+                self.motion.git_fetching = true;
                 std::thread::spawn(move || {
                     let result = fenix_git::fetch(&repo_root);
                     let _ = proxy.send_event(FenixUserEvent::GitFetched { result });
@@ -18139,6 +18179,7 @@ impl App {
     }
 
     fn apply_git_fetched(&mut self, result: Result<String, String>) {
+        self.motion.git_fetching = false;
         match result {
             Ok(_) => self.set_message("fetched"),
             Err(err) => self.set_error(format!("fetch failed: {}", err.trim())),
@@ -18797,6 +18838,13 @@ impl App {
                 // keeps `main_view` on the picker, so this reads as one
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
+            }
+            Some(ActivePicker::SettingChoice { key, picker }) => {
+                let Some(value) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let key = *key;
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.setting_chosen(key, &value);
             }
             Some(ActivePicker::CompareHead { base, picker }) => {
                 let Some(head) = picker.selected().map(|c| c.payload.clone()) else { return };
@@ -20903,7 +20951,9 @@ impl App {
     /// redraw. Save failure is non-fatal, same posture as `refresh_
     /// project_root`'s `known_projects.save()`.
     fn apply_theme(&mut self, theme: &'static Theme) {
+        let old = self.theme;
         self.theme = theme;
+        self.fade_theme_from(old);
         self.config.theme = Some(self.theme.name.to_string());
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save theme choice: {err}");
@@ -21008,21 +21058,16 @@ impl App {
     /// than one central gate, since each animation is started from a
     /// different place and "just render it instantly instead" reads
     /// more clearly at the call site than a wrapped condition would.
+    #[cfg(test)]
     pub(crate) fn animations_enabled(&self) -> bool {
-        self.config.animations.unwrap_or(true)
+        crate::motion::level(&self.config) != crate::motion::Level::Off
     }
 
     /// `SPC t a`: flips `config.animations` and persists it -- lets the
     /// user A/B a responsiveness complaint against animation cost
     /// without editing `config.ini` by hand.
     pub(crate) fn toggle_animations(&mut self) {
-        let enabled = !self.animations_enabled();
-        self.config.animations = Some(enabled);
-        if let Err(err) = self.config.save() {
-            self.set_error(format!("couldn't save settings.toml: {err}"));
-        } else {
-            self.set_message(if enabled { "Animations on" } else { "Animations off" });
-        }
+        self.cycle_motion_level();
     }
 
     /// Resets the caret blink timer so an edit or navigation always leaves
@@ -21044,11 +21089,12 @@ impl App {
     /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
     /// whichever state the caret last toggled into.
     fn caret_alpha(&self) -> f32 {
-        if !self.animations_enabled() {
+        let prefs = self.motion();
+        if !prefs.caret_fade {
             return if self.blink_visible { 1.0 } else { 0.0 };
         }
         let elapsed = Instant::now().duration_since(self.blink_transition_start);
-        let t = ease_out_cubic(elapsed.as_secs_f32() / BLINK_FADE.as_secs_f32());
+        let t = ease_out_cubic(elapsed.as_secs_f32() / prefs.blink_fade_d.as_secs_f32().max(1e-3));
         if self.blink_visible { t } else { 1.0 - t }
     }
 
@@ -21117,6 +21163,7 @@ impl App {
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        self.motion.key_repeat = event.repeat;
         // Caps Lock has no `fenix_keymap::NamedKey` counterpart -- it's
         // never a meaningful vim/leader keybinding, so `keymap::to_
         // keypress` filters it out before either branch below would ever
@@ -21200,7 +21247,9 @@ impl App {
             self.change_capture_dirty = false;
         }
         self.change_capture.push(keypress);
+        let before = self.motion_before_key();
         self.route_keypress(keypress, event_loop);
+        self.motion_after_key(before, keypress);
         if self.vim.is_idle() {
             if self.change_capture_dirty {
                 self.last_change_keys = Some(std::mem::take(&mut self.change_capture));
@@ -21546,6 +21595,14 @@ impl App {
         // never reach `self.vim`, so the selection's anchor/cursor stay
         // exactly as they were until whatever command they resolve to
         // (e.g. `format_selection`) reads them.
+        // In an open leader menu, Backspace goes up a level and Ctrl-n /
+        // Ctrl-p page through it (see `which_key`).
+        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
+            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
+        {
+            self.wake_caret();
+            return;
+        }
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
                 CommandRegistry::with_builtins().run(self, event_loop, id);
@@ -22406,7 +22463,7 @@ impl App {
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
-                if self.animations_enabled() {
+                if self.motion().yank_pulse {
                     self.pulse = Some(Pulse { range, started: Instant::now() });
                 }
             }
@@ -22618,14 +22675,17 @@ impl App {
             // away) snaps instantly rather than blurring through an ease.
             // A target arriving while the *previous* ease for this pane
             // hasn't finished yet snaps too: that only happens when scroll
-            // targets are coming in faster than SCROLL_DURATION can settle
+            // targets are coming in faster than the scroll ease can settle
             // (held-key repeat, e.g. holding `j`), and re-triggering a
             // fresh 150ms ease on every one of those keystrokes would
             // otherwise make `rendered_scroll` perpetually chase a few
             // lines behind the cursor instead of ever catching up -- the
             // opposite of the "never sits between a keypress and its
             // effect" goal this animation was built for.
-            if !self.animations_enabled() || jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.workspaces.active_scroll_anims().contains_key(&pane) {
+            // A held key keeps snapping; anything else arriving mid-ease
+            // (the wheel's next notch) eases on from where the view is.
+            let chasing = self.motion.key_repeat && self.workspaces.active_scroll_anims().contains_key(&pane);
+            if !self.motion().smooth_scroll || jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || chasing {
                 self.workspaces.active_scroll_anims_mut().remove(&pane);
                 self.pane_state_mut(pane).rendered_scroll = target as f32;
             } else {
@@ -22680,7 +22740,7 @@ impl App {
             return;
         };
         let (from, to, started) = (anim.from, anim.to, anim.started);
-        let t = Instant::now().duration_since(started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
+        let t = Instant::now().duration_since(started).as_secs_f32() / self.motion().scroll_d.as_secs_f32().max(1e-3);
         if t >= 1.0 {
             self.pane_state_mut(pane).rendered_scroll = to as f32;
             self.workspaces.active_scroll_anims_mut().remove(&pane);
@@ -22863,6 +22923,7 @@ impl App {
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -23754,27 +23815,13 @@ impl App {
         })
     }
 
-    /// Key/label pairs for whichever pending sequence is currently active
-    /// (the leader menu takes priority, since it's the outermost one --
-    /// Vim can't be mid-sequence while a leader sequence is in progress).
-    /// Empty when nothing is pending.
-    fn pending_hints(&self) -> Vec<(KeyPress, &'static str)> {
-        if let Some(local) = &self.local_matcher {
-            local.pending_children()
-        } else if self.leader_matcher.is_pending() {
-            self.leader_matcher.pending_children()
-        } else {
-            self.vim.pending_children()
-        }
-    }
-
     /// Segments and current alpha for an active yank/paste pulse, or
     /// `None` when there isn't one. Fades quickly at first then lingers
     /// faintly, via the same ease-out curve as the caret (inverted: pulses
     /// start bright and fade, blink fades in toward its target instead).
     fn pulse_overlay(&self, visible_lines: usize) -> Option<(Segments, f32)> {
         let pulse = self.pulse.as_ref()?;
-        let t = Instant::now().duration_since(pulse.started).as_secs_f32() / PULSE_DURATION.as_secs_f32();
+        let t = Instant::now().duration_since(pulse.started).as_secs_f32() / self.motion().pulse_d.as_secs_f32().max(1e-3);
         let alpha = PULSE_PEAK_ALPHA * (1.0 - ease_out_cubic(t));
         if alpha <= 0.0 {
             return None;
@@ -23836,49 +23883,6 @@ impl App {
     /// `popup::max_rows` says actually fits above the modeline, with a
     /// trailing "+N more" summary row instead of letting the panel run
     /// under it.
-    fn which_key_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
-        let mut hints = self.pending_hints();
-        if hints.is_empty() {
-            return None;
-        }
-        hints.sort_by(|a, b| a.1.cmp(b.1));
-
-        let (char_width, line_height) = match &self.text {
-            Some(text) => (text.char_width(), text.line_height()),
-            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
-        };
-
-        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING);
-        let shown_count = if hints.len() > max_rows { max_rows.saturating_sub(1).max(1) } else { hints.len() };
-        let truncated = hints.len() - shown_count;
-
-        const KEY_COLUMN_CHARS: usize = 6;
-        let longest_label = hints[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
-        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
-        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
-        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
-            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
-
-        let theme = self.theme;
-        let mut spans = Vec::new();
-        for (i, (key, label)) in hints[..shown_count].iter().enumerate() {
-            if i > 0 {
-                spans.push(("\n".to_string(), theme.fg_modeline, false));
-            }
-            spans.push((format!("{:<KEY_COLUMN_CHARS$}", keymap::describe_keypress(key)), theme.caret_text, false));
-            spans.push(((*label).to_string(), theme.fg_modeline, false));
-        }
-        if truncated > 0 {
-            spans.push(("\n".to_string(), theme.fg_modeline, false));
-            spans.push((format!("+{truncated} more"), theme.fg_modeline, false));
-        }
-
-        let row_count = shown_count + usize::from(truncated > 0);
-        let height = row_count as f32 * line_height + WHICH_KEY_PADDING;
-        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
-        Some((rect, spans))
-    }
-
     /// The Docker panel's contextual "view command options" popup (`x`
     /// on a Containers/Images/Volumes pane) -- mirrors `which_key_popup`'s
     /// shape, but its content is a small static per-`DockerPaneRole` list
@@ -24476,7 +24480,7 @@ impl App {
     /// describe a path to, so a breadcrumb row there would only ever be
     /// blank.
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
-        self.theme.show_tabs && !self.pane_titles.contains_key(&pane)
+        self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
     }
 
     fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {
@@ -24496,7 +24500,7 @@ impl App {
         // `tab_geometry`, so hit-testing and pixels now come from one
         // measurement instead of two disagreeing calculations. Cheaper
         // too -- this used to resolve display names on every mouse move.
-        let tabs = if self.theme.show_tabs { self.tab_geometry.clone() } else { Vec::new() };
+        let tabs = if self.tab_style().is_some() { self.tab_geometry.clone() } else { Vec::new() };
         let breadcrumb_panes = panes.iter().map(|(id, _)| *id).filter(|id| self.pane_has_breadcrumb(*id)).collect();
         FrameGeometry {
             panes,
@@ -24642,6 +24646,12 @@ impl App {
                 self.windows_mut().focus(id);
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
+                if let Some(&(_, rect)) = geometry.panes.iter().find(|(p, _)| *p == id) {
+                    if self.ruler_click(id, rect, pos) {
+                        self.wake_caret();
+                        return;
+                    }
+                }
                 // Clicking a VNC pane both focuses and starts
                 // interacting with it (ordinary desktop convention);
                 // clicking anything else releases capture if some other
@@ -24771,7 +24781,17 @@ impl App {
     fn handle_wheel_at(&mut self, pos: (f32, f32), delta: MouseScrollDelta, window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
-        let lines = wheel_delta_lines(delta, line_height);
+        self.motion.key_repeat = false;
+        // A trackpad's small moves add up instead of each rounding away.
+        let lines = match delta {
+            MouseScrollDelta::PixelDelta(p) => {
+                let total = self.motion.wheel_remainder + p.y as f32 / line_height;
+                let whole = total.trunc();
+                self.motion.wheel_remainder = total - whole;
+                whole as isize
+            }
+            _ => wheel_delta_lines(delta, line_height),
+        };
         if lines == 0 {
             return;
         }
@@ -24909,6 +24929,22 @@ impl App {
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");
+        let now = Instant::now();
+        let prefs = self.motion();
+        let tab_style = self.tab_style();
+        // A theme change fades from the old theme's picture: draw that
+        // once more, only to copy it, then carry on in the new colours.
+        if let Some(old) = self.motion.theme_from.take() {
+            if self.gpu.as_ref().is_some_and(|gpu| gpu.can_copy_frames() && gpu.surface.is_some()) {
+                let new = self.theme;
+                self.theme = old;
+                self.motion.capture_frame = true;
+                self.redraw();
+                self.motion.capture_frame = false;
+                self.theme = new;
+                self.motion.theme_fade = Some(crate::motion::Anim::new(now, prefs.theme_d));
+            }
+        }
         // Cheap per-frame check (an integer comparison against `Buffer::
         // edit_count()`, same "cheap no-op most frames" shape as the PDF
         // resize-tracking and VNC resize-debounce loops just below in
@@ -24994,6 +25030,8 @@ impl App {
         if let Some(sidebar) = &self.sidebar {
             self.sidebar_scroll = scroll_to_include(self.sidebar_scroll, sidebar.selected, visible_lines);
         }
+        self.notice_explorer_growth(true, now);
+        self.notice_explorer_growth(false, now);
         let show_sidebar = self.sidebar_open && main_view == MainView::Editor;
         let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
         let sidebar_render = if show_sidebar {
@@ -25017,7 +25055,7 @@ impl App {
         let modeline_top = window_height - modeline_height;
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let pane_area = geometry.pane_area;
-        let layout = geometry.panes;
+        let layout = self.motion_layout(geometry.panes, pane_area, now);
         let focused_pane = self.windows().focused_id();
 
         // One entry per visible window pane -- built fresh every frame
@@ -25138,6 +25176,8 @@ impl App {
             row_accents: Vec<(usize, [f32; 4])>,
             /// Home only: its focus rail and logo.
             home: home::HomeOverlay,
+            /// The animations' marks and the polish -- see `PaneExtras`.
+            extra: motion_host::PaneExtras,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -25279,6 +25319,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25367,6 +25408,7 @@ impl App {
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                         home: home::HomeOverlay::default(),
+                        extra: motion_host::PaneExtras::default(),
                     });
                     continue;
                 }
@@ -25443,6 +25485,7 @@ impl App {
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                         home: home::HomeOverlay::default(),
+                        extra: motion_host::PaneExtras::default(),
                     });
                     continue;
                 }
@@ -25484,6 +25527,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25523,6 +25567,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25561,6 +25606,8 @@ impl App {
             // `PaneState` (seeded when it was created), so each renders
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
+            // Sideways scrolling eases a column at a time.
+            let shown_scroll_col = self.scroll_col(pane, pane_state.scroll_col, now);
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -25633,15 +25680,15 @@ impl App {
             let content_spans = match self.buffers.get(buffer_id) {
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
-                    line, &tab_stops, pane_state.scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()),
+                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()),
                 ),
                 Some(ob) => self.content_spans(
                     ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
-                    &syntax_highlights, line, &tab_stops, pane_state.scroll_col,
+                    &syntax_highlights, line, &tab_stops, shown_scroll_col,
                 ),
                 None => Vec::new(),
             };
-            let spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
+            let mut spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
 
             // During a large animated pan the cursor's actual line can
             // legitimately be outside the currently-fetched window for
@@ -25669,7 +25716,7 @@ impl App {
             // position clamps to column 0 (still drawn, just from the
             // pane's left edge) instead of underflowing.
             let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(pane_state.scroll_col)
+                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(shown_scroll_col)
             };
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
@@ -25717,7 +25764,7 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if theme.show_tabs
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if tab_style.is_some()
                 && !self.pane_titles.contains_key(&pane)
             {
                 // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
@@ -25839,6 +25886,47 @@ impl App {
                 } else {
                     Default::default()
                 };
+            let mut extra = motion_host::PaneExtras { buffer: Some(buffer_id), base_line: render_base_line, scroll_col: shown_scroll_col, ..Default::default() };
+            // A code pane's polish: problems, brackets, selection
+            // whitespace, the overview ruler, sticky scroll.
+            if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
+                let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let view = polish::PaneView {
+                    buffer: buffer_id,
+                    lines: visible_document_lines,
+                    rows: pane_visible_lines + 1,
+                    gutter_chars,
+                    scroll_col: shown_scroll_col,
+                    rendered_scroll,
+                    cursor_line: line,
+                    tab_rows: &tab_rows,
+                    selection: &selection_segments,
+                    remap_col: &remap_col,
+                };
+                let polished = self.polish_pane(&view, &mut spans, now);
+                extra.squiggles = polished.squiggles;
+                extra.ruler = polished.ruler;
+                if !folds_active {
+                    extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
+                }
+            }
+            if let Some(flash) = self.beacon_row(buffer_id, visible_document_lines, pane_visible_lines, now) {
+                extra.row_flashes.push(flash);
+            }
+            if is_focused && !folds_active {
+                let (added, seams) = self.change_overlays(buffer_id, pane_visible_lines + 1, now);
+                let [r, g, b, _] = glyphon_to_rgba(theme.git_staged);
+                extra.cell_flashes = added.into_iter().map(|(row, s, e, a)| (row, remap_col(row, s), remap_col(row, e), [r, g, b, 0.35 * a])).collect();
+                let [r, g, b, _] = glyphon_to_rgba(theme.git_conflicted);
+                extra.seams = seams.into_iter().map(|(row, col, lines, a)| (row, if lines { 0 } else { remap_col(row, col) }, lines, [r, g, b, 0.9 * a])).collect();
+            }
+            if let Some((first, count, shown)) = self.reveal_cover(motion_host::RevealTarget::Buffer(buffer_id), now) {
+                if first + count > render_base_line {
+                    let row = first.saturating_sub(render_base_line);
+                    let count = count - render_base_line.saturating_sub(first);
+                    extra.reveal = Some((row, count, shown));
+                }
+            }
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -25868,6 +25956,7 @@ impl App {
                 indent_guides,
                 row_accents,
                 home: home_overlay,
+                extra,
             });
         }
 
@@ -25882,13 +25971,24 @@ impl App {
         };
         _profile.mark("CPU pane preparation complete");
         let (badge_bg, _badge_fg) = self.mode_colors();
+        let badge_bg = self.rail_color(badge_bg, now);
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
         // (bottom) -- least likely to sit under whatever they're looking
         // at. Resolved (and, if needed, row-truncated) here rather than
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
-        let which_key_popup = overlays_here.then(|| self.which_key_popup(window_width, modeline_top)).flatten();
+        // The which-key drawer, once a sequence has waited long enough.
+        let which_key_popup = if overlays_here && self.which_key_open(now) {
+            self.which_key_pending().map(|pending| {
+                let drawer = self.which_key_drawer(&pending, window_width, window_height, modeline_top, char_width, line_height);
+                self.motion.which_key_pages = drawer.pages;
+                self.motion.which_key_drawer = Some(drawer.clone());
+                (drawer.rect, drawer.spans)
+            })
+        } else {
+            None
+        };
         // Never `Some` at the same time as `which_key_popup`/`completion_
         // popup` in practice -- it only shows while a Docker pane is
         // focused, where a leader/operator-pending sequence or an Insert-
@@ -25915,6 +26015,20 @@ impl App {
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         let caret_alpha = self.caret_alpha();
+        let message_alpha = self.message_alpha(now);
+        let jobs = self.background_jobs();
+        let frame_ws = (self.active_frame, self.workspaces.active);
+        let corner_radius = self.corner_radius();
+        let shadows = self.config.polish.shadows != Some(false);
+        let dim_amount = (self.config.polish.dim_unfocused != Some(false) && panes_render.len() > 1)
+            .then(|| self.config.polish.dim_amount.unwrap_or(30).min(90) as f32 / 100.0);
+        let sidebar_reveal = self.reveal_cover(motion_host::RevealTarget::Sidebar, now);
+        let explorer_reveal = self.reveal_cover(motion_host::RevealTarget::Explorer, now);
+        let explorer_scroll = self.explorer_scroll;
+        let sidebar_scroll = self.sidebar_scroll;
+        let rounded_selection = self.config.polish.rounded_selection != Some(false) && corner_radius > 0.0;
+        let show_indent_guides = self.config.polish.indent_guides != Some(false);
+        let show_active_guide = self.config.polish.active_indent_guide != Some(false);
 
         let (
             Some(window),
@@ -25925,6 +26039,7 @@ impl App {
             Some(caret_rect),
             Some(vnc_pipeline),
             Some(pdf_pipeline),
+            Some(motion_gpu),
         ) = (
             &self.window,
             &mut self.gpu,
@@ -25937,15 +26052,20 @@ impl App {
             // push_quad`), rather than written one-at-a-time mid-pass.
             &mut self.vnc_pipeline,
             &self.pdf_pipeline,
+            &mut self.motion_gpu,
         ) else {
             return;
         };
+        let motion_state = &mut self.motion;
 
         let live_panes: Vec<fenix_window::WindowId> = panes_render.iter().map(|p| p.pane).collect();
         for pane in &panes_render {
             let content_refs: Vec<(&str, glyphon::Color, bool)> =
                 pane.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs);
+            let sticky: RowSpans = polish::join_rows(pane.extra.sticky.clone());
+            let sticky_refs: Vec<(&str, glyphon::Color, bool)> = sticky.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_pane_sticky(pane.pane, pane.rect.w, &sticky_refs);
         }
         text.retain_panes(&live_panes);
 
@@ -26052,7 +26172,13 @@ impl App {
             let is_error_message =
                 self.status_message.as_ref().is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
             let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
-            let suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            let mut suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            // A message fades in and out; the file's own details don't.
+            if self.status_message.as_ref().is_some_and(|m| m.set_at.elapsed() < MESSAGE_DURATION) {
+                for (_, color) in &mut suffix_spans {
+                    *color = glyphon::Color::rgba(color.r(), color.g(), color.b(), (color.a() as f32 * message_alpha).round() as u8);
+                }
+            }
             let mut spans = Vec::with_capacity(suffix_spans.len() + 1);
             // The label reads *in* the mode's own accent now (Signal
             // Rail's rail-plus-label treatment), not as contrasting text
@@ -26076,15 +26202,24 @@ impl App {
         // (white on TempleOS specifically), unlike `gutter_fg`, which is
         // calibrated for contrast against the *content* background and
         // read as barely visible here.
+        // Background work leads the clock: its name, with the spinner
+        // drawn just left of it (see the overlay pass).
+        let job_text = match jobs.as_slice() {
+            [] => String::new(),
+            [one] => format!("{one}   "),
+            [first, rest @ ..] => format!("{first} +{}   ", rest.len()),
+        };
         let clock_text = modeline_clock_text();
-        let clock_chars = clock_text.chars().count();
+        let clock_chars = clock_text.chars().count() + job_text.chars().count();
         let box_width = window_width - text::PAD_LEFT;
         // `modeline_char_width`, not the body `char_width`: both this
         // text and the clock render at `MODELINE_FONT_SCALE`, so the body
         // measurement over-estimated every column here.
         let clock_shown = modeline_clock_fits(existing_chars, window_width, modeline_char_width, clock_chars);
         if clock_shown {
-            text.set_clock_rich(box_width, &[(clock_text.as_str(), theme.fg_modeline)]);
+            text.set_clock_rich(box_width, &[(job_text.as_str(), theme.gutter_fg), (clock_text.as_str(), theme.fg_modeline)]);
+        } else if !job_text.is_empty() {
+            text.set_clock_rich(box_width, &[(job_text.as_str(), theme.gutter_fg)]);
         } else {
             text.set_clock_rich(box_width, &[]);
         }
@@ -26092,47 +26227,37 @@ impl App {
         // `TextPipeline::clock_left_edge`.
         let clock_left = text.clock_left_edge();
 
+        // Every popup open this frame, then the ones still fading out --
+        // `popup_draws` decides each one's opacity and rise.
+        let mut open_popups: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)> = Vec::new();
+        if let Some((rect, spans)) = which_key_popup {
+            open_popups.push((popup::PopupId::WhichKey, rect, spans, None));
+        }
+        if let Some((rect, spans)) = docker_menu_popup {
+            open_popups.push((popup::PopupId::DockerMenu, rect, spans, None));
+        }
+        if let Some((rect, spans)) = git_menu_popup {
+            open_popups.push((popup::PopupId::GitMenu, rect, spans, None));
+        }
+        if let Some((rect, spans, selected_row)) = completion_popup {
+            open_popups.push((popup::PopupId::Completion, rect, spans, selected_row));
+        }
+        if let Some((rect, spans)) = hover_popup {
+            open_popups.push((popup::PopupId::Hover, rect, spans, None));
+        }
+        if let Some((rect, spans)) = prompt_popup {
+            open_popups.push((popup::PopupId::Prompt, rect, spans, None));
+        }
+        if let Some((rect, spans)) = page_popup {
+            open_popups.push((popup::PopupId::Page, rect, spans, None));
+        }
+        let popup_draws = motion_state.popup_draws(prefs, open_popups, now);
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
-        // The row (if any) the currently-open popup wants highlighted --
-        // only the completion popup has a notion of a "selected" row
-        // today (which-key has no selection), consulted below alongside
-        // the `bg_rect` background push shared by every popup kind.
-        let mut popup_selected_row: Option<usize> = None;
-        if let Some((rect, spans)) = &which_key_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::WhichKey, rect.w, &refs);
-            popup_rects.push((popup::PopupId::WhichKey, *rect));
-        }
-        if let Some((rect, spans)) = &docker_menu_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::DockerMenu, rect.w, &refs);
-            popup_rects.push((popup::PopupId::DockerMenu, *rect));
-        }
-        if let Some((rect, spans)) = &git_menu_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::GitMenu, rect.w, &refs);
-            popup_rects.push((popup::PopupId::GitMenu, *rect));
-        }
-        if let Some((rect, spans, selected_row)) = &completion_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Completion, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Completion, *rect));
-            popup_selected_row = *selected_row;
-        }
-        if let Some((rect, spans)) = &hover_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Hover, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Hover, *rect));
-        }
-        if let Some((rect, spans)) = &prompt_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Prompt, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Prompt, *rect));
-        }
-        if let Some((rect, spans)) = &page_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Page, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Page, *rect));
+        for draw in &popup_draws {
+            let fade = |c: glyphon::Color| glyphon::Color::rgba(c.r(), c.g(), c.b(), (c.a() as f32 * draw.alpha).round() as u8);
+            let refs: Vec<(&str, glyphon::Color, bool)> = draw.spans.iter().map(|(s, c, i)| (s.as_str(), fade(*c), *i)).collect();
+            text.set_popup_rich(draw.id, draw.rect.w, &refs);
+            popup_rects.push((draw.id, draw.rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
@@ -26177,11 +26302,15 @@ impl App {
             if let Some((row, col, rows)) = pane.home.rail {
                 bg_rect.push_rect(gpu, content_x + col as f32 * char_width, row_y(row), home::RAIL_PX, rows as f32 * line_height, theme.caret);
             }
-            for &(row, col_start, col_end) in &pane.selection_segments {
+            let corners = if rounded_selection { polish::selection_corners(&pane.selection_segments, 3.0) } else { Vec::new() };
+            for (i, &(row, col_start, col_end)) in pane.selection_segments.iter().enumerate() {
                 let x = content_x + col_start as f32 * char_width;
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
-                bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection);
+                match corners.get(i) {
+                    Some(&radii) => bg_rect.push_corners(gpu, x, y, w, line_height, radii, theme.selection),
+                    None => bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection),
+                }
             }
             for &(row, col_start, col_end) in &pane.bracket_match_segments {
                 let x = content_x + col_start as f32 * char_width;
@@ -26204,6 +26333,29 @@ impl App {
                     bg_rect.push_rect(gpu, x, y, w, line_height, [r, g, b, *alpha]);
                 }
             }
+            // The jump beacon: the whole landing row, once.
+            for &(row, color) in &pane.extra.row_flashes {
+                bg_rect.push_rect(gpu, pane.rect.x, row_y(row), pane.rect.w, line_height, color);
+            }
+            // What an undo, redo, repeat or substitution added...
+            for &(row, col_start, col_end, color) in &pane.extra.cell_flashes {
+                let x = content_x + col_start as f32 * char_width;
+                bg_rect.push_rect(gpu, x, row_y(row), (col_end.max(col_start + 1) - col_start) as f32 * char_width, line_height, color);
+            }
+            // ...and where it took text away.
+            for &(row, col, lines, color) in &pane.extra.seams {
+                if lines {
+                    bg_rect.push_rect(gpu, content_x, row_y(row) - 1.0, pane.rect.x + pane.rect.w - content_x, 2.0, color);
+                } else {
+                    bg_rect.push_rect(gpu, content_x + col as f32 * char_width - 1.0, row_y(row), 2.0, line_height, color);
+                }
+            }
+        }
+        // Sticky scroll's rows sit on the plain background, over whatever
+        // highlight the rows beneath them had.
+        for pane in panes_render.iter().filter(|p| !p.extra.sticky.is_empty()) {
+            let h = text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height;
+            bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y, pane.rect.w, h, theme.bg);
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
         // A hairline boundary makes the status surface feel intentionally
@@ -26340,24 +26492,44 @@ impl App {
             // same-height strip. This gives the two rows a deliberate
             // hierarchy rather than making them look like two unrelated
             // toolbars of identical weight.
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, breadcrumb_h, theme.sidebar_bg);
-            // The strip's own bottom divider. Order relative to the
-            // per-tab loop below no longer matters for this rect
-            // specifically -- it used to double as the active tab's own
-            // accent line's bottom edge (a bottom underline), which made
-            // draw order load-bearing; now that the accent is a top-edge
-            // bar (below), the two never occupy the same pixels.
-            bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
-            for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
-                if is_active {
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
-                    // A top-edge accent bar marks the selected tab --
-                    // Signal Rail's own convention (mirrors the modeline's
-                    // mode rail) -- rather than a bottom underline a
-                    // divider line could paint over.
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, 3.0, theme.mode_normal);
+            let active = pane.tabs_layout.iter().zip(&pane.tab_active).find(|(_, a)| **a).map(|(t, _)| t);
+            if tab_style == Some(crate::theme::TabStyle::Underline) {
+                // Look B: flat on the editor's own background. The active
+                // tab is its bright text over an underline in the mode's
+                // colour -- muted in a pane without the keyboard -- and a
+                // hairline sets Home apart from the tabs after it.
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, theme.bg);
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
+                if let Some(home) = pane.tabs_layout.first() {
+                    let x = (home.body.x + home.body.w + 2.0).round();
+                    bg_rect.push_rect(gpu, x, strip_y + 7.0, 1.0, (strip_h - 14.0).max(4.0), theme.divider);
                 }
-                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
+                if let Some(tab) = active {
+                    let key = (frame_ws.0, frame_ws.1, pane.pane);
+                    let (x, w) = motion_state.tab_accent(prefs, key, (tab.body.x, tab.body.w), now);
+                    let color = if pane.pane == focused_pane { badge_bg } else { glyphon_to_rgba(theme.gutter_fg) };
+                    bg_rect.push_rect(gpu, x, strip_y + strip_h - 2.0, w, 2.0, color);
+                }
+            } else {
+                // Breadcrumbs are navigation chrome, but a shade closer to
+                // the editing canvas than the tab row, and a visibly
+                // shorter bar than it -- a deliberate hierarchy.
+                bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, breadcrumb_h, theme.sidebar_bg);
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
+                for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
+                    if is_active {
+                        bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
+                    }
+                    bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
+                }
+                // A top-edge accent bar marks the selected tab -- Signal
+                // Rail's own convention (mirrors the modeline's mode rail)
+                // -- sliding over from the tab you were on.
+                if let Some(tab) = active {
+                    let key = (frame_ws.0, frame_ws.1, pane.pane);
+                    let (x, w) = motion_state.tab_accent(prefs, key, (tab.body.x, tab.body.w), now);
+                    bg_rect.push_rect(gpu, x, strip_y, w, 3.0, theme.mode_normal);
+                }
             }
             bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
         }
@@ -26420,9 +26592,9 @@ impl App {
             theme.bg[2] + (guide_fg[2] - theme.bg[2]) * INDENT_GUIDE_MIX,
             1.0,
         ];
-        for pane in &panes_render {
+        for pane in panes_render.iter().filter(|_| show_indent_guides) {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
-            let active_guide = pane.caret.and_then(|(row, _)| {
+            let active_guide = pane.caret.filter(|_| show_active_guide).and_then(|(row, _)| {
                 pane.indent_guides.iter().filter(|(r, _)| *r == row).map(|(_, col)| *col).max()
                     .map(|col| (row, col))
             });
@@ -26452,9 +26624,23 @@ impl App {
         caret_rect.clear();
         if let Some(focused) = panes_render.iter().find(|p| p.pane == focused_pane) {
             if let Some((row, col)) = focused.caret {
+                // Where the caret is drawn: gliding there after a motion.
+                let (mut caret_x, mut caret_y) =
+                    caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
+                if let Some(buffer) = focused.extra.buffer {
+                    let extra = &focused.extra;
+                    let spot = motion_host::CaretSpot {
+                        pane: (frame_ws.0, frame_ws.1, focused.pane),
+                        buffer,
+                        row: (row + extra.base_line) as f32,
+                        col: (col + extra.scroll_col) as f32,
+                    };
+                    let visible = text::lines_that_fit(focused.rect.h, line_height);
+                    let (shown_row, shown_col) = motion_state.caret_spot(prefs, spot, visible, now);
+                    caret_x += (shown_col - spot.col) * char_width;
+                    caret_y += (shown_row - spot.row) * line_height;
+                }
                 if caret_alpha > 0.0 {
-                    let (caret_x, caret_y) =
-                        caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
                     let [r, g, b, a] = theme.caret;
                     // Insert keeps the thin bar (an I-beam-style "about to
                     // type here" marker); every other mode (Normal, Visual,
@@ -26472,8 +26658,124 @@ impl App {
         }
         caret_rect.flush(gpu);
 
-        let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
-            panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
+        // Drawn over the text, under popups: panes without the keyboard
+        // dimmed, and rows still opening under an unfolded row covered
+        // from where they've got to.
+        let overlay = &mut motion_gpu.overlay;
+        overlay.clear();
+        if let Some(amount) = dim_amount.filter(|_| overlays_here) {
+            let [r, g, b, _] = theme.bg;
+            for pane in panes_render.iter().filter(|p| p.pane != focused_pane) {
+                let chrome = pane_chrome_height(line_height, pane.has_breadcrumb);
+                overlay.push_rect(gpu, pane.rect.x, pane.rect.y - chrome, pane.rect.w, pane.rect.h + chrome, [r, g, b, amount]);
+            }
+        }
+        let cover = |overlay: &mut RectRenderer, x: f32, w: f32, top: f32, rows: usize, shown: f32, clip: (f32, f32), color: [f32; 4]| {
+            let from = (top + rows as f32 * line_height * shown).max(clip.0);
+            let to = (top + rows as f32 * line_height).min(clip.1);
+            if to > from {
+                overlay.push_rect(gpu, x, from, w, to - from, color);
+            }
+        };
+        for pane in &panes_render {
+            if let Some((row, rows, shown)) = pane.extra.reveal {
+                let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+                cover(overlay, pane.rect.x, pane.rect.w, top, rows, shown, (pane.rect.y, pane.rect.y + pane.rect.h), theme.bg);
+            }
+        }
+        if let Some((first, rows, shown)) = sidebar_reveal.filter(|_| show_sidebar) {
+            if first + rows > sidebar_scroll {
+                let row = first.saturating_sub(sidebar_scroll);
+                cover(overlay, 0.0, text::SIDEBAR_WIDTH - 1.0, sidebar_row_y(row), rows, shown, (0.0, modeline_top), theme.sidebar_bg);
+            }
+        }
+        if let (Some((first, rows, shown)), true) = (explorer_reveal, main_view == MainView::Explorer) {
+            if let Some(pane) = panes_render.iter().find(|p| p.pane == focused_pane).filter(|_| first + rows > explorer_scroll) {
+                let row = first.saturating_sub(explorer_scroll);
+                let top = pane.rect.y + text::PAD_TOP + row as f32 * line_height;
+                cover(overlay, pane.rect.x, pane.rect.w, top, rows, shown, (pane.rect.y, pane.rect.y + pane.rect.h), theme.bg);
+            }
+        }
+        for pane in &panes_render {
+            let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
+            let sticky_h = if pane.extra.sticky.is_empty() { 0.0 } else { text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height };
+            // Problems, underlined with a wave.
+            for &(row, col_start, col_end, color) in &pane.extra.squiggles {
+                let y = row_y(row) + line_height - 4.0;
+                if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
+                    continue;
+                }
+                let x = content_x + col_start as f32 * char_width;
+                overlay.push_wave(gpu, x, y - 1.0, (col_end - col_start) as f32 * char_width, 5.0, 6.0, 1.3, 1.2, color);
+            }
+            // Sticky scroll's edge: a hairline and a soft shadow on the
+            // text scrolling under it.
+            if sticky_h > 0.0 {
+                let bottom = pane.rect.y + sticky_h;
+                overlay.push_shadow(gpu, pane.rect.x, bottom - 6.0, pane.rect.w, 6.0, 0.0, 5.0, [0.0, 0.0, 0.0, 0.35]);
+                overlay.push_rect(gpu, pane.rect.x, bottom - 1.0, pane.rect.w, 1.0, theme.divider);
+            }
+            // The overview ruler: the whole file down the right edge.
+            if let Some(ruler) = &pane.extra.ruler {
+                const RULER_W: f32 = 10.0;
+                let x = pane.rect.x + pane.rect.w - RULER_W;
+                let (top, h) = (pane.rect.y, pane.rect.h);
+                let lines = ruler.lines.max(1) as f32;
+                let at = |line: f32| top + (line / lines).clamp(0.0, 1.0) * h;
+                let fg = glyphon_to_rgba(theme.fg);
+                overlay.push_rect(gpu, x, top, RULER_W, h, [fg[0], fg[1], fg[2], 0.03]);
+                overlay.push_rect(gpu, x, top, 1.0, h, [fg[0], fg[1], fg[2], 0.08]);
+                let thumb_h = (ruler.visible / lines * h).max(8.0).min(h);
+                overlay.push_rect(gpu, x + 1.0, at(ruler.first).min(top + h - thumb_h), RULER_W - 1.0, thumb_h, [fg[0], fg[1], fg[2], 0.07]);
+                for &(line, mark) in &ruler.marks {
+                    let y = at(line as f32);
+                    let (dx, w, mh, color) = match mark {
+                        motion_host::RulerMark::Search => (2.0, 4.0, 2.0, theme.search_match),
+                        motion_host::RulerMark::Error => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_conflicted)),
+                        motion_host::RulerMark::Warning => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Added => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_staged)),
+                        motion_host::RulerMark::Modified => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Deleted => (1.0, 3.0, 2.0, glyphon_to_rgba(theme.git_conflicted)),
+                    };
+                    overlay.push_rect(gpu, x + dx, y.min(top + h - mh), w, mh, [color[0], color[1], color[2], 0.9]);
+                }
+                overlay.push_rect(gpu, x, at(ruler.cursor as f32).min(top + h - 1.0), RULER_W, 1.0, [fg[0], fg[1], fg[2], 0.8]);
+            }
+        }
+        overlay.flush(gpu);
+
+        // The spinner: the mark's blades lit in turn, just left of the
+        // work it's for.
+        let (surface_w, surface_h) = (gpu.config.width, gpu.config.height);
+        motion_gpu.sprites.begin(surface_w, surface_h);
+        if let (false, Some(clock_left), true) = (jobs.is_empty(), clock_left, prefs.progress) {
+            let size = (modeline_height * 0.62).round().max(8.0);
+            let lit = motion_host::spinner_blade(now, motion_host::spinner_epoch());
+            let x = (clock_left - size - 4.0).round();
+            let y = (modeline_top + (modeline_height - size) / 2.0).round();
+            motion_gpu.push_spinner(x, y, size, lit);
+        }
+        motion_gpu.sprites.flush();
+
+        // Over everything: the old theme's picture fading away, and the
+        // launch splash fading out over the first frames.
+        motion_gpu.top.begin(surface_w, surface_h);
+        if let (Some(anim), Some((_, snapshot))) = (motion_state.theme_fade.filter(|a| a.running(now)), &motion_gpu.snapshot) {
+            let alpha = 1.0 - anim.eased(now);
+            motion_gpu.top.push(snapshot, 0.0, 0.0, surface_w as f32, surface_h as f32, [1.0, 1.0, 1.0, alpha]);
+        }
+        motion_gpu.top.flush();
+        if let Some(fade) = self.splash_fade.as_mut() {
+            let t = now.saturating_duration_since(fade.started).as_secs_f32();
+            let alpha = fade.alpha(now);
+            fade.sprites.begin(surface_w, surface_h);
+            fade.scene.draw(&mut fade.sprites, surface_w, surface_h, t, fade.progress.max(1.0), alpha, true);
+            fade.sprites.flush();
+        }
+
+        let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32, usize)> =
+            panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac, p.extra.sticky.len())).collect();
         text.prepare(gpu, theme, &prepare_panes, &tab_text_rects, &breadcrumb_text_rects, show_sidebar, show_terminal);
 
         // Creates each visible VNC session's texture the first time it's
@@ -26680,11 +26982,12 @@ impl App {
         }
 
         _profile.mark("text and geometry preparation complete");
-        let frame = match gpu.surface.get_current_texture() {
+        let Some(surface) = &gpu.surface else { return };
+        let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                gpu.surface.configure(&gpu.device, &gpu.config);
+                surface.configure(&gpu.device, &gpu.config);
                 return;
             }
             status @ (wgpu::CurrentSurfaceTexture::Timeout
@@ -26774,6 +27077,7 @@ impl App {
                 }
             }
             text.render(&mut pass);
+            motion_gpu.overlay.render(&mut pass);
         }
         // Popups (background + text) and the caret are drawn in a second,
         // separate pass layered on top (`LoadOp::Load`, not `Clear`)
@@ -26794,34 +27098,55 @@ impl App {
             // doc comment for what reusing the base layer's renderer here
             // silently corrupted.
             popup_rect.clear();
-            for &(id, rect) in &popup_rects {
-                popup_rect.push_rect(gpu, rect.x + 3.0, rect.y + 3.0, rect.w, rect.h, [0.0, 0.0, 0.0, 0.25]);
-                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+            let with_alpha = |[r, g, b, a]: [f32; 4], alpha: f32| [r, g, b, a * alpha];
+            for draw in &popup_draws {
+                let (rect, alpha) = (draw.rect, draw.alpha);
+                if draw.id == popup::PopupId::WhichKey {
+                    if let Some(drawer) = &motion_state.which_key_drawer {
+                        which_key::paint_drawer(popup_rect, gpu, drawer, rect, modeline_top, badge_bg, theme, char_width, line_height, shadows);
+                        continue;
+                    }
+                }
+                if shadows {
+                    popup_rect.push_shadow(gpu, rect.x, rect.y + 4.0, rect.w, rect.h, corner_radius, 10.0, [0.0, 0.0, 0.0, 0.38 * alpha]);
+                }
                 let border = glyphon_to_rgba(theme.gutter_fg);
-                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, 1.0, border);
-                popup_rect.push_rect(gpu, rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, border);
-                popup_rect.push_rect(gpu, rect.x, rect.y, 1.0, rect.h, border);
-                popup_rect.push_rect(gpu, rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, border);
+                popup_rect.push_box(gpu, rect.x, rect.y, rect.w, rect.h, crate::rect::BoxStyle {
+                    radius: corner_radius,
+                    fill: with_alpha(theme.bg_modeline, alpha),
+                    border: 1.0,
+                    border_color: with_alpha(border, alpha),
+                });
                 // The completion popup's own selected-candidate row --
-                // `theme.selection`, not `theme.hl_line`: same reasoning
-                // the sidebar's own selected-row highlight already
-                // documents (see its own push_rect call, just above) --
-                // the popup has no caret of its own, so this has to
-                // actually stand out on its own, not just serve as a
-                // subtle secondary cue alongside a visible caret. Using
-                // `hl_line` here was the bug: on Visual Studio Dark it's
-                // barely distinguishable from this same popup's own
-                // `bg_modeline` background, making the selected row
-                // unreadable.
-                if id == popup::PopupId::Completion {
-                    if let Some(row) = popup_selected_row {
+                // `theme.selection`, not `theme.hl_line`: the popup has no
+                // caret of its own, so this has to stand out on its own.
+                if draw.id == popup::PopupId::Completion {
+                    if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
-                        popup_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.selection);
+                        let inset = if corner_radius > 0.0 { 3.0 } else { 0.0 };
+                        popup_rect.push_box(gpu, rect.x + inset, y, rect.w - inset * 2.0, line_height, crate::rect::BoxStyle {
+                            radius: corner_radius.min(3.0),
+                            fill: with_alpha(theme.selection, alpha),
+                            border: 0.0,
+                            border_color: [0.0; 4],
+                        });
                     }
                 }
             }
             popup_rect.flush(gpu);
-            text.prepare_popups(gpu, theme, &popup_rects);
+            // Each popup's text inset, and where it's cut off: the
+            // which-key drawer never shows below the modeline's top.
+            let popup_text: Vec<(popup::PopupId, fenix_window::Rect, (f32, f32), f32)> = popup_rects
+                .iter()
+                .map(|&(id, rect)| {
+                    if id == popup::PopupId::WhichKey {
+                        (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    } else {
+                        (id, rect, (text::PAD_LEFT, 4.0), f32::MAX)
+                    }
+                })
+                .collect();
+            text.prepare_popups(gpu, theme, &popup_text);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -26837,17 +27162,33 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            motion_gpu.sprites.render(&mut pass);
             if !popup_rects.is_empty() {
                 popup_rect.render(&mut pass);
                 text.render_popups(&mut pass);
             }
             caret_rect.render(&mut pass);
+            motion_gpu.top.render(&mut pass);
+            if let Some(fade) = &self.splash_fade {
+                fade.sprites.render(&mut pass);
+            }
+        }
+        // The frame a theme change fades out of: copied before it's shown.
+        if motion_state.capture_frame {
+            let target = motion_gpu.snapshot_target(gpu);
+            encoder.copy_texture_to_texture(
+                frame.texture.as_image_copy(),
+                target.as_image_copy(),
+                wgpu::Extent3d { width: surface_w, height: surface_h, depth_or_array_layers: 1 },
+            );
         }
         _profile.mark("surface acquired and commands encoded");
         gpu.queue.submit(Some(encoder.finish()));
         window.pre_present_notify();
         gpu.queue.present(frame);
         _profile.mark("present complete");
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| crate::profile::launch_mark("first frame"));
         text.trim();
         // Publish the tab geometry this frame actually drew, so mouse
         // hit-testing (`frame_geometry`) uses the exact same measured
@@ -26863,32 +27204,65 @@ impl App {
 /// drawn from `fenix-brand` -- the same geometry `build.rs` embeds into
 /// the `.exe` as its resource icon (what Explorer and a taskbar pin read
 /// before the process is even running), so the two can't disagree.
-fn fenix_icon() -> Option<Icon> {
+pub(crate) fn fenix_icon() -> Option<Icon> {
     let icon = fenix_brand::app_icon(256);
     Icon::from_rgba(icon.rgba, icon.width, icon.height).ok()
 }
 
-impl ApplicationHandler<FenixUserEvent> for App {
-    /// Thin trait-required wrapper around `handle_user_event` -- see
-    /// that method's own doc comment for why the actual logic lives
-    /// there instead of here (same "extract the `ActiveEventLoop`-free
-    /// part so it's directly testable" reasoning `handle_key`/
-    /// `test_vim_key` already established for keyboard input).
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
-        self.handle_user_event(event);
+impl App {
+    /// Takes the window `window`'s surface back from the launch splash
+    /// and lets the splash fade out over the first frames. With no
+    /// splash back (it was off, or its thread failed), the surface is
+    /// made afresh if it has to be.
+    pub(crate) fn end_splash(&mut self, window: WindowId, splash: Option<crate::splash::SplashReturn>) {
+        let active = self.window.as_ref().is_some_and(|w| w.id() == window);
+        let frame = if active { None } else { (0..self.frames.len()).find(|&f| self.frame_window(f).is_some_and(|w| w.id() == window)) };
+        let gpu = match frame {
+            None => self.gpu.as_mut(),
+            Some(f) => self.frames[f].as_mut().and_then(|state| state.gpu.as_mut()),
+        };
+        let Some(gpu) = gpu else { return };
+        match splash {
+            Some(back) => {
+                gpu.restore_surface(back.surface);
+                gpu.resize(PhysicalSize::new(back.config.width, back.config.height));
+                gpu.apply_pending_resize();
+                self.splash_fade = Some(crate::splash::SplashFade {
+                    sprites: back.sprites,
+                    scene: back.scene,
+                    started: back.started,
+                    progress: back.progress,
+                    fade_from: Instant::now(),
+                    still: back.still,
+                });
+            }
+            None if gpu.surface.is_none() => {
+                let window = if active { self.window.clone() } else { frame.and_then(|f| self.frame_window(f).cloned()) };
+                if let (Some(context), Some(window)) = (&self.gpu_context, window) {
+                    let fresh = context.attach(window);
+                    match frame {
+                        None => self.gpu = Some(fresh),
+                        Some(f) => {
+                            if let Some(state) = self.frames[f].as_mut() {
+                                state.gpu = Some(fresh);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-
-        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
-        let window =
-            Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
-
-        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+    /// Everything `resumed` does once the first window and its GPU exist:
+    /// fonts, the text and rect pipelines, then the saved windows.
+    /// `progress` hears how far along it is (0 to 1), for the launch
+    /// splash; the window's surface may be on loan to the splash while
+    /// this runs, which nothing here needs.
+    pub(crate) fn start_in(&mut self, event_loop: &ActiveEventLoop, window: Arc<Window>, gpu_context: GpuContext, gpu: GpuState, progress: &dyn Fn(f32)) {
         let fonts = Rc::new(RefCell::new(text::FontContext::new(&gpu)));
+        crate::profile::launch_mark("fonts");
+        progress(0.75);
         // No priming call needed for pane content -- `redraw()` populates
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
@@ -26901,6 +27275,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let vnc_pipeline = VncPipeline::new(&gpu);
         let pdf_pipeline = PdfPipeline::new(&gpu);
         let logo_pipeline = PdfPipeline::new_blended(&gpu);
+        self.motion_gpu = Some(motion_host::MotionGpu::new(&gpu));
+        progress(0.85);
 
         self.window = Some(window);
         self.gpu_context = Some(gpu_context);
@@ -26923,6 +27299,34 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.vnc_hidden_cursor = Some(event_loop.create_custom_cursor(hidden_cursor_source));
         self.refresh_frame_origin();
         self.restore_saved_windows(event_loop);
+        progress(0.95);
+        crate::profile::launch_mark("resumed");
+    }
+}
+
+impl ApplicationHandler<FenixUserEvent> for App {
+    /// Thin trait-required wrapper around `handle_user_event` -- see
+    /// that method's own doc comment for why the actual logic lives
+    /// there instead of here (same "extract the `ActiveEventLoop`-free
+    /// part so it's directly testable" reasoning `handle_key`/
+    /// `test_vim_key` already established for keyboard input).
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
+        self.handle_user_event(event);
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let window =
+            Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
+        crate::profile::launch_mark("window");
+
+        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+        crate::profile::launch_mark("gpu");
+        self.start_in(event_loop, window, gpu_context, gpu, &|_| {});
     }
 
     /// The one place every quit path is guaranteed to pass through --
@@ -27086,9 +27490,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // everything settles, fall back to the long, efficient wait for
         // the next blink toggle -- an idle editor still does no per-frame
         // work between blinks.
-        let blink_transitioning = self.animations_enabled() && now.duration_since(self.blink_transition_start) < BLINK_FADE;
+        let prefs = self.motion();
+        let blink_transitioning = prefs.caret_fade && now.duration_since(self.blink_transition_start) < prefs.blink_fade_d;
         let pulse_active = match &self.pulse {
-            Some(p) if now.duration_since(p.started) < PULSE_DURATION => true,
+            Some(p) if now.duration_since(p.started) < prefs.pulse_d => true,
             Some(_) => {
                 self.pulse = None; // expired -- drop it so redraw stops drawing it
                 needs_redraw = true;
@@ -27113,7 +27518,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let scroll_animating = (0..self.frames.len())
             .filter_map(|frame| self.frame_workspaces(frame))
             .any(|workspaces| workspaces.active_scroll_anims().contains_key(&workspaces.active().focused_id()));
-        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused;
+        self.prune_motion(now);
+        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused || self.motion_animating(now);
         if animating {
             needs_redraw = true;
         }
@@ -27136,6 +27542,19 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // has no other reason to wake up.
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         let wait_until = wait_until.min(self.next_disk_check);
+        // A message about to fade, or the spinner's next blade.
+        let wait_until = match self.motion_next_wake(now) {
+            Some(wake) if wake <= now => {
+                for frame in 0..self.frames.len() {
+                    if let Some(window) = self.frame_window(frame) {
+                        window.request_redraw();
+                    }
+                }
+                now + ANIM_TICK
+            }
+            Some(wake) => wait_until.min(wake),
+            None => wait_until,
+        };
         // A pending listing has no other reason to wake the loop: nothing
         // is animating and no key was pressed, so without this the "still
         // reading" line would never appear and a slow share would look
@@ -27367,6 +27786,7 @@ impl App {
             bg_rect: None,
             popup_rect: None,
             caret_rect: None,
+            motion_gpu: None,
             workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
             cursor_pos: None,
             origin: (0, 0),
@@ -28318,23 +28738,33 @@ index 0000000..1111111 100644
     }
 
     #[test]
-    fn toggle_animations_flips_and_persists_the_setting() {
-        // Isolated `Config` -- same reasoning as `set_shiftwidth_command_
-        // persists_the_new_width`: `toggle_animations` calls `config.
-        // save()`, which must not write into the real dev machine's
-        // config.ini.
+    fn spc_t_a_cycles_the_motion_level_and_persists_it() {
+        // Isolated `Config`: `toggle_animations` saves, which must not
+        // write into the real dev machine's settings.
         let dir = TempDir::new("toggle_animations_persists");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
-        assert!(app.animations_enabled());
+        assert_eq!(crate::motion::level(&app.config), crate::motion::Level::Subtle);
 
+        app.toggle_animations();
+        assert_eq!(crate::motion::level(&app.config), crate::motion::Level::Full);
         app.toggle_animations();
         assert!(!app.animations_enabled());
         let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
-        assert_eq!(reloaded.animations, Some(false));
+        assert_eq!(reloaded.motion.level.as_deref(), Some("off"));
 
         app.toggle_animations();
         assert!(app.animations_enabled());
+    }
+
+    #[test]
+    fn spc_t_a_turns_motion_back_on_after_animations_were_switched_off() {
+        let dir = TempDir::new("toggle_animations_from_off");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        app.config.animations = Some(false);
+        app.toggle_animations();
+        assert!(app.animations_enabled(), "the old all-off switch no longer overrides the new level");
     }
 
     #[test]
@@ -28486,6 +28916,7 @@ index 0000000..1111111 100644
 
         // One more line down before the ease had a chance to settle -- the
         // exact shape of holding `j`.
+        app.motion.key_repeat = true;
         {
             let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
             buffer.move_down(cursor);
@@ -28494,6 +28925,30 @@ index 0000000..1111111 100644
         let ps = app.pane_state(pane);
         assert_eq!(ps.rendered_scroll, ps.scroll_line as f32, "must snap, not compound the lag from the still-active ease");
         assert!(!app.workspaces.active_scroll_anims().contains_key(&pane));
+    }
+
+    #[test]
+    fn a_new_scroll_target_that_isnt_a_held_key_eases_on_from_where_the_view_is() {
+        // The wheel's next notch arriving mid-ease: no snap.
+        let mut app = App::with_file(None);
+        for _ in 0..60 {
+            app.test_insert('\n');
+        }
+        app.test_set_cursor(Cursor::at_start());
+        for _ in 0..15 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        app.ensure_cursor_visible(10);
+        let pane = app.focused_pane_id();
+        for _ in 0..5 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        app.ensure_cursor_visible(10);
+        let ps = app.pane_state(pane);
+        assert!(app.workspaces.active_scroll_anims().contains_key(&pane), "still easing");
+        assert!(ps.rendered_scroll < ps.scroll_line as f32);
     }
 
     #[test]
@@ -34200,85 +34655,6 @@ configure_board stm32
         let r = popup_beside_row(at, 12, 70, 300.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
         assert_eq!(r.x + r.w, 700.0);
         assert!(popup_beside_row(at, 5, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).is_none(), "scrolled out of view above");
-    }
-
-    #[test]
-    fn which_key_popup_is_none_when_nothing_is_pending() {
-        let app = App::with_file(None);
-        assert!(app.which_key_popup(800.0, 580.0).is_none());
-    }
-
-    #[test]
-    fn which_key_popup_lists_pending_leader_children_sorted_by_label() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        app.leader_matcher.feed(KeyPress::char('t')); // SPC t: "line numbers", "theme"
-
-        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        // "line numbers" sorts before "theme" -- alphabetical by label.
-        assert!(joined.find("line numbers").unwrap() < joined.find("theme").unwrap());
-        assert!(joined.contains('n')); // the `n` key column, for line numbers
-        assert!(!joined.contains("more")); // both entries fit, nothing truncated
-    }
-
-    #[test]
-    fn which_key_popup_key_column_uses_caret_text_not_a_content_calibrated_color() {
-        // Regression test for a real readability bug: the key column used
-        // to be `theme.syntax_keyword`, a color calibrated for `bg` (the
-        // content background). On TempleOS that color happens to be
-        // identical to `bg_modeline` (the popup's own background), making
-        // every key binding invisible. `caret_text` is guaranteed
-        // high-contrast against `bg_modeline` in every theme.
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-        assert_eq!(spans[0].1, app.theme.caret_text); // spans[0] is the first entry's key column
-    }
-
-    #[test]
-    fn which_key_popup_rect_never_extends_past_the_window_or_under_the_modeline() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups
-
-        // A window far too short for 8 rows -- this is the bug this popup
-        // system fixes: the panel used to have no notion of "not enough
-        // room" and could draw its background/text straight through the
-        // modeline bar.
-        let modeline_top = 40.0;
-        let (rect, _) = app.which_key_popup(300.0, modeline_top).unwrap();
-
-        assert!(rect.x >= 0.0);
-        assert!(rect.y >= 0.0);
-        assert!(rect.x + rect.w <= 300.0 + 0.01);
-        assert!(rect.y <= modeline_top);
-    }
-
-    #[test]
-    fn which_key_popup_widens_to_fit_a_longer_label_than_the_minimum() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        let (root_rect, _) = app.which_key_popup(800.0, 580.0).unwrap(); // short group labels only
-
-        app.leader_matcher = keymap::leader_trie().matcher();
-        app.leader_matcher.feed(KeyPress::char(' '));
-        app.leader_matcher.feed(KeyPress::named(FenixNamedKey::Tab)); // "remove workspace" (16 chars) lives here
-        let (workspace_rect, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-
-        assert_eq!(root_rect.w, text::WHICH_KEY_MIN_WIDTH); // short labels clamp to the floor
-        assert!(workspace_rect.w > root_rect.w); // longer label pushes the panel wider
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.contains("remove workspace")); // never character-truncated
-    }
-
-    #[test]
-    fn which_key_popup_truncates_and_reports_how_many_more_when_content_overflows() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups, more than fit below
-
-        let (_, spans) = app.which_key_popup(300.0, 40.0).unwrap();
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.contains("more"));
     }
 
     #[test]

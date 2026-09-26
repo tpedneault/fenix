@@ -4,6 +4,17 @@
 /// `App::mode_colors`, every `theme.SOMETHING` read in `App::redraw`) --
 /// adding a second `Theme` value and pointing `App` at it is the entire
 /// integration surface, no per-theme special-casing elsewhere.
+/// How a pane's tab strip is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabStyle {
+    /// Filled tabs on the chrome shade, the active one in the editor's
+    /// background with an accent along its top -- Visual Studio's.
+    Block,
+    /// Flat on the editor background; the active tab is bright text over
+    /// an underline in the mode colour.
+    Underline,
+}
+
 pub struct Theme {
     /// Display/persistence identity -- also used for `by_name` lookup
     /// and cycling, since two separate `&SOME_CONST` expressions aren't
@@ -24,13 +35,10 @@ pub struct Theme {
     /// The line drawn along a window split's boundary, between two
     /// adjacent panes.
     pub divider: [f32; 4],
-    /// Whether each pane's title strip renders as a clickable row of open-
-    /// buffer tabs (`App::pane_tab_layout`) instead of today's plain
-    /// single-line title. A per-theme opt-in rather than a blanket
-    /// behavior change: every existing theme sets this `false`, so their
-    /// rendering is untouched byte-for-byte -- only a theme that actually
-    /// wants a VS/VS-Code-style tab strip sets it `true`.
-    pub show_tabs: bool,
+    /// How this theme draws each pane's tab strip when the
+    /// `appearance.tabs` setting leaves it to the theme: Visual Studio's
+    /// filled blocks, or the flat underline every other theme uses.
+    pub tabs: TabStyle,
 
     pub bg: [f32; 4],
     /// The persistent file-explorer sidebar's own background -- real VS
@@ -263,7 +271,7 @@ pub const ORBIT_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x565f89),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x1a1b26),
     sidebar_bg: rgba(0x1a1b26),
@@ -335,7 +343,7 @@ pub const TEMPLEOS: Theme = Theme {
     font_family: Some("TempleOS"),
     border: Some(rgba(0x0000aa)),
     divider: rgba(0x0000aa),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0xffffff),
     sidebar_bg: rgba(0xffffff),
@@ -440,7 +448,7 @@ pub const GRUVBOX_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x665c54),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x1d2021),
     sidebar_bg: rgba(0x1d2021),
@@ -494,7 +502,7 @@ pub const NORD: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x4c566a),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x2e3440),
     sidebar_bg: rgba(0x2e3440),
@@ -548,7 +556,7 @@ pub const DRACULA: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x6272a4),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x282a36),
     sidebar_bg: rgba(0x282a36),
@@ -602,7 +610,7 @@ pub const SOLARIZED_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x586e75),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x002b36),
     sidebar_bg: rgba(0x002b36),
@@ -656,7 +664,7 @@ pub const ONE_DARK: Theme = Theme {
     font_family: None,
     border: None,
     divider: rgba(0x5c6370),
-    show_tabs: false,
+    tabs: TabStyle::Underline,
 
     bg: rgba(0x282c34),
     sidebar_bg: rgba(0x282c34),
@@ -710,10 +718,9 @@ pub const ONE_DARK: Theme = Theme {
 /// against `bg_modeline`, which a bright saturated blue can't do for a
 /// muted color like `gutter_fg`, so the chrome stays a dark neutral gray
 /// the same way every other dark theme's own `bg_modeline` already is),
-/// and real VS syntax colors rather than an approximation. `show_tabs:
-/// true` -- the one theme so far that opts into the VS/VS-Code-style tab
-/// strip (`App::pane_tab_layout`) instead of the plain single-line title
-/// every other theme keeps. `font_family: Some("Consolas")` points at the
+/// and real VS syntax colors rather than an approximation. Its tabs are
+/// VS's own filled blocks (`TabStyle::Block`); every other theme draws the
+/// flat underline. `font_family: Some("Consolas")` points at the
 /// system font Windows ships by default rather than an embedded one, per
 /// explicit direction -- `cosmic-text`'s existing fontdb substitution
 /// already covers a machine without it, the same fallback every other
@@ -726,7 +733,7 @@ pub const VISUAL_STUDIO_DARK: Theme = Theme {
     // Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
     // actually that same doc's *button border* color, a different token.
     divider: rgba(0x2d2d30),
-    show_tabs: true,
+    tabs: TabStyle::Block,
 
     bg: rgba(0x1e1e1e),
     // VS's own real "tool window" background -- one shade lighter than

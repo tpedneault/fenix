@@ -61,6 +61,10 @@ impl App {
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
             cursor.char_idx = buffer.line_start_char(header);
             cursor.sticky_col = 0;
+        } else if let Some(&(_, end)) = ranges.iter().find(|&&(start, _)| start == header) {
+            // Unfolded: the body opens downwards from under its header.
+            let first = self.folded_display_lines(id).iter().position(|&l| l == header + 1).unwrap_or(header + 1);
+            self.reveal_lines(id, first, end.saturating_sub(header));
         }
         self.set_message(if now_collapsed { "Scope folded" } else { "Scope expanded" });
         self.wake_caret();
@@ -224,7 +228,7 @@ impl App {
     }
 
     pub(super) fn click_breadcrumb(&mut self, geometry: &FrameGeometry, pos: (f32, f32)) -> bool {
-        if !self.theme.show_tabs { return false }
+        if self.tab_style().is_none() { return false }
         let height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         // Breadcrumb text renders at `text::TITLE_FONT_SCALE` of the body
         // font (same as the tab strip above it), so hit-testing its glyph

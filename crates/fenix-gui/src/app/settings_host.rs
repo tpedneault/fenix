@@ -211,6 +211,17 @@ impl App {
                     Err(e) => self.set_error(format!("couldn't list {} ({e})", start.display())),
                 }
             }
+            SettingsAction::Choose { key, choices, current } => {
+                if choices.is_empty() {
+                    self.set_message("nothing to choose from");
+                    return;
+                }
+                let at = current.and_then(|c| choices.iter().position(|x| *x == c)).unwrap_or(0);
+                let candidates = choices.into_iter().map(|c| fenix_picker::Candidate::new(c.clone(), c)).collect();
+                let mut picker = fenix_picker::PickerState::new(candidates);
+                picker.move_selection(at as isize);
+                self.enter_picker(ActivePicker::SettingChoice { key, picker });
+            }
             SettingsAction::OpenFile(key) => {
                 let path = match self.settings_page(id).map(|p| p.snap.file.clone()) {
                     Some(path) => path,
@@ -244,6 +255,15 @@ impl App {
         self.user_settings_action(id, action);
     }
 
+    /// The value picked from the list a settings row opened: back to the
+    /// page, which sets it in the scope it's showing.
+    pub(super) fn setting_chosen(&mut self, key: &'static str, value: &str) {
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::UserSettings(_))) else { return };
+        self.show_page(id);
+        let Some(action) = self.settings_page(id).map(|p| p.chose(key, value)) else { return };
+        self.user_settings_action(id, action);
+    }
+
     /// Sets one of your settings: checked, applied to the running editor
     /// and saved.
     pub(crate) fn set_setting(&mut self, key: &str, value: Option<fenix_config::Value>) -> Result<(), String> {
@@ -258,7 +278,9 @@ impl App {
     pub(super) fn apply_setting(&mut self, key: &str) {
         match key {
             "editor.theme" => {
+                let old = self.theme;
                 self.theme = self.config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
+                self.fade_theme_from(old);
             }
             "editor.font_size" | "editor.font_family" => {
                 self.apply_font_size();
@@ -496,6 +518,25 @@ mod tests {
         press(&mut app, "r");
         assert_eq!(app.config.indent_width, None);
         assert!(!std::fs::read_to_string(app.config.path()).unwrap().contains("indent_width"));
+    }
+
+    #[test]
+    fn a_font_is_picked_from_a_list_and_saved() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("editor.font_family"));
+        page(&mut app).snap.fonts = vec!["Consolas".into(), "Fira Code".into(), "JetBrains Mono".into()];
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.main_view, MainView::Picker);
+        let Some(ActivePicker::SettingChoice { picker, .. }) = &mut app.active_picker else { panic!("a list of fonts") };
+        assert_eq!(picker.len(), 3);
+        for c in "jet".chars() {
+            picker.push_char(c);
+        }
+        app.picker_confirm();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.config.font_family.as_deref(), Some("JetBrains Mono"));
+        assert!(std::fs::read_to_string(app.config.path()).unwrap().contains("JetBrains Mono"));
+        assert!(page(&mut app).selected().is_some(), "back on the settings page");
     }
 
     #[test]
