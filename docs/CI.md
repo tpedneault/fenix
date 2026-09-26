@@ -41,17 +41,16 @@ logs and `summary.json` containing exit codes and timings. CI retains diagnostic
 logs even on failure. Successful Windows runs also retain `fenix.exe` for seven
 days; this is a debug build, not a signed release or an installer.
 
-## Repository setup and limits
+## Limits
 
-After the workflow is pushed and has run, configure the repository ruleset to
-require **Windows workspace** and **Linux reliability** before merging. Workflow
-files alone cannot enforce branch protection. These settings are not changed by
-the local implementation.
+The gates don't cover interactive GUI behavior, or the live integration
+tests that need a service (GitLab, Jira, a language server); those are
+checked by hand. Whole-workspace `rustfmt` and strict Clippy aren't
+gates yet: strict Clippy covers the storage, tasks, LSP and project
+crates, and is widened as the rest are cleaned up.
 
-Hosted jobs have not been run merely by creating these files. Linux execution,
-interactive GUI behavior, packaging, and live integration smoke tests remain
-separate validation. Whole-workspace formatting and strict Clippy are not gates
-yet because the existing repository has unrelated formatting/lint debt.
+Releases are built by a separate workflow, `release.yml`, when a `v*`
+tag is pushed.
 
 Action references: [checkout](https://github.com/actions/checkout) and
 [upload-artifact](https://github.com/actions/upload-artifact).
