@@ -146,7 +146,7 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
             }
             Err(err) => sink(PdfResponse::OpenFailed { key, message: format!("{err:?}") }),
         },
-        PdfRequest::RenderPage { key, request_id, page_index, target_w, target_h } => {
+        PdfRequest::RenderPage { key, request_id, page_index, target_w, target_h, .. } => {
             let Some(doc) = docs.get(&key) else {
                 sink(PdfResponse::RenderFailed { key, request_id, message: "document not open".to_string() });
                 return;

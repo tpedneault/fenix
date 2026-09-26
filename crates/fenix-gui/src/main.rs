@@ -38,6 +38,7 @@ mod pdf_search;
 mod pdf_texture;
 mod popup;
 mod profile;
+mod reader;
 mod rect;
 mod splash;
 mod sprite;
