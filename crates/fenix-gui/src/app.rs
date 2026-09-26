@@ -1114,7 +1114,8 @@ impl Drop for TerminalReader {
 /// buffer is closed, which is the one gesture that says the shell has
 /// no owner left.
 struct TerminalState {
-    session: fenix_terminal::Terminal,
+    /// Taken apart only by `Drop`, which hands it to a thread of its own.
+    session: std::mem::ManuallyDrop<fenix_terminal::Terminal>,
     /// `None` only in tests that read the shell's output themselves
     /// (`pump_until`); every spawn through `App` gets one, see
     /// `App::spawn_terminal_reader`. Never read again once set -- held
@@ -1122,6 +1123,12 @@ struct TerminalState {
     /// `stats_poller`/`log_follower`.
     #[allow(dead_code)]
     reader: Option<TerminalReader>,
+}
+
+impl TerminalState {
+    fn new(session: fenix_terminal::Terminal, reader: Option<TerminalReader>) -> Self {
+        Self { session: std::mem::ManuallyDrop::new(session), reader }
+    }
 }
 
 impl Drop for TerminalState {
@@ -1132,6 +1139,18 @@ impl Drop for TerminalState {
         // `reader`'s `Drop` waiting to join a thread that can never wake
         // up on its own.
         self.session.kill();
+        // The rest happens off this thread. Until Windows 11 24H2,
+        // closing a pseudoconsole blocks until its console host exits,
+        // and with another shell still open that can take arbitrarily
+        // long -- a UI thread closing a terminal would freeze with it.
+        // SAFETY: `session` is never touched again after this.
+        let session = unsafe { std::mem::ManuallyDrop::take(&mut self.session) };
+        let reader = self.reader.take();
+        // If no thread can be started, `spawn` drops the closure right
+        // here, which closes the session on this thread after all.
+        let _ = std::thread::Builder::new()
+            .name("fenix-terminal-close".into())
+            .spawn(move || drop((session, reader)));
     }
 }
 
@@ -10245,7 +10264,7 @@ impl App {
         match result {
             Ok((session, reader)) => {
                 let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Panel, reader);
-                self.terminal = Some(TerminalState { session, reader: Some(terminal_reader) });
+                self.terminal = Some(TerminalState::new(session, Some(terminal_reader)));
                 if self.terminal_open {
                     self.terminal_focused = true;
                 }
@@ -10430,7 +10449,7 @@ impl App {
         match result {
             Ok((session, reader)) => {
                 let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Buffer(id), reader);
-                self.terminal_buffers.insert(id, TerminalState { session, reader: Some(terminal_reader) });
+                self.terminal_buffers.insert(id, TerminalState::new(session, Some(terminal_reader)));
                 self.focus_terminal_buffer(id);
             }
             Err(err) => {
@@ -33508,7 +33527,7 @@ configure_board stm32
         // routing, and the real span builder the renderer draws from.
         let mut app = App::with_file(None);
         let (session, reader) = fenix_terminal::Terminal::spawn(text::TERMINAL_ROWS as u16, 80).expect("failed to spawn a real shell");
-        app.terminal = Some(TerminalState { session, reader: None });
+        app.terminal = Some(TerminalState::new(session, None));
         app.terminal_open = true;
         app.terminal_focused = true;
 
@@ -33533,7 +33552,7 @@ configure_board stm32
         app.open_buffer_in_focused_pane(id);
         app.terminal_buffer_labels.insert(id, "*terminal 1*".to_string());
         let (session, reader) = fenix_terminal::Terminal::spawn(24, 80).expect("failed to spawn a real shell");
-        app.terminal_buffers.insert(id, TerminalState { session, reader: None });
+        app.terminal_buffers.insert(id, TerminalState::new(session, None));
         app.focus_terminal_buffer(id);
 
         type_line(|key| app.write_terminal_buffer_input(id, key), "echo fenix-pane-marker");
