@@ -40,7 +40,19 @@ jobs:
           git config --global core.longpaths true
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git config --global core.autocrlf false
+      - name: Install Universal Ctags
+        # Tcl completion and symbol lookup shell out to it, and their tests
+        # use the real thing.
+        run: |
+          choco install universal-ctags --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test, lint, and build
+        # The runner's default TEMP is an 8.3 short path (C:\Users\RUNNER~1),
+        # which canonicalizes to a different spelling than tests compare
+        # against. Its own temp folder has no short names in it.
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: ./scripts/ci.ps1 -Suite Workspace
       - name: Upload diagnostic logs
         if: always()

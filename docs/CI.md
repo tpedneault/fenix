@@ -27,8 +27,9 @@ some fixtures intentionally sleep or produce unbounded output.
 
 ## Run locally
 
-Install Rust with Clippy, Git, and PowerShell 7. On Windows, install Visual Studio
-C++ Build Tools and a Windows SDK. From the repository root:
+Install Rust with Clippy, Git, PowerShell 7, and [Universal Ctags](https://ctags.io/)
+(the Tcl completion tests use it). On Windows, install Visual Studio C++ Build
+Tools and a Windows SDK. From the repository root:
 
 ```powershell
 pwsh -NoProfile -File ./scripts/ci.ps1 -Suite Workspace
