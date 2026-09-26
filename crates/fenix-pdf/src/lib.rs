@@ -80,7 +80,11 @@ pub enum PdfRequest {
     /// requests are (see `coalesce_render_requests`) -- a search is one
     /// explicit `Enter` press, not a high-frequency event like a window
     /// resize, so there's no flood of these to thin out.
-    Search { key: PdfDocKey, request_id: u64, query: String },
+    /// Searches from `from_page` on, a few pages at a time: each batch
+    /// is answered with the matches it found, then the rest of the search
+    /// goes to the back of the queue, so renders keep coming while a long
+    /// document is searched. `match_case` as for smart-case.
+    Search { key: PdfDocKey, request_id: u64, query: String, match_case: bool, from_page: u32 },
     /// Drops the renders still queued for `view` of `key` whose page isn't
     /// in `keep` -- sent when the view scrolls, so pages scrolled past
     /// aren't rendered after the ones now on screen. A render already
@@ -131,7 +135,8 @@ pub enum PdfResponse {
     /// `PageRendered`. Empty `matches` (not an error) for a query with no
     /// hits anywhere in the document -- that's a completely normal search
     /// outcome, not a failure.
-    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch> },
+    /// `done` on the last batch.
+    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch>, done: bool },
 }
 
 /// One shared background worker for every open PDF document in the
@@ -203,6 +208,21 @@ fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
                         dropped[j] = true;
                     }
                 }
+            }
+        }
+    }
+    // Only the newest search of a document goes on.
+    let mut newest_search: HashMap<PdfDocKey, u64> = HashMap::new();
+    for req in &pending {
+        if let PdfRequest::Search { key, request_id, .. } = req {
+            let newest = newest_search.entry(*key).or_insert(*request_id);
+            *newest = (*newest).max(*request_id);
+        }
+    }
+    for (i, req) in pending.iter().enumerate() {
+        if let PdfRequest::Search { key, request_id, .. } = req {
+            if newest_search.get(key) != Some(request_id) {
+                dropped[i] = true;
             }
         }
     }
@@ -289,6 +309,15 @@ mod tests {
         let view = |view, request_id| PdfRequest::RenderPage { key, view, request_id, page_index: 0, target_w: 100, target_h: 100 };
         let pending = vec![view(1, 1), view(2, 2), view(1, 3)];
         assert_eq!(coalesce_render_requests(pending), vec![view(2, 2), view(1, 3)]);
+    }
+
+    #[test]
+    fn only_the_newest_search_of_a_document_goes_on() {
+        let key = PdfDocKey::new();
+        let other = PdfDocKey::new();
+        let search = |key, request_id| PdfRequest::Search { key, request_id, query: "x".into(), match_case: false, from_page: 0 };
+        let pending = vec![search(key, 1), search(other, 1), search(key, 2)];
+        assert_eq!(coalesce_render_requests(pending), vec![search(other, 1), search(key, 2)]);
     }
 
     #[test]

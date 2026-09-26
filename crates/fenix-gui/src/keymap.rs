@@ -121,7 +121,8 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('-')], "zoom out (-)", "pdf.zoom_out");
                 t.insert(&[KeyPress::char('w')], "fit width (zw)", "pdf.fit_width");
                 t.insert(&[KeyPress::char('f')], "fit page (zp)", "pdf.fit_page");
-                t.insert(&[KeyPress::char('o')], "outline (o)", "pdf.toggle_outline");
+                t.insert(&[KeyPress::char('o')], "outline sidebar (o)", "pdf.toggle_outline");
+                t.insert(&[KeyPress::char('t')], "go to a heading", "pdf.headings");
                 t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
                 t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
             }
@@ -443,7 +444,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "find document", "pdf.documents");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('0')], "fit page", "pdf.fit_page");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "toggle outline", "pdf.toggle_outline");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "outline sidebar", "pdf.toggle_outline");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('t')], "go to a heading", "pdf.headings");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");

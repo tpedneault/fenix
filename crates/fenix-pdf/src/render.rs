@@ -130,11 +130,17 @@ fn run_with_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse) + 
             continue;
         }
         let req = pending.remove(0);
-        handle_request(&pdfium, &mut docs, req, &sink);
+        if let Some(rest) = handle_request(&pdfium, &mut docs, req, &sink) {
+            pending.push(rest);
+        }
     }
 }
 
-fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocument<'a>>, req: PdfRequest, sink: &impl Fn(PdfResponse)) {
+/// Pages a search looks through before letting other work go first.
+const SEARCH_BATCH: u32 = 8;
+
+/// Handles one request; what's left of a search comes back to be queued.
+fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocument<'a>>, req: PdfRequest, sink: &impl Fn(PdfResponse)) -> Option<PdfRequest> {
     match req {
         PdfRequest::Open { key, path } => match pdfium.load_pdf_from_file(&path, None) {
             Ok(doc) => {
@@ -153,7 +159,7 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         PdfRequest::RenderPage { key, request_id, page_index, target_w, target_h, .. } => {
             let Some(doc) = docs.get(&key) else {
                 sink(PdfResponse::RenderFailed { key, request_id, message: "document not open".to_string() });
-                return;
+                return None;
             };
             match render_page(doc, page_index, target_w, target_h) {
                 Ok((width, height, bgra, page_width_pts, page_height_pts)) => {
@@ -173,18 +179,16 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 sink(PdfResponse::Outline { key, entries });
             }
         }
-        PdfRequest::Search { key, request_id, query } => {
-            // Same "no document open under this key is a caller bug, not
-            // a search failure" posture as `FetchOutline` -- but `Search`
-            // does carry a `request_id`, and dropping the reply entirely
-            // here (rather than replying with empty results) keeps that
-            // symmetric with every other "document not open" case instead
-            // of a caller having to distinguish "found nothing" from
-            // "document already closed".
-            if let Some(doc) = docs.get(&key) {
-                let matches = search_document(doc, &query);
-                sink(PdfResponse::SearchResults { key, request_id, matches });
-            }
+        PdfRequest::Search { key, request_id, query, match_case, from_page } => {
+            // No document under this key is a caller bug, not a search
+            // that found nothing, so there's no reply.
+            let doc = docs.get(&key)?;
+            let count = doc.pages().len() as u32;
+            let to = from_page.saturating_add(SEARCH_BATCH).min(count);
+            let matches = search_pages(doc, &query, match_case, from_page..to);
+            let done = to >= count;
+            sink(PdfResponse::SearchResults { key, request_id, matches, done });
+            return (!done).then_some(PdfRequest::Search { key, request_id, query, match_case, from_page: to });
         }
         PdfRequest::Close { key } => {
             docs.remove(&key);
@@ -192,6 +196,7 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         // Only ever acted on in the queue, by `coalesce_render_requests`.
         PdfRequest::Cancel { .. } => {}
     }
+    None
 }
 
 /// Walks a document's bookmark tree depth-first, prefix-order (a parent
@@ -257,21 +262,31 @@ fn flatten_bookmark<'a>(bookmark: PdfBookmark<'a>, depth: u32, out: &mut Vec<Out
 /// Err`, e.g. a malformed page) is skipped rather than aborting the
 /// whole-document search -- one bad page shouldn't hide matches on every
 /// other page.
-fn search_document(doc: &PdfDocument, query: &str) -> Vec<PdfSearchMatch> {
+fn search_pages(doc: &PdfDocument, query: &str, match_case: bool, pages: std::ops::Range<u32>) -> Vec<PdfSearchMatch> {
     if query.trim().is_empty() {
         return Vec::new();
     }
+    let options = PdfSearchOptions::new().match_case(match_case);
     let mut matches = Vec::new();
-    for (page_index, page) in doc.pages().iter().enumerate() {
+    for page_index in pages {
+        let Ok(page) = doc.pages().get(page_index as i32) else { continue };
+        let page_h = page.height().value;
         let Ok(text_page) = page.text() else { continue };
-        let Ok(search) = text_page.search(query, &PdfSearchOptions::new()) else { continue };
+        let Ok(search) = text_page.search(query, &options) else { continue };
         let page_chars: Vec<char> = text_page.all().chars().collect();
         while let Some(segments) = search.find_next() {
             let char_index = segments.first().ok().and_then(|segment| segment.chars().ok()).and_then(|chars| chars.first_char_index());
-            if let Some(char_index) = char_index {
-                let context = build_context(&page_chars, char_index, query.chars().count());
-                matches.push(PdfSearchMatch { page_index: page_index as u32, char_index, context });
-            }
+            let Some(char_index) = char_index else { continue };
+            // pdfium's rects have their origin at the page's bottom-left.
+            let rects = segments
+                .iter()
+                .map(|segment| {
+                    let b = segment.bounds();
+                    [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value]
+                })
+                .collect();
+            let context = build_context(&page_chars, char_index, query.chars().count());
+            matches.push(PdfSearchMatch { page_index, char_index, context, rects });
         }
     }
     matches

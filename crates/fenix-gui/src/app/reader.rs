@@ -1,6 +1,7 @@
-//! The host half of the PDF reader (`reader` is the pure half): the open
-//! documents, each pane's view of one, the pdfium worker's replies, the
-//! reader's keys, and the outline and search panes.
+//! The host half of the PDF reader (`reader` and `reader_sidebar` are
+//! the pure halves): the open documents, each pane's view of one, the
+//! pdfium worker's replies, the reader's keys, its sidebar, search and
+//! marks.
 //!
 //! A document belongs to its buffer, the way a file's text does: opening
 //! a PDF gives it a tab in the focused pane like any file, the tab can be
@@ -12,10 +13,14 @@
 //! A view shows the whole document as one column of pages
 //! (`reader::Layout`) scrolled to a point in it. Each frame it asks the
 //! worker for the pages in sight and a few either side, keeps what comes
-//! back in its page cache, and drops what's scrolled far away.
+//! back in its page cache, and drops what's scrolled far away. Its
+//! sidebar -- outline, matches, marks -- sits down the pane's left edge.
+
+use std::collections::BTreeMap;
 
 use super::*;
 use crate::reader::{self, Cmd, Layout, Outcome, Zoom};
+use crate::reader_sidebar::{self, MatchRow, SideKey, Sidebar, Target};
 
 /// How far `j`/`k`/`h`/`l` move, in pixels.
 pub(super) const PAN_STEP_PX: u32 = 60;
@@ -30,8 +35,22 @@ const KEEP: usize = 8;
 /// A page not rendered yet: blank paper.
 pub(super) const PAPER: [f32; 4] = [0.91, 0.905, 0.89, 1.0];
 
+/// A search's matches on the page, and the one `n` last went to.
+const MATCH_TINT: [f32; 4] = [1.0, 0.71, 0.28, 0.38];
+const CURRENT_MATCH_TINT: [f32; 4] = [1.0, 0.42, 0.24, 0.5];
+
 /// A view: the pane showing it, and the document's buffer.
 pub(super) type ViewKey = (fenix_window::WindowId, BufferId);
+
+/// A place in a document: a page, and how far down it (0..1).
+pub(super) type Place = (u32, f32);
+
+/// What a fetched outline is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OutlineFor {
+    Sidebar,
+    Picker,
+}
 
 /// One open document -- `pdf_docs[buffer]`.
 pub(super) struct PdfDoc {
@@ -43,14 +62,25 @@ pub(super) struct PdfDoc {
     pub(super) doc_key: fenix_pdf::PdfDocKey,
     /// Every page's size in points; empty until the worker has opened it.
     pub(super) pages: Vec<(f32, f32)>,
-    /// The bookmark tree, fetched the first time the outline is asked for.
+    /// The bookmark tree, fetched the first time it's asked for.
     pub(super) outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
-    /// The latest search sent; a reply to any earlier one is stale.
-    pub(super) pending_search_request_id: u64,
-    pub(super) last_search_query: String,
-    /// The pages with a match of the last search, in order -- what `n`
-    /// and `N` go through.
-    pub(super) match_pages: Vec<u32>,
+    /// Asked for and not back yet, and what for.
+    pub(super) outline_for: Option<OutlineFor>,
+    /// The search under way or last made.
+    pub(super) search_id: u64,
+    pub(super) query: String,
+    /// Its matches so far, in page order.
+    pub(super) matches: Vec<fenix_pdf::search::PdfSearchMatch>,
+    pub(super) search_done: bool,
+    /// The match `n` last went to.
+    pub(super) current_match: Option<usize>,
+    /// Whether the matches are highlighted (`Esc` hides them).
+    pub(super) highlights: bool,
+    /// `Enter` in the search prompt before the first match came: go to
+    /// the first one at or after here when it does.
+    pub(super) jump_when_found: Option<u32>,
+    /// `m{a}`.
+    pub(super) marks: BTreeMap<char, Place>,
     /// Where the last view used was, so a new view -- the document shown
     /// in another pane, or reopened after its tab was closed -- continues
     /// there instead of at page 1.
@@ -81,8 +111,9 @@ pub(super) struct PdfView {
     /// don't cancel each other's renders.
     pub(super) id: u64,
     pub(super) zoom: Zoom,
-    /// The pane's size in pixels and the window's scale factor, from the
-    /// last frame drawn; `(0, 0)` until then.
+    /// The pages' part of the pane (the pane less a sidebar beside them)
+    /// in pixels, and the window's scale factor, from the last frame
+    /// drawn; `(0, 0)` until then.
     pub(super) pane: (f32, f32),
     pub(super) dpi: f32,
     /// The document laid out for `zoom`, `pane` and `dpi`.
@@ -90,15 +121,25 @@ pub(super) struct PdfView {
     layout_for: Option<(Zoom, (f32, f32), f32, usize)>,
     /// Top-left of what's shown, in the layout's pixels.
     pub(super) scroll: (f32, f32),
-    /// A page to show the top of once the layout is known -- where a new
-    /// view starts, or a jump made before its pane was first drawn.
-    pub(super) pending_jump: Option<u32>,
+    /// A place to show at the pane's top once the layout is known --
+    /// where a new view starts, or a jump made before its pane was first
+    /// drawn.
+    pub(super) pending_jump: Option<Place>,
     pub(super) cache: HashMap<u32, CachedPage>,
     /// Renders asked for and not back yet: page -> (request, width).
     pub(super) pending: HashMap<u32, (u64, u32)>,
     /// The pages last asked to be kept, so a scroll that changes them
     /// tells the worker.
     wanted: Vec<u32>,
+    /// The sidebar, when open.
+    pub(super) sidebar: Option<Sidebar>,
+    /// Its width in pixels, and whether it's over the pages (a narrow
+    /// pane) rather than beside them.
+    pub(super) side_px: f32,
+    pub(super) side_over: bool,
+    /// Where jumps came from and, after `Ctrl-o`, went to.
+    back: Vec<Place>,
+    forward: Vec<Place>,
 }
 
 /// One page to draw in a pane: where, and which part of its render.
@@ -109,6 +150,17 @@ pub(super) struct PageDraw {
     pub(super) dest: (f32, f32, f32, f32),
     /// The part of the page `dest` shows, 0..1 each way.
     pub(super) uv: (f32, f32, f32, f32),
+}
+
+/// What a PDF pane draws besides its pages: the sidebar's text and rects,
+/// and the search's highlights.
+#[derive(Default)]
+pub(super) struct PdfChrome {
+    pub(super) spans: RowSpans,
+    /// Under the text: the sidebar's background and its selected row.
+    pub(super) rects: Vec<((f32, f32, f32, f32), [f32; 4])>,
+    /// Over the pages.
+    pub(super) highlights: Vec<((f32, f32, f32, f32), [f32; 4])>,
 }
 
 impl App {
@@ -174,9 +226,15 @@ impl App {
                 doc_key,
                 pages: Vec::new(),
                 outline: None,
-                pending_search_request_id: 0,
-                last_search_query: String::new(),
-                match_pages: Vec::new(),
+                outline_for: None,
+                search_id: 0,
+                query: String::new(),
+                matches: Vec::new(),
+                search_done: true,
+                current_match: None,
+                highlights: false,
+                jump_when_found: None,
+                marks: BTreeMap::new(),
                 last_place: (0, reader::DEFAULT_ZOOM),
             },
         );
@@ -199,10 +257,15 @@ impl App {
                     layout: Layout::default(),
                     layout_for: None,
                     scroll: (0.0, 0.0),
-                    pending_jump: Some(page),
+                    pending_jump: Some((page, 0.0)),
                     cache: HashMap::new(),
                     pending: HashMap::new(),
                     wanted: Vec::new(),
+                    sidebar: None,
+                    side_px: 0.0,
+                    side_over: false,
+                    back: Vec::new(),
+                    forward: Vec::new(),
                 },
             );
         }
@@ -217,8 +280,8 @@ impl App {
 
     /// The view the reader's commands act on: the focused pane's when it
     /// shows a document, otherwise the one read last while its pane still
-    /// shows it here -- so `SPC r n` from the outline next to a document,
-    /// or from the code beside it, turns its page.
+    /// shows it here -- so `SPC r n` from the code beside a document turns
+    /// its page.
     pub(super) fn pdf_target(&mut self) -> Option<ViewKey> {
         let key = self.pdf_view_in_pane(self.focused_pane_id()).or_else(|| {
             let (pane, buffer) = self.pdf_last_view?;
@@ -227,17 +290,6 @@ impl App {
         self.pdf_ensure_view(key)?;
         self.pdf_last_view = Some(key);
         Some(key)
-    }
-
-    /// A pane in this workspace showing `doc`, as a view: the one read
-    /// last if it still does, else the first.
-    fn pdf_view_of_doc(&self, doc: BufferId) -> Option<ViewKey> {
-        if let Some((pane, buffer)) = self.pdf_last_view {
-            if buffer == doc && self.windows().content(pane) == Some(&doc) {
-                return Some((pane, buffer));
-            }
-        }
-        self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&doc)).map(|p| (p, doc))
     }
 
     // -- Layout and rendering ---------------------------------------------
@@ -263,24 +315,30 @@ impl App {
             }
             view.scroll.0 = x_ratio * view.layout.width - view.pane.0 / 2.0;
         }
-        if let Some(page) = view.pending_jump.take() {
+        if let Some((page, frac)) = view.pending_jump.take() {
             let page = (page as usize).min(pages.len() - 1);
-            view.scroll.1 = view.layout.top_of(page);
+            view.scroll.1 = if frac > 0.0 { view.layout.scroll_for((page, frac)) } else { view.layout.top_of(page) };
         }
         let (max_x, max_y) = view.layout.max_scroll(view.pane);
         view.scroll = (view.scroll.0.clamp(0.0, max_x), view.scroll.1.clamp(0.0, max_y));
     }
 
     /// Everything a frame does for a view before drawing it: note its
-    /// pane's size, lay it out, ask for the pages it needs (the ones in
-    /// sight first), cancel what it no longer needs and let go of pages
-    /// far away. Also what a test calls in place of drawing.
-    pub(super) fn pdf_prepare_view(&mut self, key: ViewKey, pane: (f32, f32)) {
+    /// pane's size (less a sidebar beside the pages), lay it out, ask for
+    /// the pages it needs (the ones in sight first), cancel what it no
+    /// longer needs and let go of pages far away. `cell` is the text's
+    /// `(char width, line height)`, for the sidebar. Also what a test
+    /// calls in place of drawing.
+    pub(super) fn pdf_prepare_view(&mut self, key: ViewKey, pane: (f32, f32), cell: (f32, f32)) {
         let dpi = self.frame_scale();
         let Some(view) = self.pdf_ensure_view(key) else { return };
-        view.pane = pane;
+        let side_px = if view.sidebar.is_some() { (reader_sidebar::COLS as f32 * cell.0 + text::PAD_LEFT * 2.0).round() } else { 0.0 };
+        view.side_px = side_px;
+        view.side_over = side_px > 0.0 && pane.0 < reader_sidebar::BESIDE_MIN_COLS as f32 * cell.0;
+        view.pane = (if view.side_over { pane.0 } else { (pane.0 - side_px).max(1.0) }, pane.1);
         view.dpi = dpi;
         self.pdf_relayout(key);
+        self.pdf_settle_sidebar(key, ((pane.1 - text::PAD_TOP) / cell.1.max(1.0)).floor().max(2.0) as usize - 1);
         let Some(doc_key) = self.pdf_docs.get(&key.1).map(|doc| doc.doc_key) else { return };
         let Some(view) = self.pdf_views.get(&key) else { return };
         if view.layout.pages.is_empty() {
@@ -328,15 +386,25 @@ impl App {
         self.pdf_remember_place(key);
     }
 
-    /// The pages `key` shows in a pane at `rect`, clipped to it.
+    /// Where `key`'s pages start in a pane at `rect` (right of a sidebar
+    /// beside them), and the part of the pane they may be drawn in.
+    fn pdf_page_area(&self, key: ViewKey, rect: fenix_window::Rect) -> Option<(f32, fenix_window::Rect)> {
+        let view = self.pdf_views.get(&key)?;
+        let origin = if view.side_over { rect.x } else { rect.x + view.side_px };
+        let clip = fenix_window::Rect { x: rect.x + view.side_px, y: rect.y, w: (rect.w - view.side_px).max(0.0), h: rect.h };
+        Some((origin, clip))
+    }
+
+    /// The pages `key` shows in a pane at `rect`, clipped to where pages
+    /// go.
     pub(super) fn pdf_draw_plan(&self, key: ViewKey, rect: fenix_window::Rect) -> Vec<PageDraw> {
-        let Some(view) = self.pdf_views.get(&key) else { return Vec::new() };
+        let (Some(view), Some((origin, clip))) = (self.pdf_views.get(&key), self.pdf_page_area(key, rect)) else { return Vec::new() };
         let mut draws = Vec::new();
         for page in view.layout.visible(view.scroll.1, rect.h) {
             let p = view.layout.pages[page];
-            let (dx, dy) = (rect.x + p.x - view.scroll.0, rect.y + p.y - view.scroll.1);
-            let (x0, y0) = (dx.max(rect.x), dy.max(rect.y));
-            let (x1, y1) = ((dx + p.w).min(rect.x + rect.w), (dy + p.h).min(rect.y + rect.h));
+            let (dx, dy) = (origin + p.x - view.scroll.0, rect.y + p.y - view.scroll.1);
+            let (x0, y0) = (dx.max(clip.x), dy.max(clip.y));
+            let (x1, y1) = ((dx + p.w).min(clip.x + clip.w), (dy + p.h).min(clip.y + clip.h));
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
@@ -353,9 +421,21 @@ impl App {
     pub(super) fn pdf_current_page(&self, key: ViewKey) -> u32 {
         match self.pdf_views.get(&key) {
             Some(view) if !view.layout.pages.is_empty() => view.layout.current(view.scroll.1, view.pane) as u32,
-            Some(view) => view.pending_jump.unwrap_or(0),
+            Some(view) => view.pending_jump.map(|(p, _)| p).unwrap_or(0),
             None => self.pdf_docs.get(&key.1).map(|doc| doc.last_place.0).unwrap_or(0),
         }
+    }
+
+    /// Where `key`'s pane top is, as a place to come back to.
+    fn pdf_place(&self, key: ViewKey) -> Option<Place> {
+        let view = self.pdf_views.get(&key)?;
+        if let Some(place) = view.pending_jump {
+            return Some(place);
+        }
+        (!view.layout.pages.is_empty()).then(|| {
+            let (page, frac) = view.layout.anchor(view.scroll.1);
+            (page as u32, frac)
+        })
     }
 
     fn pdf_remember_place(&mut self, key: ViewKey) {
@@ -372,7 +452,7 @@ impl App {
     }
 
     /// A reply from the worker. Anything for a document or view since
-    /// closed, or for a render since superseded, is dropped.
+    /// closed, or for a render or search since superseded, is dropped.
     pub(super) fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
         match response {
             fenix_pdf::PdfResponse::Opened { key, pages } => {
@@ -406,24 +486,46 @@ impl App {
             }
             fenix_pdf::PdfResponse::Outline { key, entries } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
-                if let Some(doc) = self.pdf_docs.get_mut(&buffer) {
-                    doc.outline = Some(entries.clone());
+                let Some(doc) = self.pdf_docs.get_mut(&buffer) else { return };
+                let empty = entries.is_empty();
+                doc.outline = Some(entries);
+                match doc.outline_for.take() {
+                    Some(OutlineFor::Picker) => self.pdf_open_heading_picker(buffer),
+                    Some(OutlineFor::Sidebar) if empty => self.set_message("this PDF has no bookmarks"),
+                    _ => {}
                 }
-                // Only ever fetched to be shown.
-                self.pdf_open_outline_pane(buffer, &entries);
+                // An open sidebar goes to the section being read.
+                let views: Vec<ViewKey> = self.pdf_views.keys().filter(|(_, b)| *b == buffer).copied().collect();
+                for view_key in views {
+                    self.pdf_sidebar_to_here(view_key);
+                }
             }
-            fenix_pdf::PdfResponse::SearchResults { key, request_id, matches } => {
+            fenix_pdf::PdfResponse::SearchResults { key, request_id, matches, done } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
                 let Some(doc) = self.pdf_docs.get_mut(&buffer) else { return };
-                if request_id != doc.pending_search_request_id {
+                if request_id != doc.search_id {
                     return;
                 }
-                let mut pages: Vec<u32> = matches.iter().map(|m| m.page_index).collect();
-                pages.dedup();
-                doc.match_pages = pages;
-                let query = doc.last_search_query.clone();
-                self.set_message(format!("{} match{} for \"{query}\" -- n and N go through them", matches.len(), if matches.len() == 1 { "" } else { "es" }));
-                self.pdf_open_or_update_search_pane(buffer, &query, &matches);
+                doc.matches.extend(matches);
+                doc.search_done = done;
+                let pending_jump = doc.jump_when_found.and_then(|from| doc.matches.iter().position(|m| m.page_index >= from).map(|at| (from, at)));
+                if done && doc.jump_when_found.is_some() && pending_jump.is_none() && !doc.matches.is_empty() {
+                    doc.jump_when_found = None;
+                    self.pdf_go_to_match(buffer, 0);
+                } else if let Some((_, at)) = pending_jump {
+                    doc.jump_when_found = None;
+                    self.pdf_go_to_match(buffer, at);
+                }
+                if done {
+                    let (count, query) = self.pdf_docs.get(&buffer).map(|d| (d.matches.len(), d.query.clone())).unwrap_or_default();
+                    if self.pdf_search_prompt.is_none() {
+                        if count == 0 {
+                            self.set_message(format!("no matches for \"{query}\""));
+                        } else {
+                            self.set_message(format!("{count} match{} for \"{query}\" -- n and N go through them", if count == 1 { "" } else { "es" }));
+                        }
+                    }
+                }
             }
         }
         self.wake_caret();
@@ -441,11 +543,9 @@ impl App {
     }
 
     /// Closes the document of a buffer being killed: the worker lets go
-    /// of it, and its views and outline and search panes go with it. The
-    /// buffer itself is the caller's to close.
+    /// of it and its views go with it. The buffer itself is the caller's
+    /// to close.
     pub(super) fn pdf_close_doc(&mut self, buffer: BufferId) {
-        self.pdf_close_outline_pane(buffer);
-        self.pdf_close_search_pane(buffer);
         let Some(doc) = self.pdf_docs.remove(&buffer) else { return };
         if let Some(worker) = &self.pdf_worker {
             worker.send(fenix_pdf::PdfRequest::Close { key: doc.doc_key });
@@ -460,8 +560,8 @@ impl App {
     // -- Keys -------------------------------------------------------------
 
     /// A key in a PDF pane: `true` when the reader took it. What it
-    /// doesn't want -- the leader, `:`, `Ctrl-w`, `Ctrl-o` -- goes on to
-    /// the editor.
+    /// doesn't want -- the leader, `:`, `Ctrl-w` -- goes on to the
+    /// editor. With the sidebar focused, its keys come first.
     pub(super) fn reader_key(&mut self, keypress: KeyPress) -> bool {
         let Some(key) = self.pdf_view_in_pane(self.focused_pane_id()) else {
             self.pdf_keys.reset();
@@ -470,6 +570,10 @@ impl App {
         if self.pdf_keys_view != Some(key) {
             self.pdf_keys.reset();
             self.pdf_keys_view = Some(key);
+        }
+        self.pdf_last_view = Some(key);
+        if self.pdf_views.get(&key).and_then(|v| v.sidebar.as_ref()).is_some_and(|s| s.focused) {
+            return self.pdf_sidebar_key(key, keypress);
         }
         match self.pdf_keys.key(keypress) {
             Outcome::Pending | Outcome::Dropped => {
@@ -508,6 +612,9 @@ impl App {
             Cmd::Search => self.start_pdf_search_prompt(),
             Cmd::NextMatch => self.pdf_step_match(true),
             Cmd::PrevMatch => self.pdf_step_match(false),
+            Cmd::SetMark(c) => self.pdf_set_mark(c),
+            Cmd::GotoMark(c) => self.pdf_goto_mark(c),
+            Cmd::Escape => self.pdf_escape(),
         }
         self.wake_caret();
     }
@@ -517,6 +624,18 @@ impl App {
         self.pdf_keys.is_pending().then(|| self.pdf_keys.pending_text())
     }
 
+    /// `Esc`: hides the search's highlights, else closes the sidebar.
+    fn pdf_escape(&mut self) {
+        let Some(key) = self.pdf_target() else { return };
+        if let Some(doc) = self.pdf_docs.get_mut(&key.1).filter(|doc| doc.highlights) {
+            doc.highlights = false;
+            return;
+        }
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.sidebar = None;
+        }
+    }
+
     // -- Moving -----------------------------------------------------------
 
     /// `J`/`K`, `SPC r n`/`SPC r p`: `delta` pages on from the one being
@@ -524,7 +643,7 @@ impl App {
     pub(super) fn pdf_turn_page(&mut self, delta: i32) {
         let Some(key) = self.pdf_target() else { return };
         let current = self.pdf_current_page(key) as i64;
-        self.pdf_jump_to_page(key, (current + delta as i64).max(0) as u32);
+        self.pdf_show(key, ((current + delta as i64).max(0) as u32, 0.0));
     }
 
     pub(crate) fn pdf_next_page(&mut self) {
@@ -556,23 +675,51 @@ impl App {
     }
 
     /// Page `page_number`, counting from 1; past the end is the last page.
+    /// A jump: `Ctrl-o` comes back.
     pub(crate) fn pdf_goto_page(&mut self, page_number: u32) {
         let Some(key) = self.pdf_target() else { return };
-        self.pdf_jump_to_page(key, page_number.saturating_sub(1));
+        self.pdf_jump(key, (page_number.saturating_sub(1), 0.0));
     }
 
-    /// `key` to the top of page `page` (from 0; past the end is the
-    /// last). Before the view is laid out, it goes there once it is.
-    fn pdf_jump_to_page(&mut self, key: ViewKey, page: u32) {
+    /// Shows `place` at the top of `key`'s pane (a page past the end is
+    /// the last). Before the view is laid out, it goes there once it is.
+    fn pdf_show(&mut self, key: ViewKey, place: Place) {
         let count = self.pdf_docs.get(&key.1).map(|doc| doc.page_count()).unwrap_or(0);
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
-        let page = if count > 0 { page.min(count - 1) } else { page };
-        view.pending_jump = Some(page);
+        let page = if count > 0 { place.0.min(count - 1) } else { place.0 };
+        view.pending_jump = Some((page, place.1));
         self.pdf_relayout(key);
         if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
             doc.last_place.0 = page;
         }
         self.wake_caret();
+    }
+
+    /// `pdf_show`, remembering where it came from for `Ctrl-o`.
+    fn pdf_jump(&mut self, key: ViewKey, place: Place) {
+        if let Some(from) = self.pdf_place(key) {
+            if let Some(view) = self.pdf_views.get_mut(&key) {
+                view.back.push(from);
+                view.forward.clear();
+            }
+        }
+        self.pdf_show(key, place);
+    }
+
+    /// `Ctrl-o` (`back`) and `Ctrl-i` in a PDF: to where the last jump
+    /// came from, or back again. `false` when there's nowhere to go, so
+    /// the editor's own jump list takes the key.
+    pub(super) fn pdf_jump_history(&mut self, back: bool) -> bool {
+        let Some(key) = self.pdf_view_in_pane(self.focused_pane_id()) else { return false };
+        let here = self.pdf_place(key);
+        let Some(view) = self.pdf_views.get_mut(&key) else { return false };
+        let (from, to) = if back { (&mut view.back, &mut view.forward) } else { (&mut view.forward, &mut view.back) };
+        let Some(place) = from.pop() else { return false };
+        if let Some(here) = here {
+            to.push(here);
+        }
+        self.pdf_show(key, place);
+        true
     }
 
     /// `h`/`l`: pans by `PAN_STEP_PX` steps.
@@ -585,26 +732,23 @@ impl App {
         self.wake_caret();
     }
 
-    /// `n`/`N`: the next (or previous) page with a match of the last
-    /// search, going round the end.
-    fn pdf_step_match(&mut self, forward: bool) {
+    // -- Marks ------------------------------------------------------------
+
+    fn pdf_set_mark(&mut self, c: char) {
         let Some(key) = self.pdf_target() else { return };
-        let Some(doc) = self.pdf_docs.get(&key.1) else { return };
-        if doc.match_pages.is_empty() {
-            let message = if doc.last_search_query.is_empty() { "no search yet -- / searches the document".to_string() } else { format!("no matches for \"{}\"", doc.last_search_query) };
-            self.set_message(message);
-            return;
+        let Some(place) = self.pdf_place(key) else { return };
+        if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
+            doc.marks.insert(c, place);
         }
-        let current = self.pdf_current_page(key);
-        let pages = &doc.match_pages;
-        let at = if forward {
-            pages.iter().position(|&p| p > current).unwrap_or(0)
-        } else {
-            pages.iter().rposition(|&p| p < current).unwrap_or(pages.len() - 1)
-        };
-        let (page, total) = (pages[at], pages.len());
-        self.pdf_jump_to_page(key, page);
-        self.set_message(format!("match on page {} ({}/{total} pages)", page + 1, at + 1));
+        self.set_message(format!("mark {c} on page {}", place.0 + 1));
+    }
+
+    fn pdf_goto_mark(&mut self, c: char) {
+        let Some(key) = self.pdf_target() else { return };
+        match self.pdf_docs.get(&key.1).and_then(|doc| doc.marks.get(&c).copied()) {
+            Some(place) => self.pdf_jump(key, place),
+            None => self.set_message(format!("no mark {c} in this document -- m{c} sets one")),
+        }
     }
 
     // -- Zoom -------------------------------------------------------------
@@ -647,16 +791,22 @@ impl App {
         self.pdf_set_zoom(Zoom::FitWidth);
     }
 
-    /// The modeline's page and zoom for the focused pane's document.
+    /// The modeline's page, zoom and search for the focused pane's
+    /// document.
     pub(super) fn pdf_modeline_position(&self) -> Option<String> {
         let key = self.pdf_view_in_pane(self.focused_pane_id())?;
         let doc = self.pdf_docs.get(&key.1)?;
         let zoom = self.pdf_views.get(&key).map(|view| view.zoom).unwrap_or(doc.last_place.1);
         let pending = self.pdf_pending_keys().map(|keys| format!("{keys}   ")).unwrap_or_default();
+        let search = match (doc.highlights, doc.current_match) {
+            (true, Some(at)) => format!("   /{} {}/{}", doc.query, at + 1, doc.matches.len()),
+            (true, None) if !doc.query.is_empty() => format!("   /{} {}", doc.query, doc.matches.len()),
+            _ => String::new(),
+        };
         Some(if doc.pages.is_empty() {
             format!("{pending}Opening...")
         } else {
-            format!("{pending}Page {}/{}   {}", self.pdf_current_page(key) + 1, doc.page_count(), reader::zoom_label(zoom))
+            format!("{pending}Page {}/{}   {}{search}", self.pdf_current_page(key) + 1, doc.page_count(), reader::zoom_label(zoom))
         })
     }
 
@@ -695,90 +845,189 @@ impl App {
         self.pdf_goto_page_prompt.as_ref().map(|input| format!("go to page: {input}"))
     }
 
-    // -- Outline ----------------------------------------------------------
+    // -- Sidebar ----------------------------------------------------------
 
-    /// Closes `doc`'s outline pane, if it has one, and goes back to the
-    /// document.
-    pub(super) fn pdf_close_outline_pane(&mut self, doc: BufferId) {
-        let Some(pane) = self.pdf_outline_panes.remove(&doc) else { return };
-        self.pdf_close_companion(pane);
-        if let Some((reader_pane, _)) = self.pdf_view_of_doc(doc) {
-            self.windows_mut().focus(reader_pane);
+    /// `o`, `SPC r o`: opens the sidebar on the outline with the keyboard
+    /// in it, or closes it.
+    pub(crate) fn pdf_toggle_outline(&mut self) {
+        let Some(key) = self.pdf_target() else { return };
+        let Some(view) = self.pdf_views.get_mut(&key) else { return };
+        if view.sidebar.is_some() {
+            view.sidebar = None;
+            return;
         }
-        self.wake_caret();
+        view.sidebar = Some(Sidebar::open(reader_sidebar::Tab::Outline));
+        self.pdf_want_outline(key.1, OutlineFor::Sidebar);
+        self.pdf_sidebar_to_here(key);
     }
 
-    /// Closes an outline or search pane and forgets its buffer.
-    fn pdf_close_companion(&mut self, pane: fenix_window::WindowId) {
-        let buffer = self.windows().content(pane).copied();
-        if self.windows().windows().contains(&pane) {
-            self.windows_mut().focus(pane);
-            if self.windows_mut().close_focused() {
-                self.workspaces.active_pane_states_mut().remove(&pane);
-                self.workspaces.active_scroll_anims_mut().remove(&pane);
-                self.workspaces.active_pane_tabs_mut().remove(&pane);
+    /// Asks the worker for `doc`'s outline if it hasn't come yet.
+    fn pdf_want_outline(&mut self, doc: BufferId, what: OutlineFor) {
+        let Some(d) = self.pdf_docs.get_mut(&doc) else { return };
+        if d.outline.is_some() {
+            return;
+        }
+        let asked = d.outline_for.is_some();
+        if !asked || what == OutlineFor::Picker {
+            d.outline_for = Some(what);
+        }
+        if !asked {
+            if let Some(worker) = &self.pdf_worker {
+                worker.send(fenix_pdf::PdfRequest::FetchOutline { key: d.doc_key });
             }
         }
-        if let Some(buffer) = buffer {
-            self.buffers.close(buffer);
-            self.pdf_outline_lines.remove(&buffer);
-            self.pdf_outline_source.remove(&buffer);
-            self.pdf_search_result_lines.remove(&buffer);
-            self.pdf_search_source.remove(&buffer);
+    }
+
+    /// The rows `key`'s sidebar shows now.
+    fn pdf_sidebar_rows(&self, key: ViewKey) -> Vec<reader_sidebar::Row> {
+        let (Some(view), Some(doc)) = (self.pdf_views.get(&key), self.pdf_docs.get(&key.1)) else { return Vec::new() };
+        let Some(side) = &view.sidebar else { return Vec::new() };
+        let outline = doc.outline.as_deref().unwrap_or(&[]);
+        let matches: Vec<MatchRow> = doc.matches.iter().map(|m| MatchRow { page: m.page_index, context: m.context.clone() }).collect();
+        let marks: Vec<(char, u32)> = doc.marks.iter().map(|(&c, &(page, _))| (c, page)).collect();
+        side.rows(outline, &matches, &marks, self.pdf_current_page(key), doc.current_match)
+    }
+
+    /// Puts the outline's cursor on the section being read.
+    fn pdf_sidebar_to_here(&mut self, key: ViewKey) {
+        let rows = self.pdf_sidebar_rows(key);
+        if let Some(side) = self.pdf_views.get_mut(&key).and_then(|v| v.sidebar.as_mut()) {
+            side.to_here(&rows);
         }
     }
 
-    /// A split next to `doc`'s pane showing `entries`.
-    fn pdf_open_outline_pane(&mut self, doc: BufferId, entries: &[fenix_pdf::outline::OutlineEntry]) {
-        let Some((reader_pane, _)) = self.pdf_view_of_doc(doc) else { return };
-        self.windows_mut().focus(reader_pane);
-        let (text, lines) = pdf_outline::render(entries);
-        let buffer = self.buffers.open_pdf_outline(&text);
-        let pane = self.windows_mut().split(SplitKind::Vertical, buffer);
-        self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(Cursor::at_start()));
-        self.pane_titles.insert(pane, "Outline".to_string());
-        self.pdf_outline_lines.insert(buffer, lines);
-        self.pdf_outline_source.insert(buffer, doc);
-        self.pdf_outline_panes.insert(doc, pane);
+    fn pdf_settle_sidebar(&mut self, key: ViewKey, height: usize) {
+        let count = self.pdf_sidebar_rows(key).len();
+        if let Some(side) = self.pdf_views.get_mut(&key).and_then(|v| v.sidebar.as_mut()) {
+            side.settle(count, height);
+        }
+    }
+
+    /// A key while the sidebar has the keyboard.
+    fn pdf_sidebar_key(&mut self, key: ViewKey, keypress: KeyPress) -> bool {
+        let rows = self.pdf_sidebar_rows(key);
+        let outline = self.pdf_docs.get(&key.1).and_then(|d| d.outline.clone()).unwrap_or_default();
+        let Some(side) = self.pdf_views.get_mut(&key).and_then(|v| v.sidebar.as_mut()) else { return false };
+        let result = side.key(keypress, &rows, &outline);
+        match result {
+            SideKey::Taken => {}
+            SideKey::Close => {
+                if let Some(view) = self.pdf_views.get_mut(&key) {
+                    view.sidebar = None;
+                }
+            }
+            SideKey::Go(target) => {
+                side.focused = false;
+                match target {
+                    Target::Page(page) => self.pdf_jump(key, (page, 0.0)),
+                    Target::Match(at) => self.pdf_go_to_match(key.1, at),
+                    Target::Mark(c) => self.pdf_goto_mark(c),
+                }
+            }
+            SideKey::Pass => return false,
+        }
         self.wake_caret();
+        true
     }
 
-    /// `o`, `SPC r o`: opens or closes the outline of the document read
-    /// -- from the document or from the outline itself.
-    pub(crate) fn pdf_toggle_outline(&mut self) {
-        let focused = self.focused_buffer_id();
-        if let Some(doc) = self.pdf_outline_source.get(&focused).copied() {
-            self.pdf_close_outline_pane(doc);
-            return;
+    /// What `key`'s pane at `rect` draws besides its pages: the sidebar
+    /// (text, background, selected row) and the search's highlights.
+    pub(super) fn pdf_chrome(&self, key: ViewKey, rect: fenix_window::Rect, cell: (f32, f32)) -> PdfChrome {
+        let theme = self.theme;
+        let mut chrome = PdfChrome::default();
+        let (Some(view), Some(doc)) = (self.pdf_views.get(&key), self.pdf_docs.get(&key.1)) else { return chrome };
+
+        if doc.highlights {
+            if let (Some((origin, clip)), false) = (self.pdf_page_area(key, rect), view.layout.pages.is_empty()) {
+                let visible = view.layout.visible(view.scroll.1, rect.h);
+                let scale = view.layout.scale;
+                for (i, m) in doc.matches.iter().enumerate().filter(|(_, m)| visible.contains(&(m.page_index as usize))) {
+                    let p = view.layout.pages[m.page_index as usize];
+                    let tint = if doc.current_match == Some(i) { CURRENT_MATCH_TINT } else { MATCH_TINT };
+                    for r in &m.rects {
+                        let x0 = (origin + p.x - view.scroll.0 + r[0] * scale).max(clip.x);
+                        let y0 = (rect.y + p.y - view.scroll.1 + r[1] * scale).max(clip.y);
+                        let x1 = (origin + p.x - view.scroll.0 + r[2] * scale).min(clip.x + clip.w);
+                        let y1 = (rect.y + p.y - view.scroll.1 + r[3] * scale).min(clip.y + clip.h);
+                        if x1 > x0 && y1 > y0 {
+                            chrome.highlights.push(((x0, y0, x1 - x0, y1 - y0), tint));
+                        }
+                    }
+                }
+            }
         }
+
+        let Some(side) = &view.sidebar else { return chrome };
+        let (char_w, line_h) = cell;
+        chrome.rects.push(((rect.x, rect.y, view.side_px, rect.h), theme.sidebar_bg));
+        chrome.rects.push(((rect.x + view.side_px - 1.0, rect.y, 1.0, rect.h), theme.divider));
+        let rows = self.pdf_sidebar_rows(key);
+        let height = ((rect.h - text::PAD_TOP) / line_h.max(1.0)).floor().max(2.0) as usize - 1;
+        let row_y = |row: usize| rect.y + text::PAD_TOP + row as f32 * line_h;
+        let header = side.header(doc.matches.len(), doc.marks.len(), !doc.search_done);
+        chrome.spans.push((format!("{header:.width$}", width = reader_sidebar::COLS), theme.caret_text, false));
+        if rows.is_empty() {
+            let empty = match (side.tab(), &doc.outline) {
+                (reader_sidebar::Tab::Outline, None) => "loading the outline\u{2026}",
+                (reader_sidebar::Tab::Outline, Some(_)) => "no bookmarks -- Tab for matches",
+                (reader_sidebar::Tab::Matches, _) => "no matches -- / searches",
+                (reader_sidebar::Tab::Marks, _) => "no marks -- m{a} sets one",
+            };
+            chrome.spans.push(("\n".to_string(), theme.fg, false));
+            chrome.spans.push((empty.to_string(), theme.gutter_fg, false));
+        }
+        for (i, row) in rows.iter().enumerate().skip(side.scroll).take(height) {
+            let shown = i - side.scroll + 1;
+            chrome.spans.push(("\n".to_string(), theme.fg, false));
+            let color = if row.here { theme.caret_text } else { theme.fg };
+            chrome.spans.push((reader_sidebar::fit(row, reader_sidebar::COLS), color, false));
+            if i == side.cursor {
+                let tint = if side.focused { theme.selection } else { [theme.selection[0], theme.selection[1], theme.selection[2], theme.selection[3] * 0.45] };
+                chrome.rects.push(((rect.x, row_y(shown), view.side_px - 1.0, line_h), tint));
+            }
+            if row.here {
+                chrome.rects.push(((rect.x, row_y(shown), 2.0, line_h), theme.mode_normal));
+            }
+        }
+        let _ = char_w;
+        chrome
+    }
+
+    // -- Headings picker --------------------------------------------------
+
+    /// `SPC r t`: a fuzzy picker over the document's headings.
+    pub(crate) fn pdf_pick_heading(&mut self) {
         let Some((_, doc)) = self.pdf_target() else { return };
-        if self.pdf_outline_panes.contains_key(&doc) {
-            self.pdf_close_outline_pane(doc);
-            return;
-        }
-        if let Some(entries) = self.pdf_docs.get(&doc).and_then(|d| d.outline.clone()) {
-            self.pdf_open_outline_pane(doc, &entries);
-            return;
-        }
-        if let (Some(worker), Some(d)) = (&self.pdf_worker, self.pdf_docs.get(&doc)) {
-            worker.send(fenix_pdf::PdfRequest::FetchOutline { key: d.doc_key });
+        if self.pdf_docs.get(&doc).is_some_and(|d| d.outline.is_some()) {
+            self.pdf_open_heading_picker(doc);
+        } else {
+            self.pdf_want_outline(doc, OutlineFor::Picker);
         }
     }
 
-    /// `Enter` in the outline: its document to that entry's page.
-    pub(super) fn pdf_outline_activate_selected(&mut self) {
-        let line = self.open().buffer.line_col(&self.cursor()).0;
-        let buffer = self.focused_buffer_id();
-        let Some(page_index) = self.pdf_outline_lines.get(&buffer).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).map(|meta| meta.page_index) else { return };
-        let Some(doc) = self.pdf_outline_source.get(&buffer).copied() else { return };
-        let Some(key) = self.pdf_view_of_doc(doc) else { return };
-        self.pdf_ensure_view(key);
-        self.pdf_jump_to_page(key, page_index);
+    fn pdf_open_heading_picker(&mut self, doc: BufferId) {
+        let entries = self.pdf_docs.get(&doc).and_then(|d| d.outline.clone()).unwrap_or_default();
+        if entries.is_empty() {
+            self.set_message("this PDF has no bookmarks");
+            return;
+        }
+        let candidates = entries
+            .iter()
+            .map(|e| fenix_picker::Candidate::new(format!("{}{}   p.{}", "  ".repeat(e.depth as usize), e.title, e.page_index + 1), e.page_index))
+            .collect();
+        self.enter_picker(ActivePicker::PdfHeading(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The heading picked: the document read to its page.
+    pub(super) fn pdf_heading_picked(&mut self, page: u32) {
+        let Some(key) = self.pdf_target() else { return };
+        self.pdf_jump(key, (page, 0.0));
     }
 
     // -- Search -----------------------------------------------------------
 
-    /// `/`, `SPC r /`: asks what to search for.
+    /// `/`, `SPC r /`: asks what to search for; the matches light up as
+    /// you type.
     pub(crate) fn start_pdf_search_prompt(&mut self) {
         if self.pdf_target().is_none() {
             return;
@@ -790,93 +1039,125 @@ impl App {
     pub(super) fn pdf_search_prompt_key(&mut self, key: KeyPress) {
         let Some(input) = &mut self.pdf_search_prompt else { return };
         match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_search_prompt = None,
+            KeyCode::Named(FenixNamedKey::Escape) => {
+                self.pdf_search_prompt = None;
+                if let Some((_, doc)) = self.pdf_target() {
+                    if let Some(d) = self.pdf_docs.get_mut(&doc) {
+                        d.highlights = false;
+                    }
+                }
+            }
             KeyCode::Named(FenixNamedKey::Enter) => {
-                let query = self.pdf_search_prompt.take().unwrap_or_default();
-                self.pdf_dispatch_search(query);
+                self.pdf_search_prompt = None;
+                self.pdf_accept_search();
             }
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
+                let query = input.clone();
+                self.pdf_dispatch_search(query);
             }
-            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
+            KeyCode::Char(c) if key.mods == Mods::default() => {
+                input.push(c);
+                let query = input.clone();
+                self.pdf_dispatch_search(query);
+            }
             _ => {}
         }
         self.wake_caret();
     }
 
     pub(super) fn pdf_search_prompt_text(&self) -> Option<String> {
-        self.pdf_search_prompt.as_ref().map(|input| format!("search pdf: {input}"))
+        let input = self.pdf_search_prompt.as_ref()?;
+        let count = self.pdf_last_view.and_then(|(_, doc)| self.pdf_docs.get(&doc)).filter(|_| !input.is_empty()).map(|d| {
+            format!("   {}{}", d.matches.len(), if d.search_done { " matches" } else { "\u{2026}" })
+        });
+        Some(format!("search pdf: {input}{}", count.unwrap_or_default()))
     }
 
-    /// Sends a search of the document read. A blank query does nothing.
+    /// Searches the document read for `query`, from the start, replacing
+    /// the last search. Smart-case: a capital makes it exact.
     fn pdf_dispatch_search(&mut self, query: String) {
-        if query.trim().is_empty() {
-            return;
-        }
         let Some((_, doc)) = self.pdf_target() else { return };
         let request_id = self.pdf_next_id();
         let Some(d) = self.pdf_docs.get_mut(&doc) else { return };
-        d.pending_search_request_id = request_id;
-        d.last_search_query = query.clone();
-        d.match_pages.clear();
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::Search { key: d.doc_key, request_id, query });
-        }
-        self.set_message("searching...");
-    }
-
-    pub(super) fn pdf_close_search_pane(&mut self, doc: BufferId) {
-        let Some(pane) = self.pdf_search_panes.remove(&doc) else { return };
-        self.pdf_close_companion(pane);
-        if let Some((reader_pane, _)) = self.pdf_view_of_doc(doc) {
-            self.windows_mut().focus(reader_pane);
-        }
-        self.wake_caret();
-    }
-
-    /// The results of a search of `doc`: into its search pane if it has
-    /// one, else a new split next to it.
-    fn pdf_open_or_update_search_pane(&mut self, doc: BufferId, query: &str, matches: &[fenix_pdf::search::PdfSearchMatch]) {
-        let (text, lines) = pdf_search::render(query, matches);
-        if let Some(buffer) = self.pdf_search_panes.get(&doc).and_then(|&pane| self.windows().content(pane).copied()) {
-            if let Some(ob) = self.buffers.get_mut(buffer) {
-                let end = ob.buffer.len_chars();
-                let mut scratch = Cursor::at_start();
-                ob.buffer.replace_range(&mut scratch, 0, end, &text);
-            }
-            self.pdf_search_result_lines.insert(buffer, lines);
-            for p in self.windows().windows() {
-                if self.windows().content(p) == Some(&buffer) {
-                    *self.pane_state_mut(p) = PaneState::seeded_at(Cursor::at_start());
-                }
-            }
-            self.wake_caret();
+        d.search_id = request_id;
+        d.query = query.clone();
+        d.matches.clear();
+        d.current_match = None;
+        d.highlights = true;
+        d.search_done = query.trim().is_empty();
+        if query.trim().is_empty() {
             return;
         }
-        let Some((reader_pane, _)) = self.pdf_view_of_doc(doc) else { return };
-        self.windows_mut().focus(reader_pane);
-        let buffer = self.buffers.open_pdf_search_results(&text);
-        let pane = self.windows_mut().split(SplitKind::Vertical, buffer);
-        self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(Cursor::at_start()));
-        self.pane_titles.insert(pane, "Search results".to_string());
-        self.pdf_search_result_lines.insert(buffer, lines);
-        self.pdf_search_source.insert(buffer, doc);
-        self.pdf_search_panes.insert(doc, pane);
-        self.wake_caret();
+        let match_case = query.chars().any(char::is_uppercase);
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Search { key: d.doc_key, request_id, query, match_case, from_page: 0 });
+        }
     }
 
-    /// `Enter` on a search result: its document to that page.
-    pub(super) fn pdf_search_activate_selected(&mut self) {
-        let line = self.open().buffer.line_col(&self.cursor()).0;
-        let buffer = self.focused_buffer_id();
-        let Some(page_index) = self.pdf_search_result_lines.get(&buffer).and_then(|lines| lines.get(line)).and_then(|meta| meta.as_ref()).map(|meta| meta.page_index) else { return };
-        let Some(doc) = self.pdf_search_source.get(&buffer).copied() else { return };
-        let Some(key) = self.pdf_view_of_doc(doc) else { return };
-        self.pdf_ensure_view(key);
-        self.pdf_jump_to_page(key, page_index);
+    /// `Enter` in the search prompt: to the first match at or after the
+    /// page being read -- now, or when it's found.
+    fn pdf_accept_search(&mut self) {
+        let Some(key) = self.pdf_target() else { return };
+        let current = self.pdf_current_page(key);
+        let Some(doc) = self.pdf_docs.get(&key.1) else { return };
+        if doc.query.trim().is_empty() {
+            return;
+        }
+        let (at, done, any, query) = (doc.matches.iter().position(|m| m.page_index >= current), doc.search_done, !doc.matches.is_empty(), doc.query.clone());
+        match at {
+            Some(at) => self.pdf_go_to_match(key.1, at),
+            None if !done => {
+                if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
+                    doc.jump_when_found = Some(current);
+                }
+            }
+            None if any => self.pdf_go_to_match(key.1, 0),
+            None => self.set_message(format!("no matches for \"{query}\"")),
+        }
+    }
+
+    /// `n`/`N`: the next (or previous) match, going round the end. With
+    /// no match gone to yet, the first after the page being read.
+    fn pdf_step_match(&mut self, forward: bool) {
+        let Some(key) = self.pdf_target() else { return };
+        let current_page = self.pdf_current_page(key);
+        let Some(doc) = self.pdf_docs.get_mut(&key.1) else { return };
+        if doc.matches.is_empty() {
+            let message = if doc.query.is_empty() { "no search yet -- / searches the document".to_string() } else { format!("no matches for \"{}\"", doc.query) };
+            self.set_message(message);
+            return;
+        }
+        doc.highlights = true;
+        let n = doc.matches.len();
+        let at = match doc.current_match {
+            Some(at) if forward => (at + 1) % n,
+            Some(at) => (at + n - 1) % n,
+            None if forward => doc.matches.iter().position(|m| m.page_index >= current_page).unwrap_or(0),
+            None => doc.matches.iter().rposition(|m| m.page_index <= current_page).unwrap_or(n - 1),
+        };
+        self.pdf_go_to_match(key.1, at);
+    }
+
+    /// Match `at` of `doc`'s search: highlighted as the current one and
+    /// brought into view, a third of the way down the pane.
+    fn pdf_go_to_match(&mut self, doc: BufferId, at: usize) {
+        let Some(d) = self.pdf_docs.get_mut(&doc) else { return };
+        let Some(m) = d.matches.get(at) else { return };
+        let (page, top_pts, total, page_h) = (m.page_index, m.rects.first().map(|r| r[1]).unwrap_or(0.0), d.matches.len(), d.pages.get(m.page_index as usize).map(|p| p.1).unwrap_or(792.0));
+        d.current_match = Some(at);
+        d.highlights = true;
+        let key = self.pdf_target().filter(|(_, b)| *b == doc).or_else(|| {
+            self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&doc)).map(|p| (p, doc))
+        });
+        if let Some(key) = key {
+            let third = self.pdf_views.get(&key).filter(|v| v.layout.scale > 0.0).map(|v| v.pane.1 / 3.0 / v.layout.scale).unwrap_or(0.0);
+            let frac = ((top_pts - third) / page_h.max(1.0)).max(0.0);
+            self.pdf_jump(key, (page, frac));
+        }
+        self.set_message(format!("match {}/{total} on page {}", at + 1, page + 1));
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -889,6 +1170,7 @@ mod tests {
 
     /// A pane that fits a US Letter page's width at 100%, with the gaps.
     const PANE: (f32, f32) = (636.0, 400.0);
+    const CELL: (f32, f32) = (text::CHAR_WIDTH, text::LINE_HEIGHT);
     /// How far down the column each page starts: its height and a gap.
     const STRIDE: f32 = 792.0 + 12.0;
 
@@ -902,7 +1184,7 @@ mod tests {
         app.open_pdf_path(Path::new(path));
         let key = app.pdf_view_in_pane(app.focused_pane_id()).expect("the PDF is in the focused pane");
         app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 10];
-        app.pdf_prepare_view(key, PANE);
+        app.pdf_prepare_view(key, PANE, CELL);
         (guard, key, app)
     }
 
@@ -964,7 +1246,7 @@ mod tests {
         app.windows_mut().focus(right_pane);
         let right = app.pdf_target().expect("the split shows the document");
         assert_eq!(right, (right_pane, left.1));
-        app.pdf_prepare_view(right, PANE);
+        app.pdf_prepare_view(right, PANE, CELL);
 
         app.pdf_goto_page(7);
 
@@ -980,7 +1262,7 @@ mod tests {
         app.pdf_goto_page(5);
         app.pdf_zoom_fit_page();
         let pane = app.windows_mut().split(SplitKind::Vertical, key.1);
-        app.pdf_prepare_view((pane, key.1), PANE);
+        app.pdf_prepare_view((pane, key.1), PANE, CELL);
         assert_eq!(page(&app, (pane, key.1)), 4);
         assert_eq!(view(&app, (pane, key.1)).zoom, Zoom::FitPage);
     }
@@ -1032,7 +1314,7 @@ mod tests {
         let (_guard, key, mut app) = test_open_pdf("pdf_rendered.pdf");
         let (first, _) = view(&app, key).pending[&0];
         app.pdf_set_zoom(Zoom::Percent(50));
-        app.pdf_prepare_view(key, PANE);
+        app.pdf_prepare_view(key, PANE, CELL);
         let (second, w) = view(&app, key).pending[&0];
         assert_ne!(first, second, "a new size asks again");
 
@@ -1051,7 +1333,7 @@ mod tests {
         assert!(view(&app, key).cache.contains_key(&0));
 
         app.pdf_goto_page(10);
-        app.pdf_prepare_view(key, PANE);
+        app.pdf_prepare_view(key, PANE, CELL);
 
         assert!(!view(&app, key).pending.contains_key(&1), "page 2 isn't needed at the end");
         assert!(view(&app, key).pending.contains_key(&9));
@@ -1059,7 +1341,7 @@ mod tests {
         assert!(view(&app, key).cache.contains_key(&0), "8 pages away is still kept");
         app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 30];
         app.pdf_goto_page(30);
-        app.pdf_prepare_view(key, PANE);
+        app.pdf_prepare_view(key, PANE, CELL);
         assert!(!view(&app, key).cache.contains_key(&0), "far away is let go");
     }
 
@@ -1195,27 +1477,6 @@ mod tests {
     }
 
     #[test]
-    fn n_and_capital_n_go_through_the_pages_with_matches() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_keys_matches.pdf");
-        app.pdf_docs.get_mut(&key.1).unwrap().match_pages = vec![2, 5, 8];
-        keys(&mut app, "n");
-        assert_eq!(page(&app, key), 2);
-        keys(&mut app, "n");
-        assert_eq!(page(&app, key), 5);
-        keys(&mut app, "N");
-        assert_eq!(page(&app, key), 2);
-        keys(&mut app, "N");
-        assert_eq!(page(&app, key), 8, "round the start to the last");
-    }
-
-    #[test]
-    fn n_before_any_search_says_how_to_search() {
-        let (_guard, _key, mut app) = test_open_pdf("pdf_keys_no_search.pdf");
-        keys(&mut app, "n");
-        assert!(app.modeline_text().contains("/ searches"), "{}", app.modeline_text());
-    }
-
-    #[test]
     fn the_modeline_shows_the_page_zoom_and_a_count_being_typed() {
         let (_guard, _key, mut app) = test_open_pdf("pdf_modeline.pdf");
         app.pdf_goto_page(4);
@@ -1252,7 +1513,43 @@ mod tests {
         assert!(app.pdf_goto_page_prompt.is_none() && app.pdf_search_prompt.is_none());
     }
 
-    // -- Outline ----------------------------------------------------------
+    // -- Jumps and marks --------------------------------------------------
+
+    #[test]
+    fn ctrl_o_goes_back_from_a_jump_and_ctrl_i_forward_again() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_jumps.pdf");
+        app.pdf_scroll(100);
+        keys(&mut app, "7G");
+        assert_eq!(page(&app, key), 6);
+        assert!(app.pdf_jump_history(true));
+        assert_eq!(view(&app, key).scroll.1, 100.0, "back where the jump came from");
+        assert!(app.pdf_jump_history(false));
+        assert_eq!(page(&app, key), 6);
+        assert!(!app.pdf_jump_history(false), "nothing further: the editor's own jump list takes it");
+    }
+
+    #[test]
+    fn scrolling_isnt_a_jump() {
+        let (_guard, _key, mut app) = test_open_pdf("pdf_not_a_jump.pdf");
+        keys(&mut app, "5j");
+        assert!(!app.pdf_jump_history(true));
+    }
+
+    #[test]
+    fn marks_come_back_to_the_same_place() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_marks.pdf");
+        app.pdf_goto_page(4);
+        app.pdf_scroll(100);
+        let place = view(&app, key).scroll.1;
+        keys(&mut app, "ma");
+        keys(&mut app, "G");
+        keys(&mut app, "'a");
+        assert!((view(&app, key).scroll.1 - place).abs() < 1.0);
+        keys(&mut app, "'b");
+        assert!(app.modeline_text().contains("no mark b"), "{}", app.modeline_text());
+    }
+
+    // -- Sidebar ----------------------------------------------------------
 
     fn sample_outline() -> Vec<fenix_pdf::outline::OutlineEntry> {
         vec![
@@ -1262,156 +1559,200 @@ mod tests {
     }
 
     #[test]
-    fn o_opens_the_outline_beside_the_document_and_closes_it_again() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline.pdf");
-        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
-        let panes = app.windows().window_count();
-
+    fn o_opens_the_sidebar_on_the_outline_and_asks_for_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_sidebar.pdf");
         keys(&mut app, "o");
-        assert_eq!(app.windows().window_count(), panes + 1);
-        let outline = app.focused_buffer_id();
-        assert_eq!(app.buffers.get(outline).unwrap().kind, BufferKind::PdfOutline);
-        assert_eq!(app.pdf_outline_source.get(&outline), Some(&key.1));
-        assert_eq!(app.open().buffer.text(), "Chapter 1\nChapter 2\n");
+        let side = view(&app, key).sidebar.as_ref().expect("open");
+        assert!(side.focused, "it has the keyboard");
+        assert_eq!(app.pdf_docs[&key.1].outline_for, Some(OutlineFor::Sidebar), "asked for");
+        assert_eq!(app.windows().window_count(), 1, "in the pane, not beside it");
 
-        app.pdf_toggle_outline();
-        assert_eq!(app.windows().window_count(), panes);
-        assert!(app.pdf_outline_panes.is_empty() && app.pdf_outline_lines.is_empty() && app.pdf_outline_source.is_empty());
-        assert_eq!(app.focused_pane_id(), key.0);
+        let doc_key = app.pdf_docs[&key.1].doc_key;
+        app.pdf_goto_page(8);
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Outline { key: doc_key, entries: sample_outline() });
+        assert_eq!(view(&app, key).sidebar.as_ref().unwrap().cursor, 1, "on the section being read");
     }
 
     #[test]
-    fn an_outline_not_fetched_yet_is_asked_for_and_opens_when_it_comes() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_fetch.pdf");
-        let panes = app.windows().window_count();
-        app.pdf_toggle_outline();
-        assert_eq!(app.windows().window_count(), panes, "nothing to show yet");
+    fn enter_in_the_sidebar_goes_there_and_gives_the_pages_the_keyboard() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_sidebar_enter.pdf");
+        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
+        keys(&mut app, "o");
+        assert!(app.reader_key(KeyPress::char('j')), "the sidebar's j");
+        assert_eq!(page(&app, key), 0, "moving in the sidebar doesn't scroll");
+        assert!(app.reader_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(page(&app, key), 6);
+        assert!(!view(&app, key).sidebar.as_ref().unwrap().focused);
+        keys(&mut app, "j");
+        assert!(view(&app, key).scroll.1 > 6.0 * STRIDE - 12.0, "j scrolls the pages again");
+        keys(&mut app, "o");
+        assert!(view(&app, key).sidebar.is_none(), "o closes it");
+    }
 
+    #[test]
+    fn a_wide_pane_has_the_sidebar_beside_the_pages_and_a_narrow_one_over_them() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_sidebar_width.pdf");
+        keys(&mut app, "o");
+        app.pdf_prepare_view(key, (1200.0, 400.0), CELL);
+        let side = view(&app, key).side_px;
+        assert!(side > 0.0 && !view(&app, key).side_over);
+        assert_eq!(view(&app, key).pane.0, 1200.0 - side, "the pages fit what's left");
+        app.pdf_prepare_view(key, PANE, CELL);
+        assert!(view(&app, key).side_over);
+        assert_eq!(view(&app, key).pane.0, PANE.0, "the pages keep the whole width");
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 };
+        assert!(app.pdf_draw_plan(key, rect).iter().all(|d| d.dest.0 >= side), "nothing drawn under it");
+    }
+
+    #[test]
+    fn the_sidebar_draws_its_lists_header_and_rows() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_sidebar_draw.pdf");
+        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
+        keys(&mut app, "o");
+        let chrome = app.pdf_chrome(key, fenix_window::Rect { x: 0.0, y: 0.0, w: 1200.0, h: 400.0 }, CELL);
+        let text: String = chrome.spans.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert!(text.starts_with("[Outline] Matches 0 Marks 0"), "{text}");
+        assert!(text.contains("Chapter 2"), "{text}");
+        assert!(!chrome.rects.is_empty(), "its background and selected row");
+    }
+
+    #[test]
+    fn spc_r_t_picks_a_heading_by_name() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_headings.pdf");
+        app.pdf_pick_heading();
+        assert_eq!(app.pdf_docs[&key.1].outline_for, Some(OutlineFor::Picker));
         let doc_key = app.pdf_docs[&key.1].doc_key;
         app.apply_pdf_response(fenix_pdf::PdfResponse::Outline { key: doc_key, entries: sample_outline() });
-        assert_eq!(app.pdf_docs[&key.1].outline, Some(sample_outline()));
-        assert_eq!(app.windows().window_count(), panes + 1);
-    }
-
-    #[test]
-    fn enter_on_an_outline_entry_takes_the_document_there() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_enter.pdf");
-        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline();
-        let start = app.open().buffer.line_start_char(1);
-        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
-        app.pdf_outline_activate_selected();
+        let Some(ActivePicker::PdfHeading(picker)) = &mut app.active_picker else { panic!("the heading picker") };
+        for c in "chapter 2".chars() {
+            picker.push_char(c);
+        }
+        app.picker_confirm();
         assert_eq!(page(&app, key), 6);
-    }
-
-    #[test]
-    fn killing_the_document_closes_its_outline_and_search_panes() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_kill_companions.pdf");
-        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline();
-        let doc_key = app.pdf_docs[&key.1].doc_key;
-        app.pdf_docs.get_mut(&key.1).unwrap().pending_search_request_id = 1;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-        app.windows_mut().focus(key.0);
-
-        app.kill_buffer_now();
-
-        assert!(app.pdf_outline_panes.is_empty() && app.pdf_outline_source.is_empty());
-        assert!(app.pdf_search_panes.is_empty() && app.pdf_search_source.is_empty());
-        assert_eq!(app.windows().window_count(), 1);
-    }
-
-    #[test]
-    fn killing_the_outline_buffer_closes_its_pane_and_goes_back_to_the_document() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_kill.pdf");
-        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline();
-        app.kill_buffer_now();
-        assert!(app.pdf_outline_panes.is_empty());
-        assert_eq!(app.focused_pane_id(), key.0);
-        assert!(app.pdf_docs.contains_key(&key.1));
     }
 
     // -- Search -----------------------------------------------------------
 
-    fn sample_matches() -> Vec<fenix_pdf::search::PdfSearchMatch> {
-        vec![
-            fenix_pdf::search::PdfSearchMatch { page_index: 0, char_index: 5, context: "the quick brown fox".to_string() },
-            fenix_pdf::search::PdfSearchMatch { page_index: 6, char_index: 0, context: "jumps over the lazy dog".to_string() },
-            fenix_pdf::search::PdfSearchMatch { page_index: 6, char_index: 40, context: "another dog".to_string() },
-        ]
+    fn hit(page: u32, y: f32, context: &str) -> fenix_pdf::search::PdfSearchMatch {
+        fenix_pdf::search::PdfSearchMatch { page_index: page, char_index: 0, context: context.to_string(), rects: vec![[100.0, y, 160.0, y + 12.0]] }
+    }
+
+    fn found(app: &mut App, key: ViewKey, matches: Vec<fenix_pdf::search::PdfSearchMatch>, done: bool) {
+        let (doc_key, request_id) = (app.pdf_docs[&key.1].doc_key, app.pdf_docs[&key.1].search_id);
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id, matches, done });
     }
 
     #[test]
-    fn slash_asks_for_a_query_and_sends_the_search() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt.pdf");
+    fn typing_a_search_searches_as_you_go_with_smart_case() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_typing.pdf");
         keys(&mut app, "/");
-        for c in "fox".chars() {
-            app.pdf_search_prompt_key(KeyPress::char(c));
-        }
-        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fox".to_string()));
-        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        app.pdf_search_prompt_key(KeyPress::char('f'));
+        let first = app.pdf_docs[&key.1].search_id;
+        app.pdf_search_prompt_key(KeyPress::char('o'));
         let doc = &app.pdf_docs[&key.1];
-        assert!(doc.pending_search_request_id > 0);
-        assert_eq!(doc.last_search_query, "fox");
+        assert!(doc.search_id > first, "a new search for each change");
+        assert_eq!(doc.query, "fo");
+        assert!(doc.highlights && !doc.search_done);
+        found(&mut app, key, vec![hit(0, 100.0, "fox")], false);
+        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fo   1\u{2026}".to_string()));
+        found(&mut app, key, vec![hit(4, 100.0, "fog")], true);
+        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fo   2 matches".to_string()));
     }
 
     #[test]
-    fn search_results_open_beside_the_document_and_enter_goes_to_a_match() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_results.pdf");
+    fn a_stale_searchs_results_are_dropped() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_stale.pdf");
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('a'));
         let doc_key = app.pdf_docs[&key.1].doc_key;
-        app.pdf_docs.get_mut(&key.1).unwrap().pending_search_request_id = 1;
-        let panes = app.windows().window_count();
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-
-        assert_eq!(app.windows().window_count(), panes + 1);
-        let results = app.focused_buffer_id();
-        assert_eq!(app.pdf_search_source.get(&results), Some(&key.1));
-        assert!(app.open().buffer.text().contains("p.  7  jumps over the lazy dog"));
-        assert_eq!(app.pdf_docs[&key.1].match_pages, vec![0, 6], "one entry per page");
-
-        let start = app.open().buffer.line_start_char(1);
-        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
-        app.pdf_search_activate_selected();
-        assert_eq!(page(&app, key), 6);
+        let stale = app.pdf_docs[&key.1].search_id;
+        app.pdf_search_prompt_key(KeyPress::char('b'));
+        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: stale, matches: vec![hit(0, 0.0, "a")], done: true });
+        assert!(app.pdf_docs[&key.1].matches.is_empty());
     }
 
     #[test]
-    fn a_stale_search_is_dropped_and_a_new_one_reuses_the_results_pane() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_second.pdf");
-        let doc_key = app.pdf_docs[&key.1].doc_key;
-        app.pdf_docs.get_mut(&key.1).unwrap().pending_search_request_id = 2;
-        let panes = app.windows().window_count();
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-        assert_eq!(app.windows().window_count(), panes, "stale");
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 2, matches: sample_matches() });
-        let results_pane = app.pdf_search_panes[&key.1];
-        app.pdf_docs.get_mut(&key.1).unwrap().pending_search_request_id = 3;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults {
-            key: doc_key,
-            request_id: 3,
-            matches: vec![fenix_pdf::search::PdfSearchMatch { page_index: 2, char_index: 0, context: "banana".to_string() }],
-        });
-        assert_eq!(app.windows().window_count(), panes + 1);
-        assert_eq!(app.pdf_search_panes[&key.1], results_pane);
-        let buffer = *app.windows().content(results_pane).unwrap();
-        assert!(app.buffers.get(buffer).unwrap().buffer.text().contains("banana"));
+    fn enter_goes_to_the_first_match_from_here_even_before_it_is_found() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_enter.pdf");
+        app.pdf_goto_page(4);
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        found(&mut app, key, vec![hit(1, 100.0, "early")], false);
+        assert_eq!(page(&app, key), 3, "page 2 is before here");
+        found(&mut app, key, vec![hit(5, 300.0, "later")], true);
+        assert_eq!(page(&app, key), 5);
+        assert_eq!(app.pdf_docs[&key.1].current_match, Some(1));
     }
 
     #[test]
-    fn no_matches_say_so_and_enter_there_does_nothing() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_none.pdf");
-        let doc_key = app.pdf_docs[&key.1].doc_key;
-        {
-            let doc = app.pdf_docs.get_mut(&key.1).unwrap();
-            doc.pending_search_request_id = 1;
-            doc.last_search_query = "xylophone".to_string();
-        }
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
-        assert_eq!(app.open().buffer.text(), "(no matches for \"xylophone\")");
-        app.pdf_search_activate_selected();
-        assert_eq!(page(&app, key), 0);
+    fn n_and_capital_n_go_through_the_matches_one_by_one() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_n.pdf");
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+        found(&mut app, key, vec![hit(2, 100.0, "a"), hit(2, 600.0, "b"), hit(8, 50.0, "c")], true);
+        keys(&mut app, "n");
+        assert_eq!((app.pdf_docs[&key.1].current_match, page(&app, key)), (Some(0), 2));
+        keys(&mut app, "n");
+        assert_eq!(app.pdf_docs[&key.1].current_match, Some(1), "two on one page, one at a time");
+        keys(&mut app, "n");
+        assert_eq!((app.pdf_docs[&key.1].current_match, page(&app, key)), (Some(2), 8));
+        keys(&mut app, "n");
+        assert_eq!(app.pdf_docs[&key.1].current_match, Some(0), "round the end");
+        keys(&mut app, "N");
+        assert_eq!(app.pdf_docs[&key.1].current_match, Some(2));
+        assert!(app.modeline_text().contains("match 3/3 on page 9"), "{}", app.modeline_text());
+        app.status_message = None;
+        assert!(app.modeline_text().contains("/x 3/3"), "the position shows the search too: {}", app.modeline_text());
+    }
+
+    #[test]
+    fn matches_are_highlighted_on_the_page_until_esc() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_highlights.pdf");
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
+        found(&mut app, key, vec![hit(0, 100.0, "a"), hit(0, 200.0, "b"), hit(9, 0.0, "far")], true);
+        app.pdf_prepare_view(key, PANE, CELL);
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 };
+        let chrome = app.pdf_chrome(key, rect, CELL);
+        assert_eq!(chrome.highlights.len(), 2, "the two in sight");
+        let current = chrome.highlights.iter().find(|(_, tint)| *tint == CURRENT_MATCH_TINT).expect("the current one stands out");
+        assert_eq!(current.0.2, 60.0, "the match's width at 100%");
+        assert!(app.reader_key(KeyPress::named(FenixNamedKey::Escape)));
+        assert!(app.pdf_chrome(key, rect, CELL).highlights.is_empty());
+    }
+
+    #[test]
+    fn esc_in_the_search_prompt_clears_the_highlights() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_esc.pdf");
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(app.pdf_search_prompt.is_none());
+        assert!(!app.pdf_docs[&key.1].highlights);
+    }
+
+    #[test]
+    fn the_matches_list_goes_to_a_match() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_search_list.pdf");
+        keys(&mut app, "/");
+        app.pdf_search_prompt_key(KeyPress::char('x'));
+        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
+        found(&mut app, key, vec![hit(2, 100.0, "a"), hit(7, 100.0, "b")], true);
+        app.pdf_docs.get_mut(&key.1).unwrap().outline = Some(Vec::new());
+        keys(&mut app, "o");
+        app.reader_key(KeyPress::named(FenixNamedKey::Tab));
+        app.reader_key(KeyPress::char('j'));
+        app.reader_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!((app.pdf_docs[&key.1].current_match, page(&app, key)), (Some(1), 7));
+    }
+
+    #[test]
+    fn n_before_any_search_says_how_to_search() {
+        let (_guard, _key, mut app) = test_open_pdf("pdf_keys_no_search.pdf");
+        keys(&mut app, "n");
+        assert!(app.modeline_text().contains("/ searches"), "{}", app.modeline_text());
     }
 }

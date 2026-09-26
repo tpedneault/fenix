@@ -194,9 +194,16 @@ pub enum Cmd {
     Outline,
     /// `/`: search.
     Search,
-    /// `n`/`N`: the next or previous page with a match of the last search.
+    /// `n`/`N`: the next or previous match of the last search.
     NextMatch,
     PrevMatch,
+    /// `m{a}`: a mark here.
+    SetMark(char),
+    /// `'{a}` or `` `{a} ``: back to a mark.
+    GotoMark(char),
+    /// `Esc` with nothing typed: hide the search's highlights, or close
+    /// the sidebar.
+    Escape,
 }
 
 /// What `Keys::key` made of a key.
@@ -261,6 +268,8 @@ impl Keys {
                 ('z', KeyCode::Char('w')) => Cmd::FitWidth,
                 ('z', KeyCode::Char('p')) => Cmd::FitPage,
                 ('z', KeyCode::Char('0')) => Cmd::ActualSize,
+                ('m', KeyCode::Char(c)) if c.is_ascii_alphabetic() => Cmd::SetMark(c),
+                ('\'', KeyCode::Char(c)) if c.is_ascii_alphabetic() => Cmd::GotoMark(c),
                 _ => return Outcome::Dropped,
             };
             return Outcome::Run(cmd);
@@ -289,8 +298,12 @@ impl Keys {
         let cmd = match key.code {
             KeyCode::Char(c @ '1'..='9') => return self.digit(c),
             KeyCode::Char('0') if count.is_some() => return self.digit('0'),
-            KeyCode::Char(c @ ('g' | 'z')) => {
+            KeyCode::Char(c @ ('g' | 'z' | 'm' | '\'')) => {
                 self.prefix = Some(c);
+                return Outcome::Pending;
+            }
+            KeyCode::Char('`') => {
+                self.prefix = Some('\'');
                 return Outcome::Pending;
             }
             KeyCode::Char('j') | KeyCode::Named(NamedKey::Down) => Cmd::Scroll(n),
@@ -315,6 +328,7 @@ impl Keys {
                 self.reset();
                 return Outcome::Dropped;
             }
+            KeyCode::Named(NamedKey::Escape) => Cmd::Escape,
             _ => {
                 self.count = None;
                 return Outcome::Pass;
@@ -389,6 +403,14 @@ mod tests {
     }
 
     #[test]
+    fn marks() {
+        assert_eq!(last("ma"), Outcome::Run(Cmd::SetMark('a')));
+        assert_eq!(last("'a"), Outcome::Run(Cmd::GotoMark('a')));
+        assert_eq!(last("`b"), Outcome::Run(Cmd::GotoMark('b')));
+        assert_eq!(last("m1"), Outcome::Dropped);
+    }
+
+    #[test]
     fn the_old_single_keys_are_gone() {
         for key in ["p", "w", "0"] {
             assert_eq!(last(key), Outcome::Pass, "{key}");
@@ -416,8 +438,8 @@ mod tests {
         assert!(!keys.is_pending());
         assert_eq!(keys.key(KeyPress::char(' ')), Outcome::Pass);
         feed(&mut keys, "4");
-        assert_eq!(keys.key(KeyPress::named(NamedKey::Escape)), Outcome::Dropped);
-        assert_eq!(keys.key(KeyPress::named(NamedKey::Escape)), Outcome::Pass, "Esc with nothing pending isn't the reader's");
+        assert_eq!(keys.key(KeyPress::named(NamedKey::Escape)), Outcome::Dropped, "Esc clears a count");
+        assert_eq!(keys.key(KeyPress::named(NamedKey::Escape)), Outcome::Run(Cmd::Escape));
     }
 
     #[test]

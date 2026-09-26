@@ -64,17 +64,6 @@ pub enum BufferKind {
     /// file path on the `Buffer` itself either -- see `open_pdf`'s own
     /// doc comment for why.
     Pdf,
-    /// A PDF's flattened bookmark tree (`SPC r o`), shown as an indented
-    /// listing in its own companion pane next to the `Pdf` pane it was
-    /// opened from -- unlike `Pdf` itself, this *is* real Vim-navigable
-    /// text (same "real buffer, just tagged" shape as `Dashboard`), since
-    /// an outline is naturally just a list of lines, not pixel content.
-    PdfOutline,
-    /// A PDF text search's flat match list (`SPC r /`), shown as one row
-    /// per hit in its own companion pane next to the `Pdf` pane it was
-    /// searched from -- same "real buffer, just tagged" shape as
-    /// `PdfOutline`, just a list of matches instead of bookmarks.
-    PdfSearchResults,
     /// The build/task runner's live output panel (`SPC t t`) -- same
     /// "real buffer, just tagged, host appends to it as output streams
     /// in" shape as `Docker`'s own Logs pane, just a single pane rather
@@ -195,8 +184,6 @@ impl BufferKind {
             | BufferKind::SearchReplace
             | BufferKind::Vnc
             | BufferKind::Pdf
-            | BufferKind::PdfOutline
-            | BufferKind::PdfSearchResults
             | BufferKind::TaskOutput
             | BufferKind::Debug
             | BufferKind::Diff
@@ -392,23 +379,6 @@ impl BufferList {
         self.insert(Buffer::empty(), None, BufferKind::Pdf)
     }
 
-    /// A real buffer seeded with `text` (an indented, flattened rendering
-    /// of a PDF's bookmark tree) and tagged `PdfOutline` -- `SPC r o`.
-    /// Same "real buffer, just tagged" shape as `open_dashboard`/
-    /// `open_docker`, unlike `open_pdf`/`open_vnc`'s empty-buffer shape:
-    /// an outline's content genuinely is text worth Vim-navigating
-    /// (`j`/`k`/`/`/`n`), not a stand-in pane slot for pixel content.
-    pub fn open_pdf_outline(&mut self, text: &str) -> BufferId {
-        self.insert(Buffer::from_text(text), None, BufferKind::PdfOutline)
-    }
-
-    /// A real buffer seeded with `text` (one formatted row per text-
-    /// search match) and tagged `PdfSearchResults` -- `SPC r /`. Same
-    /// "real buffer, just tagged" shape as `open_pdf_outline`.
-    pub fn open_pdf_search_results(&mut self, text: &str) -> BufferId {
-        self.insert(Buffer::from_text(text), None, BufferKind::PdfSearchResults)
-    }
-
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
     /// e.g. `docker logs` output shown by the Docker panel's `l` action.
     /// Unlike `open_dashboard`/`open_explorer`/`open_docker`, this is
@@ -582,8 +552,6 @@ mod tests {
             BufferKind::Terminal,
             BufferKind::Vnc,
             BufferKind::Pdf,
-            BufferKind::PdfOutline,
-            BufferKind::PdfSearchResults,
             BufferKind::TaskOutput,
             BufferKind::ToolStatus,
         ] {
@@ -673,16 +641,6 @@ mod tests {
         assert_eq!(ob.buffer.text(), "");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::Pdf);
-    }
-
-    #[test]
-    fn open_pdf_search_results_seeds_the_text_and_tags_the_buffer() {
-        let mut list = BufferList::new();
-        let id = list.open_pdf_search_results("p.  1  the quick brown fox\n");
-        let ob = list.get(id).unwrap();
-        assert_eq!(ob.buffer.text(), "p.  1  the quick brown fox\n");
-        assert_eq!(ob.buffer.path(), None);
-        assert_eq!(ob.kind, BufferKind::PdfSearchResults);
     }
 
     #[test]

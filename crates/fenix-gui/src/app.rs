@@ -74,8 +74,6 @@ use crate::icon;
 use crate::merge_view;
 use crate::keymap;
 use crate::markdown;
-use crate::pdf_outline;
-use crate::pdf_search;
 use crate::popup;
 use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
@@ -2303,6 +2301,9 @@ enum ActivePicker {
     /// step through (the installed fonts): one of them, by name. What
     /// it's for is `key`; confirming hands the choice back to the page.
     SettingChoice { key: &'static str, picker: fenix_picker::PickerState<String> },
+    /// `SPC r t`: a PDF's headings, by name; confirming goes to the
+    /// heading's page.
+    PdfHeading(fenix_picker::PickerState<u32>),
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2445,6 +2446,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
+        ActivePicker::PdfHeading(picker) => picker.push_char(c),
     }
 }
 
@@ -2486,6 +2488,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
+        ActivePicker::PdfHeading(picker) => picker.backspace(),
     }
 }
 
@@ -2527,6 +2530,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
+        ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
     }
 }
 
@@ -2571,6 +2575,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
+        ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
     }
 }
 
@@ -2612,6 +2617,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
+        ActivePicker::PdfHeading(picker) => picker.query(),
     }
 }
 
@@ -2653,6 +2659,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
+        ActivePicker::PdfHeading(picker) => picker.len(),
     }
 }
 
@@ -2694,6 +2701,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
+        ActivePicker::PdfHeading(picker) => picker.selected_row(),
     }
 }
 
@@ -2739,6 +2747,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -5149,8 +5158,6 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::Git
             | BufferKind::Vnc
             | BufferKind::Pdf
-            | BufferKind::PdfOutline
-            | BufferKind::PdfSearchResults
             | BufferKind::TaskOutput
             | BufferKind::Debug
             | BufferKind::ToolStatus
@@ -6011,18 +6018,6 @@ pub struct App {
     /// The one pdfium worker for every document (pdfium can't be called
     /// from two threads), spawned with the first PDF opened.
     pdf_worker: Option<fenix_pdf::PdfWorker>,
-    /// A document's outline pane, by the document's buffer.
-    pdf_outline_panes: HashMap<BufferId, fenix_window::WindowId>,
-    /// What each outline line points at, by the outline's buffer.
-    pdf_outline_lines: HashMap<BufferId, Vec<Option<pdf_outline::PdfOutlineLine>>>,
-    /// The document an outline buffer is of.
-    pdf_outline_source: HashMap<BufferId, BufferId>,
-    /// A document's search results pane, by the document's buffer.
-    pdf_search_panes: HashMap<BufferId, fenix_window::WindowId>,
-    /// What each search result line points at, by the results' buffer.
-    pdf_search_result_lines: HashMap<BufferId, Vec<Option<pdf_search::PdfSearchResultLine>>>,
-    /// The document a search results buffer is of.
-    pdf_search_source: HashMap<BufferId, BufferId>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -6945,12 +6940,6 @@ impl App {
             pdf_next_id: 0,
             pdf_requests: HashMap::new(),
             pdf_worker: None,
-            pdf_outline_panes: HashMap::new(),
-            pdf_outline_lines: HashMap::new(),
-            pdf_outline_source: HashMap::new(),
-            pdf_search_panes: HashMap::new(),
-            pdf_search_result_lines: HashMap::new(),
-            pdf_search_source: HashMap::new(),
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -12569,14 +12558,6 @@ impl App {
         if self.pdf_docs.contains_key(&id) {
             self.pdf_close_doc(id);
         }
-        if let Some(doc) = self.pdf_outline_source.get(&id).copied() {
-            self.pdf_close_outline_pane(doc);
-            return;
-        }
-        if let Some(doc) = self.pdf_search_source.get(&id).copied() {
-            self.pdf_close_search_pane(doc);
-            return;
-        }
         // A pane-resident terminal's shell dies with its buffer -- see
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
@@ -17760,6 +17741,12 @@ impl App {
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
             }
+            Some(ActivePicker::PdfHeading(picker)) => {
+                let Some(page) = picker.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.pdf_heading_picked(page);
+            }
             Some(ActivePicker::SettingChoice { key, picker }) => {
                 let Some(value) = picker.selected().map(|c| c.payload.clone()) else { return };
                 let key = *key;
@@ -20449,6 +20436,13 @@ impl App {
                 return;
             }
             if let KeyCode::Char(c) = keypress.code {
+                // A PDF has jumps of its own; with none to go back to, the
+                // editor's own jump list takes the key.
+                let pdf_jump = (c.eq_ignore_ascii_case(&'o') || c.eq_ignore_ascii_case(&'i')) && self.open().kind == BufferKind::Pdf;
+                if pdf_jump && self.pdf_jump_history(c.eq_ignore_ascii_case(&'o')) {
+                    self.wake_caret();
+                    return;
+                }
                 let id = if c.eq_ignore_ascii_case(&'s') {
                     Some("file.save")
                 } else if c.eq_ignore_ascii_case(&'z') && self.modifiers.shift_key() {
@@ -20641,26 +20635,6 @@ impl App {
         // `j`/`k`, `J`/`K`, `gg`/`G`, `g` waiting for the tab keys, zoom,
         // `/` and `n`. What it doesn't take goes on to the editor.
         if self.open().kind == BufferKind::Pdf && self.reader_key(keypress) {
-            return;
-        }
-
-        // A PDF outline pane is a real Vim-navigable buffer (see
-        // `BufferKind`'s own doc comment on `PdfOutline`) -- every other
-        // key still reaches Vim below unchanged (movement, `/` search,
-        // `gg`/`G`...); only `Enter` means something special on it, same
-        // shape as the Dashboard interception above.
-        if self.open().kind == BufferKind::PdfOutline && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
-            self.pdf_outline_activate_selected();
-            self.wake_caret();
-            return;
-        }
-
-        // A PDF search-results pane -- same shape as the outline
-        // interception just above, just jumping to a match's page
-        // instead of a bookmark's.
-        if self.open().kind == BufferKind::PdfSearchResults && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
-            self.pdf_search_activate_selected();
-            self.wake_caret();
             return;
         }
 
@@ -21641,10 +21615,6 @@ impl App {
                 self.vnc_session_key_for_buffer(buffer_id).map(|name| format!("VNC: {name}")).unwrap_or_else(|| "*vnc*".to_string())
             } else if ob.kind == BufferKind::Pdf {
                 self.pdf_docs.get(&buffer_id).map(|doc| doc.name.clone()).unwrap_or_else(|| "*pdf*".to_string())
-            } else if ob.kind == BufferKind::PdfOutline {
-                "*pdf outline*".to_string()
-            } else if ob.kind == BufferKind::PdfSearchResults {
-                "*pdf search*".to_string()
             } else if ob.kind == BufferKind::TaskOutput {
                 "*task output*".to_string()
             } else if ob.kind == BufferKind::Debug {
@@ -21776,6 +21746,7 @@ impl App {
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
+                Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -22181,8 +22152,6 @@ impl App {
             || ob.kind == BufferKind::SearchReplace
             || ob.kind == BufferKind::Vnc
             || ob.kind == BufferKind::Pdf
-            || ob.kind == BufferKind::PdfOutline
-            || ob.kind == BufferKind::PdfSearchResults
             || ob.kind == BufferKind::TaskOutput
             || ob.kind == BufferKind::Debug
             || ob.kind == BufferKind::ToolStatus
@@ -24149,6 +24118,10 @@ impl App {
         // that actually knows each pane's real current on-screen pixel
         // size.
         let mut pdf_panes: Vec<(reader::ViewKey, fenix_window::Rect)> = Vec::new();
+        // A PDF pane's sidebar background (under its text) and its
+        // search highlights (over its pages).
+        let mut pdf_under: Vec<((f32, f32, f32, f32), [f32; 4])> = Vec::new();
+        let mut pdf_highlights: Vec<((f32, f32, f32, f32), [f32; 4])> = Vec::new();
         // Where the focused page is scrolled to, for its popup.
         let mut page_popup_at: Option<PagePopupAt> = None;
         for (pane, rect) in &layout {
@@ -24393,7 +24366,7 @@ impl App {
                 // view here: a tab moved in, a split, a tab reopened.
                 let pdf_key = self.pdf_view_in_pane(pane);
                 if let Some(key) = pdf_key {
-                    self.pdf_prepare_view(key, (rect.w.max(1.0), rect.h.max(1.0)));
+                    self.pdf_prepare_view(key, (rect.w.max(1.0), rect.h.max(1.0)), (char_width, line_height));
                 }
                 // While an overlay covers this pane, nothing is pushed
                 // to `pdf_panes` and no `PaneRender` is emitted here --
@@ -24401,8 +24374,13 @@ impl App {
                 // branches below, which render the overlay into this
                 // pane exactly as they would over any ordinary buffer.
                 if !overlay_covers_pane {
+                    let mut pdf_spans = RowSpans::new();
                     if let Some(key) = pdf_key {
                         pdf_panes.push((key, rect));
+                        let chrome = self.pdf_chrome(key, rect, (char_width, line_height));
+                        pdf_spans = chrome.spans;
+                        pdf_under.extend(chrome.rects);
+                        pdf_highlights.extend(chrome.highlights);
                     }
                     // A PDF is a tab like any file, so its pane has the strip.
                     let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) =
@@ -24411,7 +24389,7 @@ impl App {
                         pane,
                         rect,
                         title: pane_title,
-                        spans: Vec::new(),
+                        spans: pdf_spans,
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
@@ -25228,6 +25206,9 @@ impl App {
             let h = text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height;
             bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y, pane.rect.w, h, theme.bg);
         }
+        for &((x, y, w, h), color) in &pdf_under {
+            bg_rect.push_rect(gpu, x, y, w, h, color);
+        }
         // Blank paper where a PDF page is still being rendered, so the
         // column keeps its shape while the pages come in.
         for (key, draws) in &pdf_plans {
@@ -25622,6 +25603,9 @@ impl App {
                 }
                 overlay.push_rect(gpu, x, at(ruler.cursor as f32).min(top + h - 1.0), RULER_W, 1.0, [fg[0], fg[1], fg[2], 0.8]);
             }
+        }
+        for &((x, y, w, h), color) in &pdf_highlights {
+            overlay.push_rect(gpu, x, y, w, h, color);
         }
         overlay.flush(gpu);
 
@@ -40921,12 +40905,11 @@ configure_board stm32
     }
 
     #[test]
-    fn is_readonly_buffer_kind_covers_docker_git_vnc_pdf_and_pdf_outline_only() {
+    fn is_readonly_buffer_kind_covers_docker_git_vnc_and_pdf() {
         assert!(is_readonly_buffer_kind(BufferKind::Docker));
         assert!(is_readonly_buffer_kind(BufferKind::Git));
         assert!(is_readonly_buffer_kind(BufferKind::Vnc));
         assert!(is_readonly_buffer_kind(BufferKind::Pdf));
-        assert!(is_readonly_buffer_kind(BufferKind::PdfOutline));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
         // A listing is read-only *by kind*; rename mode is the
