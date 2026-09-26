@@ -22,8 +22,6 @@
 //! or pulled in here at all.
 
 mod render;
-pub mod coords;
-pub mod crop;
 pub mod outline;
 pub mod search;
 
@@ -83,6 +81,11 @@ pub enum PdfRequest {
     /// explicit `Enter` press, not a high-frequency event like a window
     /// resize, so there's no flood of these to thin out.
     Search { key: PdfDocKey, request_id: u64, query: String },
+    /// Drops the renders still queued for `view` of `key` whose page isn't
+    /// in `keep` -- sent when the view scrolls, so pages scrolled past
+    /// aren't rendered after the ones now on screen. A render already
+    /// under way finishes.
+    Cancel { key: PdfDocKey, view: u64, keep: Vec<u32> },
     Close { key: PdfDocKey },
 }
 
@@ -90,12 +93,11 @@ pub enum PdfRequest {
 /// `response_sink` (see `PdfWorker::spawn`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfResponse {
-    /// `page_width_pts`/`page_height_pts` are page 0's native size, in PDF
-    /// points (1/72 inch) -- the caller needs these *before* it can even
-    /// compute a fit-to-page/fit-width/percent render target (see
-    /// `coords::fit_page_size`/`fit_width_size`/`percent_size`), and
-    /// there's no render to piggyback them on yet at this point.
-    Opened { key: PdfDocKey, page_count: u32, page_width_pts: f32, page_height_pts: f32 },
+    /// Every page's size in PDF points (1/72 inch), in order -- the
+    /// caller lays the whole document out before rendering any of it.
+    /// Read without loading the pages, so it's cheap even for a long
+    /// document.
+    Opened { key: PdfDocKey, pages: Vec<(f32, f32)> },
     OpenFailed { key: PdfDocKey, message: String },
     /// A page finished rendering, as a tightly-packed BGRA buffer of
     /// exactly `width` x `height` pixels (matches the `target_w`/
@@ -184,31 +186,41 @@ impl Drop for PdfWorker {
     }
 }
 
-/// Collapses a batch of requests drained from the channel in one go so
-/// that, per `key` and `view`, only the *last* `RenderPage` request in the batch
-/// survives -- everything before it is dropped silently (no
-/// `RenderFailed` reply; the caller never sees these as having been
-/// dispatched at all, since from its perspective a newer request for the
-/// same session already supersedes them). `Open`/`FetchOutline`/`Search`/
-/// `Close` requests, and `RenderPage` requests for a *different* key, are
-/// never touched or reordered -- only same-key `RenderPage` entries are thinned out,
-/// preserving every other request's original position. This is what
-/// keeps a live window resize (which can queue many `RenderPage`
-/// requests for the same session faster than pdfium can render them)
-/// from visibly lagging behind: only the final, current pane size is
-/// ever actually rendered.
+/// Thins the worker's queue: of the `RenderPage`s for one page of one
+/// view, only the last survives (a resize can ask for many sizes faster
+/// than pdfium renders one); a `Cancel` drops the renders queued before it
+/// for its view that aren't of a page it keeps, and goes itself. Nothing
+/// else is dropped or reordered.
 fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
     use std::collections::HashMap;
-    let mut latest_render_index: HashMap<(PdfDocKey, u64), usize> = HashMap::new();
+    let mut dropped = vec![false; pending.len()];
     for (i, req) in pending.iter().enumerate() {
-        if let PdfRequest::RenderPage { key, view, .. } = req {
-            latest_render_index.insert((*key, *view), i);
+        if let PdfRequest::Cancel { key, view, keep } = req {
+            dropped[i] = true;
+            for (j, earlier) in pending[..i].iter().enumerate() {
+                if let PdfRequest::RenderPage { key: k, view: v, page_index, .. } = earlier {
+                    if k == key && v == view && !keep.contains(page_index) {
+                        dropped[j] = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut latest: HashMap<(PdfDocKey, u64, u32), usize> = HashMap::new();
+    for (i, req) in pending.iter().enumerate() {
+        if let PdfRequest::RenderPage { key, view, page_index, .. } = req {
+            if !dropped[i] {
+                latest.insert((*key, *view, *page_index), i);
+            }
         }
     }
     pending
         .into_iter()
         .enumerate()
-        .filter(|(i, req)| !matches!(req, PdfRequest::RenderPage { key, view, .. } if latest_render_index.get(&(*key, *view)) != Some(i)))
+        .filter(|(i, req)| {
+            !dropped[*i]
+                && !matches!(req, PdfRequest::RenderPage { key, view, page_index, .. } if latest.get(&(*key, *view, *page_index)) != Some(i))
+        })
         .map(|(_, req)| req)
         .collect()
 }
@@ -219,6 +231,36 @@ mod tests {
 
     fn render_req(key: PdfDocKey, request_id: u64) -> PdfRequest {
         PdfRequest::RenderPage { key, view: 0, request_id, page_index: 0, target_w: 100, target_h: 100 }
+    }
+
+    fn page_req(key: PdfDocKey, view: u64, page_index: u32) -> PdfRequest {
+        PdfRequest::RenderPage { key, view, request_id: page_index as u64, page_index, target_w: 100, target_h: 100 }
+    }
+
+    #[test]
+    fn coalesce_keeps_one_render_per_page_so_a_view_can_ask_for_several_pages() {
+        let key = PdfDocKey::new();
+        let pending = vec![page_req(key, 1, 3), page_req(key, 1, 4), page_req(key, 1, 3)];
+        assert_eq!(coalesce_render_requests(pending), vec![page_req(key, 1, 4), page_req(key, 1, 3)]);
+    }
+
+    #[test]
+    fn cancel_drops_the_views_queued_renders_except_the_pages_it_keeps() {
+        let key = PdfDocKey::new();
+        let other = PdfDocKey::new();
+        let pending = vec![
+            page_req(key, 1, 3),
+            page_req(key, 1, 4),
+            page_req(key, 2, 3),
+            page_req(other, 1, 3),
+            PdfRequest::Cancel { key, view: 1, keep: vec![4, 9] },
+            page_req(key, 1, 9),
+        ];
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![page_req(key, 1, 4), page_req(key, 2, 3), page_req(other, 1, 3), page_req(key, 1, 9)],
+            "only view 1's page 3 goes; later renders and other views' stay"
+        );
     }
 
     #[test]

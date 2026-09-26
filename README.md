@@ -865,7 +865,7 @@ for anyone curious to poke around or build on it.
   path, the explorer, a recent file, a CLI argument, a jump) -- as a tab
   in the focused pane, fitted to its width -- and can be moved, closed,
   reopened and shown in two panes at different pages. Reading uses Vim's
-  keys: `j`/`k` scroll (on through page edges), `Ctrl-d`/`Ctrl-u` and
+  keys over one continuous column of pages: `j`/`k` scroll, `Ctrl-d`/`Ctrl-u` and
   `Ctrl-f`/`Ctrl-b` by half and whole screens, `J`/`K` turn the page,
   `gg`, `G` and `{n}G` go to a page, counts repeat, and `g` waits so
   `gt`/`gT`/`gh` still move between tabs. `+`/`-` zoom in steps, `=`
@@ -1365,7 +1365,7 @@ popup shows what keys continue it.
 | `SPC r 0` / `SPC r w` | Fit the page / its width to the pane |
 | `SPC r o` | Open or close the outline |
 | `SPC r /` | Search the document's text |
-| wheel, `j` / `k`, `{n}j` | Scroll, going on to the next/previous page at an edge (PDF panes) |
+| wheel, `j` / `k`, `{n}j` | Scroll the column of pages; `Ctrl` + wheel zooms (PDF panes) |
 | `Ctrl-d` / `Ctrl-u`, `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | Half a screen / a screen (PDF panes) |
 | `J` / `K`, `{n}J` | Next / previous page (PDF panes) |
 | `gg` / `G` / `{n}G` | First / last / page n (PDF panes) |
@@ -1683,8 +1683,15 @@ never blocks the editor.
 Where you are -- page, zoom, scroll -- belongs to the **pane**, so the
 same document can be shown in two splits at different pages. A pane
 showing a document for the first time starts where you last were in it.
-The default zoom is **fit width**: the page's width fills the pane and a
-tall page scrolls.
+The default zoom is **fit width**: the page's width fills the pane.
+
+The pages are laid out **one under the other in a single column**, so
+scrolling goes straight from the bottom of one page onto the top of the
+next -- there are no page turns, only positions. Only the pages in sight
+are drawn, the ones just below and above are rendered ahead so reading
+on never waits, and a page that isn't ready yet shows as blank paper at
+its size, so nothing jumps when it arrives. A zoom keeps the same place
+at the top of the pane.
 
 The reader's keys are Vim's, with counts. Anything else -- the leader,
 `:`, `Ctrl-w`, `Ctrl-o` -- goes to the editor as usual, and `SPC m` lists
@@ -1692,7 +1699,8 @@ the reader's commands.
 
 | Keys | Action |
 |---|---|
-| mouse wheel, `j` / `k`, `Down` / `Up`, `{n}j` | Scroll; at the bottom/top edge, go on to the next/previous page |
+| mouse wheel, `j` / `k`, `Down` / `Up`, `{n}j` | Scroll the column of pages |
+| `Ctrl` + wheel | Zoom in / out |
 | `Ctrl-d` / `Ctrl-u` | Half a screen down / up |
 | `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | A screen down / up |
 | `J` / `K`, `{n}J`, `SPC r n` / `SPC r p` | Next / previous page, at its top |
@@ -1727,12 +1735,8 @@ a PDF. A path that has since moved is reported by name instead of
 opening an empty buffer, and an empty index says so rather than opening
 a picker over nothing.
 
-Scrolling carries on across page edges both ways: past the bottom of a
-page onto the top of the next, and back up past the top onto the
-*bottom* of the one before, so scrolling back retraces what scrolling
-forward covered.
-
-The status line shows `Page N/M` and the zoom (`Fit width`, `Fit page`,
+The status line shows `Page N/M` (the page across the middle of the
+pane) and the zoom (`Fit width`, `Fit page`,
 or a percentage) where an ordinary buffer shows `Ln`/`Col`, and a count
 or `g`/`z` while you type it.
 
@@ -1747,13 +1751,14 @@ results pane beside the document (a new search reuses it); `Enter` on a
 result goes to its page, and `n`/`N` step through the pages with matches
 from wherever you are, going round the ends.
 
-The page re-renders to fit when its pane is resized, except at a
+The pages re-render to fit when the pane is resized, except at a
 percentage, which stays where you left it. A zoom percentage is of the
 page's real size on this screen, so 100% looks the same on a scaled
-display.
+display. Every page of a document shares one scale; a narrower page sits
+centred.
 
-A PDF pane's buffer is empty and pathless -- the page lives in a GPU
-texture -- so `:w` on one does nothing and can't overwrite the PDF.
+A PDF pane's buffer is empty and pathless -- the pages live in GPU
+textures -- so `:w` on one does nothing and can't overwrite the PDF.
 Needs `pdfium.dll` (see [Optional external tools](#optional-external-tools))
 -- without it, opening a PDF reports the error in the status line.
 

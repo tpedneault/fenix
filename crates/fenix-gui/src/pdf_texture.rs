@@ -8,8 +8,8 @@ struct Vertex {
 }
 
 const VERTICES_PER_QUAD: usize = 6;
-/// How many quads one frame can draw: one per pane showing a PDF.
-pub const MAX_QUADS: usize = 16;
+/// How many quads one frame can draw: every page in sight in every pane.
+pub const MAX_QUADS: usize = 256;
 
 /// One rendered PDF page as a sampled GPU texture. Recreated (`PdfPipeline
 /// ::create_texture`) whenever its pixel size changes (a page turn, a
@@ -216,13 +216,22 @@ impl PdfPipeline {
     /// Draws `tex` scaled to exactly fill the pixel rect
     /// `(dest_x, dest_y, dest_w, dest_h)`, using vertex slot `slot`
     /// (`0..MAX_QUADS`, distinct for each draw in a frame; a slot past the
-    /// end is skipped). Same NDC-space quad conversion
-    /// `vnc_texture::VncPipeline::draw`/`RectRenderer::push_rect` use.
+    /// end is skipped).
     #[allow(clippy::too_many_arguments)]
     pub fn draw<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass PdfTexture, slot: usize, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) {
+        self.draw_region(gpu, pass, tex, slot, (dest_x, dest_y, dest_w, dest_h), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    /// Draws the part `uv` (`(u0, v0, u1, v1)`, 0..1) of `tex` into the
+    /// pixel rect `dest` -- a page cut to the pane it's scrolled in. Same
+    /// NDC-space quad conversion `vnc_texture::VncPipeline::draw`/
+    /// `RectRenderer::push_rect` use.
+    pub fn draw_region<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass PdfTexture, slot: usize, dest: (f32, f32, f32, f32), uv: (f32, f32, f32, f32)) {
         if slot >= MAX_QUADS {
             return;
         }
+        let (dest_x, dest_y, dest_w, dest_h) = dest;
+        let (u0, v0, u1, v1) = uv;
         let sw = gpu.config.width as f32;
         let sh = gpu.config.height as f32;
         let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
@@ -233,12 +242,12 @@ impl PdfPipeline {
         let p11 = to_ndc(dest_x + dest_w, dest_y + dest_h);
 
         let vertices = [
-            Vertex { position: p00, uv: [0.0, 0.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p11, uv: [1.0, 1.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
+            Vertex { position: p00, uv: [u0, v0] },
+            Vertex { position: p10, uv: [u1, v0] },
+            Vertex { position: p01, uv: [u0, v1] },
+            Vertex { position: p10, uv: [u1, v0] },
+            Vertex { position: p11, uv: [u1, v1] },
+            Vertex { position: p01, uv: [u0, v1] },
         ];
         let offset = (slot * VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress;
         gpu.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::cast_slice(&vertices));

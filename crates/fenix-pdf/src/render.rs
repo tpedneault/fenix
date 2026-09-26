@@ -113,15 +113,24 @@ fn run_without_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse)
 
 fn run_with_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse) + Send + 'static, pdfium: Pdfium) {
     let mut docs: HashMap<PdfDocKey, PdfDocument> = HashMap::new();
+    // The worker's own queue: everything waiting is read in before each
+    // request is handled, so a scroll's `Cancel` or a newer render gets
+    // a say before pdfium spends time on work nobody can see any more.
+    let mut pending: Vec<PdfRequest> = Vec::new();
     loop {
-        let Ok(first) = receiver.recv() else { return };
-        let mut pending = vec![first];
+        if pending.is_empty() {
+            let Ok(first) = receiver.recv() else { return };
+            pending.push(first);
+        }
         while let Ok(req) = receiver.try_recv() {
             pending.push(req);
         }
-        for req in crate::coalesce_render_requests(pending) {
-            handle_request(&pdfium, &mut docs, req, &sink);
+        pending = crate::coalesce_render_requests(pending);
+        if pending.is_empty() {
+            continue;
         }
+        let req = pending.remove(0);
+        handle_request(&pdfium, &mut docs, req, &sink);
     }
 }
 
@@ -129,20 +138,15 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
     match req {
         PdfRequest::Open { key, path } => match pdfium.load_pdf_from_file(&path, None) {
             Ok(doc) => {
-                let page_count = doc.pages().len().max(0) as u32;
-                // Page 0's native size, if there's a page 0 at all -- a
-                // 0-page PDF is technically possible (malformed/empty) and
-                // shouldn't crash the worker, just report a degenerate
-                // size the caller's fit math already treats as "nothing
-                // to fit" (see `coords::fit_page_size`'s own degenerate-
-                // input handling).
-                let (page_width_pts, page_height_pts) = doc
-                    .pages()
-                    .get(0)
-                    .map(|page| (page.width().value, page.height().value))
-                    .unwrap_or((0.0, 0.0));
+                let pages = doc.pages();
+                // A size pdfium can't read (a malformed page) stands in as
+                // US Letter, so the layout still has a place for it.
+                let sizes = pages
+                    .as_range()
+                    .map(|i| pages.page_size(i).map(|rect| (rect.width().value, rect.height().value)).unwrap_or((612.0, 792.0)))
+                    .collect();
                 docs.insert(key, doc);
-                sink(PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts });
+                sink(PdfResponse::Opened { key, pages: sizes });
             }
             Err(err) => sink(PdfResponse::OpenFailed { key, message: format!("{err:?}") }),
         },
@@ -185,6 +189,8 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         PdfRequest::Close { key } => {
             docs.remove(&key);
         }
+        // Only ever acted on in the queue, by `coalesce_render_requests`.
+        PdfRequest::Cancel { .. } => {}
     }
 }
 
