@@ -67,34 +67,7 @@ impl App {
     /// regaining focus); the minute tick keeps the last scan.
     pub(super) fn refresh_home_data(&mut self, with_todos: bool) {
         let now = chrono::Local::now();
-        let mut recent_files = self.recent_files.paths().iter().filter(|p| p.is_file());
-        let project_of = |path: &Path| -> Option<(String, Option<String>)> {
-            let root = fenix_project::find_project_root(path)?;
-            let name = root.file_name()?.to_string_lossy().into_owned();
-            Some((name, git_branch(&root)))
-        };
-        let resume = recent_files.next().map(|path| {
-            let detail = match project_of(path) {
-                Some((name, Some(branch))) => format!("{name} · {branch}"),
-                Some((name, None)) => name,
-                None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
-            };
-            dashboard::FileItem {
-                path: path.clone(),
-                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                detail,
-                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
-            }
-        });
-        let recent = recent_files
-            .take(5)
-            .map(|path| dashboard::FileItem {
-                path: path.clone(),
-                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                detail: String::new(),
-                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
-            })
-            .collect();
+        let (resume, recent) = self.home_recent_files(None);
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
@@ -142,7 +115,7 @@ impl App {
                 t.order,
             )
         });
-        let today = open
+        let today: Vec<dashboard::TaskItem> = open
             .into_iter()
             .map(|t| dashboard::TaskItem {
                 title: match t.jira_key() {
@@ -156,41 +129,105 @@ impl App {
 
         let todos = if with_todos {
             let root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
-            root.and_then(|root| self.collect_project_todos(&root).ok())
-                .map(|(found, _)| {
-                    let mut items: Vec<dashboard::TodoItem> = found
-                        .into_iter()
-                        .map(|(kind, m)| dashboard::TodoItem {
-                            kind,
-                            message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
-                            file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                            path: m.path,
-                            line: m.line,
-                            col: m.col,
-                        })
-                        .collect();
-                    items.sort_by_key(|t| t.kind);
-                    items
-                })
-                .unwrap_or_default()
+            root.map(|root| self.home_todos(&root)).unwrap_or_default()
         } else {
             self.home_data.todos.clone()
         };
 
-        let data = HomeData {
-            date: now.format("%A %-d %B · %H:%M").to_string(),
-            resume,
-            recent,
-            projects,
-            today,
-            todos,
-            recovery: self.unclaimed_snapshot_names().len(),
-        };
-        if data != self.home_data {
+        let date = now.format("%A %-d %B · %H:%M").to_string();
+        let recovery = self.unclaimed_snapshot_names().len();
+        // A project workspace's Home: the same page, narrowed to the
+        // project's own files and TODOs, and named after it.
+        let mut scoped = HashMap::new();
+        for root in self.home_projects() {
+            let (resume, recent) = self.home_recent_files(Some(&root));
+            let todos = match self.home_project_data.get(&root) {
+                Some(previous) if !with_todos => previous.todos.clone(),
+                _ => self.home_todos(&root),
+            };
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+            let data = HomeData {
+                date: format!("{name} · {date}"),
+                resume,
+                recent,
+                projects: projects.clone(),
+                today: today.clone(),
+                todos,
+                recovery,
+            };
+            scoped.insert(root, data);
+        }
+        let data = HomeData { date, resume, recent, projects, today, todos, recovery };
+        if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
+            self.home_project_data = scoped;
             // Every Home re-lays itself out on its next frame.
             self.home_views.values_mut().for_each(|view| view.size = (0, 0));
         }
+    }
+
+    /// What Home `id` shows: its project's page for a project
+    /// workspace's Home, the everything page otherwise.
+    pub(super) fn home_data_for(&self, id: BufferId) -> &HomeData {
+        self.home_project_of(id).and_then(|root| self.home_project_data.get(&root)).unwrap_or(&self.home_data)
+    }
+
+    /// The resume slot and the recent files, from anywhere or only from
+    /// under `scope`.
+    fn home_recent_files(&self, scope: Option<&Path>) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
+        // Recent files are stored canonical (with Windows' `\\?\` prefix), project
+        // roots normalized, so both are compared normalized.
+        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| p.is_file() && under(p));
+        let project_of = |path: &Path| -> Option<(String, Option<String>)> {
+            let root = fenix_project::find_project_root(path)?;
+            let name = root.file_name()?.to_string_lossy().into_owned();
+            Some((name, git_branch(&root)))
+        };
+        let resume = recent_files.next().map(|path| {
+            let detail = match project_of(path) {
+                Some((name, Some(branch))) => format!("{name} · {branch}"),
+                Some((name, None)) => name,
+                None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            };
+            dashboard::FileItem {
+                path: path.clone(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                detail,
+                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
+            }
+        });
+        let recent = recent_files
+            .take(5)
+            .map(|path| dashboard::FileItem {
+                path: path.clone(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                detail: String::new(),
+                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
+            })
+            .collect();
+        (resume, recent)
+    }
+
+    /// The TODO column for `root`, grouped by kind.
+    fn home_todos(&self, root: &Path) -> Vec<dashboard::TodoItem> {
+        self.collect_project_todos(root)
+            .map(|(found, _)| {
+                let mut items: Vec<dashboard::TodoItem> = found
+                    .into_iter()
+                    .map(|(kind, m)| dashboard::TodoItem {
+                        kind,
+                        message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
+                        file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        path: m.path,
+                        line: m.line,
+                        col: m.col,
+                    })
+                    .collect();
+                items.sort_by_key(|t| t.kind);
+                items
+            })
+            .unwrap_or_default()
     }
 
     /// The minute tick: the clock and a running timer move on even when
@@ -216,7 +253,7 @@ impl App {
             return;
         }
         let selected = self.home_selected_slot(id, pane).and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
-        let view = dashboard::layout(&self.home_data, cols, rows);
+        let view = dashboard::layout(self.home_data_for(id), cols, rows);
         let Some(ob) = self.buffers.get_mut(id) else { return };
         if ob.buffer.text() != view.text {
             let end = ob.buffer.len_chars();

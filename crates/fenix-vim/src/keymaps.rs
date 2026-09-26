@@ -101,6 +101,9 @@ pub enum VimAction {
     RequestLsp(crate::state::LspRequestKind),
     /// `]t`/`[t` -- resolved into `VimEvent::BracketJump`.
     BracketJump { target: crate::state::BracketTarget, forward: bool },
+    /// `gt`/`gT`/`g<Tab>`/`gh` -- resolved into `VimEvent::Tab`, the
+    /// count folded in there.
+    Tab(crate::state::TabMove),
 }
 
 /// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
@@ -224,6 +227,10 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
     t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
     t.insert(&[KeyPress::char('K')], "hover", VimAction::RequestLsp(crate::state::LspRequestKind::Hover));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('t')], "next tab", VimAction::Tab(crate::state::TabMove::Next));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('T')], "previous tab", VimAction::Tab(crate::state::TabMove::Prev(1)));
+    t.insert(&[KeyPress::char('g'), KeyPress::named(fenix_keymap::NamedKey::Tab)], "last tab", VimAction::Tab(crate::state::TabMove::Last));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('h')], "Home", VimAction::Tab(crate::state::TabMove::Home));
     t.label_group(&[KeyPress::char(']')], "next...");
     t.label_group(&[KeyPress::char('[')], "previous...");
     t.insert(&[KeyPress::char(']'), KeyPress::char('t')], "next TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: true });

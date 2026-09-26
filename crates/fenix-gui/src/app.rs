@@ -5,6 +5,7 @@ mod session;
 mod editor_ui;
 mod todos;
 mod home;
+mod tabs;
 mod agenda_sync;
 mod agenda_host;
 mod jira_host;
@@ -5034,6 +5035,20 @@ struct Workspace {
     /// The project this workspace belongs to, once one's been opened
     /// into it from the hub -- where opening that project again returns.
     project: Option<PathBuf>,
+    /// This workspace's own Home buffer: the tab pinned first in every
+    /// pane's strip, never closed, scoped to `project` when there is one.
+    /// Filled lazily (`App::ensure_workspace_home`), so every path that
+    /// makes a workspace needn't know about it. Never listed in
+    /// `pane_tabs` -- the strip puts it in front itself.
+    home: Option<BufferId>,
+    /// The buffer each pane showed before its current one -- `g<Tab>`.
+    last_tab: HashMap<fenix_window::WindowId, BufferId>,
+    /// Each pane's preview tab, if it has one: the tab a jump (`gd`, a
+    /// search result) reuses until it's edited or kept.
+    preview: HashMap<fenix_window::WindowId, BufferId>,
+    /// Each pane's closed tabs, newest last, with the place each held --
+    /// what `SPC b u` reopens.
+    closed_tabs: HashMap<fenix_window::WindowId, Vec<(BufferId, usize)>>,
 }
 
 impl Workspace {
@@ -5042,7 +5057,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() }
     }
 }
 
@@ -5085,8 +5100,12 @@ impl WorkspaceList {
         &mut self.workspaces[self.active].scroll_anims
     }
 
-    fn active_pane_tabs(&self) -> &HashMap<fenix_window::WindowId, Vec<BufferId>> {
-        &self.workspaces[self.active].pane_tabs
+    fn active_workspace(&self) -> &Workspace {
+        &self.workspaces[self.active]
+    }
+
+    fn active_workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspaces[self.active]
     }
 
     fn active_pane_tabs_mut(&mut self) -> &mut HashMap<fenix_window::WindowId, Vec<BufferId>> {
@@ -5865,6 +5884,18 @@ pub struct App {
     home_views: HashMap<BufferId, dashboard::HomeView>,
     /// What Home shows, shared by every Home buffer.
     home_data: dashboard::HomeData,
+    /// A page saw `g` and is waiting to learn whether it's a tab key
+    /// (`gt`, `gT`, `gh`, `g<Tab>`) -- see `App::page_key`.
+    page_g_pending: bool,
+    /// The last tab clicked, and when -- a second click on it soon after
+    /// is a double-click, which keeps a preview.
+    last_tab_click: Option<(Instant, fenix_window::WindowId, BufferId)>,
+    /// A tab the left button went down on, carried to wherever it's
+    /// released to move it there.
+    tab_drag: Option<(fenix_window::WindowId, BufferId)>,
+    /// A project workspace's Home data, by project root -- see
+    /// `App::home_data_for`.
+    home_project_data: HashMap<PathBuf, dashboard::HomeData>,
     /// The logo lockup image and its GPU copy.
     home_logo: Option<home::HomeLogo>,
     /// An alpha-blended textured-quad pipeline for the logo -- the PDF
@@ -7015,6 +7046,10 @@ impl App {
             recent_files,
             home_views: HashMap::new(),
             home_data: dashboard::HomeData::default(),
+            page_g_pending: false,
+            last_tab_click: None,
+            tab_drag: None,
+            home_project_data: HashMap::new(),
             home_logo: None,
             logo_pipeline: None,
             dired_states: HashMap::new(),
@@ -7656,14 +7691,21 @@ impl App {
     /// from whatever it was showing before (which could easily be out of
     /// bounds for the new buffer's own length).
     fn set_pane_content(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId) {
+        self.set_pane_content_as(pane, buffer_id, false);
+    }
+
+    /// `set_pane_content`, with a buffer the pane has no tab for yet
+    /// opening in its preview tab when `preview` (see `App::list_tab`).
+    fn set_pane_content_as(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, preview: bool) {
         if self.snippet.as_ref().is_some_and(|s| s.pane == pane) { self.snippet = None; }
+        let before = self.windows().content(pane).copied();
+        if let Some(before) = before.filter(|&b| b != buffer_id) {
+            self.workspaces.active_workspace_mut().last_tab.insert(pane, before);
+        }
         self.windows_mut().set_content(pane, buffer_id);
         let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(cursor));
-        let tabs = self.workspaces.active_pane_tabs_mut().entry(pane).or_default();
-        if !tabs.contains(&buffer_id) {
-            tabs.push(buffer_id);
-        }
+        self.list_tab(pane, before, buffer_id, preview);
         self.refresh_gutter_hunks(buffer_id);
     }
 
@@ -7791,12 +7833,18 @@ impl App {
     /// -- which was still showing the hijacked file, not VNC, making it
     /// look like reopening the session had silently done nothing.
     fn open_buffer_in_focused_pane(&mut self, id: BufferId) {
+        self.open_buffer_in_focused_pane_as(id, false);
+    }
+
+    /// `open_buffer_in_focused_pane`, in the pane's preview tab when
+    /// `preview` -- for a jump rather than a deliberate open.
+    fn open_buffer_in_focused_pane_as(&mut self, id: BufferId, preview: bool) {
         if self.focused_pane_holds_a_tracked_session() {
             let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
             self.workspaces.new_workspace(id, cursor);
         } else {
             let focused = self.focused_pane_id();
-            self.set_pane_content(focused, id);
+            self.set_pane_content_as(focused, id, preview);
         }
     }
 
@@ -8170,7 +8218,7 @@ impl App {
     /// range's start.
     fn goto_lsp_location(&mut self, location: &lsp_types::Location) {
         let Some(path) = fenix_lsp::uri_to_path(&location.uri) else { return };
-        self.open_file_from_picker(&path);
+        self.open_file_as_preview(&path);
         self.goto_lsp_position(location.range.start);
     }
 
@@ -9304,6 +9352,11 @@ impl App {
         if self.open().buffer.path().is_none() {
             self.set_error("no file path to save to yet; use :w <path>");
             return;
+        }
+        // Saving a preview says you mean to keep it.
+        let pane = self.focused_pane_id();
+        if self.workspaces.active_workspace().preview.get(&pane) == Some(&id) {
+            self.keep_preview(pane);
         }
         if !force {
             // Re-checked here rather than trusting the last sweep: the
@@ -12345,11 +12398,11 @@ impl App {
         let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         match entry {
             QuickfixEntry::Grep(m) | QuickfixEntry::Task(m) => {
-                self.open_file_from_picker(&m.path);
+                self.open_file_as_preview(&m.path);
                 self.jump_to_grep_match(&m);
             }
             QuickfixEntry::Lsp { path, position } => {
-                self.open_file_from_picker(&path);
+                self.open_file_as_preview(&path);
                 self.goto_lsp_position(position);
             }
         }
@@ -13516,6 +13569,10 @@ impl App {
     /// "close" action the guard exists for.
     fn kill_buffer_now(&mut self) {
         let id = self.focused_buffer_id();
+        if self.is_a_workspace_home(id) {
+            self.set_message("Home stays open -- gt or SPC b b to leave it");
+            return;
+        }
         if let Some(session) = &self.docker_session {
             if [
                 session.containers_buffer,
@@ -13579,8 +13636,7 @@ impl App {
         if self.project_replace.as_ref().is_some_and(|s| s.buffer_id == id) {
             self.project_replace = None;
         }
-        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
-        self.repoint_panes_showing(id, fallback);
+        self.drop_buffer_from_every_strip(id);
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13651,17 +13707,10 @@ impl App {
         self.wake_caret();
     }
 
-    /// `SPC d d`: (re-)opens the dashboard in the focused pane, freshly
-    /// generated from the current `known_projects`/`recent_files` --
-    /// always a *new* buffer, same "no dedup" precedent as `SPC b X`
-    /// above (repeated presses just make more buffers; see this
-    /// feature's own plan for why that's an intentional, not a new,
-    /// simplification).
+    /// `SPC o d`: this workspace's Home, in the focused pane -- the same
+    /// as `gh`, not another dashboard.
     pub(crate) fn open_dashboard(&mut self) {
-        let id = self.new_home_buffer();
-        self.open_buffer_in_focused_pane(id);
-        self.refresh_project_root();
-        self.wake_caret();
+        self.go_home();
     }
 
     /// `SPC d d`: opens (or, if one's already open, refocuses/refreshes)
@@ -14836,7 +14885,7 @@ impl App {
     /// rather than a separate persistent highlight for v1.
     fn goto_debug_location(&mut self, path: &Path, line: usize) {
         let Some(buffer_id) = self.buffers.id_for_path(path) else {
-            self.open_file_from_picker(path);
+            self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
             return;
         };
@@ -14854,7 +14903,7 @@ impl App {
             }
         }
         if !shown_somewhere {
-            self.open_file_from_picker(path);
+            self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
         }
     }
@@ -18672,7 +18721,7 @@ impl App {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-                self.open_file_from_picker(&m.path);
+                self.open_file_as_preview(&m.path);
                 self.jump_to_grep_match(&m);
                 self.record_jump(from);
                 // So `SPC p n`/`SPC p N` continue from wherever the
@@ -18730,7 +18779,7 @@ impl App {
                 let Some(tag) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-                self.open_file_from_picker(&tag.file);
+                self.open_file_as_preview(&tag.file);
                 self.jump_to_tag(&tag);
                 self.record_jump(from);
             }
@@ -18888,13 +18937,28 @@ impl App {
     /// here, so confirming always means "this is current now, back to
     /// the editor."
     fn open_file_from_picker(&mut self, path: &Path) {
+        self.open_file_as(path, false);
+        // Opened on purpose: a preview of this file is now a tab you keep.
+        let pane = self.focused_pane_id();
+        if self.workspaces.active_workspace().preview.get(&pane) == Some(&self.focused_buffer_id()) {
+            self.keep_preview(pane);
+        }
+    }
+
+    /// Where a jump lands (`gd`, a search result, a symbol, `Ctrl-O`):
+    /// the pane's preview tab, which the next jump reuses.
+    fn open_file_as_preview(&mut self, path: &Path) {
+        self.open_file_as(path, true);
+    }
+
+    fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
             self.open_pdf_path(path);
             return;
         }
         let id = self.buffers.open_path(path);
         self.note_disk_state(id);
-        self.open_buffer_in_focused_pane(id);
+        self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
         self.record_recent_file(path);
         self.main_view = MainView::Editor;
@@ -19137,6 +19201,7 @@ impl App {
     /// What happens after a key has been through Vim, whatever it did:
     /// today, finishing an XML tag the key just typed in Insert mode.
     fn after_vim_key(&mut self, key: KeyPress) {
+        self.keep_edited_preview();
         if let KeyCode::Char(c @ ('>' | '/')) = key.code {
             if key.mods == Mods::default() && self.vim.mode() == Mode::Insert {
                 self.xml_autoclose(c);
@@ -19263,7 +19328,8 @@ impl App {
     /// apply.
     fn goto_jump_entry(&mut self, entry: JumpEntry, linewise: bool) {
         if entry.buffer != self.focused_buffer_id() {
-            self.open_buffer_in_focused_pane(entry.buffer);
+            self.open_buffer_in_focused_pane_as(entry.buffer, true);
+            self.refresh_project_root();
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
@@ -20614,7 +20680,10 @@ impl App {
     /// current buffer (so it starts on something, not a blank scratch
     /// buffer) -- becomes active immediately.
     pub(crate) fn new_workspace(&mut self) {
-        let id = self.focused_buffer_id();
+        let focused = self.focused_buffer_id();
+        // A workspace's Home is its own: seed the new one with a fresh
+        // Home rather than the one it was opened from.
+        let id = if self.is_a_workspace_home(focused) { self.new_home_buffer() } else { focused };
         let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.new_workspace(id, cursor);
         self.wake_caret();
@@ -21397,6 +21466,18 @@ impl App {
         // narrow, disclosed gap far preferable to risking a regression
         // in the everyday redo shortcut itself.
         if keypress.mods.ctrl {
+            // The editors' own tab keys, in any mode -- Insert included,
+            // where `gt` would only type.
+            let tab_move = match keypress.code {
+                KeyCode::Named(FenixNamedKey::PageDown) => Some(fenix_vim::TabMove::Next),
+                KeyCode::Named(FenixNamedKey::PageUp) => Some(fenix_vim::TabMove::Prev(1)),
+                KeyCode::Named(FenixNamedKey::Tab) => Some(fenix_vim::TabMove::Last),
+                _ => None,
+            };
+            if let Some(mv) = tab_move {
+                self.move_tab(mv);
+                return;
+            }
             if let KeyCode::Char(c) = keypress.code {
                 let id = if c.eq_ignore_ascii_case(&'s') {
                     Some("file.save")
@@ -22382,6 +22463,7 @@ impl App {
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::Tab(mv) => self.move_tab(mv),
             VimEvent::None => {}
         }
         self.wake_caret();
@@ -24579,6 +24661,13 @@ impl App {
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
                 self.set_pane_content(pane, buffer);
+                self.tab_clicked(pane, buffer);
+            }
+            Some(ScrollTarget::CloseTab(pane, buffer)) if self.workspaces.active_workspace().home == Some(buffer) => {
+                self.windows_mut().focus(pane);
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+                self.set_pane_content(pane, buffer);
             }
             Some(ScrollTarget::CloseTab(pane, buffer)) => self.close_pane_tab(pane, buffer),
             None => return,
@@ -24593,15 +24682,28 @@ impl App {
     /// pane's own tab strip), so this only ever hides it from *this*
     /// pane's strip, same as navigating away from a buffer already works
     /// today (`SPC b b` still reaches it). If `buffer` was the pane's
-    /// active tab, retargets to the tab list's new last entry, or a fresh
-    /// scratch buffer if the list is now empty.
+    /// active tab, retargets to its neighbour (`tab_after_closing`), or
+    /// Home once no other tab is left. Home itself never closes.
     fn close_pane_tab(&mut self, pane: fenix_window::WindowId, buffer: BufferId) {
+        if self.workspaces.active_workspace().home == Some(buffer) {
+            return;
+        }
         let was_active = self.windows().content(pane) == Some(&buffer);
-        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
-        tabs.retain(|&id| id != buffer);
-        let next = tabs.last().copied();
+        let order = self.pane_tab_order(pane);
+        let ws = self.workspaces.active_workspace_mut();
+        let Some(tabs) = ws.pane_tabs.get_mut(&pane) else { return };
+        let Some(at) = tabs.iter().position(|&id| id == buffer) else { return };
+        tabs.remove(at);
+        let closed = ws.closed_tabs.entry(pane).or_default();
+        closed.push((buffer, at));
+        if closed.len() > tabs::CLOSED_TABS_KEPT {
+            closed.remove(0);
+        }
+        if ws.preview.get(&pane) == Some(&buffer) {
+            ws.preview.remove(&pane);
+        }
         if was_active {
-            let target = next.unwrap_or_else(|| self.buffers.open_scratch());
+            let target = tabs::tab_after_closing(&order, buffer).unwrap_or_else(|| self.ensure_workspace_home());
             self.set_pane_content(pane, target);
         }
     }
@@ -24804,6 +24906,8 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // Every pane's strip starts with the workspace's Home.
+        self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");
         // Cheap per-frame check (an integer comparison against `Buffer::
         // edit_count()`, same "cheap no-op most frames" shape as the PDF
@@ -25001,6 +25105,8 @@ impl App {
             /// and an estimate built from character counts cannot match a
             /// row that mixes the body font with the much wider icon font.
             tab_ranges: Vec<(usize, usize, usize, usize)>,
+            /// Which of `tab_spans` are in italics: the preview tab's name.
+            tab_italic: Vec<usize>,
             /// The breadcrumb bar's rich-text spans, directly below the
             /// tab strip -- kept as its own field (not appended to `tab_
             /// spans` with a newline) since the two rows now render as
@@ -25167,6 +25273,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25254,6 +25361,7 @@ impl App {
                         tab_spans: Vec::new(),
                         breadcrumb_spans: Vec::new(),
                         tab_ranges: Vec::new(),
+                        tab_italic: Vec::new(),
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
@@ -25329,6 +25437,7 @@ impl App {
                         tab_spans: Vec::new(),
                         breadcrumb_spans: Vec::new(),
                         tab_ranges: Vec::new(),
+                        tab_italic: Vec::new(),
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
@@ -25369,6 +25478,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25407,6 +25517,7 @@ impl App {
                     tab_spans: Vec::new(),
                     breadcrumb_spans: Vec::new(),
                     tab_ranges: Vec::new(),
+                    tab_italic: Vec::new(),
                     has_breadcrumb,
                     gutter_marks: Vec::new(),
                     row_accents: Vec::new(),
@@ -25606,7 +25717,7 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges) = if theme.show_tabs
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if theme.show_tabs
                 && !self.pane_titles.contains_key(&pane)
             {
                 // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
@@ -25628,26 +25739,25 @@ impl App {
                 // visible tabs. Lazily resolve names so repeated redraws
                 // while moving do work proportional to tabs that fit, not
                 // all files ever visited in that pane.
-                let tabs = self
-                    .workspaces
-                    .active_pane_tabs()
-                    .get(&pane)
-                    .into_iter()
-                    .flatten()
-                    .map(|&id| (id, self.buffer_display_name(id).chars().count()));
+                let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
                 let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
                 let active_buffer = self.windows().content(pane).copied();
                 let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
                 let mut active_flags: Vec<bool> = Vec::new();
                 let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+                let mut italic: Vec<usize> = Vec::new();
                 let mut byte = 0usize;
                 for tab in &layout {
                     let is_active = Some(tab.buffer) == active_buffer;
                     active_flags.push(is_active);
                     let name_color =
                         if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
-                    let name = self.buffer_display_name(tab.buffer);
-                    let icon_ch = icon::navigation_icon_for(&name);
+                    // Home: the house, the workspace's name, and no ×
+                    // -- blanks where it would be, so it measures and
+                    // lines up like every other tab.
+                    let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
+                    let name = self.tab_label(tab.buffer);
+                    let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
                     let dirty = self
                         .buffers
                         .get(tab.buffer)
@@ -25673,20 +25783,23 @@ impl App {
                     // start at 0 and stay in that string's own space.
                     let icon_span = format!(" {icon_ch} ");
                     let name_span = format!("{label}{}", if dirty { "*" } else { "" });
-                    let close_span = " × ".to_string();
+                    let close_span = if is_home { "   " } else { " × " }.to_string();
                     let tab_start = byte;
                     byte += icon_span.len() + name_span.len();
                     let close_start = byte;
                     byte += close_span.len();
                     ranges.push((tab_start, byte, close_start, byte));
                     spans.push((icon_span, theme.icon_file, true));
+                    if self.is_preview_tab(pane, tab.buffer) {
+                        italic.push(spans.len());
+                    }
                     spans.push((name_span, name_color, false));
                     spans.push((close_span, theme.gutter_fg, false));
                 }
                 let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
-                (layout, active_flags, spans, crumbs, ranges)
+                (layout, active_flags, spans, crumbs, ranges, italic)
             } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
 
             // Inline git gutter marks (Part 5) currently in view -- every
@@ -25749,6 +25862,7 @@ impl App {
                 tab_spans,
                 breadcrumb_spans,
                 tab_ranges,
+                tab_italic,
                 has_breadcrumb,
                 gutter_marks,
                 indent_guides,
@@ -25866,11 +25980,11 @@ impl App {
             let tab_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: tab_h };
             if pane.tabs_layout.is_empty() {
                 let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)]);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)], &[]);
             } else {
                 let refs: Vec<(&str, glyphon::Color, bool)> =
                     pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &refs);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &refs, &pane.tab_italic);
                 // Now that the strip is shaped, replace each tab's
                 // estimated rect with where its glyphs actually landed.
                 // This is the whole fix for the active tab's highlight
@@ -26919,6 +27033,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     }
                 }
                 if let Some(pos) = self.cursor_pos {
+                    self.tab_mouse(pos, button, state == ElementState::Pressed);
+                }
+                if let Some(pos) = self.cursor_pos {
                     self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
                 }
             }
@@ -27159,6 +27276,7 @@ impl App {
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::Tab(mv) => self.move_tab(mv),
             _ => {}
         }
         self.after_vim_key(kp);
@@ -35469,30 +35587,48 @@ configure_board stm32
     }
 
     #[test]
-    fn kill_buffer_falls_back_to_the_mru_next_buffer() {
+    fn kill_buffer_falls_back_to_the_neighbour_tab() {
         let dir = TempDir::new("kill_buffer");
+        let (a, b, c) = (dir.write("a.txt", "a"), dir.write("b.txt", "b"), dir.write("c.txt", "c"));
+        let mut app = App::with_file(None);
+        app.ensure_workspace_home();
+        app.test_open_path(&a);
+        app.test_open_path(&b);
+        let b_id = app.focused_buffer_id();
+        app.test_open_path(&c);
+        let c_id = app.focused_buffer_id();
+        app.test_open_path(&b);
+
+        app.kill_buffer(); // b sits between a and c: the right one wins
+
+        assert_eq!(app.focused_buffer_id(), c_id);
+        assert!(app.buffers.get(b_id).is_none());
+        assert!(!app.pane_tab_order(app.focused_pane_id()).contains(&b_id));
+    }
+
+    #[test]
+    fn kill_buffer_on_a_panes_only_file_falls_back_to_home() {
+        let dir = TempDir::new("kill_buffer_home");
         let a = dir.write("a.txt", "a");
         let mut app = App::with_file(None);
-        let scratch_id = app.focused_buffer_id();
-        app.test_open_path(&a); // focused on a, scratch is MRU-next
+        let home = app.ensure_workspace_home();
+        app.test_open_path(&a);
 
         app.kill_buffer();
 
-        assert_eq!(app.focused_buffer_id(), scratch_id);
-        assert!(app.buffers.get(scratch_id).is_some());
+        assert_eq!(app.focused_buffer_id(), home);
         assert_eq!(app.buffers.len(), 1);
     }
 
     #[test]
-    fn kill_buffer_on_the_last_buffer_falls_back_to_a_fresh_scratch() {
-        let mut app = App::with_file(None); // single scratch buffer
-        let original_id = app.focused_buffer_id();
+    fn home_refuses_to_be_killed() {
+        let mut app = App::with_file(None);
+        let home = app.ensure_workspace_home();
 
         app.kill_buffer();
 
-        assert_ne!(app.focused_buffer_id(), original_id); // a *new* scratch, not the old one
-        assert_eq!(app.buffers.len(), 1);
-        assert_eq!(app.open().buffer.text(), "");
+        assert_eq!(app.focused_buffer_id(), home);
+        assert!(app.buffers.get(home).is_some());
     }
 
     #[test]
@@ -35500,7 +35636,7 @@ configure_board stm32
         let dir = TempDir::new("kill_buffer_multi_pane");
         let a = dir.write("a.txt", "a");
         let mut app = App::with_file(None);
-        let scratch_id = app.focused_buffer_id();
+        let scratch_id = app.ensure_workspace_home();
         app.test_open_path(&a); // focused pane now on a
         app.split_vertical(); // new pane, also showing a
         assert_eq!(app.windows().window_count(), 2);
@@ -35698,18 +35834,285 @@ configure_board stm32
     }
 
     #[test]
-    fn open_dashboard_replaces_the_focused_pane_with_a_fresh_dashboard_buffer() {
+    fn open_dashboard_goes_to_the_workspaces_one_home() {
         let dir = TempDir::new("open_dashboard");
         let a = dir.write("a.txt", "hello");
         let mut app = App::with_file(None);
+        let home = app.focused_buffer_id();
         app.test_open_path(&a);
         let a_id = app.focused_buffer_id();
 
         app.open_dashboard();
-
         assert_ne!(app.focused_buffer_id(), a_id);
+        assert_eq!(app.focused_buffer_id(), home, "the start screen became the workspace's Home");
         assert_eq!(app.open().kind, BufferKind::Dashboard);
         assert!(!app.test_home().slots.is_empty());
+
+        app.test_open_path(&a);
+        app.open_dashboard();
+        assert_eq!(app.focused_buffer_id(), home, "not a second dashboard");
+    }
+
+    // -- tabs ---------------------------------------------------------
+
+    /// `App::with_file(None)` with its Home adopted and three files open
+    /// in the one pane, in order; the pane is on the last.
+    fn app_with_three_tabs(name: &str) -> (App, TempDir, [BufferId; 4]) {
+        let dir = TempDir::new(name);
+        let mut app = App::with_file(None);
+        let home = app.ensure_workspace_home();
+        let mut ids = [home; 4];
+        for (i, file) in ["a.txt", "b.txt", "c.txt"].into_iter().enumerate() {
+            let path = dir.write(file, file);
+            app.test_open_path(&path);
+            ids[i + 1] = app.focused_buffer_id();
+        }
+        (app, dir, ids)
+    }
+
+    #[test]
+    fn home_is_first_in_the_strip_and_never_listed_twice() {
+        let (app, _dir, ids) = app_with_three_tabs("tabs_order");
+        assert_eq!(app.pane_tab_order(app.focused_pane_id()), ids.to_vec());
+        assert_eq!(app.tab_label(ids[0]), app.workspaces.active_name(), "Home is labelled with the workspace");
+    }
+
+    #[test]
+    fn gt_and_gt_shifted_step_and_wrap_through_home() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_step");
+        keys(&mut app, "gt");
+        assert_eq!(app.focused_buffer_id(), home, "gt from the last tab wraps to Home");
+        keys(&mut app, "gt");
+        assert_eq!(app.focused_buffer_id(), a);
+        keys(&mut app, "gT");
+        keys(&mut app, "gT");
+        assert_eq!(app.focused_buffer_id(), c);
+        keys(&mut app, "2gT");
+        assert_eq!(app.focused_buffer_id(), a);
+        let _ = b;
+    }
+
+    #[test]
+    fn a_counted_gt_goes_to_that_file_and_gh_goes_home() {
+        let (mut app, _dir, [home, a, b, _c]) = app_with_three_tabs("tabs_nth");
+        keys(&mut app, "2gt");
+        assert_eq!(app.focused_buffer_id(), b);
+        keys(&mut app, "1gt");
+        assert_eq!(app.focused_buffer_id(), a);
+        keys(&mut app, "9gt");
+        assert_eq!(app.focused_buffer_id(), a, "past the last tab stays put");
+        keys(&mut app, "gh");
+        assert_eq!(app.focused_buffer_id(), home);
+    }
+
+    #[test]
+    fn g_tab_goes_back_to_the_tab_before() {
+        let (mut app, _dir, [_home, a, _b, c]) = app_with_three_tabs("tabs_last");
+        keys(&mut app, "1gt");
+        assert_eq!(app.focused_buffer_id(), a);
+        keys(&mut app, "g");
+        app.test_route_key(KeyPress::named(FenixNamedKey::Tab));
+        assert_eq!(app.focused_buffer_id(), c);
+        keys(&mut app, "g");
+        app.test_route_key(KeyPress::named(FenixNamedKey::Tab));
+        assert_eq!(app.focused_buffer_id(), a);
+    }
+
+    #[test]
+    fn closing_the_last_file_tab_lands_on_home_and_home_never_closes() {
+        let dir = TempDir::new("tabs_close");
+        let a = dir.write("a.txt", "a");
+        let mut app = App::with_file(None);
+        let home = app.ensure_workspace_home();
+        app.test_open_path(&a);
+        let (pane, a_id) = (app.focused_pane_id(), app.focused_buffer_id());
+
+        app.close_pane_tab(pane, a_id);
+        assert_eq!(app.focused_buffer_id(), home);
+        assert!(app.buffers.get(a_id).is_some(), "closing a tab keeps the buffer");
+
+        app.close_pane_tab(pane, home);
+        assert_eq!(app.pane_tab_order(pane), vec![home]);
+    }
+
+    #[test]
+    fn closing_a_middle_tab_goes_to_its_right_neighbour() {
+        let (mut app, _dir, [_home, a, b, c]) = app_with_three_tabs("tabs_close_mid");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, b);
+        app.close_pane_tab(pane, b);
+        assert_eq!(app.focused_buffer_id(), c);
+        assert_eq!(app.pane_tab_order(pane)[1..], [a, c]);
+    }
+
+    #[test]
+    fn a_new_tab_opens_right_after_the_one_you_were_on() {
+        let (mut app, dir, [home, a, b, c]) = app_with_three_tabs("tabs_insert");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.test_open_path(&dir.write("d.txt", "d"));
+        let d = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, d, b, c]);
+    }
+
+    #[test]
+    fn jumps_share_one_preview_tab_until_it_is_edited() {
+        let (mut app, dir, [home, a, b, c]) = app_with_three_tabs("tabs_preview");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        assert!(app.is_preview_tab(pane, p));
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, p, b, c]);
+
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, q, b, c], "the next jump reuses the preview's place");
+
+        app.test_route_key(KeyPress::char('x'));
+        assert!(!app.is_preview_tab(pane, q), "an edit keeps it");
+        app.open_file_as_preview(&dir.write("r.txt", "r"));
+        let r = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, q, r, b, c]);
+    }
+
+    #[test]
+    fn opening_a_previewed_file_on_purpose_keeps_it() {
+        let dir = TempDir::new("tabs_preview_keep");
+        let file = dir.write("p.txt", "p");
+        let mut app = App::with_file(None);
+        app.ensure_workspace_home();
+        let pane = app.focused_pane_id();
+        app.open_file_as_preview(&file);
+        assert!(app.is_preview_tab(pane, app.focused_buffer_id()));
+        app.open_file_from_picker(&file);
+        assert!(!app.is_preview_tab(pane, app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn keep_preview_and_a_double_click_keep_it() {
+        let dir = TempDir::new("tabs_preview_click");
+        let mut app = App::with_file(None);
+        app.ensure_workspace_home();
+        let pane = app.focused_pane_id();
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        app.tab_clicked(pane, p);
+        assert!(app.is_preview_tab(pane, p), "one click only switches");
+        app.tab_clicked(pane, p);
+        assert!(!app.is_preview_tab(pane, p));
+
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        app.keep_focused_preview();
+        assert!(!app.is_preview_tab(pane, q));
+    }
+
+    #[test]
+    fn with_previews_off_every_jump_is_a_tab() {
+        let dir = TempDir::new("tabs_preview_off");
+        let mut app = App::with_file(None);
+        app.config.preview_tab = Some(false);
+        let home = app.ensure_workspace_home();
+        app.open_file_as_preview(&dir.write("p.txt", "p"));
+        let p = app.focused_buffer_id();
+        app.open_file_as_preview(&dir.write("q.txt", "q"));
+        let q = app.focused_buffer_id();
+        assert_eq!(app.pane_tab_order(app.focused_pane_id()), vec![home, p, q]);
+    }
+
+    #[test]
+    fn a_closed_tab_reopens_where_it_was() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_reopen");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, b);
+        app.close_focused_tab();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, c]);
+        assert!(app.buffers.get(b).is_some());
+        app.reopen_closed_tab();
+        assert_eq!(app.focused_buffer_id(), b);
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+    }
+
+    #[test]
+    fn closing_the_others_leaves_home_and_this_one_and_each_comes_back() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_others");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, b);
+        app.close_other_tabs();
+        assert_eq!(app.pane_tab_order(pane), vec![home, b]);
+        app.reopen_closed_tab();
+        app.reopen_closed_tab();
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+    }
+
+    #[test]
+    fn a_tab_moves_left_and_right_but_home_stays_first() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_shift");
+        let pane = app.focused_pane_id();
+        app.set_pane_content(pane, a);
+        app.shift_focused_tab(-1);
+        assert_eq!(app.pane_tab_order(pane), vec![home, a, b, c]);
+        app.shift_focused_tab(1);
+        assert_eq!(app.pane_tab_order(pane), vec![home, b, a, c]);
+    }
+
+    #[test]
+    fn the_mouse_closes_with_the_middle_button_and_drags_to_move() {
+        let (mut app, _dir, [home, a, b, c]) = app_with_three_tabs("tabs_mouse");
+        let pane = app.focused_pane_id();
+        let rect = |x: f32| fenix_window::Rect { x, y: 0.0, w: 10.0, h: 10.0 };
+        app.tab_geometry = [home, a, b, c]
+            .iter()
+            .enumerate()
+            .map(|(i, &buffer)| (pane, TabRect { buffer, body: rect(i as f32 * 10.0), close: rect(i as f32 * 10.0 + 8.0) }))
+            .collect();
+        app.tab_mouse((12.0, 5.0), MouseButton::Left, true); // a
+        app.tab_mouse((32.0, 5.0), MouseButton::Left, false); // onto c
+        assert_eq!(app.pane_tab_order(pane), vec![home, b, c, a]);
+        app.tab_mouse((22.0, 5.0), MouseButton::Middle, true); // over what was b's place
+        assert_eq!(app.pane_tab_order(pane).len(), 3);
+        app.tab_mouse((2.0, 5.0), MouseButton::Middle, true); // Home
+        assert_eq!(app.pane_tab_order(pane)[0], home);
+    }
+
+    #[test]
+    fn every_pane_starts_with_the_same_home() {
+        let (mut app, _dir, [home, ..]) = app_with_three_tabs("tabs_split");
+        app.split_vertical();
+        assert_eq!(app.pane_tab_order(app.focused_pane_id())[0], home);
+    }
+
+    #[test]
+    fn a_new_workspace_gets_a_home_of_its_own() {
+        let mut app = App::with_file(None);
+        let first = app.ensure_workspace_home();
+        app.new_workspace();
+        let second = app.ensure_workspace_home();
+        assert_ne!(first, second);
+        assert_eq!(app.focused_buffer_id(), second);
+    }
+
+    #[test]
+    fn a_project_workspaces_home_shows_only_that_projects_files() {
+        let inside = TempDir::new("home_scope_in");
+        let outside = TempDir::new("home_scope_out");
+        let (mine, other) = (inside.write("mine.rs", "x"), outside.write("other.rs", "y"));
+        let mut app = App::with_file(None);
+        for file in [&other, &mine] {
+            app.recent_files.add(std::fs::canonicalize(file).unwrap());
+        }
+        let home = app.ensure_workspace_home();
+        let root = fenix_lsp::normalize(std::fs::canonicalize(inside.path()).unwrap());
+        app.workspaces.active_workspace_mut().project = Some(root);
+        app.refresh_home_data(true);
+
+        let scoped = app.home_data_for(home);
+        let names: Vec<&str> = scoped.resume.iter().chain(&scoped.recent).map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["mine.rs"]);
+        assert!(scoped.date.starts_with(&*inside.path().file_name().unwrap().to_string_lossy()), "{}", scoped.date);
+        let everything: Vec<&str> = app.home_data.resume.iter().chain(&app.home_data.recent).map(|f| f.name.as_str()).collect();
+        assert!(everything.contains(&"other.rs"));
     }
 
     #[test]

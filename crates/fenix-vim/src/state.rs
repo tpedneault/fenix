@@ -154,6 +154,25 @@ pub enum VimEvent {
     /// document's syntax, which only the host can answer; this crate
     /// only knows which key asked, in which direction, how many times.
     BracketJump { target: BracketTarget, forward: bool, count: u32 },
+    /// `gt`/`gT`/`{n}gt`/`g<Tab>`/`gh` -- move along the focused pane's
+    /// tab strip. Tabs are a host notion; this crate only says which key
+    /// asked, with the count already folded in.
+    Tab(TabMove),
+}
+
+/// Where a tab key asked to go -- see `VimEvent::Tab`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMove {
+    /// `gt`: the next tab, wrapping.
+    Next,
+    /// `gT`/`{n}gT`: back `n` tabs, wrapping.
+    Prev(u32),
+    /// `{n}gt`: tab `n`, counting from 1 (Home isn't numbered).
+    Nth(u32),
+    /// `g<Tab>`: the tab this pane was on before the current one.
+    Last,
+    /// `gh`: the workspace's Home.
+    Home,
 }
 
 /// What a `]`/`[` pair jumps between -- see `VimEvent::BracketJump`.
@@ -376,6 +395,8 @@ pub struct VimState {
     /// `VimEvent::BracketJump`, the same round trip `pending_lsp_
     /// request` makes.
     pending_bracket_jump: Option<(BracketTarget, bool, u32)>,
+    /// Set by `gt`/`gT`/`g<Tab>`/`gh`; the same round trip again.
+    pending_tab: Option<TabMove>,
     command_line: String,
     /// Set by `f`/`F`/`t`/`T`: the *next* key is the target char, not a
     /// trie key -- `(forward, till, count)`, `count` being whatever was
@@ -446,6 +467,7 @@ impl VimState {
             pending_comment_lines: None,
             pending_lsp_request: None,
             pending_bracket_jump: None,
+            pending_tab: None,
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
@@ -775,6 +797,7 @@ impl VimState {
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
         let bracket_jump = self.pending_bracket_jump.take();
+        let tab = self.pending_tab.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
         // keypress would otherwise produce, so this never shadows a real
@@ -798,6 +821,7 @@ impl VimState {
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
             .or_else(|| bracket_jump.map(|(target, forward, count)| VimEvent::BracketJump { target, forward, count }))
+            .or_else(|| tab.map(VimEvent::Tab))
             .unwrap_or(event)
     }
 
@@ -1467,6 +1491,10 @@ impl VimState {
             }
             VimAction::RequestLsp(kind) => self.pending_lsp_request = Some(kind),
             VimAction::BracketJump { target, forward } => self.pending_bracket_jump = Some((target, forward, count)),
+            // Vim's own split: a bare `gt` steps, a counted one jumps.
+            VimAction::Tab(TabMove::Next) => self.pending_tab = Some(raw_count.map_or(TabMove::Next, TabMove::Nth)),
+            VimAction::Tab(TabMove::Prev(_)) => self.pending_tab = Some(TabMove::Prev(count)),
+            VimAction::Tab(other) => self.pending_tab = Some(other),
         }
     }
 
@@ -2706,6 +2734,26 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "3[");
         let event = vim.handle_key(&mut b, &mut c, KeyPress::char('t'));
         assert_eq!(event, VimEvent::BracketJump { target: BracketTarget::Todo, forward: false, count: 3 });
+    }
+
+    #[test]
+    fn tab_keys_ask_the_host_to_move_with_vims_count_rules() {
+        let mut b = buf("x");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let mut last = |vim: &mut VimState, typed: &str| {
+            let (head, tail) = typed.split_at(typed.len() - 1);
+            keys(vim, &mut b, &mut c, head);
+            vim.handle_key(&mut b, &mut c, KeyPress::char(tail.chars().next().unwrap()))
+        };
+        assert_eq!(last(&mut vim, "gt"), VimEvent::Tab(TabMove::Next));
+        assert_eq!(last(&mut vim, "3gt"), VimEvent::Tab(TabMove::Nth(3)));
+        assert_eq!(last(&mut vim, "gT"), VimEvent::Tab(TabMove::Prev(1)));
+        assert_eq!(last(&mut vim, "2gT"), VimEvent::Tab(TabMove::Prev(2)));
+        assert_eq!(last(&mut vim, "gh"), VimEvent::Tab(TabMove::Home));
+        keys(&mut vim, &mut b, &mut c, "g");
+        assert_eq!(named(&mut vim, &mut b, &mut c, NamedKey::Tab), VimEvent::Tab(TabMove::Last));
+        assert!(vim.is_idle());
     }
 
     #[test]

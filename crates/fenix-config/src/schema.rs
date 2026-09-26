@@ -306,6 +306,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; h and l go through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
         s("editor.font_size", Appearance, "Font size", Kind::Float { min: 6.0, max: 48.0 }, "Text size, in points.", field!(font_size, f32_get, f32_set)).default("16"),
         s("editor.animations", Appearance, "Animations", Kind::Bool, "Smooth scrolling and the caret's fade.", field!(animations, bool_get, bool_set)).default("on"),
+        s("editor.preview_tab", Appearance, "Preview tabs", Kind::Bool, "A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P.", field!(preview_tab, bool_get, bool_set)).default("on"),
         // Files
         s("editor.watch_files", Files, "Watch files on disk", Kind::Bool, "Notice when an open file changes on disk, and reload it when you haven't edited it.", field!(watch_files, bool_get, bool_set)).default("on"),
         // Completion & LSP

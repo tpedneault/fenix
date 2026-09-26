@@ -337,7 +337,8 @@ impl App {
         }
         // Version 1 records no document for dashboards and transient panels.
         // Restore those leaves to a usable dashboard, including its actions.
-        let placeholder = self.new_home_buffer();
+        // Every workspace gets its own Home, which is also what a leaf
+        // with no restorable document shows.
         let mut frames = Vec::new();
         for frame in saved.frames {
             // `capture_session` no longer writes a panel workspace at all
@@ -385,13 +386,15 @@ impl App {
                         Layout::Split { kind, ratio, first, second } => Layout::Split { kind, ratio, first: Box::new(map(*first, docs, fallback, states)), second: Box::new(map(*second, docs, fallback, states)) },
                     }
                 }
-                let layout = map(workspace.layout, &documents, placeholder, &mut states);
+                let home = self.buffers.open_dashboard("");
+                let layout = map(workspace.layout, &documents, home, &mut states);
                 let tree = WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
                 let mut pane_states = HashMap::new();
                 let mut pane_tabs = HashMap::new();
                 for (id, pane) in tree.windows().into_iter().zip(states) {
-                    pane_tabs.insert(id, vec![*tree.content(id).unwrap_or(&placeholder)]);
-                    if tree.content(id) == Some(&placeholder) {
+                    let shown = *tree.content(id).unwrap_or(&home);
+                    pane_tabs.insert(id, if shown == home { Vec::new() } else { vec![shown] });
+                    if shown == home {
                         pane_states.insert(id, PaneState::seeded_at(Cursor::at_start()));
                         continue;
                     }
@@ -402,19 +405,15 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
-        }
-        let placeholder_used = frames.iter().any(|frame| frame.workspaces.iter().any(|workspace| workspace.windows.windows().iter().any(|pane| workspace.windows.content(*pane) == Some(&placeholder))));
-        if !placeholder_used {
-            self.buffers.close(placeholder);
-            self.home_views.remove(&placeholder);
         }
         self.workspaces = frames.remove(0);
         self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
         self.refresh_project_root();
         self.refresh_all_gutter_hunks();
+        self.refresh_home_data(true);
         self.main_view = MainView::Editor;
         if warnings.is_empty() { self.set_message("restored editor session"); }
         else { self.set_error(format!("Session restored with warnings: {}", warnings.join("; "))); }
