@@ -33,7 +33,7 @@ pub fn parse_heading(line_text: &str) -> Option<(usize, String)> {
 
 /// A heading's display label for the `SPC c o` outline picker -- its
 /// title, indented two spaces per level below the first (matching the
-/// PDF viewer's own outline panel convention, `pdf_outline::render`),
+/// PDF reader's outline sidebar and heading picker),
 /// not the literal `#`s -- so nesting reads at a glance without the
 /// visual noise of repeating hash marks down the whole list.
 pub fn heading_label(level: usize, title: &str) -> String {

@@ -13,9 +13,12 @@
 /// (see `App::pdf_jump_session_to_page`), but kept rather than discarded
 /// since it's what pdfium's search API hands back for free and a future
 /// "highlight the match on the page" feature would need it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PdfSearchMatch {
     pub page_index: u32,
     pub char_index: usize,
     pub context: String,
+    /// Where the match is on its page, in points from the page's
+    /// top-left: `[x0, y0, x1, y1]`, one per line it spans.
+    pub rects: Vec<[f32; 4]>,
 }

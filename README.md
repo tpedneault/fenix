@@ -870,8 +870,11 @@ for anyone curious to poke around or build on it.
   `gg`, `G` and `{n}G` go to a page, counts repeat, and `g` waits so
   `gt`/`gT`/`gh` still move between tabs. `+`/`-` zoom in steps, `=`
   switches between fit width and fit page, `zw`/`zp`/`z0` pick one.
-  `o` opens the outline beside it, `/` searches and `n`/`N` go through
-  the pages with matches. `SPC m` lists the reader's commands, and
+  `o` opens a sidebar with the outline (folding, the section you're in
+  marked), the search's matches and your marks; `/` searches as you
+  type, highlighting every match on the page, and `n`/`N` go through
+  them one by one; `m{a}` and `'{a}` set and use marks, and `Ctrl-o`
+  comes back from a jump. `SPC r t` picks a heading by name. `SPC m` lists the reader's commands, and
   `SPC r` works from any pane on the PDF read last. Requires
   `pdfium.dll` (see [Optional external tools](#optional-external-tools))
   -- without it, opening a PDF shows an error instead of a blank pane.
@@ -1363,7 +1366,8 @@ popup shows what keys continue it.
 | `SPC r =` / `SPC r -` | Zoom in / out |
 | `SPC r f` | Open a document from the document index (`SPC ,` > Documents) |
 | `SPC r 0` / `SPC r w` | Fit the page / its width to the pane |
-| `SPC r o` | Open or close the outline |
+| `SPC r o` | Open or close the sidebar (outline, matches, marks) |
+| `SPC r t` | Go to a heading of the PDF, picked by name |
 | `SPC r /` | Search the document's text |
 | wheel, `j` / `k`, `{n}j` | Scroll the column of pages; `Ctrl` + wheel zooms (PDF panes) |
 | `Ctrl-d` / `Ctrl-u`, `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | Half a screen / a screen (PDF panes) |
@@ -1371,7 +1375,8 @@ popup shows what keys continue it.
 | `gg` / `G` / `{n}G` | First / last / page n (PDF panes) |
 | `h` / `l` | Pan sideways (PDF panes) |
 | `+` / `-` / `=` / `zw` / `zp` / `z0` | Zoom in / out, fit width or page in turn, fit width, fit page, 100% (PDF panes) |
-| `o` / `/` / `n` / `N` | Outline, search, next / previous page with a match (PDF panes) |
+| `o` / `/` / `n` / `N` | Sidebar, search, next / previous match (PDF panes) |
+| `m{a}` / `'{a}`, `Ctrl-o` / `Ctrl-i` | Set / go to a mark, back / forward through jumps (PDF panes) |
 | `gd` | Go to definition (LSP) |
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
 | `K` | Show hover information for the symbol under the cursor (LSP) |
@@ -1711,9 +1716,13 @@ the reader's commands.
 | `=` | Fit width and fit page, in turn |
 | `zw` / `zp` / `z0` | Fit width / fit page / 100% (the page's real size on this screen) |
 | `h` / `l`, `Left` / `Right` | Pan sideways when the page is wider than the pane |
-| `o`, `SPC r o` | Open or close the outline beside the document |
-| `/`, `SPC r /` | Search the document's text |
-| `n` / `N` | The next / previous page with a match of the last search |
+| `o`, `SPC r o` | Open or close the sidebar: outline, matches, marks |
+| `SPC r t` | Go to a heading, picked by name |
+| `/`, `SPC r /` | Search as you type; `Enter` goes to the first match from here |
+| `n` / `N` | The next / previous match, going round the ends |
+| `Esc` | Hide the matches' highlights, or close the sidebar |
+| `m{a}` / `'{a}` | Set a mark here / go back to it |
+| `Ctrl-o` / `Ctrl-i` | Back / forward through jumps (`gg`, `G`, `{n}G`, headings, matches, marks) |
 
 `SPC r ...` also works from another pane -- the outline, or the code
 you're reading the document for -- and acts on the PDF read last.
@@ -1740,16 +1749,30 @@ pane) and the zoom (`Fit width`, `Fit page`,
 or a percentage) where an ordinary buffer shows `Ln`/`Col`, and a count
 or `g`/`z` while you type it.
 
-The outline (`o`) opens as a split next to the document, listing its
-bookmarks as indented lines. It's ordinary Vim-navigable text; `Enter`
-on an entry takes the document to its page, and `o` or `SPC r o` from
-either pane closes it. It's fetched once per document; a PDF with no
-bookmarks shows a line saying so.
+The **sidebar** (`o`) runs down the reader's left edge -- beside the
+pages, or over them in a narrow pane -- with three lists that `Tab`
+goes between: the **outline**, the **matches** of the last search and
+the document's **marks**. It opens on the outline with the keyboard in
+it: `j`/`k`/`gg`/`G` move, `Enter` goes there and hands the keyboard
+back to the pages, `o`, `q` or `Esc` close it. The outline is a tree:
+`za` folds an entry, `h` folds or goes up to the parent, `l` unfolds,
+`zM`/`zR` fold and unfold everything, and the section you're reading
+stays marked as you scroll. A PDF with no bookmarks says so.
 
-Search (`/`) lists every match in page order as `p.NNN  <context>` in a
-results pane beside the document (a new search reuses it); `Enter` on a
-result goes to its page, and `n`/`N` step through the pages with matches
-from wherever you are, going round the ends.
+**Search** (`/`) searches as you type -- a capital letter makes it
+match case -- and highlights every match on the pages, the current one
+more strongly; the prompt counts them as they're found. `Enter` goes to
+the first match from the page you're on (as soon as it's found), and
+`n`/`N` step through the matches one by one, going round the ends. The
+modeline keeps the query and `3/17`; `Esc` hides the highlights. A long
+document is searched a few pages at a time, so pages keep rendering
+while it's searched.
+
+**Marks**: `m{a}` marks where the pane's top is and `'{a}` comes back;
+they're listed in the sidebar. Every jump -- `gg`, `G`, `{n}G`, a
+heading, a match, a mark -- can be undone with `Ctrl-o` and redone with
+`Ctrl-i`; with no jumps left, `Ctrl-o` goes back to the buffer before,
+as in any other pane.
 
 The pages re-render to fit when the pane is resized, except at a
 percentage, which stays where you left it. A zoom percentage is of the
