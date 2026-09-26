@@ -7366,7 +7366,7 @@ impl App {
     fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
         let (Some(context), Some(fonts)) = (&self.gpu_context, &self.fonts) else { return };
 
-        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let mut attrs = window_attributes();
         if let Some(position) = placement.position {
             attrs = attrs.with_position(position);
         }
@@ -26902,6 +26902,24 @@ fn fenix_icon() -> Option<Icon> {
     Icon::from_rgba(icon.rgba, icon.width, icon.height).ok()
 }
 
+/// The application ID a Linux desktop matches a window to its launcher
+/// by: the `StartupWMClass` of `snap/gui/fenix.desktop`.
+#[cfg(target_os = "linux")]
+const LINUX_APP_ID: &str = "fenix";
+
+/// What every Fenix window starts from.
+fn window_attributes() -> winit::window::WindowAttributes {
+    let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+    // Wayland's app_id and X11's WM_CLASS. Without them, a dock can't tell
+    // the window belongs to Fenix's launcher, and shows a generic icon.
+    #[cfg(target_os = "linux")]
+    let attrs = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        attrs.with_name(LINUX_APP_ID, LINUX_APP_ID)
+    };
+    attrs
+}
+
 impl ApplicationHandler<FenixUserEvent> for App {
     /// Thin trait-required wrapper around `handle_user_event` -- see
     /// that method's own doc comment for why the actual logic lives
@@ -26917,7 +26935,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             return;
         }
 
-        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let attrs = window_attributes();
         let window =
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
 
