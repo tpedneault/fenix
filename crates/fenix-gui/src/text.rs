@@ -39,8 +39,8 @@ pub const MAX_FONT_SIZE: f32 = 40.0;
 /// produce usable glyphs. Real per-column pixel math (caret, selection,
 /// badge sizing) should use `TextPipeline::char_width()` instead, which
 /// measures the *actual* active font's advance width rather than
-/// assuming this ratio holds -- it doesn't across fonts (the bundled
-/// TempleOS bitmap font is ~1.0x its em size, not ~0.6x).
+/// assuming this ratio holds -- it doesn't across fonts (a square
+/// bitmap font's advance is ~1.0x its em size, not ~0.6x).
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
@@ -64,19 +64,9 @@ pub const SIDEBAR_WIDTH: f32 = 240.0;
 /// row count to stay in sync with what's rendered.
 pub const TERMINAL_ROWS: usize = 12;
 
-/// A community TTF conversion (github.com/rendello/templeos_font) of
-/// TempleOS's actual 8x8 bitmap font, embedded so the TempleOS theme
-/// looks right on any machine without needing the font installed --
-/// same reasoning as bundling any other asset the app depends on.
-/// Registered into `FontSystem`'s font database at `TextPipeline::new`
-/// time via `load_font_data`; its family name (confirmed with
-/// `fc-scan`, not guessed) is `"TempleOS"`, matching `Theme::
-/// font_family` on the `TEMPLEOS` theme.
-static TEMPLEOS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/templeos_font.ttf");
-
 /// The official Nerd Fonts symbols-only release (`NerdFontsSymbolsOnly.zip`,
-/// `github.com/ryanoasis/nerd-fonts`), embedded for the same reason the
-/// TempleOS font is: every icon glyph the sidebar/tabs/file explorer draw
+/// `github.com/ryanoasis/nerd-fonts`), embedded because every icon glyph
+/// the sidebar/tabs/file explorer draw
 /// (`icon::icon_for`) needs this font actually present, not just assumed
 /// installed. This is the `...Mono` variant specifically -- every icon
 /// occupies exactly one fixed-width cell, matching the monospace grid the
@@ -162,16 +152,16 @@ fn default_monospace_family(font_system: &FontSystem) -> String {
             return family.to_owned();
         }
     }
-    // Deterministic fallback for other platforms; the embedded font is a
-    // last resort on machines with no system monospace fonts at all.
+    // Deterministic fallback for other platforms. With no monospace font
+    // installed at all, the generic alias is the best there is.
     let mut families: Vec<_> = db
         .faces()
         .filter(|face| face.monospaced)
         .flat_map(|face| face.families.iter().map(|(name, _)| name.as_str()))
-        .filter(|name| *name != "TempleOS")
+        .filter(|name| *name != ICON_FONT_FAMILY)
         .collect();
     families.sort_unstable();
-    families.first().copied().unwrap_or("TempleOS").to_owned()
+    families.first().copied().unwrap_or(db.family_name(&Family::Monospace)).to_owned()
 }
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
@@ -223,7 +213,6 @@ pub struct FontContext {
 impl FontContext {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let default_family: &'static str =
             Box::leak(default_monospace_family(&font_system).into_boxed_str());
@@ -328,9 +317,9 @@ pub struct TextPipeline {
     /// pixels at the current `font_size` -- recomputed whenever
     /// `content_family` (`set_theme`) or `font_size` (`set_font_size`)
     /// actually changes, not every frame. Different fonts have very
-    /// different advance-to-em ratios (the bundled TempleOS bitmap font
-    /// is a full square cell, ~1.0x its em size, vastly wider than a
-    /// typical outline monospace font's ~0.6x), so a single hardcoded
+    /// different advance-to-em ratios (a square bitmap font's cell is
+    /// ~1.0x its em size, vastly wider than a typical outline monospace
+    /// font's ~0.6x), so a single hardcoded
     /// ratio (`CHAR_WIDTH`) breaks caret/column alignment the moment a
     /// second font enters the mix -- callers needing per-column pixel
     /// math should use `char_width()`, not the `CHAR_WIDTH` constant.
@@ -1209,25 +1198,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_templeos_font_loads_and_resolves_by_the_expected_family_name() {
-        // No GPU needed for this -- `FontSystem`/`fontdb` are pure font
-        // data structures; only `TextPipeline` itself needs a `GpuState`.
-        // This guards against the embedded bytes going stale/corrupt, or
-        // the family name (`Theme::font_family` on `TEMPLEOS`, confirmed
-        // with `fc-scan` at the time this was bundled) silently drifting.
-        let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        let found = font_system
-            .db_mut()
-            .faces()
-            .any(|face| face.families.iter().any(|(name, _)| name == "TempleOS"));
-        assert!(found, "expected the embedded font to register under the family name \"TempleOS\"");
-    }
-
-    #[test]
     fn embedded_symbols_nerd_font_mono_loads_and_resolves_by_the_expected_family_name() {
-        // Same guard as the TempleOS test above, for the icon font every
-        // sidebar/tab/explorer icon glyph (`icon::icon_for`) depends on.
+        // No GPU needed: `FontSystem`/`fontdb` are pure font data. Guards
+        // against the embedded bytes going stale or corrupt, or the family
+        // name drifting, for the icon font every sidebar/tab/explorer icon
+        // glyph (`icon::icon_for`) depends on.
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let found = font_system
@@ -1238,41 +1213,12 @@ mod tests {
     }
 
     #[test]
-    fn measured_char_width_reflects_the_bundled_fonts_real_1_to_1_advance_ratio() {
-        // Confirmed via fontTools against the actual font file: every
-        // glyph's advance is exactly 1000/1000 units (a full square
-        // cell) -- i.e. at FONT_SIZE=16 the real advance is ~16px, not
-        // the ~9.6px a typical outline monospace font's ~0.6 ratio
-        // would give. This is the bug the caret/column misalignment
-        // traced back to: a single hardcoded CHAR_WIDTH assumed every
-        // font shared that ~0.6 ratio.
-        let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        let width = TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"), FONT_SIZE, LINE_HEIGHT);
-        assert!((width - FONT_SIZE).abs() < 0.5, "expected ~{FONT_SIZE}px (1:1 ratio), got {width}px");
-    }
-
-    #[test]
-    fn measured_char_width_for_the_default_family_is_narrower_than_the_bitmap_font() {
-        let mut font_system = FontSystem::new();
-        let default_width = TextPipeline::measure_char_width(&mut font_system, Family::Monospace, FONT_SIZE, LINE_HEIGHT);
-        font_system.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        let templeos_width =
-            TextPipeline::measure_char_width(&mut font_system, Family::Name("TempleOS"), FONT_SIZE, LINE_HEIGHT);
-        assert!(
-            default_width < templeos_width,
-            "expected the system default monospace font ({default_width}px) to be narrower \
-             than the bundled 1:1-ratio bitmap font ({templeos_width}px)"
-        );
-    }
-
-    #[test]
     fn the_font_list_is_the_monospace_families_without_the_icon_font() {
         let mut fonts = FontSystem::new();
-        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let names = monospace_families(&fonts);
-        assert!(names.iter().any(|n| n == "TempleOS"), "{names:?}");
+        let default = default_monospace_family(&fonts);
+        assert!(names.contains(&default), "{default} missing from {names:?}");
         assert!(!names.iter().any(|n| n == ICON_FONT_FAMILY), "{names:?}");
         let mut sorted = names.clone();
         sorted.sort_by_key(|n| n.to_lowercase());
@@ -1289,14 +1235,13 @@ mod tests {
     #[test]
     fn is_monospace_installed_accepts_a_real_embedded_monospace_face() {
         let mut fonts = FontSystem::new();
-        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
-        assert!(is_monospace_installed(&fonts, "TempleOS"));
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        assert!(is_monospace_installed(&fonts, ICON_FONT_FAMILY));
     }
 
     #[test]
     fn missing_generic_alias_resolves_to_an_installed_fixed_width_font() {
         let mut fonts = FontSystem::new();
-        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         fonts.db_mut().set_monospace_family("Fenix deliberately missing monospace");
         let name = default_monospace_family(&fonts);
         assert!(fonts
@@ -1335,12 +1280,10 @@ mod tests {
     }
 
     #[test]
-    fn default_font_and_templeos_keep_mixed_text_on_the_character_grid() {
+    fn the_default_font_keeps_mixed_text_on_the_character_grid() {
         let mut fonts = FontSystem::new();
-        fonts.db_mut().load_font_data(TEMPLEOS_FONT_BYTES.to_vec());
         let name = default_monospace_family(&fonts);
         assert_fixed_grid(&mut fonts, &name);
-        assert_fixed_grid(&mut fonts, "TempleOS");
     }
 
     #[test]

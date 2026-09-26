@@ -320,10 +320,9 @@ pub const ORBIT_DARK: Theme = Theme {
 /// headings, links, and directives -- much closer to a print/document
 /// editor than a dark-background terminal IDE.
 ///
-/// `font_family` names the real 8x8 TempleOS bitmap font, embedded into
-/// the binary (`text::TEMPLEOS_FONT_BYTES`, a community TTF conversion
-/// of the original) rather than depending on it being installed --
-/// works on any machine.
+/// The colors only: it uses the same monospace font as every other
+/// theme. A font of your own, the TempleOS bitmap font included, can be
+/// set with `editor.font_family`.
 ///
 /// One remaining disclosed simplification: TempleOS's own HolyC IDE
 /// colors identifiers quasi-randomly per token, which isn't replicated
@@ -332,7 +331,7 @@ pub const ORBIT_DARK: Theme = Theme {
 /// one consistent accent rather than a per-token one.
 pub const TEMPLEOS: Theme = Theme {
     name: "TempleOS",
-    font_family: Some("TempleOS"),
+    font_family: None,
     border: Some(rgba(0x0000aa)),
     divider: rgba(0x0000aa),
     show_tabs: false,

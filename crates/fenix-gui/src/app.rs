@@ -24945,9 +24945,8 @@ impl App {
         // `char_width` below reflects it), the real measured advance
         // width for that font (used for every per-column pixel
         // computation below instead of the fixed-ratio `text::
-        // CHAR_WIDTH` constant, which broke the moment a second font --
-        // the bundled TempleOS bitmap font, a ~1.0x-em advance vs. the
-        // constant's assumed ~0.6x -- entered the mix), and the live
+        // CHAR_WIDTH` constant, which breaks for any font whose advance
+        // isn't the constant's assumed ~0.6 em), and the live
         // `line_height`/`modeline_height` (same reasoning: fixed once,
         // now adjustable at runtime via `SPC t =`/`-`/`0`, so every
         // consumer needs the *current* value, not the `text::LINE_HEIGHT`/
@@ -24955,8 +24954,8 @@ impl App {
         let theme = self.theme;
         // A `config.ini` `font_family` always wins over whatever the
         // active theme names; an unset config falls through to the
-        // theme's own choice (`None` for every theme but TempleOS,
-        // which `TextPipeline::set_font_family` resolves to the fast
+        // theme's own choice (`None` for the shipped themes, which
+        // `TextPipeline::set_font_family` resolves to the fast
         // concrete-name fallback rather than the slow generic one).
         let font_family = self.config.font_family.as_deref().or(theme.font_family);
         let (char_width, line_height, modeline_height, modeline_char_width) = match &mut self.text {
