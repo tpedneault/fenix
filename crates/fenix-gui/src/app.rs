@@ -6006,9 +6006,8 @@ pub struct App {
     pdf_keys_view: Option<reader::ViewKey>,
     /// Hands out view and request ids, unique across every document.
     pdf_next_id: u64,
-    /// Reused for cropping a render to what's visible, since a zoomed
-    /// page's crop is megabytes and changes on every pan.
-    pdf_crop_scratch: Vec<u8>,
+    /// Renders asked for and not back yet: request -> the view and page.
+    pdf_requests: HashMap<u64, (reader::ViewKey, u32)>,
     /// The one pdfium worker for every document (pdfium can't be called
     /// from two threads), spawned with the first PDF opened.
     pdf_worker: Option<fenix_pdf::PdfWorker>,
@@ -6944,7 +6943,7 @@ impl App {
             pdf_keys: crate::reader::Keys::default(),
             pdf_keys_view: None,
             pdf_next_id: 0,
-            pdf_crop_scratch: Vec::new(),
+            pdf_requests: HashMap::new(),
             pdf_worker: None,
             pdf_outline_panes: HashMap::new(),
             pdf_outline_lines: HashMap::new(),
@@ -23327,6 +23326,105 @@ impl App {
     /// descriptive title rather than tabs, and no cursor position to
     /// describe a path to, so a breadcrumb row there would only ever be
     /// blank.
+    /// A pane's tab strip, when the theme draws one and the pane isn't a
+    /// fixed-purpose panel with a title of its own: the tabs' rects,
+    /// which is active, the strip's text, the breadcrumb (for the buffer
+    /// and position in `crumbs_at`), each tab's text range and which are
+    /// in italics. Computed while `self` is still whole, since it needs
+    /// the buffers and workspaces.
+    #[allow(clippy::type_complexity)]
+    fn pane_tab_strip(
+        &self,
+        pane: fenix_window::WindowId,
+        rect: fenix_window::Rect,
+        line_height: f32,
+        is_focused: bool,
+        theme: &Theme,
+        crumbs_at: Option<(BufferId, usize)>,
+    ) -> (Vec<TabRect>, Vec<bool>, Vec<(String, glyphon::Color, bool)>, Vec<(String, glyphon::Color, bool)>, Vec<(usize, usize, usize, usize)>, Vec<usize>) {
+        if self.tab_style().is_none() || self.pane_titles.contains_key(&pane) {
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        }
+            // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
+            // body font (see `TextPipeline::title_metrics`), so its
+            // real glyphs are narrower per cell than the body `char_
+            // width` used elsewhere in this loop -- laying tabs out
+            // with that wider body measurement drifted the background/
+            // hit-test geometry further right of the actually-smaller
+            // rendered text with every tab.
+            let title_char_width =
+                self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+            let strip_rect = tab_strip_rect(fenix_window::Rect {
+                x: rect.x,
+                y: rect.y - title_reserved_height(line_height),
+                w: rect.w,
+                h: tab_strip_height(line_height),
+            });
+            // A pane's list is its complete navigation history, not its
+            // visible tabs. Lazily resolve names so repeated redraws
+            // while moving do work proportional to tabs that fit, not
+            // all files ever visited in that pane.
+            let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
+            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
+            let active_buffer = self.windows().content(pane).copied();
+            let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
+            let mut active_flags: Vec<bool> = Vec::new();
+            let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+            let mut italic: Vec<usize> = Vec::new();
+            let mut byte = 0usize;
+            for tab in &layout {
+                let is_active = Some(tab.buffer) == active_buffer;
+                active_flags.push(is_active);
+                let name_color =
+                    if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
+                // Home: the house, the workspace's name, and no ×
+                // -- blanks where it would be, so it measures and
+                // lines up like every other tab.
+                let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
+                let name = self.tab_label(tab.buffer);
+                let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
+                let dirty = self
+                    .buffers
+                    .get(tab.buffer)
+                    .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
+                // Truncated against `TAB_MAX_NAME_CHARS` directly, and
+                // padded up to `TAB_MIN_NAME_CHARS`, rather than
+                // derived back out of `tab.body.w`. That round trip
+                // (width -> budget -> text) was one half of why the
+                // drawn tab never matched its own glyphs: it assumed
+                // every rendered cell is `title_char_width` wide, which
+                // the icon span in particular is not.
+                let truncated = truncate_tab_name(&name, TAB_MAX_NAME_CHARS);
+                let label = if truncated.chars().count() < TAB_MIN_NAME_CHARS {
+                    format!("{truncated:<width$}", width = TAB_MIN_NAME_CHARS)
+                } else {
+                    truncated
+                };
+                // Byte ranges into the concatenated strip string, so
+                // `TextPipeline::title_span_bounds` can report where
+                // this tab and its close glyph actually landed once
+                // shaped. The title buffer holds only the tab row (the
+                // breadcrumb bar is its own buffer), so these offsets
+                // start at 0 and stay in that string's own space.
+                let icon_span = format!(" {icon_ch} ");
+                let name_span = format!("{label}{}", if dirty { "*" } else { "" });
+                let close_span = if is_home { "   " } else { " × " }.to_string();
+                let tab_start = byte;
+                byte += icon_span.len() + name_span.len();
+                let close_start = byte;
+                byte += close_span.len();
+                ranges.push((tab_start, byte, close_start, byte));
+                spans.push((icon_span, theme.icon_file, true));
+                if self.is_preview_tab(pane, tab.buffer) {
+                    italic.push(spans.len());
+                }
+                spans.push((name_span, name_color, false));
+                spans.push((close_span, theme.gutter_fg, false));
+            }
+            let crumbs = crumbs_at.map(|(buffer, at)| self.breadcrumb_spans(buffer, at)).unwrap_or_default();
+            (layout, active_flags, spans, crumbs, ranges, italic)
+    }
+
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
         self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
     }
@@ -23690,16 +23788,20 @@ impl App {
                         state.session.scroll(lines);
                     }
                 } else if self.pdf_view_in_pane(pane).is_some() {
-                    // A PDF pane has no text to scroll either -- the
-                    // wheel moves the rendered page instead, turning
-                    // pages once there's nothing left to scroll (see
-                    // `pdf_scroll`). Focus the pane first: `pdf_scroll`
-                    // acts on whatever session is *focused*, and clicking
-                    // into a document before wheeling it is a step nobody
-                    // performs in a PDF reader.
+                    // A PDF pane scrolls its column of pages; with Ctrl
+                    // held the wheel zooms. Focused first, as nobody clicks
+                    // into a document before wheeling it.
                     self.windows_mut().focus(pane);
-                    let delta_px = -(lines as f32 * line_height).round() as i32;
-                    self.pdf_scroll(delta_px);
+                    if self.modifiers.control_key() {
+                        if lines > 0 {
+                            self.pdf_zoom_in();
+                        } else if lines < 0 {
+                            self.pdf_zoom_out();
+                        }
+                    } else {
+                        let delta_px = -(lines as f32 * line_height).round() as i32;
+                        self.pdf_scroll(delta_px);
+                    }
                 } else if pane == self.focused_pane_id() {
                     self.scroll_focused_pane(lines);
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
@@ -24291,14 +24393,7 @@ impl App {
                 // view here: a tab moved in, a split, a tab reopened.
                 let pdf_key = self.pdf_view_in_pane(pane);
                 if let Some(key) = pdf_key {
-                    let pane_px = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
-                    if let Some(view) = self.pdf_ensure_view(key) {
-                        view.last_pane_size = pane_px;
-                    }
-                    let loaded = self.pdf_docs.get(&key.1).is_some_and(|doc| doc.page_count > 0);
-                    if loaded && self.pdf_views.get(&key).is_some_and(|view| self.pdf_target_size(key) != view.last_requested_size) {
-                        self.pdf_render(key);
-                    }
+                    self.pdf_prepare_view(key, (rect.w.max(1.0), rect.h.max(1.0)));
                 }
                 // While an overlay covers this pane, nothing is pushed
                 // to `pdf_panes` and no `PaneRender` is emitted here --
@@ -24309,6 +24404,9 @@ impl App {
                     if let Some(key) = pdf_key {
                         pdf_panes.push((key, rect));
                     }
+                    // A PDF is a tab like any file, so its pane has the strip.
+                    let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) =
+                        self.pane_tab_strip(pane, rect, line_height, is_focused, theme, None);
                     panes_render.push(PaneRender {
                         pane,
                         rect,
@@ -24325,12 +24423,12 @@ impl App {
                         caret: None,
                         content_frac: 0.0,
                         gutter_px: 0.0,
-                        tabs_layout: Vec::new(),
-                        tab_active: Vec::new(),
-                        tab_spans: Vec::new(),
-                        breadcrumb_spans: Vec::new(),
-                        tab_ranges: Vec::new(),
-                        tab_italic: Vec::new(),
+                        tabs_layout,
+                        tab_active,
+                        tab_spans,
+                        breadcrumb_spans,
+                        tab_ranges,
+                        tab_italic,
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
@@ -24615,90 +24713,8 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if tab_style.is_some()
-                && !self.pane_titles.contains_key(&pane)
-            {
-                // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
-                // body font (see `TextPipeline::title_metrics`), so its
-                // real glyphs are narrower per cell than the body `char_
-                // width` used elsewhere in this loop -- laying tabs out
-                // with that wider body measurement drifted the background/
-                // hit-test geometry further right of the actually-smaller
-                // rendered text with every tab.
-                let title_char_width =
-                    self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
-                let strip_rect = tab_strip_rect(fenix_window::Rect {
-                    x: rect.x,
-                    y: rect.y - title_reserved_height(line_height),
-                    w: rect.w,
-                    h: tab_strip_height(line_height),
-                });
-                // A pane's list is its complete navigation history, not its
-                // visible tabs. Lazily resolve names so repeated redraws
-                // while moving do work proportional to tabs that fit, not
-                // all files ever visited in that pane.
-                let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
-                let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
-                let active_buffer = self.windows().content(pane).copied();
-                let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
-                let mut active_flags: Vec<bool> = Vec::new();
-                let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
-                let mut italic: Vec<usize> = Vec::new();
-                let mut byte = 0usize;
-                for tab in &layout {
-                    let is_active = Some(tab.buffer) == active_buffer;
-                    active_flags.push(is_active);
-                    let name_color =
-                        if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
-                    // Home: the house, the workspace's name, and no ×
-                    // -- blanks where it would be, so it measures and
-                    // lines up like every other tab.
-                    let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
-                    let name = self.tab_label(tab.buffer);
-                    let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
-                    let dirty = self
-                        .buffers
-                        .get(tab.buffer)
-                        .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
-                    // Truncated against `TAB_MAX_NAME_CHARS` directly, and
-                    // padded up to `TAB_MIN_NAME_CHARS`, rather than
-                    // derived back out of `tab.body.w`. That round trip
-                    // (width -> budget -> text) was one half of why the
-                    // drawn tab never matched its own glyphs: it assumed
-                    // every rendered cell is `title_char_width` wide, which
-                    // the icon span in particular is not.
-                    let truncated = truncate_tab_name(&name, TAB_MAX_NAME_CHARS);
-                    let label = if truncated.chars().count() < TAB_MIN_NAME_CHARS {
-                        format!("{truncated:<width$}", width = TAB_MIN_NAME_CHARS)
-                    } else {
-                        truncated
-                    };
-                    // Byte ranges into the concatenated strip string, so
-                    // `TextPipeline::title_span_bounds` can report where
-                    // this tab and its close glyph actually landed once
-                    // shaped. The title buffer holds only the tab row (the
-                    // breadcrumb bar is its own buffer), so these offsets
-                    // start at 0 and stay in that string's own space.
-                    let icon_span = format!(" {icon_ch} ");
-                    let name_span = format!("{label}{}", if dirty { "*" } else { "" });
-                    let close_span = if is_home { "   " } else { " × " }.to_string();
-                    let tab_start = byte;
-                    byte += icon_span.len() + name_span.len();
-                    let close_start = byte;
-                    byte += close_span.len();
-                    ranges.push((tab_start, byte, close_start, byte));
-                    spans.push((icon_span, theme.icon_file, true));
-                    if self.is_preview_tab(pane, tab.buffer) {
-                        italic.push(spans.len());
-                    }
-                    spans.push((name_span, name_color, false));
-                    spans.push((close_span, theme.gutter_fg, false));
-                }
-                let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
-                (layout, active_flags, spans, crumbs, ranges, italic)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            };
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) =
+                self.pane_tab_strip(pane, rect, line_height, is_focused, theme, Some((buffer_id, pane_state.cursor.char_idx)));
 
             // Inline git gutter marks (Part 5) currently in view -- every
             // mark's 1-based file line is remapped to a row relative to
@@ -24880,6 +24896,10 @@ impl App {
         let rounded_selection = self.config.polish.rounded_selection != Some(false) && corner_radius > 0.0;
         let show_indent_guides = self.config.polish.indent_guides != Some(false);
         let show_active_guide = self.config.polish.active_indent_guide != Some(false);
+
+        // The pages each PDF pane shows, worked out while `self` is still
+        // whole.
+        let pdf_plans: Vec<(reader::ViewKey, Vec<reader::PageDraw>)> = pdf_panes.iter().map(|&(key, rect)| (key, self.pdf_draw_plan(key, rect))).collect();
 
         let (
             Some(window),
@@ -25207,6 +25227,15 @@ impl App {
         for pane in panes_render.iter().filter(|p| !p.extra.sticky.is_empty()) {
             let h = text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height;
             bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y, pane.rect.w, h, theme.bg);
+        }
+        // Blank paper where a PDF page is still being rendered, so the
+        // column keeps its shape while the pages come in.
+        for (key, draws) in &pdf_plans {
+            let Some(view) = self.pdf_views.get(key) else { continue };
+            for draw in draws.iter().filter(|d| !view.cache.contains_key(&d.page)) {
+                let (x, y, w, h) = draw.dest;
+                bg_rect.push_rect(gpu, x, y, w, h, reader::PAPER);
+            }
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
         // A hairline boundary makes the status surface feel intentionally
@@ -25761,58 +25790,21 @@ impl App {
         }
         vnc_pipeline.flush(gpu);
 
-        // Unlike the VNC loop just above (whole framebuffer always maps
-        // onto the whole pane), a PDF render can be smaller than the pane
-        // (fit-to-page/fit-width letterboxing) or larger (zoomed in) --
-        // so what actually gets uploaded is a crop of `full_bgra`, sized
-        // and positioned by `scroll_offset`, clamped against both the
-        // render's real size and the pane's current size (the only place
-        // both are known at once). `last_uploaded` records exactly what
-        // was last cropped/uploaded so a frame where nothing about the
-        // crop changed skips touching the GPU at all; `apply_pdf_
-        // response` resets it to `None` on every fresh render so a new
-        // bitmap always gets uploaded even if its crop key happens to
-        // coincide with the previous one.
-        let mut crop_scratch = std::mem::take(&mut self.pdf_crop_scratch);
-        for (key, rect) in &pdf_panes {
-            let Some(session) = self.pdf_views.get_mut(key) else { continue };
-            let Some((full_w, full_h, full_bytes)) = &session.full_bgra else { continue };
-            let (full_w, full_h) = (*full_w, *full_h);
-            let pane_w = rect.w.max(1.0) as u32;
-            let pane_h = rect.h.max(1.0) as u32;
-            let visible_w = full_w.min(pane_w).max(1);
-            let visible_h = full_h.min(pane_h).max(1);
-            let max_scroll_x = full_w.saturating_sub(visible_w);
-            let max_scroll_y = full_h.saturating_sub(visible_h);
-            let scroll_x = session.scroll_offset.0.min(max_scroll_x);
-            let scroll_y = session.scroll_offset.1.min(max_scroll_y);
-            session.scroll_offset = (scroll_x, scroll_y);
-            let upload_key = (visible_w, visible_h, scroll_x, scroll_y);
-            if session.last_uploaded == Some(upload_key) && session.texture.is_some() {
-                continue;
+        // Rendered pages the worker has sent since the last frame go into
+        // textures of their own; the pixels are let go once uploaded.
+        for (key, draws) in &pdf_plans {
+            let Some(view) = self.pdf_views.get_mut(key) else { continue };
+            for draw in draws {
+                let Some(page) = view.cache.get_mut(&draw.page) else { continue };
+                let Some(bgra) = page.bgra.take() else { continue };
+                if page.texture.as_ref().map(|t| t.size()) != Some((page.w, page.h)) {
+                    page.texture = Some(pdf_pipeline.create_texture(gpu, page.w, page.h));
+                }
+                if let Some(texture) = &page.texture {
+                    pdf_pipeline.upload_rect(gpu, texture, 0, 0, page.w, page.h, &bgra);
+                }
             }
-            // Only recreate the texture when the crop's *size* changed
-            // (a resize/zoom/page-size change); a pan keeps the same
-            // size and only moves the window, so it reuses the texture
-            // and bind group it already has -- see `PdfTexture::size`.
-            if session.texture.as_ref().map(|tex| tex.size()) != Some((visible_w, visible_h)) {
-                session.texture = Some(pdf_pipeline.create_texture(gpu, visible_w, visible_h));
-            }
-            let Some(texture) = &session.texture else { continue };
-            // Fit-to-page (the default) renders the page to exactly the
-            // size it will occupy, so the "crop" is the whole bitmap far
-            // more often than not -- uploading `full_bgra` straight
-            // through in that case skips a multi-megabyte allocate-and-
-            // copy per page turn for no loss of generality.
-            if (visible_w, visible_h) == (full_w, full_h) && (scroll_x, scroll_y) == (0, 0) {
-                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, full_bytes);
-            } else {
-                fenix_pdf::crop::crop_bgra_into(&mut crop_scratch, full_bytes, full_w, full_h, scroll_x, scroll_y, visible_w, visible_h);
-                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, &crop_scratch);
-            }
-            session.last_uploaded = Some(upload_key);
         }
-        self.pdf_crop_scratch = crop_scratch;
 
         // Home's logo: drawn (by fenix-brand) at exactly the pixel height
         // its rows give it, so it's crisp at any font size, and uploaded
@@ -25893,25 +25885,16 @@ impl App {
             }
             // Same "before text, so title bars stay legible" reasoning as
             // the VNC loop just above.
-            for (slot, (key, rect)) in pdf_panes.iter().enumerate() {
-                let Some(session) = self.pdf_views.get(key) else { continue };
-                let (Some(texture), Some((visible_w, visible_h, _, _))) = (&session.texture, session.last_uploaded) else { continue };
-                // Centered within the pane, never stretched to fill it --
-                // unlike VNC's own draw call just above (whole framebuffer
-                // always maps onto the whole pane), a PDF render's pixel
-                // size is already the intended on-screen size (computed by
-                // `pdf_target_size`), so drawing it any larger/smaller
-                // than that would silently re-distort the very aspect
-                // ratio `fit_page_size`/`fit_width_size` exist to
-                // preserve. Smaller than `rect` in an axis (fit-to-page
-                // letterboxing) shows as blank pane background around it;
-                // this loop runs before `text.render` so a fully centered
-                // small page still leaves the title bar legible on top.
-                let dest_w = (visible_w as f32).min(rect.w);
-                let dest_h = (visible_h as f32).min(rect.h);
-                let dest_x = rect.x + (rect.w - dest_w) / 2.0;
-                let dest_y = rect.y + (rect.h - dest_h) / 2.0;
-                pdf_pipeline.draw(gpu, &mut pass, texture, slot, dest_x, dest_y, dest_w, dest_h);
+            // Each page in sight, cut to its pane; a page still being
+            // rendered is the paper `bg_rect` already drew.
+            let mut slot = 0;
+            for (key, draws) in &pdf_plans {
+                let Some(view) = self.pdf_views.get(key) else { continue };
+                for draw in draws {
+                    let Some(texture) = view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()) else { continue };
+                    pdf_pipeline.draw_region(gpu, &mut pass, texture, slot, draw.dest, draw.uv);
+                    slot += 1;
+                }
             }
             if let (Some(logo), Some(pipeline)) = (self.home_logo.as_ref(), self.logo_pipeline.as_ref()) {
                 if let Some(texture) = &logo.texture {

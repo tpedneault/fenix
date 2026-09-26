@@ -25,34 +25,6 @@ pub const DEFAULT_ZOOM: Zoom = Zoom::FitWidth;
 /// page is already several thousand pixels on a side.
 pub const ZOOM_STEPS: &[u32] = &[25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400];
 
-/// Turns a zoom into the pixel size to render a page at, given the page's
-/// size in points, the pane's size in pixels and the window's scale
-/// factor. `(0, 0)` while the page's size or the pane's isn't known yet,
-/// which callers read as "nothing to render".
-pub fn target_size(zoom: Zoom, page_pts: (f32, f32), pane_px: (u32, u32), scale: f32) -> (u32, u32) {
-    if page_pts.0 <= 0.0 || page_pts.1 <= 0.0 || pane_px.0 == 0 || pane_px.1 == 0 {
-        return (0, 0);
-    }
-    match zoom {
-        Zoom::FitPage => fenix_pdf::coords::fit_page_size(page_pts.0, page_pts.1, pane_px.0, pane_px.1),
-        Zoom::FitWidth => fenix_pdf::coords::fit_width_size(page_pts.0, page_pts.1, pane_px.0),
-        Zoom::Percent(percent) => {
-            let percent = ((percent as f32) * scale.max(0.1)).round().max(1.0) as u32;
-            fenix_pdf::coords::percent_size(page_pts.0, page_pts.1, percent)
-        }
-    }
-}
-
-/// The percentage a render of `rendered_w` pixels is at, for a page
-/// `page_w_pts` wide on a screen of scale factor `scale` -- where `+` and
-/// `-` step from when the view is fitted. 100 when nothing's rendered.
-pub fn effective_percent(rendered_w: u32, page_w_pts: f32, scale: f32) -> u32 {
-    if rendered_w == 0 || page_w_pts <= 0.0 {
-        return 100;
-    }
-    ((rendered_w as f32 / page_w_pts / scale.max(0.1)) * 100.0).round().max(1.0) as u32
-}
-
 /// The zoom step after `current` (`in_ = true`) or before it: the next
 /// one strictly larger or smaller, so a fitted 97% goes to 100% and then
 /// 110%. Stays at either end.
@@ -71,6 +43,123 @@ pub fn zoom_label(zoom: Zoom) -> String {
         Zoom::FitPage => "Fit page".to_string(),
         Zoom::FitWidth => "Fit width".to_string(),
         Zoom::Percent(percent) => format!("{percent}%"),
+    }
+}
+
+/// Pixels between pages, and around them, before the scale factor.
+pub const PAGE_GAP: f32 = 12.0;
+
+/// Where one page sits in the document's column, in pixels from the
+/// column's top-left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl PageRect {
+    /// The size to render it at.
+    pub fn px(&self) -> (u32, u32) {
+        (self.w.round().max(1.0) as u32, self.h.round().max(1.0) as u32)
+    }
+}
+
+/// Every page of a document, one under the other, at one scale.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Layout {
+    /// Pixels per point.
+    pub scale: f32,
+    pub gap: f32,
+    pub pages: Vec<PageRect>,
+    /// The column's size: at least the pane's width, so a narrow page is
+    /// centred in it.
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Lays `pages` (sizes in points) out for `zoom` in a pane `pane` pixels
+/// big, on a screen of scale factor `dpi`. Fitting fits the widest page
+/// (and, for fit page, the tallest), so every page has one scale and a
+/// narrower one sits centred.
+pub fn layout(pages: &[(f32, f32)], zoom: Zoom, pane: (f32, f32), dpi: f32) -> Layout {
+    let dpi = dpi.max(0.1);
+    let gap = (PAGE_GAP * dpi).round();
+    let max_w = pages.iter().map(|p| p.0).fold(0.0f32, f32::max).max(1.0);
+    let max_h = pages.iter().map(|p| p.1).fold(0.0f32, f32::max).max(1.0);
+    let room = ((pane.0 - gap * 2.0).max(1.0), (pane.1 - gap * 2.0).max(1.0));
+    let scale = match zoom {
+        Zoom::FitWidth => room.0 / max_w,
+        Zoom::FitPage => (room.0 / max_w).min(room.1 / max_h),
+        Zoom::Percent(p) => p as f32 / 100.0 * dpi,
+    }
+    .max(0.01);
+    let width = pane.0.max((max_w * scale).round() + gap * 2.0);
+    let mut y = gap;
+    let pages: Vec<PageRect> = pages
+        .iter()
+        .map(|&(w, h)| {
+            let (w, h) = ((w * scale).round().max(1.0), (h * scale).round().max(1.0));
+            let rect = PageRect { x: ((width - w) / 2.0).round(), y, w, h };
+            y += h + gap;
+            rect
+        })
+        .collect();
+    let height = if pages.is_empty() { 0.0 } else { y };
+    Layout { scale, gap, pages, width, height }
+}
+
+impl Layout {
+    /// The page at column height `y` -- a gap counts as the page above it.
+    pub fn page_at(&self, y: f32) -> usize {
+        if self.pages.is_empty() {
+            return 0;
+        }
+        self.pages.partition_point(|p| p.y <= y).saturating_sub(1)
+    }
+
+    /// The pages any of `top..top + h` shows.
+    pub fn visible(&self, top: f32, h: f32) -> std::ops::Range<usize> {
+        if self.pages.is_empty() {
+            return 0..0;
+        }
+        let first = self.page_at(top);
+        let last = self.page_at(top + h.max(1.0) - 1.0);
+        first..last + 1
+    }
+
+    pub fn max_scroll(&self, pane: (f32, f32)) -> (f32, f32) {
+        ((self.width - pane.0).max(0.0), (self.height - pane.1).max(0.0))
+    }
+
+    /// The scroll that puts `page`'s top at the pane's top, less the gap.
+    pub fn top_of(&self, page: usize) -> f32 {
+        self.pages.get(page).map(|p| (p.y - self.gap).max(0.0)).unwrap_or(0.0)
+    }
+
+    /// The page being read: the one across the middle of the pane, or
+    /// the last when scrolled to the end.
+    pub fn current(&self, scroll_y: f32, pane: (f32, f32)) -> usize {
+        if self.pages.is_empty() {
+            return 0;
+        }
+        if scroll_y >= self.max_scroll(pane).1 - 0.5 && self.height > pane.1 {
+            return self.pages.len() - 1;
+        }
+        self.page_at(scroll_y + pane.1 / 2.0)
+    }
+
+    /// Where the pane's top is, as a page and how far down it (0..1), so
+    /// the same place can be found in another layout of the document.
+    pub fn anchor(&self, scroll_y: f32) -> (usize, f32) {
+        let page = self.page_at(scroll_y);
+        let Some(p) = self.pages.get(page) else { return (0, 0.0) };
+        (page, (scroll_y - p.y) / p.h.max(1.0))
+    }
+
+    pub fn scroll_for(&self, anchor: (usize, f32)) -> f32 {
+        self.pages.get(anchor.0).map(|p| p.y + anchor.1 * p.h).unwrap_or(0.0).max(0.0)
     }
 }
 
@@ -332,24 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn target_size_follows_the_zoom() {
-        assert_eq!(target_size(Zoom::FitPage, (612.0, 792.0), (612, 792), 1.0), (612, 792));
-        assert_eq!(target_size(Zoom::FitWidth, (612.0, 792.0), (306, 200), 1.0), (306, 396));
-        assert_eq!(target_size(Zoom::Percent(100), (612.0, 792.0), (10, 10), 1.0), (612, 792), "percent ignores the pane");
-        assert_eq!(target_size(Zoom::FitPage, (0.0, 0.0), (612, 792), 1.0), (0, 0), "no page size yet");
-        assert_eq!(target_size(Zoom::FitPage, (612.0, 792.0), (0, 792), 1.0), (0, 0), "no pane yet");
-    }
-
-    #[test]
-    fn a_percent_is_of_the_pages_real_size_on_a_scaled_screen() {
-        assert_eq!(target_size(Zoom::Percent(100), (612.0, 792.0), (1, 1), 1.5), (918, 1188));
-        assert_eq!(effective_percent(918, 612.0, 1.5), 100);
-        assert_eq!(effective_percent(612, 612.0, 1.0), 100);
-        assert_eq!(effective_percent(1224, 612.0, 1.0), 200);
-        assert_eq!(effective_percent(0, 612.0, 1.0), 100, "nothing rendered yet");
-    }
-
-    #[test]
     fn zoom_steps_go_to_the_next_step_and_stop_at_the_ends() {
         assert_eq!(step_zoom(100, true), 110);
         assert_eq!(step_zoom(97, true), 100, "a fitted 97% goes to the next real step");
@@ -357,5 +428,57 @@ mod tests {
         assert_eq!(step_zoom(400, true), 400);
         assert_eq!(step_zoom(25, false), 25);
         assert_eq!(step_zoom(1000, false), 400);
+    }
+    fn letter(n: usize) -> Vec<(f32, f32)> {
+        vec![(612.0, 792.0); n]
+    }
+
+    #[test]
+    fn fit_width_stacks_the_pages_one_under_the_other() {
+        let l = layout(&letter(3), Zoom::FitWidth, (636.0, 400.0), 1.0);
+        assert_eq!(l.scale, 1.0);
+        assert_eq!(l.pages[0], PageRect { x: 12.0, y: 12.0, w: 612.0, h: 792.0 });
+        assert_eq!(l.pages[1].y, 12.0 + 792.0 + 12.0);
+        assert_eq!(l.height, 12.0 + 3.0 * (792.0 + 12.0));
+        assert_eq!(l.width, 636.0);
+    }
+
+    #[test]
+    fn a_narrower_page_is_centred_at_the_same_scale() {
+        let l = layout(&[(612.0, 792.0), (306.0, 396.0)], Zoom::FitWidth, (636.0, 400.0), 1.0);
+        assert_eq!((l.pages[1].w, l.pages[1].x), (306.0, 165.0));
+    }
+
+    #[test]
+    fn fit_page_fits_the_tallest_page_and_a_percent_ignores_the_pane() {
+        let l = layout(&letter(2), Zoom::FitPage, (1000.0, 420.0), 1.0);
+        assert_eq!(l.pages[0].h, 396.0);
+        let l = layout(&letter(2), Zoom::Percent(200), (100.0, 100.0), 1.5);
+        assert_eq!(l.pages[0].w, 1836.0);
+        assert!(l.width > 100.0, "wider than the pane, so it pans");
+    }
+
+    #[test]
+    fn what_shows_and_what_is_being_read() {
+        let l = layout(&letter(5), Zoom::FitWidth, (636.0, 400.0), 1.0);
+        assert_eq!(l.visible(0.0, 400.0), 0..1);
+        assert_eq!(l.visible(700.0, 400.0), 0..2);
+        assert_eq!(l.current(0.0, (636.0, 400.0)), 0);
+        assert_eq!(l.current(700.0, (636.0, 400.0)), 1, "page 2 crosses the middle");
+        let end = l.max_scroll((636.0, 400.0)).1;
+        assert_eq!(l.current(end, (636.0, 400.0)), 4, "the last page at the end");
+        assert_eq!(l.top_of(2), l.pages[2].y - 12.0);
+    }
+
+    #[test]
+    fn an_anchor_finds_the_same_place_at_another_zoom() {
+        let small = layout(&letter(5), Zoom::FitWidth, (336.0, 400.0), 1.0);
+        let big = layout(&letter(5), Zoom::FitWidth, (1236.0, 400.0), 1.0);
+        let y = small.pages[3].y + small.pages[3].h / 4.0;
+        let anchor = small.anchor(y);
+        assert_eq!(anchor.0, 3);
+        assert!((anchor.1 - 0.25).abs() < 0.01);
+        let again = big.scroll_for(anchor);
+        assert_eq!(big.page_at(again), 3);
     }
 }

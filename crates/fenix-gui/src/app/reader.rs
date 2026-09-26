@@ -5,15 +5,30 @@
 //! A document belongs to its buffer, the way a file's text does: opening
 //! a PDF gives it a tab in the focused pane like any file, the tab can be
 //! moved, closed and reopened, and the same document can be shown in two
-//! panes. Where you are in it -- page, zoom, scroll -- belongs to the
-//! *view*: one per pane and tab (`ViewKey`), made the first time a pane
-//! shows the document, starting where the last view left off.
+//! panes. Where you are in it belongs to the *view*: one per pane and tab
+//! (`ViewKey`), made the first time a pane shows the document, starting
+//! where the last view left off.
+//!
+//! A view shows the whole document as one column of pages
+//! (`reader::Layout`) scrolled to a point in it. Each frame it asks the
+//! worker for the pages in sight and a few either side, keeps what comes
+//! back in its page cache, and drops what's scrolled far away.
 
 use super::*;
-use crate::reader::{self, Cmd, Outcome, Zoom};
+use crate::reader::{self, Cmd, Layout, Outcome, Zoom};
 
-/// How far `j`/`k`/`h`/`l` move, in rendered pixels.
+/// How far `j`/`k`/`h`/`l` move, in pixels.
 pub(super) const PAN_STEP_PX: u32 = 60;
+
+/// Pages rendered ahead of the pane and behind it.
+const AHEAD: usize = 2;
+const BEHIND: usize = 1;
+
+/// Rendered pages further than this from the pane are let go.
+const KEEP: usize = 8;
+
+/// A page not rendered yet: blank paper.
+pub(super) const PAPER: [f32; 4] = [0.91, 0.905, 0.89, 1.0];
 
 /// A view: the pane showing it, and the document's buffer.
 pub(super) type ViewKey = (fenix_window::WindowId, BufferId);
@@ -26,11 +41,8 @@ pub(super) struct PdfDoc {
     pub(super) name: String,
     /// The worker's name for the document.
     pub(super) doc_key: fenix_pdf::PdfDocKey,
-    /// 0 until the worker has opened it.
-    pub(super) page_count: u32,
-    /// Page 0's size in points -- what a view without a render of its own
-    /// yet fits to.
-    pub(super) page_point_size: (f32, f32),
+    /// Every page's size in points; empty until the worker has opened it.
+    pub(super) pages: Vec<(f32, f32)>,
     /// The bookmark tree, fetched the first time the outline is asked for.
     pub(super) outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
     /// The latest search sent; a reply to any earlier one is stale.
@@ -45,37 +57,58 @@ pub(super) struct PdfDoc {
     pub(super) last_place: (u32, Zoom),
 }
 
+impl PdfDoc {
+    pub(super) fn page_count(&self) -> u32 {
+        self.pages.len() as u32
+    }
+}
+
+/// A page the worker has rendered for a view.
+pub(super) struct CachedPage {
+    /// The size it was rendered at -- drawn stretched if the layout has
+    /// since changed, until the sharp one comes.
+    pub(super) w: u32,
+    pub(super) h: u32,
+    /// The pixels until the frame drawing the view has put them in
+    /// `texture`.
+    pub(super) bgra: Option<Vec<u8>>,
+    pub(super) texture: Option<PdfTexture>,
+}
+
 /// One pane's view of a document -- `pdf_views[(pane, buffer)]`.
 pub(super) struct PdfView {
     /// The worker's name for this view, so two views of one document
     /// don't cancel each other's renders.
     pub(super) id: u64,
-    pub(super) current_page: u32,
-    /// The latest render asked for; a reply to any earlier one is stale.
-    pub(super) pending_request_id: u64,
-    /// The pixel size of the latest render asked for -- compared every
-    /// frame with what the zoom now calls for, to notice a resize.
-    /// `(0, 0)` until the first.
-    pub(super) last_requested_size: (u32, u32),
-    /// This view's page's size in points, once a render of it has come
-    /// back; `(0, 0)` until then (the document's page 0 stands in).
-    pub(super) page_point_size: (f32, f32),
     pub(super) zoom: Zoom,
-    /// The pane's size in pixels, from the last frame drawn.
-    pub(super) last_pane_size: (u32, u32),
-    /// Top-left of what's shown of `full_bgra`; clamped when drawn.
-    pub(super) scroll_offset: (u32, u32),
-    /// The next render starts at the bottom of its page: set by
-    /// scrolling up past a page's top, so it continues onto the bottom
-    /// of the page before.
-    pub(super) land_at_bottom: bool,
-    /// The whole latest render, kept so panning re-crops it.
-    pub(super) full_bgra: Option<(u32, u32, Vec<u8>)>,
-    /// `(w, h, x, y)` of the crop in `texture`, so an unchanged frame
-    /// skips the upload.
-    pub(super) last_uploaded: Option<(u32, u32, u32, u32)>,
-    /// Made by the frame that draws the view, when it first does.
-    pub(super) texture: Option<PdfTexture>,
+    /// The pane's size in pixels and the window's scale factor, from the
+    /// last frame drawn; `(0, 0)` until then.
+    pub(super) pane: (f32, f32),
+    pub(super) dpi: f32,
+    /// The document laid out for `zoom`, `pane` and `dpi`.
+    pub(super) layout: Layout,
+    layout_for: Option<(Zoom, (f32, f32), f32, usize)>,
+    /// Top-left of what's shown, in the layout's pixels.
+    pub(super) scroll: (f32, f32),
+    /// A page to show the top of once the layout is known -- where a new
+    /// view starts, or a jump made before its pane was first drawn.
+    pub(super) pending_jump: Option<u32>,
+    pub(super) cache: HashMap<u32, CachedPage>,
+    /// Renders asked for and not back yet: page -> (request, width).
+    pub(super) pending: HashMap<u32, (u64, u32)>,
+    /// The pages last asked to be kept, so a scroll that changes them
+    /// tells the worker.
+    wanted: Vec<u32>,
+}
+
+/// One page to draw in a pane: where, and which part of its render.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PageDraw {
+    pub(super) page: u32,
+    /// Clipped to the pane.
+    pub(super) dest: (f32, f32, f32, f32),
+    /// The part of the page `dest` shows, 0..1 each way.
+    pub(super) uv: (f32, f32, f32, f32),
 }
 
 impl App {
@@ -112,8 +145,8 @@ impl App {
         self.wake_caret();
     }
 
-    /// A buffer for `path` and the worker's `Open` for it. The page count
-    /// and first render come later, through `apply_pdf_response`.
+    /// A buffer for `path` and the worker's `Open` for it. The page sizes
+    /// come later, through `apply_pdf_response`.
     fn pdf_load(&mut self, path: &Path) -> BufferId {
         if self.pdf_worker.is_none() {
             let worker = match self.event_proxy.clone() {
@@ -139,8 +172,7 @@ impl App {
                 path: path.to_path_buf(),
                 name,
                 doc_key,
-                page_count: 0,
-                page_point_size: (0.0, 0.0),
+                pages: Vec::new(),
                 outline: None,
                 pending_search_request_id: 0,
                 last_search_query: String::new(),
@@ -161,17 +193,16 @@ impl App {
                 key,
                 PdfView {
                     id,
-                    current_page: page,
-                    pending_request_id: 0,
-                    last_requested_size: (0, 0),
-                    page_point_size: (0.0, 0.0),
                     zoom,
-                    last_pane_size: (0, 0),
-                    scroll_offset: (0, 0),
-                    land_at_bottom: false,
-                    full_bgra: None,
-                    last_uploaded: None,
-                    texture: None,
+                    pane: (0.0, 0.0),
+                    dpi: 1.0,
+                    layout: Layout::default(),
+                    layout_for: None,
+                    scroll: (0.0, 0.0),
+                    pending_jump: Some(page),
+                    cache: HashMap::new(),
+                    pending: HashMap::new(),
+                    wanted: Vec::new(),
                 },
             );
         }
@@ -209,50 +240,129 @@ impl App {
         self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&doc)).map(|p| (p, doc))
     }
 
-    /// A view's page's size in points: its own once rendered, else the
-    /// document's first page's.
-    fn pdf_page_pts(&self, key: ViewKey) -> (f32, f32) {
-        match (self.pdf_views.get(&key), self.pdf_docs.get(&key.1)) {
-            (Some(view), _) if view.page_point_size.0 > 0.0 => view.page_point_size,
-            (_, Some(doc)) => doc.page_point_size,
-            _ => (0.0, 0.0),
-        }
-    }
+    // -- Layout and rendering ---------------------------------------------
 
-    /// The size to render `key`'s page at, for its zoom and pane now.
-    pub(super) fn pdf_target_size(&self, key: ViewKey) -> (u32, u32) {
-        let Some(view) = self.pdf_views.get(&key) else { return (0, 0) };
-        reader::target_size(view.zoom, self.pdf_page_pts(key), view.last_pane_size, self.frame_scale())
-    }
-
-    /// Asks the worker for `key`'s page at `w` x `h`. Nothing before the
-    /// document's page count is known, or for a degenerate size.
-    fn pdf_dispatch_render(&mut self, key: ViewKey, w: u32, h: u32) {
-        if w == 0 || h == 0 || self.pdf_docs.get(&key.1).is_none_or(|doc| doc.page_count == 0) {
+    /// Lays `key` out again if its zoom, pane, scale factor or document
+    /// changed, keeping the same place at the pane's top; then applies a
+    /// pending jump and keeps the scroll in bounds.
+    pub(super) fn pdf_relayout(&mut self, key: ViewKey) {
+        let Some(pages) = self.pdf_docs.get(&key.1).map(|doc| doc.pages.clone()) else { return };
+        let Some(view) = self.pdf_views.get_mut(&key) else { return };
+        if view.pane.0 <= 0.0 || view.pane.1 <= 0.0 || pages.is_empty() {
             return;
         }
-        let request_id = self.pdf_next_id();
-        let Some(doc_key) = self.pdf_docs.get(&key.1).map(|doc| doc.doc_key) else { return };
-        let Some(view) = self.pdf_views.get_mut(&key) else { return };
-        view.pending_request_id = request_id;
-        view.last_requested_size = (w, h);
-        let (view_id, page_index) = (view.id, view.current_page);
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, view: view_id, request_id, page_index, target_w: w, target_h: h });
+        let inputs = (view.zoom, view.pane, view.dpi, pages.len());
+        if view.layout_for != Some(inputs) {
+            let old = std::mem::take(&mut view.layout);
+            let anchor = (!old.pages.is_empty()).then(|| old.anchor(view.scroll.1));
+            let x_ratio = if old.width > 0.0 { (view.scroll.0 + view.pane.0 / 2.0) / old.width } else { 0.5 };
+            view.layout = reader::layout(&pages, view.zoom, view.pane, view.dpi);
+            view.layout_for = Some(inputs);
+            if let Some(anchor) = anchor {
+                view.scroll.1 = view.layout.scroll_for(anchor);
+            }
+            view.scroll.0 = x_ratio * view.layout.width - view.pane.0 / 2.0;
         }
+        if let Some(page) = view.pending_jump.take() {
+            let page = (page as usize).min(pages.len() - 1);
+            view.scroll.1 = view.layout.top_of(page);
+        }
+        let (max_x, max_y) = view.layout.max_scroll(view.pane);
+        view.scroll = (view.scroll.0.clamp(0.0, max_x), view.scroll.1.clamp(0.0, max_y));
     }
 
-    /// Renders `key` again for its current page and zoom.
-    pub(super) fn pdf_render(&mut self, key: ViewKey) {
-        let (w, h) = self.pdf_target_size(key);
-        self.pdf_dispatch_render(key, w, h);
+    /// Everything a frame does for a view before drawing it: note its
+    /// pane's size, lay it out, ask for the pages it needs (the ones in
+    /// sight first), cancel what it no longer needs and let go of pages
+    /// far away. Also what a test calls in place of drawing.
+    pub(super) fn pdf_prepare_view(&mut self, key: ViewKey, pane: (f32, f32)) {
+        let dpi = self.frame_scale();
+        let Some(view) = self.pdf_ensure_view(key) else { return };
+        view.pane = pane;
+        view.dpi = dpi;
+        self.pdf_relayout(key);
+        let Some(doc_key) = self.pdf_docs.get(&key.1).map(|doc| doc.doc_key) else { return };
+        let Some(view) = self.pdf_views.get(&key) else { return };
+        if view.layout.pages.is_empty() {
+            return;
+        }
+        let visible = view.layout.visible(view.scroll.1, view.pane.1);
+        let count = view.layout.pages.len();
+        let mut wanted: Vec<u32> = visible.clone().map(|p| p as u32).collect();
+        wanted.extend((visible.end..(visible.end + AHEAD).min(count)).map(|p| p as u32));
+        wanted.extend((visible.start.saturating_sub(BEHIND)..visible.start).rev().map(|p| p as u32));
+        let asks: Vec<(u32, (u32, u32))> = wanted
+            .iter()
+            .map(|&p| (p, view.layout.pages[p as usize].px()))
+            .filter(|&(p, (w, _))| view.cache.get(&p).is_none_or(|c| c.w != w) && view.pending.get(&p).is_none_or(|&(_, pw)| pw != w))
+            .collect();
+        let changed = view.wanted != wanted;
+        let view_id = view.id;
+        let (lo, hi) = (visible.start.saturating_sub(KEEP) as u32, (visible.end + KEEP) as u32);
+
+        for (page, (w, h)) in asks {
+            let request_id = self.pdf_next_id();
+            self.pdf_requests.insert(request_id, (key, page));
+            if let Some(view) = self.pdf_views.get_mut(&key) {
+                view.pending.insert(page, (request_id, w));
+            }
+            if let Some(worker) = &self.pdf_worker {
+                worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, view: view_id, request_id, page_index: page, target_w: w, target_h: h });
+            }
+        }
+        let Some(view) = self.pdf_views.get_mut(&key) else { return };
+        if changed {
+            let dropped: Vec<u64> = view.pending.iter().filter(|(p, _)| !wanted.contains(p)).map(|(_, (id, _))| *id).collect();
+            view.pending.retain(|p, _| wanted.contains(p));
+            view.wanted = wanted.clone();
+            for id in dropped {
+                self.pdf_requests.remove(&id);
+            }
+            if let Some(worker) = &self.pdf_worker {
+                worker.send(fenix_pdf::PdfRequest::Cancel { key: doc_key, view: view_id, keep: wanted });
+            }
+        }
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.cache.retain(|&p, _| p >= lo && p < hi);
+        }
         self.pdf_remember_place(key);
     }
 
+    /// The pages `key` shows in a pane at `rect`, clipped to it.
+    pub(super) fn pdf_draw_plan(&self, key: ViewKey, rect: fenix_window::Rect) -> Vec<PageDraw> {
+        let Some(view) = self.pdf_views.get(&key) else { return Vec::new() };
+        let mut draws = Vec::new();
+        for page in view.layout.visible(view.scroll.1, rect.h) {
+            let p = view.layout.pages[page];
+            let (dx, dy) = (rect.x + p.x - view.scroll.0, rect.y + p.y - view.scroll.1);
+            let (x0, y0) = (dx.max(rect.x), dy.max(rect.y));
+            let (x1, y1) = ((dx + p.w).min(rect.x + rect.w), (dy + p.h).min(rect.y + rect.h));
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            draws.push(PageDraw {
+                page: page as u32,
+                dest: (x0, y0, x1 - x0, y1 - y0),
+                uv: ((x0 - dx) / p.w, (y0 - dy) / p.h, (x1 - dx) / p.w, (y1 - dy) / p.h),
+            });
+        }
+        draws
+    }
+
+    /// The page `key` is reading: the one across the middle of its pane.
+    pub(super) fn pdf_current_page(&self, key: ViewKey) -> u32 {
+        match self.pdf_views.get(&key) {
+            Some(view) if !view.layout.pages.is_empty() => view.layout.current(view.scroll.1, view.pane) as u32,
+            Some(view) => view.pending_jump.unwrap_or(0),
+            None => self.pdf_docs.get(&key.1).map(|doc| doc.last_place.0).unwrap_or(0),
+        }
+    }
+
     fn pdf_remember_place(&mut self, key: ViewKey) {
-        let Some(place) = self.pdf_views.get(&key).map(|view| (view.current_page, view.zoom)) else { return };
+        let page = self.pdf_current_page(key);
+        let Some(zoom) = self.pdf_views.get(&key).map(|view| view.zoom) else { return };
         if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
-            doc.last_place = place;
+            doc.last_place = (page, zoom);
         }
     }
 
@@ -262,54 +372,37 @@ impl App {
     }
 
     /// A reply from the worker. Anything for a document or view since
-    /// closed, or for a request since superseded, is dropped.
+    /// closed, or for a render since superseded, is dropped.
     pub(super) fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
         match response {
-            fenix_pdf::PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts } => {
+            fenix_pdf::PdfResponse::Opened { key, pages } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
                 if let Some(doc) = self.pdf_docs.get_mut(&buffer) {
-                    doc.page_count = page_count;
-                    doc.page_point_size = (page_width_pts, page_height_pts);
-                    doc.last_place.0 = doc.last_place.0.min(page_count.saturating_sub(1));
+                    doc.last_place.0 = doc.last_place.0.min((pages.len() as u32).saturating_sub(1));
+                    doc.pages = pages;
                 }
-                // Views made before the count was known may be past the
-                // end; the first render is asked for by the next frame.
-                for (_, view) in self.pdf_views.iter_mut().filter(|((_, b), _)| *b == buffer) {
-                    view.current_page = view.current_page.min(page_count.saturating_sub(1));
-                }
+                // The views lay themselves out on the next frame.
             }
             fenix_pdf::PdfResponse::OpenFailed { key, message } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
                 let path = self.pdf_docs.get(&buffer).map(|doc| doc.path.display().to_string()).unwrap_or_default();
                 self.set_error(format!("couldn't open {path}: {message}"));
             }
-            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts } => {
-                let Some(buffer) = self.pdf_doc_by_key(key) else { return };
-                let Some(view_key) = self.pdf_views.iter().find(|((_, b), v)| *b == buffer && v.pending_request_id == request_id).map(|(k, _)| *k) else { return };
+            fenix_pdf::PdfResponse::PageRendered { request_id, page_index, width, height, bgra, .. } => {
+                let Some((view_key, page)) = self.pdf_requests.remove(&request_id) else { return };
                 let Some(view) = self.pdf_views.get_mut(&view_key) else { return };
-                if page_index != view.current_page {
+                if page != page_index || view.pending.get(&page).is_none_or(|&(id, _)| id != request_id) {
                     return;
                 }
-                view.page_point_size = (page_width_pts, page_height_pts);
-                // `u32::MAX`: drawing clamps it to this render's bottom.
-                view.scroll_offset = if view.land_at_bottom { (0, u32::MAX) } else { (0, 0) };
-                view.land_at_bottom = false;
-                view.full_bgra = Some((width, height, bgra));
-                view.last_uploaded = None;
-                // A page of another size than the one this render was
-                // sized for: render it again at its own size. Within a
-                // pixel is close enough -- real documents vary their pages
-                // in the second decimal, and a re-render for that is waste.
-                let corrected = self.pdf_target_size(view_key);
-                if corrected != (0, 0) && (corrected.0.abs_diff(width) > 1 || corrected.1.abs_diff(height) > 1) {
-                    self.pdf_dispatch_render(view_key, corrected.0, corrected.1);
-                }
+                view.pending.remove(&page);
+                view.cache.insert(page, CachedPage { w: width, h: height, bgra: Some(bgra), texture: None });
             }
-            fenix_pdf::PdfResponse::RenderFailed { key, request_id, message } => {
-                let Some(buffer) = self.pdf_doc_by_key(key) else { return };
-                if self.pdf_views.iter().any(|((_, b), v)| *b == buffer && v.pending_request_id == request_id) {
-                    self.set_error(format!("couldn't render page: {message}"));
+            fenix_pdf::PdfResponse::RenderFailed { request_id, message, .. } => {
+                let Some((view_key, page)) = self.pdf_requests.remove(&request_id) else { return };
+                if let Some(view) = self.pdf_views.get_mut(&view_key) {
+                    view.pending.remove(&page);
                 }
+                self.set_error(format!("couldn't render page {}: {message}", page + 1));
             }
             fenix_pdf::PdfResponse::Outline { key, entries } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
@@ -341,6 +434,7 @@ impl App {
     /// their buffers do.
     pub(super) fn pdf_forget_views_in(&mut self, panes: &[fenix_window::WindowId]) {
         self.pdf_views.retain(|(pane, _), _| !panes.contains(pane));
+        self.pdf_requests.retain(|_, ((pane, _), _)| !panes.contains(pane));
         if self.pdf_last_view.is_some_and(|(pane, _)| panes.contains(&pane)) {
             self.pdf_last_view = None;
         }
@@ -357,6 +451,7 @@ impl App {
             worker.send(fenix_pdf::PdfRequest::Close { key: doc.doc_key });
         }
         self.pdf_views.retain(|(_, b), _| *b != buffer);
+        self.pdf_requests.retain(|_, ((_, b), _)| *b != buffer);
         if self.pdf_last_view.is_some_and(|(_, b)| b == buffer) {
             self.pdf_last_view = None;
         }
@@ -390,15 +485,13 @@ impl App {
     }
 
     fn pdf_run(&mut self, cmd: Cmd) {
-        let pane_h = self.pdf_target().and_then(|key| self.pdf_views.get(&key)).map(|view| view.last_pane_size.1 as i32).filter(|&h| h > 0).unwrap_or(400);
+        let pane_h = self.pdf_target().and_then(|key| self.pdf_views.get(&key)).map(|view| view.pane.1 as i32).filter(|&h| h > 0).unwrap_or(400);
         match cmd {
             Cmd::Scroll(n) => self.pdf_scroll(n.saturating_mul(PAN_STEP_PX as i32)),
             Cmd::HalfScreen(n) => self.pdf_scroll(n.saturating_mul(pane_h / 2)),
             Cmd::Screen(n) => self.pdf_scroll(n.saturating_mul((pane_h - PAN_STEP_PX as i32).max(PAN_STEP_PX as i32))),
             Cmd::Pan(n) => self.pdf_pan(n, 0),
-            Cmd::Page(n) => {
-                self.pdf_turn_page(n);
-            }
+            Cmd::Page(n) => self.pdf_turn_page(n),
             Cmd::GotoPage(n) => self.pdf_goto_page(n),
             Cmd::LastPage => self.pdf_last_page(),
             Cmd::Tab(mv) => self.move_tab(mv),
@@ -426,30 +519,12 @@ impl App {
 
     // -- Moving -----------------------------------------------------------
 
-    /// `J`/`K`, `SPC r n`/`SPC r p`: `delta` pages on, at the top of the
-    /// page. Whether the page changed.
-    pub(super) fn pdf_turn_page(&mut self, delta: i32) -> bool {
-        self.pdf_turn_page_landing(delta, false)
-    }
-
-    /// `pdf_turn_page`, landing at the bottom of the new page when
-    /// `land_at_bottom` -- scrolling up past a page's top.
-    fn pdf_turn_page_landing(&mut self, delta: i32, land_at_bottom: bool) -> bool {
-        let Some(key) = self.pdf_target() else { return false };
-        let page_count = self.pdf_docs.get(&key.1).map(|doc| doc.page_count).unwrap_or(0);
-        let Some(view) = self.pdf_views.get_mut(&key) else { return false };
-        if page_count == 0 {
-            return false;
-        }
-        let page = (view.current_page as i64 + delta as i64).clamp(0, page_count as i64 - 1) as u32;
-        if page == view.current_page {
-            return false;
-        }
-        view.current_page = page;
-        view.land_at_bottom = land_at_bottom;
-        self.pdf_render(key);
-        self.wake_caret();
-        true
+    /// `J`/`K`, `SPC r n`/`SPC r p`: `delta` pages on from the one being
+    /// read, at its top.
+    pub(super) fn pdf_turn_page(&mut self, delta: i32) {
+        let Some(key) = self.pdf_target() else { return };
+        let current = self.pdf_current_page(key) as i64;
+        self.pdf_jump_to_page(key, (current + delta as i64).max(0) as u32);
     }
 
     pub(crate) fn pdf_next_page(&mut self) {
@@ -466,30 +541,18 @@ impl App {
 
     pub(crate) fn pdf_last_page(&mut self) {
         let Some(key) = self.pdf_target() else { return };
-        let Some(page_count) = self.pdf_docs.get(&key.1).map(|doc| doc.page_count) else { return };
-        self.pdf_goto_page(page_count);
+        let Some(count) = self.pdf_docs.get(&key.1).map(|doc| doc.page_count()) else { return };
+        self.pdf_goto_page(count);
     }
 
-    /// Scrolls `delta_px` down the page (up when negative); past the
-    /// page's edge, onto the next or previous one. A page that fits the
-    /// pane has nothing to scroll, so there every scroll turns it.
+    /// Scrolls `delta_px` down the column (up when negative).
     pub(super) fn pdf_scroll(&mut self, delta_px: i32) {
         let Some(key) = self.pdf_target() else { return };
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
-        let full_h = view.full_bgra.as_ref().map(|(_, h, _)| *h).unwrap_or(0);
-        let max_y = full_h.saturating_sub(full_h.min(view.last_pane_size.1));
-        let current = view.scroll_offset.1.min(max_y);
-        let next = (current as i64 + delta_px as i64).clamp(0, max_y as i64) as u32;
-        if next != current {
-            view.scroll_offset.1 = next;
-            self.wake_caret();
-            return;
-        }
-        if delta_px > 0 {
-            self.pdf_turn_page_landing(1, false);
-        } else if delta_px < 0 {
-            self.pdf_turn_page_landing(-1, true);
-        }
+        let max_y = view.layout.max_scroll(view.pane).1;
+        view.scroll.1 = (view.scroll.1 + delta_px as f32).clamp(0.0, max_y);
+        self.pdf_remember_place(key);
+        self.wake_caret();
     }
 
     /// Page `page_number`, counting from 1; past the end is the last page.
@@ -498,31 +561,27 @@ impl App {
         self.pdf_jump_to_page(key, page_number.saturating_sub(1));
     }
 
-    /// `key` to page `page_index` (from 0), at its top.
-    fn pdf_jump_to_page(&mut self, key: ViewKey, page_index: u32) {
-        let page_count = self.pdf_docs.get(&key.1).map(|doc| doc.page_count).unwrap_or(0);
+    /// `key` to the top of page `page` (from 0; past the end is the
+    /// last). Before the view is laid out, it goes there once it is.
+    fn pdf_jump_to_page(&mut self, key: ViewKey, page: u32) {
+        let count = self.pdf_docs.get(&key.1).map(|doc| doc.page_count()).unwrap_or(0);
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
-        if page_count == 0 {
-            return;
-        }
-        let page = page_index.min(page_count - 1);
-        if page != view.current_page {
-            view.current_page = page;
-            view.land_at_bottom = false;
-            self.pdf_render(key);
-        } else {
-            view.scroll_offset.1 = 0;
+        let page = if count > 0 { page.min(count - 1) } else { page };
+        view.pending_jump = Some(page);
+        self.pdf_relayout(key);
+        if let Some(doc) = self.pdf_docs.get_mut(&key.1) {
+            doc.last_place.0 = page;
         }
         self.wake_caret();
     }
 
-    /// `h`/`l`: pans by `PAN_STEP_PX` steps. Clamped when drawn.
+    /// `h`/`l`: pans by `PAN_STEP_PX` steps.
     pub(super) fn pdf_pan(&mut self, dx: i32, dy: i32) {
         let Some(key) = self.pdf_target() else { return };
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
-        let step = PAN_STEP_PX as i64;
-        let (x, y) = view.scroll_offset;
-        view.scroll_offset = ((x.min(u32::MAX / 2) as i64 + dx as i64 * step).max(0) as u32, (y.min(u32::MAX / 2) as i64 + dy as i64 * step).max(0) as u32);
+        let step = PAN_STEP_PX as f32;
+        let (max_x, max_y) = view.layout.max_scroll(view.pane);
+        view.scroll = ((view.scroll.0 + dx as f32 * step).clamp(0.0, max_x), (view.scroll.1 + dy as f32 * step).clamp(0.0, max_y));
         self.wake_caret();
     }
 
@@ -536,7 +595,7 @@ impl App {
             self.set_message(message);
             return;
         }
-        let current = self.pdf_views.get(&key).map(|view| view.current_page).unwrap_or(0);
+        let current = self.pdf_current_page(key);
         let pages = &doc.match_pages;
         let at = if forward {
             pages.iter().position(|&p| p > current).unwrap_or(0)
@@ -554,16 +613,13 @@ impl App {
     /// a fitted view steps from the percentage it's fitted at.
     fn pdf_zoom_step(&mut self, in_: bool) {
         let Some(key) = self.pdf_target() else { return };
-        let page_w = self.pdf_page_pts(key).0;
-        let scale = self.frame_scale();
-        let Some(view) = self.pdf_views.get_mut(&key) else { return };
+        let Some(view) = self.pdf_views.get(&key) else { return };
         let current = match view.zoom {
             Zoom::Percent(p) => p,
-            _ => reader::effective_percent(view.last_requested_size.0, page_w, scale),
+            _ if view.layout.scale > 0.0 => (view.layout.scale / view.dpi.max(0.1) * 100.0).round() as u32,
+            _ => 100,
         };
-        view.zoom = Zoom::Percent(reader::step_zoom(current, in_));
-        self.pdf_render(key);
-        self.wake_caret();
+        self.pdf_set_zoom(Zoom::Percent(reader::step_zoom(current, in_)));
     }
 
     pub(crate) fn pdf_zoom_in(&mut self) {
@@ -578,7 +634,8 @@ impl App {
         let Some(key) = self.pdf_target() else { return };
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
         view.zoom = zoom;
-        self.pdf_render(key);
+        self.pdf_relayout(key);
+        self.pdf_remember_place(key);
         self.wake_caret();
     }
 
@@ -594,15 +651,12 @@ impl App {
     pub(super) fn pdf_modeline_position(&self) -> Option<String> {
         let key = self.pdf_view_in_pane(self.focused_pane_id())?;
         let doc = self.pdf_docs.get(&key.1)?;
-        let (page, zoom) = match self.pdf_views.get(&key) {
-            Some(view) => (view.current_page, view.zoom),
-            None => doc.last_place,
-        };
+        let zoom = self.pdf_views.get(&key).map(|view| view.zoom).unwrap_or(doc.last_place.1);
         let pending = self.pdf_pending_keys().map(|keys| format!("{keys}   ")).unwrap_or_default();
-        Some(if doc.page_count == 0 {
+        Some(if doc.pages.is_empty() {
             format!("{pending}Opening...")
         } else {
-            format!("{pending}Page {}/{}   {}", page + 1, doc.page_count, reader::zoom_label(zoom))
+            format!("{pending}Page {}/{}   {}", self.pdf_current_page(key) + 1, doc.page_count(), reader::zoom_label(zoom))
         })
     }
 
@@ -823,6 +877,7 @@ impl App {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,23 +887,31 @@ mod tests {
     /// or tear it down at once, as parallel tests would.
     static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// An app with `path` open as a PDF, as if the worker had answered:
-    /// 10 US Letter pages, in a 612 x 792 pane. Returns the guard first so
-    /// the app (and its worker) is dropped before the lock is released.
+    /// A pane that fits a US Letter page's width at 100%, with the gaps.
+    const PANE: (f32, f32) = (636.0, 400.0);
+    /// How far down the column each page starts: its height and a gap.
+    const STRIDE: f32 = 792.0 + 12.0;
+
+    /// An app with `path` open as a PDF, as if the worker had answered
+    /// with 10 US Letter pages, drawn once in a `PANE`-sized pane. Returns
+    /// the guard first so the app (and its worker) is dropped before the
+    /// lock is released.
     fn test_open_pdf(path: &str) -> (std::sync::MutexGuard<'static, ()>, ViewKey, App) {
         let guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut app = App::with_file(None);
         app.open_pdf_path(Path::new(path));
         let key = app.pdf_view_in_pane(app.focused_pane_id()).expect("the PDF is in the focused pane");
-        let doc = app.pdf_docs.get_mut(&key.1).unwrap();
-        doc.page_count = 10;
-        doc.page_point_size = (612.0, 792.0);
-        app.pdf_views.get_mut(&key).unwrap().last_pane_size = (612, 792);
+        app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 10];
+        app.pdf_prepare_view(key, PANE);
         (guard, key, app)
     }
 
     fn view(app: &App, key: ViewKey) -> &PdfView {
         app.pdf_views.get(&key).expect("the view")
+    }
+
+    fn page(app: &App, key: ViewKey) -> u32 {
+        app.pdf_current_page(key)
     }
 
     fn keys(app: &mut App, text: &str) {
@@ -857,15 +920,16 @@ mod tests {
         }
     }
 
-    fn rendered(app: &mut App, key: ViewKey, request_id: u64) {
-        let doc_key = app.pdf_docs[&key.1].doc_key;
+    /// The worker's answer to request `request_id` for `page`.
+    fn rendered(app: &mut App, request_id: u64, page: u32, w: u32) {
+        let doc_key = app.pdf_docs.values().next().unwrap().doc_key;
         app.apply_pdf_response(fenix_pdf::PdfResponse::PageRendered {
             key: doc_key,
             request_id,
-            page_index: 0,
-            width: 612,
-            height: 792,
-            bgra: vec![0u8; 612 * 792 * 4],
+            page_index: page,
+            width: w,
+            height: 10,
+            bgra: vec![0u8; w as usize * 10 * 4],
             page_width_pts: 612.0,
             page_height_pts: 792.0,
         });
@@ -900,12 +964,12 @@ mod tests {
         app.windows_mut().focus(right_pane);
         let right = app.pdf_target().expect("the split shows the document");
         assert_eq!(right, (right_pane, left.1));
-        app.pdf_views.get_mut(&right).unwrap().last_pane_size = (612, 792);
+        app.pdf_prepare_view(right, PANE);
 
         app.pdf_goto_page(7);
 
-        assert_eq!(view(&app, right).current_page, 6);
-        assert_eq!(view(&app, left).current_page, 0, "the other view stays where it was");
+        assert_eq!(page(&app, right), 6);
+        assert_eq!(page(&app, left), 0, "the other view stays where it was");
         assert_ne!(view(&app, left).id, view(&app, right).id, "each view gets its own renders");
         assert_eq!(app.pdf_docs.len(), 1);
     }
@@ -916,36 +980,16 @@ mod tests {
         app.pdf_goto_page(5);
         app.pdf_zoom_fit_page();
         let pane = app.windows_mut().split(SplitKind::Vertical, key.1);
-        let other = app.pdf_ensure_view((pane, key.1)).unwrap();
-        assert_eq!((other.current_page, other.zoom), (4, Zoom::FitPage));
-    }
-
-    #[test]
-    fn a_render_goes_to_the_view_that_asked_for_it_and_a_stale_one_is_dropped() {
-        let (_guard, left, mut app) = test_open_pdf("pdf_render_routing.pdf");
-        let right_pane = app.windows_mut().split(SplitKind::Vertical, left.1);
-        let right = (right_pane, left.1);
-        app.pdf_ensure_view(right).unwrap().last_pane_size = (612, 792);
-        app.pdf_render(left);
-        let stale = view(&app, left).pending_request_id;
-        app.pdf_render(left);
-        app.pdf_render(right);
-        let request_id = view(&app, right).pending_request_id;
-        assert_ne!(request_id, view(&app, left).pending_request_id);
-
-        rendered(&mut app, right, request_id);
-        rendered(&mut app, left, stale);
-
-        assert!(view(&app, right).full_bgra.is_some());
-        assert!(view(&app, left).full_bgra.is_none(), "neither the other view's nor a superseded one");
+        app.pdf_prepare_view((pane, key.1), PANE);
+        assert_eq!(page(&app, (pane, key.1)), 4);
+        assert_eq!(view(&app, (pane, key.1)).zoom, Zoom::FitPage);
     }
 
     #[test]
     fn killing_the_buffer_closes_the_document_and_its_views() {
         let (_guard, key, mut app) = test_open_pdf("pdf_kill.pdf");
         app.kill_buffer_now();
-        assert!(app.pdf_docs.is_empty());
-        assert!(app.pdf_views.is_empty());
+        assert!(app.pdf_docs.is_empty() && app.pdf_views.is_empty() && app.pdf_requests.is_empty());
         assert!(app.buffers.get(key.1).is_none());
         assert_eq!(app.workspaces.len(), 1, "no workspace goes with it");
     }
@@ -957,7 +1001,7 @@ mod tests {
         let second = app.test_add_frame(elsewhere);
         app.activate_frame(second);
         app.drop_frame(0);
-        assert!(!app.pdf_views.contains_key(&key), "its texture belonged to that frame");
+        assert!(!app.pdf_views.contains_key(&key), "its textures belonged to that frame");
         assert!(app.pdf_docs.contains_key(&key.1), "the buffer is still open");
     }
 
@@ -968,7 +1012,108 @@ mod tests {
         let code = app.windows_mut().split(SplitKind::Vertical, scratch);
         app.windows_mut().focus(code);
         app.pdf_next_page();
-        assert_eq!(view(&app, key).current_page, 1);
+        assert_eq!(page(&app, key), 1);
+    }
+
+    // -- One column of pages ----------------------------------------------
+
+    #[test]
+    fn a_view_asks_for_the_pages_in_sight_and_a_few_ahead() {
+        let (_guard, key, app) = test_open_pdf("pdf_asks.pdf");
+        let mut asked: Vec<u32> = view(&app, key).pending.keys().copied().collect();
+        asked.sort();
+        assert_eq!(asked, vec![0, 1, 2], "page 1 in sight, two ahead, none behind the first");
+        assert_eq!(app.pdf_requests.len(), 3);
+        assert!(view(&app, key).pending.values().all(|&(_, w)| w == 612), "at the width fit width gives them");
+    }
+
+    #[test]
+    fn a_rendered_page_goes_into_the_view_that_asked_and_a_superseded_one_is_dropped() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_rendered.pdf");
+        let (first, _) = view(&app, key).pending[&0];
+        app.pdf_set_zoom(Zoom::Percent(50));
+        app.pdf_prepare_view(key, PANE);
+        let (second, w) = view(&app, key).pending[&0];
+        assert_ne!(first, second, "a new size asks again");
+
+        rendered(&mut app, first, 0, 612);
+        assert!(!view(&app, key).cache.contains_key(&0), "the old size's answer is dropped");
+        rendered(&mut app, second, 0, w);
+        assert_eq!(view(&app, key).cache[&0].w, w);
+        assert!(!view(&app, key).pending.contains_key(&0));
+    }
+
+    #[test]
+    fn scrolling_away_cancels_what_is_no_longer_needed_and_lets_far_pages_go() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_cancel.pdf");
+        let (request, _) = view(&app, key).pending[&0];
+        rendered(&mut app, request, 0, 612);
+        assert!(view(&app, key).cache.contains_key(&0));
+
+        app.pdf_goto_page(10);
+        app.pdf_prepare_view(key, PANE);
+
+        assert!(!view(&app, key).pending.contains_key(&1), "page 2 isn't needed at the end");
+        assert!(view(&app, key).pending.contains_key(&9));
+        assert!(app.pdf_requests.values().all(|&(_, p)| p >= 7), "only the end and one behind: {:?}", app.pdf_requests);
+        assert!(view(&app, key).cache.contains_key(&0), "8 pages away is still kept");
+        app.pdf_docs.get_mut(&key.1).unwrap().pages = vec![(612.0, 792.0); 30];
+        app.pdf_goto_page(30);
+        app.pdf_prepare_view(key, PANE);
+        assert!(!view(&app, key).cache.contains_key(&0), "far away is let go");
+    }
+
+    #[test]
+    fn the_draw_plan_cuts_pages_to_the_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_plan.pdf");
+        app.pdf_scroll(700);
+        let rect = fenix_window::Rect { x: 100.0, y: 50.0, w: PANE.0, h: PANE.1 };
+        let plan = app.pdf_draw_plan(key, rect);
+        assert_eq!(plan.iter().map(|d| d.page).collect::<Vec<_>>(), vec![0, 1]);
+        let first = plan[0];
+        assert_eq!(first.dest, (112.0, 50.0, 612.0, 12.0 + 792.0 - 700.0));
+        assert!((first.uv.1 - 688.0 / 792.0).abs() < 1e-4, "the bottom of page 1");
+        assert_eq!(first.uv.3, 1.0);
+        let second = plan[1];
+        assert_eq!(second.dest.1, 50.0 + STRIDE + 12.0 - 700.0);
+        assert!(second.dest.1 + second.dest.3 <= rect.y + rect.h, "cut at the pane's bottom");
+    }
+
+    #[test]
+    fn scrolling_goes_straight_through_page_edges() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_scroll.pdf");
+        keys(&mut app, "j");
+        assert_eq!(view(&app, key).scroll.1, PAN_STEP_PX as f32);
+        keys(&mut app, "2j");
+        assert_eq!(view(&app, key).scroll.1, 3.0 * PAN_STEP_PX as f32);
+        app.pdf_scroll(900);
+        assert_eq!(page(&app, key), 1, "on into page 2 without a page turn");
+        app.pdf_scroll(-100_000);
+        assert_eq!(view(&app, key).scroll.1, 0.0, "stops at the top");
+        app.pdf_scroll(100_000);
+        assert_eq!(page(&app, key), 9, "and at the end");
+    }
+
+    #[test]
+    fn half_and_whole_screens() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_screens.pdf");
+        app.reader_key(KeyPress::char('d').with_ctrl());
+        assert_eq!(view(&app, key).scroll.1, 200.0);
+        app.reader_key(KeyPress::char('f').with_ctrl());
+        assert_eq!(view(&app, key).scroll.1, 200.0 + 400.0 - PAN_STEP_PX as f32, "a screen, less a step to keep your place");
+    }
+
+    #[test]
+    fn a_zoom_keeps_the_same_place_at_the_top() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_anchor.pdf");
+        app.pdf_goto_page(6);
+        app.pdf_scroll(300);
+        let before = view(&app, key).layout.anchor(view(&app, key).scroll.1);
+        keys(&mut app, "+");
+        let after = view(&app, key).layout.anchor(view(&app, key).scroll.1);
+        assert_eq!(view(&app, key).zoom, Zoom::Percent(110));
+        assert_eq!(before.0, after.0);
+        assert!((before.1 - after.1).abs() < 0.01, "{before:?} {after:?}");
     }
 
     // -- Keys -------------------------------------------------------------
@@ -977,15 +1122,16 @@ mod tests {
     fn counts_and_vim_page_keys() {
         let (_guard, key, mut app) = test_open_pdf("pdf_keys_pages.pdf");
         keys(&mut app, "3J");
-        assert_eq!(view(&app, key).current_page, 3);
+        assert_eq!(page(&app, key), 3);
+        assert_eq!(view(&app, key).scroll.1, 3.0 * STRIDE, "at the page's top");
         keys(&mut app, "K");
-        assert_eq!(view(&app, key).current_page, 2);
+        assert_eq!(page(&app, key), 2);
         keys(&mut app, "G");
-        assert_eq!(view(&app, key).current_page, 9);
+        assert_eq!(page(&app, key), 9);
         keys(&mut app, "gg");
-        assert_eq!(view(&app, key).current_page, 0);
+        assert_eq!(page(&app, key), 0);
         keys(&mut app, "7G");
-        assert_eq!(view(&app, key).current_page, 6);
+        assert_eq!(page(&app, key), 6);
     }
 
     #[test]
@@ -1023,17 +1169,43 @@ mod tests {
     }
 
     #[test]
+    fn zoom_steps_from_where_the_view_is_and_stops_at_the_ends() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_zoom.pdf");
+        app.pdf_zoom_in();
+        assert_eq!(view(&app, key).zoom, Zoom::Percent(110), "fit width is 100% here");
+        app.pdf_set_zoom(Zoom::Percent(400));
+        app.pdf_zoom_in();
+        assert_eq!(view(&app, key).zoom, Zoom::Percent(400));
+        app.pdf_set_zoom(Zoom::Percent(25));
+        app.pdf_zoom_out();
+        assert_eq!(view(&app, key).zoom, Zoom::Percent(25));
+    }
+
+    #[test]
+    fn panning_works_when_the_page_is_wider_than_the_pane() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_pan.pdf");
+        keys(&mut app, "l");
+        assert_eq!(view(&app, key).scroll.0, 0.0, "fit width: nothing to pan");
+        app.pdf_set_zoom(Zoom::Percent(200));
+        let x = view(&app, key).scroll.0;
+        keys(&mut app, "l");
+        assert_eq!(view(&app, key).scroll.0, x + PAN_STEP_PX as f32);
+        app.pdf_pan(-100, 0);
+        assert_eq!(view(&app, key).scroll.0, 0.0);
+    }
+
+    #[test]
     fn n_and_capital_n_go_through_the_pages_with_matches() {
         let (_guard, key, mut app) = test_open_pdf("pdf_keys_matches.pdf");
         app.pdf_docs.get_mut(&key.1).unwrap().match_pages = vec![2, 5, 8];
         keys(&mut app, "n");
-        assert_eq!(view(&app, key).current_page, 2);
+        assert_eq!(page(&app, key), 2);
         keys(&mut app, "n");
-        assert_eq!(view(&app, key).current_page, 5);
+        assert_eq!(page(&app, key), 5);
         keys(&mut app, "N");
-        assert_eq!(view(&app, key).current_page, 2);
+        assert_eq!(page(&app, key), 2);
         keys(&mut app, "N");
-        assert_eq!(view(&app, key).current_page, 8, "round the start to the last");
+        assert_eq!(page(&app, key), 8, "round the start to the last");
     }
 
     #[test]
@@ -1053,81 +1225,6 @@ mod tests {
         assert!(app.modeline_text().contains("12   Page 4/10"), "{}", app.modeline_text());
     }
 
-    // -- Scrolling and pages ----------------------------------------------
-
-    /// A render taller than the pane, so there's something to scroll.
-    fn seed_scrollable_render(app: &mut App, key: ViewKey) {
-        let view = app.pdf_views.get_mut(&key).unwrap();
-        view.last_pane_size = (612, 400);
-        view.full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
-        view.scroll_offset = (0, 0);
-    }
-
-    #[test]
-    fn scrolling_moves_within_a_page_taller_than_the_pane() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_within.pdf");
-        seed_scrollable_render(&mut app, key);
-        keys(&mut app, "j");
-        assert_eq!(view(&app, key).scroll_offset.1, PAN_STEP_PX);
-        assert_eq!(view(&app, key).current_page, 0);
-        keys(&mut app, "2j");
-        assert_eq!(view(&app, key).scroll_offset.1, 3 * PAN_STEP_PX);
-    }
-
-    #[test]
-    fn scrolling_past_the_bottom_goes_on_to_the_top_of_the_next_page() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_bottom.pdf");
-        seed_scrollable_render(&mut app, key);
-        app.pdf_views.get_mut(&key).unwrap().scroll_offset = (0, 392);
-        app.pdf_scroll(PAN_STEP_PX as i32);
-        assert_eq!(view(&app, key).current_page, 1);
-        assert!(!view(&app, key).land_at_bottom);
-    }
-
-    #[test]
-    fn scrolling_past_the_top_goes_back_to_the_bottom_of_the_page_before() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_top.pdf");
-        seed_scrollable_render(&mut app, key);
-        app.pdf_views.get_mut(&key).unwrap().current_page = 3;
-        app.pdf_scroll(-(PAN_STEP_PX as i32));
-        assert_eq!(view(&app, key).current_page, 2);
-        assert!(view(&app, key).land_at_bottom);
-    }
-
-    #[test]
-    fn a_page_that_fits_turns_on_every_scroll_and_stops_at_the_last() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_fitting.pdf");
-        app.pdf_views.get_mut(&key).unwrap().full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
-        app.pdf_scroll(PAN_STEP_PX as i32);
-        assert_eq!(view(&app, key).current_page, 1);
-        app.pdf_views.get_mut(&key).unwrap().current_page = 9;
-        app.pdf_scroll(PAN_STEP_PX as i32);
-        assert_eq!(view(&app, key).current_page, 9);
-    }
-
-    #[test]
-    fn a_render_lands_at_the_bottom_only_when_scrolling_back_asked_for_it() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_landing.pdf");
-        app.pdf_render(key);
-        app.pdf_views.get_mut(&key).unwrap().land_at_bottom = true;
-        let request_id = view(&app, key).pending_request_id;
-        rendered(&mut app, key, request_id);
-        assert_eq!(view(&app, key).scroll_offset, (0, u32::MAX), "clamped to the bottom when drawn");
-        assert!(!view(&app, key).land_at_bottom);
-    }
-
-    #[test]
-    fn going_to_a_page_counts_from_1_and_stops_at_the_last() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_goto.pdf");
-        app.pdf_goto_page(5);
-        assert_eq!(view(&app, key).current_page, 4);
-        assert_eq!(view(&app, key).last_requested_size, (612, 792), "rendered at fit width");
-        app.pdf_goto_page(9999);
-        assert_eq!(view(&app, key).current_page, 9);
-        app.pdf_first_page();
-        assert_eq!(view(&app, key).current_page, 0);
-    }
-
     #[test]
     fn the_go_to_page_prompt_takes_digits_and_esc_cancels() {
         let (_guard, key, mut app) = test_open_pdf("pdf_goto_prompt.pdf");
@@ -1137,13 +1234,13 @@ mod tests {
         }
         assert_eq!(app.pdf_goto_page_prompt_text(), Some("go to page: 7".to_string()));
         app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-        assert_eq!(view(&app, key).current_page, 6);
+        assert_eq!(page(&app, key), 6);
 
         app.start_pdf_goto_page_prompt();
         app.pdf_goto_page_prompt_key(KeyPress::char('2'));
         app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Escape));
         assert!(app.pdf_goto_page_prompt.is_none());
-        assert_eq!(view(&app, key).current_page, 6);
+        assert_eq!(page(&app, key), 6);
     }
 
     #[test]
@@ -1153,34 +1250,6 @@ mod tests {
         app.start_pdf_goto_page_prompt();
         app.start_pdf_search_prompt();
         assert!(app.pdf_goto_page_prompt.is_none() && app.pdf_search_prompt.is_none());
-    }
-
-    // -- Zoom and panning -------------------------------------------------
-
-    #[test]
-    fn zoom_steps_from_where_the_view_is_and_stops_at_the_ends() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_zoom.pdf");
-        app.pdf_views.get_mut(&key).unwrap().last_requested_size = (612, 792);
-        app.pdf_zoom_in();
-        assert_eq!(view(&app, key).zoom, Zoom::Percent(110), "a fitted 100% steps to 110%");
-        app.pdf_views.get_mut(&key).unwrap().zoom = Zoom::Percent(400);
-        app.pdf_zoom_in();
-        assert_eq!(view(&app, key).zoom, Zoom::Percent(400));
-        app.pdf_views.get_mut(&key).unwrap().zoom = Zoom::Percent(25);
-        app.pdf_zoom_out();
-        assert_eq!(view(&app, key).zoom, Zoom::Percent(25));
-        app.pdf_zoom_fit_page();
-        assert_eq!(view(&app, key).zoom, Zoom::FitPage);
-    }
-
-    #[test]
-    fn panning_moves_and_never_goes_below_zero() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_pan.pdf");
-        app.pdf_views.get_mut(&key).unwrap().scroll_offset = (100, 100);
-        keys(&mut app, "l");
-        assert_eq!(view(&app, key).scroll_offset, (100 + PAN_STEP_PX, 100));
-        app.pdf_pan(-5, -5);
-        assert_eq!(view(&app, key).scroll_offset, (0, 0));
     }
 
     // -- Outline ----------------------------------------------------------
@@ -1232,7 +1301,7 @@ mod tests {
         let start = app.open().buffer.line_start_char(1);
         app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
         app.pdf_outline_activate_selected();
-        assert_eq!(view(&app, key).current_page, 6);
+        assert_eq!(page(&app, key), 6);
     }
 
     #[test]
@@ -1305,7 +1374,7 @@ mod tests {
         let start = app.open().buffer.line_start_char(1);
         app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
         app.pdf_search_activate_selected();
-        assert_eq!(view(&app, key).current_page, 6);
+        assert_eq!(page(&app, key), 6);
     }
 
     #[test]
@@ -1343,6 +1412,6 @@ mod tests {
         app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
         assert_eq!(app.open().buffer.text(), "(no matches for \"xylophone\")");
         app.pdf_search_activate_selected();
-        assert_eq!(view(&app, key).current_page, 0);
+        assert_eq!(page(&app, key), 0);
     }
 }
