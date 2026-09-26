@@ -6054,6 +6054,8 @@ pub struct App {
     pdf_places: HashMap<PathBuf, crate::reader::SavedPlace>,
     pdf_places_path: PathBuf,
     pdf_places_dirty: bool,
+    /// `f`'s link labels, while they show.
+    pdf_hints: Option<reader::Hints>,
     /// The one pdfium worker for every document (pdfium can't be called
     /// from two threads), spawned with the first PDF opened.
     pdf_worker: Option<fenix_pdf::PdfWorker>,
@@ -6982,6 +6984,7 @@ impl App {
             pdf_places: crate::reader::parse_places(&std::fs::read_to_string(&pdf_places_path).unwrap_or_default()),
             pdf_places_path,
             pdf_places_dirty: false,
+            pdf_hints: None,
             pdf_worker: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
@@ -26325,6 +26328,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 let pos = (position.x as f32, position.y as f32);
                 self.cursor_pos = Some(pos);
                 self.handle_vnc_pointer_move(pos);
+                self.pdf_mouse_move(pos);
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
                     self.update_hover_cursor(pos, window_width, window_height);
                 }
@@ -26341,6 +26345,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 if let Some(pos) = self.cursor_pos {
                     self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
+                    // After the click has focused the pane: a link or a
+                    // drag selecting text in a PDF.
+                    self.pdf_mouse(pos, button, state == ElementState::Pressed);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {

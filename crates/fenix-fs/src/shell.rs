@@ -62,6 +62,26 @@ pub fn reveal(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Opens a web or mail link in the system's browser or mail program.
+///
+/// Only `http:`, `https:` and `mailto:` -- a link comes from a document
+/// that may not be trusted, and handing the shell a `file:` path or an
+/// unknown scheme could run something.
+pub fn open_url(url: &str) -> io::Result<()> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{url} isn't a web or mail link")));
+    }
+    #[cfg(windows)]
+    {
+        no_window("explorer.exe").arg(url.trim()).spawn().map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("xdg-open").arg(url.trim()).spawn().map(|_| ())
+    }
+}
+
 #[cfg(windows)]
 fn no_window(program: &str) -> Command {
     use std::os::windows::process::CommandExt;
@@ -81,6 +101,13 @@ mod tests {
     // every run, and what is worth checking here is the refusal -- the
     // part with a decision in it. The launching itself is one `spawn`
     // call, verified by using it.
+
+    #[test]
+    fn only_web_and_mail_links_are_opened() {
+        for url in ["file:///C:/Windows/System32/calc.exe", "C:/tools/x.exe", "javascript:alert(1)", "ms-settings:"] {
+            assert_eq!(open_url(url).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{url}");
+        }
+    }
 
     #[test]
     fn opening_something_that_is_not_there_is_refused_rather_than_launched() {

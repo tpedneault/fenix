@@ -38,6 +38,7 @@ mod popup;
 mod profile;
 mod reader;
 mod reader_sidebar;
+mod reader_text;
 mod rect;
 mod splash;
 mod sprite;

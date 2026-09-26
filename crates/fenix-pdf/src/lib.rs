@@ -24,6 +24,7 @@
 mod render;
 pub mod outline;
 pub mod search;
+pub mod text;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,6 +91,10 @@ pub enum PdfRequest {
     /// aren't rendered after the ones now on screen. A render already
     /// under way finishes.
     Cancel { key: PdfDocKey, view: u64, keep: Vec<u32> },
+    /// A page's characters and their boxes, for selecting and copying.
+    Text { key: PdfDocKey, page: u32 },
+    /// A page's links.
+    Links { key: PdfDocKey, page: u32 },
     Close { key: PdfDocKey },
 }
 
@@ -137,6 +142,10 @@ pub enum PdfResponse {
     /// outcome, not a failure.
     /// `done` on the last batch.
     SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch>, done: bool },
+    /// Reply to `Text`; empty for a page with no text (a scan).
+    Text { key: PdfDocKey, page: u32, chars: Vec<text::PageChar> },
+    /// Reply to `Links`.
+    Links { key: PdfDocKey, page: u32, links: Vec<text::PageLink> },
 }
 
 /// One shared background worker for every open PDF document in the

@@ -302,6 +302,10 @@ pub enum Cmd {
     Escape,
     /// `yp`: copy a link to this page (`file.pdf#page=38`).
     CopyLink,
+    /// `v`: select text with the keys.
+    Visual,
+    /// `f`: a label on every link in sight, to follow one by typing it.
+    Hints,
 }
 
 /// What `Keys::key` made of a key.
@@ -420,6 +424,8 @@ impl Keys {
             KeyCode::Char('-') => Cmd::ZoomOut,
             KeyCode::Char('=') => Cmd::ToggleFit,
             KeyCode::Char('o') => Cmd::Outline,
+            KeyCode::Char('v') => Cmd::Visual,
+            KeyCode::Char('f') => Cmd::Hints,
             KeyCode::Char('/') => Cmd::Search,
             KeyCode::Char('n') => Cmd::NextMatch,
             KeyCode::Char('N') => Cmd::PrevMatch,

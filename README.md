@@ -879,7 +879,9 @@ for anyone curious to poke around or build on it.
   in `SPC ,`); each PDF reopens where you left it, Home lists what you're
   reading, `yp` copies a `file.pdf#page=38` link that `gf` follows from
   any note, a PDF your build rewrites reloads in place, and sessions bring
-  PDF panes back. `SPC m` lists the reader's commands, and
+  PDF panes back. Text can be selected -- by dragging, or `v` and Vim's
+  motions -- and `y` copies it with the lines run together; `f` labels
+  every link in sight to follow by typing, and a click follows one. `SPC m` lists the reader's commands, and
   `SPC r` works from any pane on the PDF read last. Requires
   `pdfium.dll` (see [Optional external tools](#optional-external-tools))
   -- without it, opening a PDF shows an error instead of a blank pane.
@@ -1385,6 +1387,8 @@ popup shows what keys continue it.
 | `o` / `/` / `n` / `N` | Sidebar, search, next / previous match (PDF panes) |
 | `m{a}` / `'{a}`, `Ctrl-o` / `Ctrl-i` | Set / go to a mark, back / forward through jumps (PDF panes) |
 | `yp` | Copy a link to this page (PDF panes) |
+| `v`, drag | Select text; `w` `b` `e` `0` `$` `j` `k` extend it, `y` copies (PDF panes) |
+| `f`, click | Label the links in sight and follow one by typing it; a click follows a link (PDF panes) |
 | `gd` | Go to definition (LSP) |
 | `gf` | Open the file named under the cursor, in the preview tab -- a `spec.pdf#page=38` link opens the PDF at that page |
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
@@ -1733,6 +1737,10 @@ the reader's commands.
 | `m{a}` / `'{a}` | Set a mark here / go back to it |
 | `Ctrl-o` / `Ctrl-i` | Back / forward through jumps (`gg`, `G`, `{n}G`, headings, matches, marks) |
 | `yp`, `SPC r y` | Copy a link to this page, `file.pdf#page=38` |
+| `v` | Select text from the top line in sight; `w` `b` `e` `h` `l` `0` `$` `j` `k` extend it across pages, `y` copies, `Esc` stops |
+| drag | Select text with the mouse; `y` copies |
+| `f` | Label every link in sight; typing a label follows it, `Esc` cancels |
+| click | Follow a link |
 | `SPC r c` | Pages as printed, or in the theme's colours |
 
 `SPC r ...` also works from another pane -- the outline, or the code
@@ -1811,6 +1819,16 @@ the pages, over them, or beside them when there's room.
 to the clipboard. `gf` on such a link, in any buffer (a Markdown note, a
 task, a code comment), opens the PDF at that page in the preview tab;
 `gf` on any other file name opens that file.
+
+**Text and links**: dragging across a page selects its text, and so does
+`v` from the keyboard -- starting at the top line in sight, extended with
+Vim's `w` `b` `e` `h` `l` `0` `$` `j` `k`, on across pages. `y` copies it
+to the clipboard and the unnamed register with the lines run together
+and a word split by a hyphen at a line's end mended. A scanned page has
+no text and says so. `f` puts a label on every link in sight; typing one
+follows it, and a click on a link does the same. A link to another page
+is a jump (`Ctrl-o` comes back); a web or mail link opens in your
+browser -- any other kind is refused, since it comes from the document.
 
 **Rebuilt PDFs**: with `editor.watch_files` on, a PDF rewritten on disk
 -- LaTeX, Typst, Doxygen, a datasheet downloaded again -- is read again,

@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 use super::*;
 use crate::reader::{self, Cmd, Layout, Outcome, Zoom};
 use crate::reader_sidebar::{self, MatchRow, SideKey, Sidebar, Target};
+use crate::reader_text::{self, Motion, TextPos};
+use fenix_pdf::text::{LinkTarget, PageChar, PageLink};
 
 /// How far `j`/`k`/`h`/`l` move, in pixels.
 pub(super) const PAN_STEP_PX: u32 = 60;
@@ -34,6 +36,12 @@ const KEEP: usize = 8;
 
 /// A page not rendered yet: blank paper.
 pub(super) const PAPER: [f32; 4] = [0.91, 0.905, 0.89, 1.0];
+
+/// A selection, and a link while hints are showing.
+const SELECTION_TINT: [f32; 4] = [0.34, 0.61, 0.84, 0.35];
+const LINK_TINT: [f32; 4] = [1.0, 0.71, 0.28, 0.22];
+/// Link hints' letters: Cinder, the Fenix mark's red.
+const HINT_INK: glyphon::Color = glyphon::Color::rgb(0xd6, 0x3a, 0x2f);
 
 /// A search's matches on the page, and the one `n` last went to.
 const MATCH_TINT: [f32; 4] = [1.0, 0.71, 0.28, 0.38];
@@ -90,6 +98,12 @@ pub(super) struct PdfDoc {
     /// When the file was last written, to reload it when a build
     /// rewrites it.
     pub(super) modified: Option<std::time::SystemTime>,
+    /// Pages' characters and links, read the first time they're needed
+    /// (a selection, `f`, a click); the pages asked for and not back yet.
+    pub(super) text: HashMap<u32, Vec<PageChar>>,
+    pub(super) links: HashMap<u32, Vec<PageLink>>,
+    asked_text: HashSet<u32>,
+    asked_links: HashSet<u32>,
 }
 
 impl PdfDoc {
@@ -145,6 +159,18 @@ pub(super) struct PdfView {
     /// Where jumps came from and, after `Ctrl-o`, went to.
     back: Vec<Place>,
     forward: Vec<Place>,
+    /// The selected text, from where it started to where it's been taken
+    /// (either way round), while it's showing.
+    pub(super) selection: Option<(TextPos, TextPos)>,
+    /// `v`: the keys move the selection's end and `y` copies it.
+    pub(super) visual: bool,
+    /// `v` pressed before its page's text came: start when it does.
+    visual_waiting: Option<u32>,
+    /// The left button is down, selecting.
+    dragging: bool,
+    /// Where a drag started on a page whose text hadn't come yet: the
+    /// selection starts there once it has.
+    drag_from: Option<(u32, (f32, f32))>,
 }
 
 /// One page to draw in a pane: where, and which part of its render.
@@ -248,6 +274,10 @@ impl App {
                 last_place,
                 last_frac,
                 modified: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+                text: HashMap::new(),
+                links: HashMap::new(),
+                asked_text: HashSet::new(),
+                asked_links: HashSet::new(),
             },
         );
         buffer
@@ -278,6 +308,11 @@ impl App {
                     side_over: false,
                     back: Vec::new(),
                     forward: Vec::new(),
+                    selection: None,
+                    visual: false,
+                    visual_waiting: None,
+                    dragging: false,
+                    drag_from: None,
                 },
             );
         }
@@ -386,6 +421,12 @@ impl App {
             if let Some(worker) = &self.pdf_worker {
                 worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, view: view_id, request_id, page_index: page, target_w: w, target_h: h });
             }
+        }
+        // The links and text in sight, so a click, `f` or a drag finds
+        // them without waiting.
+        for page in visible.clone() {
+            self.pdf_want_links(key.1, page as u32);
+            self.pdf_want_text(key.1, page as u32);
         }
         let Some(view) = self.pdf_views.get_mut(&key) else { return };
         if changed {
@@ -600,6 +641,30 @@ impl App {
                     self.pdf_sidebar_to_here(view_key);
                 }
             }
+            fenix_pdf::PdfResponse::Text { key, page, chars } => {
+                let Some(buffer) = self.pdf_doc_by_key(key) else { return };
+                let empty = chars.is_empty();
+                if let Some(doc) = self.pdf_docs.get_mut(&buffer) {
+                    doc.text.insert(page, chars);
+                }
+                let waiting: Vec<ViewKey> = self.pdf_views.iter().filter(|((_, b), v)| *b == buffer && v.visual_waiting == Some(page)).map(|(k, _)| *k).collect();
+                for view_key in waiting {
+                    if let Some(view) = self.pdf_views.get_mut(&view_key) {
+                        view.visual_waiting = None;
+                    }
+                    if empty {
+                        self.set_message("this page has no text to select -- a scan?");
+                    } else {
+                        self.pdf_start_visual(view_key);
+                    }
+                }
+            }
+            fenix_pdf::PdfResponse::Links { key, page, links } => {
+                let Some(buffer) = self.pdf_doc_by_key(key) else { return };
+                if let Some(doc) = self.pdf_docs.get_mut(&buffer) {
+                    doc.links.insert(page, links);
+                }
+            }
             fenix_pdf::PdfResponse::SearchResults { key, request_id, matches, done } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
                 let Some(doc) = self.pdf_docs.get_mut(&buffer) else { return };
@@ -674,8 +739,14 @@ impl App {
             self.pdf_keys_view = Some(key);
         }
         self.pdf_last_view = Some(key);
+        if self.pdf_hints.as_ref().is_some_and(|h| h.view == key) {
+            return self.pdf_hint_key(keypress);
+        }
         if self.pdf_views.get(&key).and_then(|v| v.sidebar.as_ref()).is_some_and(|s| s.focused) {
             return self.pdf_sidebar_key(key, keypress);
+        }
+        if self.pdf_views.get(&key).is_some_and(|v| v.visual) {
+            return self.pdf_visual_key(key, keypress);
         }
         match self.pdf_keys.key(keypress) {
             Outcome::Pending | Outcome::Dropped => {
@@ -718,6 +789,12 @@ impl App {
             Cmd::GotoMark(c) => self.pdf_goto_mark(c),
             Cmd::Escape => self.pdf_escape(),
             Cmd::CopyLink => self.pdf_copy_link(),
+            Cmd::Visual => {
+                if let Some(key) = self.pdf_target() {
+                    self.pdf_start_visual(key);
+                }
+            }
+            Cmd::Hints => self.pdf_show_hints(),
         }
         self.wake_caret();
     }
@@ -727,9 +804,14 @@ impl App {
         self.pdf_keys.is_pending().then(|| self.pdf_keys.pending_text())
     }
 
-    /// `Esc`: hides the search's highlights, else closes the sidebar.
+    /// `Esc`: clears a selection, else hides the search's highlights,
+    /// else closes the sidebar.
     fn pdf_escape(&mut self) {
         let Some(key) = self.pdf_target() else { return };
+        if let Some(view) = self.pdf_views.get_mut(&key).filter(|v| v.selection.is_some()) {
+            view.selection = None;
+            return;
+        }
         if let Some(doc) = self.pdf_docs.get_mut(&key.1).filter(|doc| doc.highlights) {
             doc.highlights = false;
             return;
@@ -1041,6 +1123,44 @@ impl App {
         let mut chrome = PdfChrome::default();
         let (Some(view), Some(doc)) = (self.pdf_views.get(&key), self.pdf_docs.get(&key.1)) else { return chrome };
 
+        // Where a box in points on `page` is in the pane, cut to the pages'
+        // part of it.
+        let to_screen = |page: u32, r: &[f32; 4]| -> Option<(f32, f32, f32, f32)> {
+            let (origin, clip) = self.pdf_page_area(key, rect)?;
+            let p = view.layout.pages.get(page as usize)?;
+            let scale = view.layout.scale;
+            let x0 = (origin + p.x - view.scroll.0 + r[0] * scale).max(clip.x);
+            let y0 = (rect.y + p.y - view.scroll.1 + r[1] * scale).max(clip.y);
+            let x1 = (origin + p.x - view.scroll.0 + r[2] * scale).min(clip.x + clip.w);
+            let y1 = (rect.y + p.y - view.scroll.1 + r[3] * scale).min(clip.y + clip.h);
+            (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+        };
+        if let Some((a, b)) = view.selection {
+            let (from, to) = (a.min(b), a.max(b));
+            for page in from.page..=to.page {
+                let Some(chars) = doc.text.get(&page) else { continue };
+                let start = if page == from.page { from.idx } else { 0 };
+                let end = if page == to.page { to.idx } else { chars.len().saturating_sub(1) };
+                for r in reader_text::line_rects(chars, start, end) {
+                    if let Some(on_screen) = to_screen(page, &r) {
+                        chrome.highlights.push((on_screen, SELECTION_TINT));
+                    }
+                }
+            }
+        }
+        let mut labels: Vec<(f32, f32, String)> = Vec::new();
+        if let Some(hints) = self.pdf_hints.as_ref().filter(|h| h.view == key) {
+            for (label, page, at) in &hints.links {
+                if !label.starts_with(&hints.typed) {
+                    continue;
+                }
+                let Some(link) = doc.links.get(page).and_then(|l| l.get(*at)) else { continue };
+                if let Some(on_screen) = to_screen(*page, &link.rect) {
+                    chrome.highlights.push((on_screen, LINK_TINT));
+                    labels.push((on_screen.0, on_screen.1, label.clone()));
+                }
+            }
+        }
         if doc.highlights {
             if let (Some((origin, clip)), false) = (self.pdf_page_area(key, rect), view.layout.pages.is_empty()) {
                 let visible = view.layout.visible(view.scroll.1, rect.h);
@@ -1069,15 +1189,28 @@ impl App {
                 chrome.rects.push(((clip.x, clip.y, clip.w, clip.h), [bg[0] * 0.72, bg[1] * 0.72, bg[2] * 0.72, 1.0]));
             }
         }
-        let Some(side) = &view.sidebar else { return chrome };
         let (char_w, line_h) = cell;
+        let rows_shown = ((rect.h - text::PAD_TOP) / line_h.max(1.0)).floor().max(1.0) as usize;
+        let cols_shown = ((rect.w - text::PAD_LEFT) / char_w.max(1.0)).floor().max(1.0) as usize;
+        let mut grid = TextGrid::new(rows_shown, cols_shown, theme.fg);
+        for (x, y, label) in &labels {
+            let row = ((y - rect.y - text::PAD_TOP) / line_h).round().max(0.0) as usize;
+            let col = ((x - rect.x - text::PAD_LEFT) / char_w).round().max(0.0) as usize;
+            // Over the page, so no box under it (the page would cover
+            // one): the mark's red reads on paper and on a themed page.
+            grid.put(row, col, label, HINT_INK);
+        }
+        let Some(side) = &view.sidebar else {
+            chrome.spans = grid.spans();
+            return chrome;
+        };
         chrome.rects.push(((rect.x, rect.y, view.side_px, rect.h), theme.sidebar_bg));
         chrome.rects.push(((rect.x + view.side_px - 1.0, rect.y, 1.0, rect.h), theme.divider));
         let rows = self.pdf_sidebar_rows(key);
         let height = ((rect.h - text::PAD_TOP) / line_h.max(1.0)).floor().max(2.0) as usize - 1;
         let row_y = |row: usize| rect.y + text::PAD_TOP + row as f32 * line_h;
         let header = side.header(doc.matches.len(), doc.marks.len(), !doc.search_done);
-        chrome.spans.push((format!("{header:.width$}", width = reader_sidebar::COLS), theme.caret_text, false));
+        grid.put(0, 0, &format!("{header:.width$}", width = reader_sidebar::COLS), theme.caret_text);
         if rows.is_empty() {
             let empty = match (side.tab(), &doc.outline) {
                 (reader_sidebar::Tab::Outline, None) => "loading the outline\u{2026}",
@@ -1085,14 +1218,12 @@ impl App {
                 (reader_sidebar::Tab::Matches, _) => "no matches -- / searches",
                 (reader_sidebar::Tab::Marks, _) => "no marks -- m{a} sets one",
             };
-            chrome.spans.push(("\n".to_string(), theme.fg, false));
-            chrome.spans.push((empty.to_string(), theme.gutter_fg, false));
+            grid.put(1, 0, empty, theme.gutter_fg);
         }
         for (i, row) in rows.iter().enumerate().skip(side.scroll).take(height) {
             let shown = i - side.scroll + 1;
-            chrome.spans.push(("\n".to_string(), theme.fg, false));
             let color = if row.here { theme.caret_text } else { theme.fg };
-            chrome.spans.push((reader_sidebar::fit(row, reader_sidebar::COLS), color, false));
+            grid.put(shown, 0, &reader_sidebar::fit(row, reader_sidebar::COLS), color);
             if i == side.cursor {
                 let tint = if side.focused { theme.selection } else { [theme.selection[0], theme.selection[1], theme.selection[2], theme.selection[3] * 0.45] };
                 chrome.rects.push(((rect.x, row_y(shown), view.side_px - 1.0, line_h), tint));
@@ -1101,7 +1232,7 @@ impl App {
                 chrome.rects.push(((rect.x, row_y(shown), 2.0, line_h), theme.mode_normal));
             }
         }
-        let _ = char_w;
+        chrome.spans = grid.spans();
         chrome
     }
 
@@ -1338,6 +1469,10 @@ impl App {
             d.matches.clear();
             d.current_match = None;
             d.search_done = true;
+            d.text.clear();
+            d.links.clear();
+            d.asked_text.clear();
+            d.asked_links.clear();
             let (key, path, name) = (d.doc_key, d.path.clone(), d.name.clone());
             if let Some(worker) = &self.pdf_worker {
                 worker.send(fenix_pdf::PdfRequest::Close { key });
@@ -1366,7 +1501,379 @@ impl App {
             None => self.pdf_load(&canonical),
         }
     }
+    // -- Text: selecting and copying --------------------------------------
+
+    fn pdf_want_text(&mut self, doc: BufferId, page: u32) {
+        let Some(d) = self.pdf_docs.get_mut(&doc) else { return };
+        if d.text.contains_key(&page) || !d.asked_text.insert(page) {
+            return;
+        }
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Text { key: d.doc_key, page });
+        }
+    }
+
+    fn pdf_want_links(&mut self, doc: BufferId, page: u32) {
+        let Some(d) = self.pdf_docs.get_mut(&doc) else { return };
+        if d.links.contains_key(&page) || !d.asked_links.insert(page) {
+            return;
+        }
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(fenix_pdf::PdfRequest::Links { key: d.doc_key, page });
+        }
+    }
+
+    /// Where a point in `key`'s pane (in pixels from its top-left) is on
+    /// a page: the page, and points from its top-left.
+    fn pdf_point_at(&self, key: ViewKey, local: (f32, f32)) -> Option<(u32, (f32, f32))> {
+        let view = self.pdf_views.get(&key)?;
+        if view.layout.pages.is_empty() || local.0 < view.side_px {
+            return None;
+        }
+        let origin = if view.side_over { 0.0 } else { view.side_px };
+        let (x, y) = (local.0 - origin + view.scroll.0, local.1 + view.scroll.1);
+        let page = view.layout.page_at(y);
+        let p = view.layout.pages[page];
+        Some((page as u32, ((x - p.x) / view.layout.scale, (y - p.y) / view.layout.scale)))
+    }
+
+    /// `v`: a selection from the start of the top line in sight, with the
+    /// keys moving its end. Waits for the page's text if it hasn't come.
+    pub(super) fn pdf_start_visual(&mut self, key: ViewKey) {
+        let Some(view) = self.pdf_views.get(&key) else { return };
+        if view.layout.pages.is_empty() {
+            return;
+        }
+        let page = view.layout.page_at(view.scroll.1) as u32;
+        let p = view.layout.pages[page as usize];
+        let top = ((view.scroll.1 - p.y) / view.layout.scale).max(0.0);
+        let Some(chars) = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&page)) else {
+            if let Some(view) = self.pdf_views.get_mut(&key) {
+                view.visual_waiting = Some(page);
+            }
+            self.pdf_want_text(key.1, page);
+            self.set_message("reading the page's text\u{2026}");
+            return;
+        };
+        let Some(idx) = reader_text::line_start_near(chars, top + 6.0) else {
+            self.set_message("this page has no text to select -- a scan?");
+            return;
+        };
+        let at = TextPos { page, idx };
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.selection = Some((at, at));
+            view.visual = true;
+        }
+        self.set_message("VISUAL -- w b e 0 $ j k h l move, y copies, Esc stops");
+    }
+
+    /// A key while `v` is selecting.
+    fn pdf_visual_key(&mut self, key: ViewKey, keypress: KeyPress) -> bool {
+        let motion = match keypress.code {
+            _ if keypress.mods != Mods::default() => return false,
+            KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => Motion::Left,
+            KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => Motion::Right,
+            KeyCode::Char('w') => Motion::WordForward,
+            KeyCode::Char('b') => Motion::WordBack,
+            KeyCode::Char('e') => Motion::WordEnd,
+            KeyCode::Char('0') => Motion::LineStart,
+            KeyCode::Char('$') => Motion::LineEnd,
+            KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => Motion::LineDown,
+            KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => Motion::LineUp,
+            KeyCode::Char('y') => {
+                self.pdf_copy_selection(key);
+                return true;
+            }
+            KeyCode::Char('v') | KeyCode::Named(FenixNamedKey::Escape) => {
+                if let Some(view) = self.pdf_views.get_mut(&key) {
+                    view.visual = false;
+                    view.selection = None;
+                }
+                self.wake_caret();
+                return true;
+            }
+            KeyCode::Char(' ') | KeyCode::Char(':') => return false,
+            _ => return true,
+        };
+        self.pdf_move_selection(key, motion);
+        self.wake_caret();
+        true
+    }
+
+    /// Moves the selection's end by `motion`, on to the next or previous
+    /// page at an edge (once its text has come), and keeps it in sight.
+    fn pdf_move_selection(&mut self, key: ViewKey, motion: Motion) {
+        let Some((anchor, head)) = self.pdf_views.get(&key).and_then(|v| v.selection) else { return };
+        let count = self.pdf_docs.get(&key.1).map(|d| d.page_count()).unwrap_or(0);
+        let Some(chars) = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&head.page)) else { return };
+        let next = match reader_text::step(chars, head.idx, motion) {
+            Some(idx) => Some(TextPos { page: head.page, idx }),
+            None => {
+                let forward = matches!(motion, Motion::LineDown | Motion::WordForward | Motion::WordEnd | Motion::Right);
+                let page = if forward { head.page + 1 } else { head.page.wrapping_sub(1) };
+                if page >= count {
+                    None
+                } else if let Some(other) = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&page)) {
+                    let idx = if forward { 0 } else { other.len().saturating_sub(1) };
+                    (!other.is_empty()).then_some(TextPos { page, idx })
+                } else {
+                    self.pdf_want_text(key.1, page);
+                    None
+                }
+            }
+        };
+        let Some(next) = next else { return };
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.selection = Some((anchor, next));
+        }
+        self.pdf_keep_in_sight(key, next);
+    }
+
+    /// Scrolls `key` so the character at `at` shows.
+    fn pdf_keep_in_sight(&mut self, key: ViewKey, at: TextPos) {
+        let Some(r) = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&at.page)).and_then(|c| c.get(at.idx)).map(|c| c.rect) else { return };
+        let Some(view) = self.pdf_views.get_mut(&key) else { return };
+        let Some(p) = view.layout.pages.get(at.page as usize).copied() else { return };
+        let (top, bottom) = (p.y + r[1] * view.layout.scale, p.y + r[3] * view.layout.scale);
+        let margin = view.pane.1 / 6.0;
+        if top < view.scroll.1 {
+            view.scroll.1 = (top - margin).max(0.0);
+        } else if bottom > view.scroll.1 + view.pane.1 {
+            view.scroll.1 = (bottom + margin - view.pane.1).min(view.layout.max_scroll(view.pane).1);
+        }
+    }
+
+    /// `y` on a selection: its text, lines run together, to the clipboard
+    /// and the unnamed register.
+    fn pdf_copy_selection(&mut self, key: ViewKey) {
+        let Some((a, b)) = self.pdf_views.get(&key).and_then(|v| v.selection) else { return };
+        let (from, to) = (a.min(b), a.max(b));
+        let Some(doc) = self.pdf_docs.get(&key.1) else { return };
+        let mut parts = Vec::new();
+        for page in from.page..=to.page {
+            let Some(chars) = doc.text.get(&page) else { continue };
+            let start = if page == from.page { from.idx } else { 0 };
+            let end = if page == to.page { to.idx } else { chars.len().saturating_sub(1) };
+            parts.push(reader_text::copy_text(chars, start, end));
+        }
+        let text = parts.join(" ");
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(text.clone());
+        }
+        let words = text.split_whitespace().count();
+        self.vim.set_register(text, false);
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.visual = false;
+            view.selection = None;
+        }
+        self.set_message(format!("copied {words} word{}", if words == 1 { "" } else { "s" }));
+    }
+
+    // -- The mouse --------------------------------------------------------
+
+    /// A button pressed or let go over a PDF pane: a click on a link
+    /// follows it; a drag selects text, and leaves it selected for `y`.
+    pub(super) fn pdf_mouse(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) -> bool {
+        if button != MouseButton::Left {
+            return false;
+        }
+        if !pressed {
+            return self.pdf_release();
+        }
+        let Some((pane, rect)) = self.pane_rect_at(pos) else { return false };
+        let Some(key) = self.pdf_view_in_pane(pane) else { return false };
+        self.pdf_press(key, (pos.0 - rect.x, pos.1 - rect.y))
+    }
+
+    /// The left button let go: a drag leaves its text selected for `y`.
+    pub(super) fn pdf_release(&mut self) -> bool {
+        let Some(key) = self.pdf_views.iter().find(|(_, v)| v.dragging).map(|(k, _)| *k) else { return false };
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.dragging = false;
+            view.drag_from = None;
+            match view.selection {
+                Some((a, b)) if a != b => view.visual = true,
+                _ => view.selection = None,
+            }
+        }
+        if self.pdf_views.get(&key).is_some_and(|v| v.visual) {
+            self.set_message("selected -- y copies, Esc clears");
+        }
+        true
+    }
+
+    /// A left press at `local` (pixels from the pane's top-left).
+    pub(super) fn pdf_press(&mut self, key: ViewKey, local: (f32, f32)) -> bool {
+        let Some((page, pt)) = self.pdf_point_at(key, local) else { return false };
+        let link = self.pdf_docs.get(&key.1).and_then(|d| d.links.get(&page)).and_then(|links| {
+            links.iter().find(|l| pt.0 >= l.rect[0] && pt.0 <= l.rect[2] && pt.1 >= l.rect[1] && pt.1 <= l.rect[3]).cloned()
+        });
+        if let Some(link) = link {
+            self.pdf_follow(key, &link.to);
+            return true;
+        }
+        let at = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&page)).and_then(|chars| reader_text::char_at(chars, pt));
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            view.visual = false;
+            view.selection = at.map(|idx| (TextPos { page, idx }, TextPos { page, idx }));
+            view.dragging = true;
+            view.drag_from = at.is_none().then_some((page, pt));
+        }
+        self.pdf_want_text(key.1, page);
+        self.wake_caret();
+        true
+    }
+
+    /// The pointer moving: while dragging, the selection's end follows.
+    pub(super) fn pdf_mouse_move(&mut self, pos: (f32, f32)) {
+        let Some(key) = self.pdf_views.iter().find(|(_, v)| v.dragging).map(|(k, _)| *k) else { return };
+        let Some(rect) = self.pane_rect_at(pos).filter(|(p, _)| *p == key.0).map(|(_, r)| r) else { return };
+        self.pdf_drag(key, (pos.0 - rect.x, pos.1 - rect.y));
+    }
+
+    /// The pointer at `local` while dragging.
+    pub(super) fn pdf_drag(&mut self, key: ViewKey, local: (f32, f32)) {
+        let Some((page, pt)) = self.pdf_point_at(key, local) else { return };
+        let Some(idx) = self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&page)).and_then(|chars| reader_text::char_at(chars, pt)) else {
+            self.pdf_want_text(key.1, page);
+            return;
+        };
+        let head = TextPos { page, idx };
+        // A drag begun before its page's text came starts now.
+        let from = self.pdf_views.get(&key).and_then(|v| v.drag_from);
+        let anchor = from.and_then(|(fp, fpt)| self.pdf_docs.get(&key.1).and_then(|d| d.text.get(&fp)).and_then(|c| reader_text::char_at(c, fpt)).map(|idx| TextPos { page: fp, idx }));
+        if let Some(view) = self.pdf_views.get_mut(&key) {
+            if let Some(anchor) = anchor {
+                view.selection = Some((anchor, head));
+                view.drag_from = None;
+            } else if let Some((anchor, _)) = view.selection {
+                view.selection = Some((anchor, head));
+            }
+        }
+        self.wake_caret();
+    }
+
+    // -- Links ------------------------------------------------------------
+
+    /// `f`: a label on every link in sight; typing one follows it.
+    fn pdf_show_hints(&mut self) {
+        let Some(key) = self.pdf_target() else { return };
+        let Some(view) = self.pdf_views.get(&key) else { return };
+        let visible = view.layout.visible(view.scroll.1, view.pane.1);
+        let Some(doc) = self.pdf_docs.get(&key.1) else { return };
+        let found: Vec<(u32, usize)> = visible
+            .clone()
+            .flat_map(|page| doc.links.get(&(page as u32)).map(|l| (0..l.len()).map(move |i| (page as u32, i)).collect::<Vec<_>>()).unwrap_or_default())
+            .collect();
+        if found.is_empty() {
+            let asked = visible.clone().any(|page| !doc.links.contains_key(&(page as u32)));
+            self.set_message(if asked { "reading the page's links\u{2026} -- f again in a moment" } else { "no links in sight" });
+            return;
+        }
+        let labels = reader_text::hint_labels(found.len());
+        let links = labels.into_iter().zip(found).map(|(label, (page, at))| (label, page, at)).collect();
+        self.pdf_hints = Some(Hints { view: key, links, typed: String::new() });
+        self.set_message("type a link's letters to follow it -- Esc cancels");
+    }
+
+    /// A key while link hints show.
+    fn pdf_hint_key(&mut self, keypress: KeyPress) -> bool {
+        let Some(hints) = self.pdf_hints.as_mut() else { return false };
+        match keypress.code {
+            KeyCode::Char(c) if keypress.mods == Mods::default() && c.is_ascii_lowercase() => hints.typed.push(c),
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                hints.typed.pop();
+            }
+            _ => {
+                self.pdf_hints = None;
+                self.set_message("");
+                return true;
+            }
+        }
+        let typed = hints.typed.clone();
+        let matching: Vec<(String, u32, usize)> = hints.links.iter().filter(|(l, _, _)| l.starts_with(&typed)).cloned().collect();
+        let key = hints.view;
+        match matching.as_slice() {
+            [] => self.pdf_hints = None,
+            [(label, page, at)] if *label == typed => {
+                self.pdf_hints = None;
+                if let Some(to) = self.pdf_docs.get(&key.1).and_then(|d| d.links.get(page)).and_then(|l| l.get(*at)).map(|l| l.to.clone()) {
+                    self.pdf_follow(key, &to);
+                }
+            }
+            _ => {}
+        }
+        self.wake_caret();
+        true
+    }
+
+    /// Goes where a link points: a page of this document is a jump
+    /// (`Ctrl-o` comes back), a web or mail link opens in the browser.
+    fn pdf_follow(&mut self, key: ViewKey, to: &LinkTarget) {
+        match to {
+            LinkTarget::Page { page, y } => {
+                let page_h = self.pdf_docs.get(&key.1).and_then(|d| d.pages.get(*page as usize)).map(|p| p.1).unwrap_or(792.0);
+                let frac = y.map(|y| (y / page_h.max(1.0)).clamp(0.0, 1.0)).unwrap_or(0.0);
+                self.pdf_jump(key, (*page, frac));
+                self.set_message(format!("page {}", page + 1));
+            }
+            LinkTarget::Uri(uri) => match fenix_fs::open_url(uri) {
+                Ok(()) => self.set_message(format!("opened {uri}")),
+                Err(err) => self.set_error(err.to_string()),
+            },
+        }
+    }
 }
+
+/// Link hints showing in a view: each link's label, page and index in
+/// that page's links, and what's been typed.
+pub(super) struct Hints {
+    pub(super) view: ViewKey,
+    pub(super) links: Vec<(String, u32, usize)>,
+    pub(super) typed: String,
+}
+
+/// A pane's text as a grid of cells, so the sidebar and link labels can
+/// be put where they go and handed on as one pane's text.
+struct TextGrid {
+    rows: Vec<Vec<(char, glyphon::Color)>>,
+    fg: glyphon::Color,
+}
+
+impl TextGrid {
+    fn new(rows: usize, cols: usize, fg: glyphon::Color) -> Self {
+        TextGrid { rows: vec![vec![(' ', fg); cols]; rows], fg }
+    }
+
+    fn put(&mut self, row: usize, col: usize, text: &str, color: glyphon::Color) {
+        let Some(cells) = self.rows.get_mut(row) else { return };
+        for (i, c) in text.chars().enumerate() {
+            if let Some(cell) = cells.get_mut(col + i) {
+                *cell = (c, color);
+            }
+        }
+    }
+
+    /// The rows as spans, a run of one colour each, trailing blanks cut.
+    fn spans(self) -> RowSpans {
+        let last = self.rows.iter().rposition(|r| r.iter().any(|(c, _)| *c != ' ')).map(|i| i + 1).unwrap_or(0);
+        let mut spans: RowSpans = Vec::new();
+        for (i, row) in self.rows.into_iter().take(last).enumerate() {
+            if i > 0 {
+                spans.push(("\n".to_string(), self.fg, false));
+            }
+            let end = row.iter().rposition(|(c, _)| *c != ' ').map(|i| i + 1).unwrap_or(0);
+            for (c, color) in row.into_iter().take(end) {
+                match spans.last_mut() {
+                    Some((text, last, false)) if *last == color && !text.ends_with('\n') => text.push(c),
+                    _ => spans.push((c.to_string(), color, false)),
+                }
+            }
+        }
+        spans
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -2136,5 +2643,157 @@ mod tests {
         let buffer = app.pdf_buffer_for(&path);
         assert!(app.pdf_docs.contains_key(&buffer));
         assert_eq!(app.pdf_docs.values().filter(|d| d.path == path).count(), 1);
+    }
+
+    // -- Text and links ---------------------------------------------------
+
+    /// "Hello world\nsecond line" at the top-left of a page, 6 points a
+    /// character, lines 10 apart.
+    fn two_lines() -> Vec<fenix_pdf::text::PageChar> {
+        let mut chars = Vec::new();
+        for (row, line) in ["Hello world", "second line"].iter().enumerate() {
+            for (col, c) in line.chars().enumerate() {
+                let (x, y) = (col as f32 * 6.0, row as f32 * 10.0);
+                chars.push(fenix_pdf::text::PageChar { c, rect: [x, y, x + 6.0, y + 8.0] });
+            }
+            if row == 0 {
+                chars.push(fenix_pdf::text::PageChar { c: '\n', rect: [0.0; 4] });
+            }
+        }
+        chars
+    }
+
+    fn text_arrives(app: &mut App, key: ViewKey, page: u32, chars: Vec<fenix_pdf::text::PageChar>) {
+        let doc_key = app.pdf_docs[&key.1].doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Text { key: doc_key, page, chars });
+    }
+
+    fn link(rect: [f32; 4], to: fenix_pdf::text::LinkTarget) -> fenix_pdf::text::PageLink {
+        fenix_pdf::text::PageLink { rect, to }
+    }
+
+    #[test]
+    fn v_selects_from_the_top_line_and_y_copies_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_visual.pdf");
+        text_arrives(&mut app, key, 0, two_lines());
+        keys(&mut app, "v");
+        assert!(view(&app, key).visual);
+        keys(&mut app, "w");
+        keys(&mut app, "e");
+        assert_eq!(view(&app, key).selection.map(|(_, h)| h), Some(TextPos { page: 0, idx: 10 }));
+        keys(&mut app, "y");
+        assert_eq!(app.vim.register().0, "Hello world");
+        assert!(!view(&app, key).visual && view(&app, key).selection.is_none(), "copying ends it");
+        assert!(app.modeline_text().contains("copied 2 words"), "{}", app.modeline_text());
+    }
+
+    #[test]
+    fn v_waits_for_the_pages_text_and_a_scan_says_it_has_none() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_visual_wait.pdf");
+        keys(&mut app, "v");
+        assert!(!view(&app, key).visual, "no text yet");
+        assert!(app.pdf_docs[&key.1].asked_text.contains(&0), "asked for");
+        text_arrives(&mut app, key, 0, two_lines());
+        assert!(view(&app, key).visual, "started when it came");
+
+        keys(&mut app, "v");
+        app.pdf_docs.get_mut(&key.1).unwrap().text.remove(&0);
+        app.pdf_docs.get_mut(&key.1).unwrap().asked_text.clear();
+        keys(&mut app, "v");
+        text_arrives(&mut app, key, 0, Vec::new());
+        assert!(!view(&app, key).visual);
+        assert!(app.modeline_text().contains("no text to select"), "{}", app.modeline_text());
+    }
+
+    #[test]
+    fn j_in_a_selection_goes_on_to_the_next_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_visual_pages.pdf");
+        text_arrives(&mut app, key, 0, two_lines());
+        text_arrives(&mut app, key, 1, two_lines());
+        keys(&mut app, "v");
+        keys(&mut app, "jj");
+        assert_eq!(view(&app, key).selection.map(|(_, h)| h.page), Some(1));
+        app.reader_key(KeyPress::named(FenixNamedKey::Escape));
+        assert!(!view(&app, key).visual && view(&app, key).selection.is_none());
+    }
+
+    #[test]
+    fn dragging_selects_and_y_copies() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_drag.pdf");
+        text_arrives(&mut app, key, 0, two_lines());
+        // Page 1 starts 12 pixels in and down, at 100%.
+        assert!(app.pdf_press(key, (13.0, 13.0)));
+        app.pdf_drag(key, (12.0 + 61.0, 13.0));
+        assert!(app.pdf_release());
+        assert!(view(&app, key).visual, "left selected");
+        keys(&mut app, "y");
+        assert_eq!(app.vim.register().0, "Hello world");
+    }
+
+    #[test]
+    fn a_drag_begun_before_the_text_came_still_selects() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_drag_early.pdf");
+        app.pdf_docs.get_mut(&key.1).unwrap().text.clear();
+        assert!(app.pdf_press(key, (13.0, 13.0)), "taken, text or not");
+        text_arrives(&mut app, key, 0, two_lines());
+        app.pdf_drag(key, (12.0 + 61.0, 13.0));
+        assert!(app.pdf_release());
+        keys(&mut app, "y");
+        assert_eq!(app.vim.register().0, "Hello world");
+    }
+
+    #[test]
+    fn a_click_on_a_link_follows_it_and_ctrl_o_comes_back() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_click_link.pdf");
+        let doc_key = app.pdf_docs[&key.1].doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Links {
+            key: doc_key,
+            page: 0,
+            links: vec![link([100.0, 100.0, 160.0, 112.0], fenix_pdf::text::LinkTarget::Page { page: 5, y: None })],
+        });
+        assert!(app.pdf_press(key, (12.0 + 110.0, 12.0 + 105.0)));
+        assert_eq!(page(&app, key), 5);
+        assert!(app.pdf_jump_history(true));
+        assert_eq!(page(&app, key), 0);
+    }
+
+    #[test]
+    fn f_labels_the_links_in_sight_and_typing_one_follows_it() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_hints.pdf");
+        let doc_key = app.pdf_docs[&key.1].doc_key;
+        app.apply_pdf_response(fenix_pdf::PdfResponse::Links {
+            key: doc_key,
+            page: 0,
+            links: vec![
+                link([100.0, 20.0, 160.0, 32.0], fenix_pdf::text::LinkTarget::Page { page: 3, y: None }),
+                link([100.0, 60.0, 160.0, 72.0], fenix_pdf::text::LinkTarget::Page { page: 7, y: Some(396.0) }),
+            ],
+        });
+        keys(&mut app, "f");
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 };
+        let chrome = app.pdf_chrome(key, rect, CELL);
+        let text: String = chrome.spans.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert!(text.contains('a') && text.contains('s'), "the labels: {text:?}");
+        assert!(app.reader_key(KeyPress::char('s')));
+        assert!(app.pdf_hints.is_none());
+        assert_eq!(page(&app, key), 7);
+        assert!(view(&app, key).scroll.1 > 7.0 * STRIDE, "half way down, where the link points");
+    }
+
+    #[test]
+    fn a_link_to_something_that_isnt_a_web_page_is_refused() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_bad_link.pdf");
+        app.pdf_follow(key, &fenix_pdf::text::LinkTarget::Uri("file:///C:/Windows/System32/calc.exe".into()));
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("isn't a web or mail link")));
+    }
+
+    #[test]
+    fn a_selection_is_drawn_over_the_page() {
+        let (_guard, key, mut app) = test_open_pdf("pdf_selection_drawn.pdf");
+        text_arrives(&mut app, key, 0, two_lines());
+        keys(&mut app, "v");
+        keys(&mut app, "j");
+        let chrome = app.pdf_chrome(key, fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 }, CELL);
+        assert_eq!(chrome.highlights.iter().filter(|(_, tint)| *tint == SELECTION_TINT).count(), 2, "one box per line");
     }
 }
