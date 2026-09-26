@@ -3145,6 +3145,13 @@ fn file_label(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(path))
 }
 
+/// Whether properties go on to count what's inside: a real folder only.
+/// A link is measured as itself, so counting one would only replace
+/// where it points with "0B in 1 file".
+fn counts_contents(props: &fenix_fs::Properties) -> bool {
+    props.kind.is_dir_like() && !props.kind.is_link()
+}
+
 /// One line of everything a listing column cannot hold.
 fn describe_properties(props: &fenix_fs::Properties) -> String {
     let name = props.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&props.path));
@@ -3174,7 +3181,7 @@ fn describe_properties(props: &fenix_fs::Properties) -> String {
     if let Some(target) = &props.link_target {
         out.push_str(&format!("  --  links to {}", readable_path(target)));
     }
-    if props.kind.is_dir_like() {
+    if counts_contents(props) {
         out.push_str("  --  counting...");
     }
     out
@@ -20278,7 +20285,7 @@ impl App {
             }
         };
         self.set_message(describe_properties(&props));
-        if props.kind.is_dir_like() {
+        if counts_contents(&props) {
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
