@@ -433,7 +433,44 @@ impl App {
     /// Keys a page claims while it's focused. While a field has the
     /// keyboard that's every key; otherwise the leader and `:` still reach
     /// Vim, so `SPC w` and friends work from a page.
+    /// A key for the focused page. `g` waits for its second key: `gt`,
+    /// `gT`, `gh` and `g<Tab>` are the tab keys, as in a text buffer;
+    /// anything else reaches the page as the two keys it was, so a
+    /// page's own `gg` still works.
     pub(super) fn page_key(&mut self, keypress: KeyPress) -> bool {
+        let id = self.focused_buffer_id();
+        let Some(state) = self.pages.get(&id) else {
+            self.page_g_pending = false;
+            return false;
+        };
+        if state.typing() || !self.vim.is_idle() || self.leader_matcher.is_pending() || keypress.mods != Mods::default() {
+            self.page_g_pending = false;
+            return self.page_key_now(keypress);
+        }
+        if std::mem::take(&mut self.page_g_pending) {
+            let mv = match keypress.code {
+                KeyCode::Char('t') => Some(fenix_vim::TabMove::Next),
+                KeyCode::Char('T') => Some(fenix_vim::TabMove::Prev(1)),
+                KeyCode::Char('h') => Some(fenix_vim::TabMove::Home),
+                KeyCode::Named(FenixNamedKey::Tab) => Some(fenix_vim::TabMove::Last),
+                _ => None,
+            };
+            if let Some(mv) = mv {
+                self.move_tab(mv);
+                return true;
+            }
+            // Not a tab key: the page gets both, `gg` included.
+            self.page_key_now(KeyPress::char('g'));
+            return self.page_key_now(keypress);
+        }
+        if keypress == KeyPress::char('g') {
+            self.page_g_pending = true;
+            return true;
+        }
+        self.page_key_now(keypress)
+    }
+
+    fn page_key_now(&mut self, keypress: KeyPress) -> bool {
         let id = self.focused_buffer_id();
         let Some(state) = self.pages.get(&id) else { return false };
         // A leader sequence under way is the leader's, not the page's.
@@ -794,6 +831,7 @@ impl App {
             self.workspaces.rename_active(name);
             let active = self.workspaces.active_index();
             self.workspaces.workspaces[active].project = Some(root.clone());
+            self.refresh_home_data(true);
         }
         match file {
             Some(file) => self.open_file_from_picker(&file),

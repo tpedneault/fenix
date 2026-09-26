@@ -29,6 +29,8 @@ pub const ICON_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
 // `glyphnames.json`) and against the actual installed font's cmap, not
 // guessed from memory or trusted from a summarized fetch.
 const FOLDER: char = '\u{f07b}'; // nf-fa-folder
+/// A workspace's Home tab.
+pub const HOME: char = '\u{f015}'; // nf-fa-home
 const FOLDER_OPEN: char = '\u{f07c}'; // nf-fa-folder_open
 const FILE_GENERIC: char = '\u{f15b}'; // nf-fa-file
 const FILE_CODE: char = '\u{f1c9}'; // nf-fa-file_code_o -- fallback for a recognized-but-iconless extension

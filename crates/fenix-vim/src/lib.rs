@@ -22,6 +22,6 @@ pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
 pub use motion::Motion;
 pub use operator::Operator;
-pub use state::{BracketTarget, LspRequestKind, VimEvent, VimState};
+pub use state::{BracketTarget, LspRequestKind, TabMove, VimEvent, VimState};
 pub use substitute::replace_in_text;
 pub use textobject::TextObject;

@@ -555,6 +555,25 @@ mod tests {
     }
 
     #[test]
+    fn g_on_the_page_is_a_tab_key_or_else_reaches_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let home = app.ensure_workspace_home();
+        let first = app.agenda_store.create_task("First".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.agenda_store.create_task("Second".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let page = app.open_agenda_page(Some(Tab::List));
+        // `gg` still means the top: `s` then acts on the first task.
+        press(&mut app, "jggs2");
+        assert_eq!(app.agenda_store.task(first).unwrap().status, Status::InProgress);
+        press(&mut app, "gh");
+        assert_eq!(app.focused_buffer_id(), home);
+        app.move_tab(fenix_vim::TabMove::Prev(1));
+        assert_eq!(app.focused_buffer_id(), page);
+        press(&mut app, "gt");
+        assert_eq!(app.focused_buffer_id(), home, "gt from the page wraps to Home");
+    }
+
+    #[test]
     fn keys_on_a_row_change_the_task_and_the_page_follows() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
