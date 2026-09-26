@@ -12,6 +12,9 @@ impl App {
     /// first -- the project it belongs to, then its language.
     pub(super) fn local_contexts(&self) -> Vec<LocalContext> {
         let mut contexts = Vec::new();
+        if self.open().kind == BufferKind::Pdf {
+            contexts.push(LocalContext::Reader);
+        }
         if fenix_embedded::project_root_of(&self.integration_root()).is_some() {
             contexts.push(LocalContext::Arduino);
         }
@@ -28,7 +31,7 @@ impl App {
         let contexts = self.local_contexts();
         if contexts.is_empty() {
             self.local_matcher = None;
-            self.set_message("SPC m has nothing for this buffer -- it has menus in Arduino sketches and Tcl files");
+            self.set_message("SPC m has nothing for this buffer -- it has menus in PDFs, Arduino sketches and Tcl files");
             return;
         }
         let names: Vec<&str> = contexts.iter().map(|c| c.name()).collect();

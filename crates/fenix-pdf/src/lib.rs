@@ -62,7 +62,10 @@ impl Default for PdfDocKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfRequest {
     Open { key: PdfDocKey, path: PathBuf },
-    RenderPage { key: PdfDocKey, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
+    /// `view` names which of the caller's views of the document asked:
+    /// two panes can show one document at different pages, and each
+    /// needs its own render.
+    RenderPage { key: PdfDocKey, view: u64, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
     /// Fetches and flattens the document's bookmark tree (see the
     /// `outline` module). Cheap relative to `RenderPage` (no
     /// rasterization involved), but still routed through the same
@@ -182,7 +185,7 @@ impl Drop for PdfWorker {
 }
 
 /// Collapses a batch of requests drained from the channel in one go so
-/// that, per `key`, only the *last* `RenderPage` request in the batch
+/// that, per `key` and `view`, only the *last* `RenderPage` request in the batch
 /// survives -- everything before it is dropped silently (no
 /// `RenderFailed` reply; the caller never sees these as having been
 /// dispatched at all, since from its perspective a newer request for the
@@ -196,16 +199,16 @@ impl Drop for PdfWorker {
 /// ever actually rendered.
 fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
     use std::collections::HashMap;
-    let mut latest_render_index: HashMap<PdfDocKey, usize> = HashMap::new();
+    let mut latest_render_index: HashMap<(PdfDocKey, u64), usize> = HashMap::new();
     for (i, req) in pending.iter().enumerate() {
-        if let PdfRequest::RenderPage { key, .. } = req {
-            latest_render_index.insert(*key, i);
+        if let PdfRequest::RenderPage { key, view, .. } = req {
+            latest_render_index.insert((*key, *view), i);
         }
     }
     pending
         .into_iter()
         .enumerate()
-        .filter(|(i, req)| !matches!(req, PdfRequest::RenderPage { key, .. } if latest_render_index.get(key) != Some(i)))
+        .filter(|(i, req)| !matches!(req, PdfRequest::RenderPage { key, view, .. } if latest_render_index.get(&(*key, *view)) != Some(i)))
         .map(|(_, req)| req)
         .collect()
 }
@@ -215,7 +218,7 @@ mod tests {
     use super::*;
 
     fn render_req(key: PdfDocKey, request_id: u64) -> PdfRequest {
-        PdfRequest::RenderPage { key, request_id, page_index: 0, target_w: 100, target_h: 100 }
+        PdfRequest::RenderPage { key, view: 0, request_id, page_index: 0, target_w: 100, target_h: 100 }
     }
 
     #[test]
@@ -236,6 +239,14 @@ mod tests {
         let b = PdfDocKey::new();
         let pending = vec![render_req(a, 1), render_req(b, 1), render_req(a, 2)];
         assert_eq!(coalesce_render_requests(pending), vec![render_req(b, 1), render_req(a, 2)]);
+    }
+
+    #[test]
+    fn coalesce_keeps_the_last_render_of_each_view_of_one_document() {
+        let key = PdfDocKey::new();
+        let view = |view, request_id| PdfRequest::RenderPage { key, view, request_id, page_index: 0, target_w: 100, target_h: 100 };
+        let pending = vec![view(1, 1), view(2, 2), view(1, 3)];
+        assert_eq!(coalesce_render_requests(pending), vec![view(2, 2), view(1, 3)]);
     }
 
     #[test]

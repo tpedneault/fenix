@@ -80,6 +80,9 @@ pub enum LocalContext {
     /// from the reference elisp implementation's own `SPC M` scheme),
     /// plus Tcl's ctags-based symbols.
     Tcl,
+    /// A PDF pane: the reader's commands, for finding them without
+    /// knowing its keys.
+    Reader,
 }
 
 impl LocalContext {
@@ -88,6 +91,7 @@ impl LocalContext {
         match self {
             LocalContext::Arduino => "arduino",
             LocalContext::Tcl => "tcl",
+            LocalContext::Reader => "reader",
         }
     }
 
@@ -106,6 +110,20 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('d')], "debug", "embedded.debug");
                 t.insert(&[KeyPress::char('n')], "new sketch", "embedded.new_sketch");
                 t.insert(&[KeyPress::char('i')], "project info", "embedded.info");
+            }
+            LocalContext::Reader => {
+                t.insert(&[KeyPress::char('n')], "next page (J)", "pdf.next_page");
+                t.insert(&[KeyPress::char('p')], "previous page (K)", "pdf.prev_page");
+                t.insert(&[KeyPress::char('g')], "go to page ({n}G)", "pdf.goto_page");
+                t.insert(&[KeyPress::char('[')], "first page (gg)", "pdf.first_page");
+                t.insert(&[KeyPress::char(']')], "last page (G)", "pdf.last_page");
+                t.insert(&[KeyPress::char('=')], "zoom in (+)", "pdf.zoom_in");
+                t.insert(&[KeyPress::char('-')], "zoom out (-)", "pdf.zoom_out");
+                t.insert(&[KeyPress::char('w')], "fit width (zw)", "pdf.fit_width");
+                t.insert(&[KeyPress::char('f')], "fit page (zp)", "pdf.fit_page");
+                t.insert(&[KeyPress::char('o')], "outline (o)", "pdf.toggle_outline");
+                t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
+                t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
             }
             LocalContext::Tcl => {
                 t.insert(&[KeyPress::char('i')], "insert telecommand", "mib.insert_telecommand");
