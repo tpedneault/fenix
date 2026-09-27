@@ -1134,6 +1134,58 @@ Everything Fenix does, by area. For the keys, see
   - In a Tcl file, `SPC m` keeps its letters: `i` insert, `e` edit the
     call, `t` telecommand, `k` TM packet, `p` TM parameter, `c`
     calibration, `m` the MIB page, `r` read again.
+  - **MIB checks**: besides unreadable files, the MIB is checked against
+    the standards -- APIDs, packet sizes, overlapping parameters, widths
+    against types, PUS identification, checksums, calibrations and time
+    formats (`ccsds.checks_off` turns checks off) -- and telecommand
+    calls in scripts are checked against it as you type
+    (`mib.check_scripts`): unknown mnemonics with the closest names,
+    missing or unknown arguments, values out of range.
+  - **Services** (`6` on the MIB page): the telecommands and packets by
+    PUS service and subtype, named as ECSS-E-ST-70-41C names them.
+  - **Generating from the MIB** (`SPC k g`): XTCE, a Wireshark Lua
+    dissector, a C header, a Python module that encodes telecommands and
+    decodes packets, an ICD in Markdown, or a test vector per
+    telecommand, written to the project's `generated/` folder.
+
+- **CCSDS and PUS** (`SPC k`): packet tools that follow the project's
+  mission settings (`CCSDS & PUS` in `SPC ,`: PUS-C by default or PUS-A,
+  the TM time format and epoch, the checksum, the source ID, the frame
+  layout, and where `PLF_OFFBY` counts from). Fenix only reads packets;
+  it never sends a telecommand.
+  - **The packet inspector** (`SPC k d`): the hex under the cursor (or
+    the Visual selection) in any spelling -- `0B F2 C1`, `0x0BF2`,
+    `\x0b\xf2`, a C array, a dump with an offset column -- decoded
+    layer by layer: primary header, PUS header, time, then the MIB's
+    packet and parameters with calibrated values and limits, and the
+    CRC. The bytes are shown beside the tree, coloured by field. `a`
+    reads them as something else -- a TM, TC, AOS or USLP frame (with
+    Reed-Solomon correction and de-randomization), a CLTU, a CFDP PDU,
+    a CLCW, a time code. A field names the standard defining it, and
+    `Enter` opens that standard's PDF at the heading. `K` on hex in a
+    file gives a one-line summary; `SPC k b` or `y` in the insert form
+    copies a telecommand's packet bytes.
+  - **Time** (`SPC k T`): an on-board time (CUC or CDS) against UTC,
+    TAI, GPS, day of year and seconds since the epoch, with leap seconds
+    (`ccsds.leap_seconds` for a newer table); type any of them, or
+    insert the on-board time.
+  - **Hex view** (`SPC f x`, and any file that isn't text): a file's
+    bytes, view only, with the packet under the cursor outlined, `w`
+    to the next packet, `]`/`[` to sync markers, search and goto.
+  - **Recordings** (`SPC k f`): a file of packets, frames (with the
+    sync marker, randomization and Reed-Solomon found by themselves) or
+    records, or a text log with a packet in hex on each line, as a
+    list of packets with time, APID, SPID and checks. Tabs list them by
+    APID, follow a TM parameter through them (`t`, with a curve and
+    limits) and list problems; `/` filters (`apid:`, `spid:`,
+    `check:bad`...), `]`/`[` jump between sequence gaps, `w` writes the
+    packets shown or a parameter's samples.
+  - **Live sources** (`SPC k l`): the same page fed by a TCP or UDP
+    port, a file being written, or a NATS subject, from `ccsds.sources`.
+    Receive only.
+  - **Standards** (`SPC k ?`): the CCSDS and ECSS standards these tools
+    refer to, opened from the folder `ccsds.library` names, or where to
+    get them.
 
 ## Themes, terminals and tables
 
