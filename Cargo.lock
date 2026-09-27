@@ -668,6 +668,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-ccsds"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "fenix-completion"
 version = "1.0.0"
 
