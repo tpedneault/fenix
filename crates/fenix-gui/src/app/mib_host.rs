@@ -626,6 +626,56 @@ impl App {
         true
     }
 
+    /// Checks the telecommand calls of the focused file against the MIB,
+    /// when it changed since the last look.
+    pub(super) fn mib_check_scripts(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else { return };
+        let on = match self.mib_project_value("mib.check_scripts") {
+            Some(fenix_config::Value::Bool(b)) => *b,
+            _ => self.config.mib_check_scripts.unwrap_or(true),
+        };
+        if !on || !self.mib_in_this_file() {
+            self.mib_diagnostics.remove(&path);
+            return;
+        }
+        let edits = self.open().buffer.edit_count();
+        if self.mib_checked.get(&id) == Some(&edits) {
+            return;
+        }
+        let (key, _) = self.mib_key_here();
+        let Some(set) = self.mib_set_ready(&key) else { return };
+        self.mib_checked.insert(id, edits);
+        let text = self.open().buffer.text();
+        let templates = self.mib_templates(&key);
+        let found = crate::mib_check::check(&text, &set, &templates);
+        let diags: Vec<lsp_types::Diagnostic> = found
+            .into_iter()
+            .map(|f| lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line: f.line as u32, character: f.cols.start as u32 },
+                    end: lsp_types::Position { line: f.line as u32, character: f.cols.end as u32 },
+                },
+                severity: Some(match f.severity {
+                    crate::mib_check::Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
+                    crate::mib_check::Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+                    crate::mib_check::Severity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
+                }),
+                source: Some("MIB".into()),
+                message: f.message,
+                ..Default::default()
+            })
+            .collect();
+        if diags.is_empty() {
+            self.mib_diagnostics.remove(&path);
+        } else {
+            self.mib_diagnostics.insert(path, diags);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Completion's MIB names: telecommands and parameters, with what
     /// they are.
     pub(super) fn mib_completion_items(&mut self) -> Vec<fenix_picker::Candidate<crate::completion::Item>> {

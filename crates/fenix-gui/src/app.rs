@@ -5886,6 +5886,11 @@ pub struct App {
     stream_sources: HashMap<BufferId, stream_host::StreamSource>,
     /// A stream page waiting for a parameter from the `MibDef` picker.
     mib_pick_for_stream: Option<BufferId>,
+    /// Telecommand calls the MIB disagrees with, by file -- drawn with
+    /// the language servers' diagnostics.
+    mib_diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Each buffer's edit count when its calls were last checked.
+    mib_checked: HashMap<BufferId, u64>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6669,6 +6674,8 @@ impl App {
             mib_last: HashMap::new(),
             stream_sources: HashMap::new(),
             mib_pick_for_stream: None,
+            mib_diagnostics: HashMap::new(),
+            mib_checked: HashMap::new(),
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -7660,6 +7667,13 @@ impl App {
     /// server's way of saying "no more diagnostics here," not "nothing
     /// changed," so it's stored as an actual removal rather than an
     /// empty `Vec` left behind.
+    /// A file's problems: its language server's, and the MIB's.
+    fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
+        all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
+        all
+    }
+
     fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
         let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
         if params.diagnostics.is_empty() {
@@ -14399,6 +14413,7 @@ impl App {
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
         self.mib_poll();
+        self.mib_check_scripts();
         self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
@@ -20911,7 +20926,7 @@ impl App {
             .buffer
             .path()
             .map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())))
-            .and_then(|p| self.diagnostics.get(&p))
+            .map(|p| self.all_diagnostics(&p))
             .filter(|diags| !diags.is_empty())
             .map(|diags| {
                 let errors = diags.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();

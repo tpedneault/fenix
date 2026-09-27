@@ -7,6 +7,7 @@ mod jira_page;
 mod mib_def;
 mod mib_form;
 mod mib_page;
+mod mib_check;
 mod packet_page;
 mod hex_page;
 mod time_page;
