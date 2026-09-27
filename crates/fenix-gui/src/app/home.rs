@@ -175,8 +175,6 @@ impl App {
         self.home_project_of(id).and_then(|root| self.home_project_data.get(&root)).unwrap_or(&self.home_data)
     }
 
-    /// The resume slot and the recent files, from anywhere or only from
-    /// under `scope`.
     /// PDFs read lately, with where you were in each -- Home's Reading.
     fn home_reading(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
@@ -197,6 +195,8 @@ impl App {
             .collect()
     }
 
+    /// The resume slot and the recent files, from anywhere or only from
+    /// under `scope`.
     fn home_recent_files(&self, scope: Option<&Path>) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
         // Recent files are stored canonical (with Windows' `\\?\` prefix), project
         // roots normalized, so both are compared normalized.

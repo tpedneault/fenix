@@ -1120,15 +1120,21 @@ impl Drop for TerminalReader {
 /// buffer is closed, which is the one gesture that says the shell has
 /// no owner left.
 struct TerminalState {
-    session: fenix_terminal::Terminal,
-    /// `None` when opened without a real `event_proxy` (every test, per
-    /// `App::new`'s own doc comment) -- same "only a real, main.rs-
-    /// launched App spawns anything" posture `DockerSession::stats_
-    /// poller`/`GitSession::status_poller` already have. Never read
-    /// again once set -- held only for its `Drop` side effect, same
-    /// idiom as `stats_poller`/`log_follower`.
+    /// Taken apart only by `Drop`, which hands it to a thread of its own.
+    session: std::mem::ManuallyDrop<fenix_terminal::Terminal>,
+    /// `None` only in tests that read the shell's output themselves
+    /// (`pump_until`); every spawn through `App` gets one, see
+    /// `App::spawn_terminal_reader`. Never read again once set -- held
+    /// only for its `Drop` side effect, same idiom as
+    /// `stats_poller`/`log_follower`.
     #[allow(dead_code)]
     reader: Option<TerminalReader>,
+}
+
+impl TerminalState {
+    fn new(session: fenix_terminal::Terminal, reader: Option<TerminalReader>) -> Self {
+        Self { session: std::mem::ManuallyDrop::new(session), reader }
+    }
 }
 
 impl Drop for TerminalState {
@@ -1139,6 +1145,18 @@ impl Drop for TerminalState {
         // `reader`'s `Drop` waiting to join a thread that can never wake
         // up on its own.
         self.session.kill();
+        // The rest happens off this thread. Until Windows 11 24H2,
+        // closing a pseudoconsole blocks until its console host exits,
+        // and with another shell still open that can take arbitrarily
+        // long -- a UI thread closing a terminal would freeze with it.
+        // SAFETY: `session` is never touched again after this.
+        let session = unsafe { std::mem::ManuallyDrop::take(&mut self.session) };
+        let reader = self.reader.take();
+        // If no thread can be started, `spawn` drops the closure right
+        // here, which closes the session on this thread after all.
+        let _ = std::thread::Builder::new()
+            .name("fenix-terminal-close".into())
+            .spawn(move || drop((session, reader)));
     }
 }
 
@@ -2980,6 +2998,13 @@ fn file_label(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(path))
 }
 
+/// Whether properties go on to count what's inside: a real folder only.
+/// A link is measured as itself, so counting one would only replace
+/// where it points with "0B in 1 file".
+fn counts_contents(props: &fenix_fs::Properties) -> bool {
+    props.kind.is_dir_like() && !props.kind.is_link()
+}
+
 /// One line of everything a listing column cannot hold.
 fn describe_properties(props: &fenix_fs::Properties) -> String {
     let name = props.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&props.path));
@@ -3009,7 +3034,7 @@ fn describe_properties(props: &fenix_fs::Properties) -> String {
     if let Some(target) = &props.link_target {
         out.push_str(&format!("  --  links to {}", readable_path(target)));
     }
-    if props.kind.is_dir_like() {
+    if counts_contents(props) {
         out.push_str("  --  counting...");
     }
     out
@@ -10078,6 +10103,20 @@ impl App {
         self.wake_caret();
     }
 
+    /// Starts the thread that reads a freshly spawned shell's output.
+    ///
+    /// Without an event loop to forward to (every test) the output is
+    /// read and thrown away rather than left in the pipe. Until
+    /// Windows 11 24H2, `ClosePseudoConsole` blocks until the session's
+    /// output has been drained, so a shell nobody reads from hangs
+    /// whoever drops it -- here, the test, forever.
+    fn spawn_terminal_reader(&self, target: TerminalTarget, reader: Box<dyn std::io::Read + Send>) -> TerminalReader {
+        match self.event_proxy.clone() {
+            Some(proxy) => TerminalReader::spawn(target, reader, move |event| proxy.send_event(event).is_ok()),
+            None => TerminalReader::spawn(target, reader, |_| true),
+        }
+    }
+
     /// `FenixUserEvent::TerminalSpawned` handling: wires the freshly
     /// spawned shell's reader thread and, if the panel's still open
     /// (the user could have closed it again while the spawn was in
@@ -10091,10 +10130,8 @@ impl App {
         self.terminal_spawning = false;
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.event_proxy.clone().map(|proxy| {
-                    TerminalReader::spawn(TerminalTarget::Panel, reader, move |event| proxy.send_event(event).is_ok())
-                });
-                self.terminal = Some(TerminalState { session, reader: terminal_reader });
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Panel, reader);
+                self.terminal = Some(TerminalState::new(session, Some(terminal_reader)));
                 if self.terminal_open {
                     self.terminal_focused = true;
                 }
@@ -10278,10 +10315,8 @@ impl App {
         }
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.event_proxy.clone().map(|proxy| {
-                    TerminalReader::spawn(TerminalTarget::Buffer(id), reader, move |event| proxy.send_event(event).is_ok())
-                });
-                self.terminal_buffers.insert(id, TerminalState { session, reader: terminal_reader });
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Buffer(id), reader);
+                self.terminal_buffers.insert(id, TerminalState::new(session, Some(terminal_reader)));
                 self.focus_terminal_buffer(id);
             }
             Err(err) => {
@@ -19288,7 +19323,7 @@ impl App {
             }
         };
         self.set_message(describe_properties(&props));
-        if props.kind.is_dir_like() {
+        if counts_contents(&props) {
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
@@ -19822,7 +19857,7 @@ impl App {
     pub(crate) fn start_workspace_launcher_picker(&mut self) {
         if self.config.workspaces.is_empty() {
             self.set_error(
-                "no workspaces on the shelf yet -- add them in SPC , (Documents & workspaces)".to_string(),
+                "no workspaces on the shelf yet -- add them in SPC , (Workspaces)".to_string(),
             );
             return;
         }
@@ -23974,9 +24009,8 @@ impl App {
         // `char_width` below reflects it), the real measured advance
         // width for that font (used for every per-column pixel
         // computation below instead of the fixed-ratio `text::
-        // CHAR_WIDTH` constant, which broke the moment a second font --
-        // the bundled TempleOS bitmap font, a ~1.0x-em advance vs. the
-        // constant's assumed ~0.6x -- entered the mix), and the live
+        // CHAR_WIDTH` constant, which breaks for any font whose advance
+        // isn't the constant's assumed ~0.6 em), and the live
         // `line_height`/`modeline_height` (same reasoning: fixed once,
         // now adjustable at runtime via `SPC t =`/`-`/`0`, so every
         // consumer needs the *current* value, not the `text::LINE_HEIGHT`/
@@ -23984,8 +24018,8 @@ impl App {
         let theme = self.theme;
         // A `config.ini` `font_family` always wins over whatever the
         // active theme names; an unset config falls through to the
-        // theme's own choice (`None` for every theme but TempleOS,
-        // which `TextPipeline::set_font_family` resolves to the fast
+        // theme's own choice (`None` for the shipped themes, which
+        // `TextPipeline::set_font_family` resolves to the fast
         // concrete-name fallback rather than the slow generic one).
         let font_family = self.config.font_family.as_deref().or(theme.font_family);
         let (char_width, line_height, modeline_height, modeline_char_width) = match &mut self.text {
@@ -32862,7 +32896,7 @@ configure_board stm32
         // routing, and the real span builder the renderer draws from.
         let mut app = App::with_file(None);
         let (session, reader) = fenix_terminal::Terminal::spawn(text::TERMINAL_ROWS as u16, 80).expect("failed to spawn a real shell");
-        app.terminal = Some(TerminalState { session, reader: None });
+        app.terminal = Some(TerminalState::new(session, None));
         app.terminal_open = true;
         app.terminal_focused = true;
 
@@ -32887,7 +32921,7 @@ configure_board stm32
         app.open_buffer_in_focused_pane(id);
         app.terminal_buffer_labels.insert(id, "*terminal 1*".to_string());
         let (session, reader) = fenix_terminal::Terminal::spawn(24, 80).expect("failed to spawn a real shell");
-        app.terminal_buffers.insert(id, TerminalState { session, reader: None });
+        app.terminal_buffers.insert(id, TerminalState::new(session, None));
         app.focus_terminal_buffer(id);
 
         type_line(|key| app.write_terminal_buffer_input(id, key), "echo fenix-pane-marker");

@@ -1,8 +1,13 @@
+// No console window on Windows: Fenix is a GUI program. `fenix --console`
+// gives it one when you want to read what it prints (see `console`).
+#![cfg_attr(not(test), windows_subsystem = "windows")]
+
 mod agenda_page;
 mod jira_page;
 mod app;
 mod commands;
 mod completion;
+mod console;
 mod dashboard;
 mod page;
 mod project_doctor;
@@ -54,6 +59,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use app::FenixUserEvent;
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if console::requested(&args) {
+        console::open();
+    }
+
     profile::launch_mark("main");
     let event_loop = EventLoop::<FenixUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -64,7 +74,6 @@ fn main() -> anyhow::Result<()> {
     // its file arguments to whichever instance is already running
     // instead of opening a second window -- see `ipc`'s own doc
     // comment for the mechanism and its one disclosed tradeoff.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     match ipc::negotiate(&args) {
         ipc::Role::HandedOff => return Ok(()),
         ipc::Role::Server(listener) => ipc::spawn_accept_loop(listener, proxy.clone()),

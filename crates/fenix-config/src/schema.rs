@@ -1,7 +1,7 @@
 //! Every setting, declared once: its key in `settings.toml`, where it
 //! goes on the settings page, what kind of value it takes and what it's
-//! for. Loading, checking, saving, the settings page and the README's
-//! settings table all read this list, so they can't disagree.
+//! for. Loading, checking, saving, the settings page and the settings
+//! table in docs/CONFIGURATION.md all read this list, so they can't disagree.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -427,7 +427,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             };
             Ok(())
         })),
-        // Documents & workspaces
+        // Workspaces
         s("documents", Reader, "Documents", Kind::Map { key: "Name", value: "File", paths: true }, "The SPC r f shelf: a name and the file it opens. A project's own shelf is listed first.", field!(documents, path_map_get, path_map_set)).project(),
         s("reader.colors", Reader, "Page colours", Kind::Choice(&["paper", "theme"]), "Paper shows pages as printed. Theme draws them in the current theme's colours. SPC r c switches; open PDFs change at once.", sub!(reader.colors, text_get, text_set)).default("paper"),
         s("reader.zoom", Reader, "Default zoom", Kind::Choice(&["width", "page"]), "How a PDF opens the first time: its pages' width fills the pane, or a whole page fits. After that it opens as you left it.", sub!(reader.zoom, text_get, text_set)).default("width"),
@@ -452,7 +452,7 @@ pub fn setting(key: &str) -> Option<&'static Setting> {
     settings().iter().find(|s| s.key == key)
 }
 
-/// Every setting as a Markdown table, by category -- the README's copy,
+/// Every setting as a Markdown table, by category -- the copy in docs/CONFIGURATION.md,
 /// which a test keeps in step with this list.
 pub fn markdown_table() -> String {
     let mut out = String::from("| Setting | Takes | Default | What it does |
@@ -710,14 +710,14 @@ mod tests {
         assert!(hosts.kind.check(&Value::Records(vec![vec!["a".into(), "h".into(), "70000".into()]])).unwrap_err().contains("Port"));
     }
 
-    /// The README lists every setting; this is what keeps it true. When
-    /// it fails, paste `markdown_table()` over the README's table (run
+    /// docs/CONFIGURATION.md lists every setting; this is what keeps it
+    /// true. When it fails, paste `markdown_table()` over its table (run
     /// `cargo test -p fenix-config print_the_settings_table -- --ignored
     /// --nocapture`).
     #[test]
-    fn the_readme_lists_every_setting_as_the_schema_declares_it() {
-        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap().replace('\r', "");
-        assert!(readme.contains(&markdown_table()), "README.md's settings table is out of date");
+    fn the_docs_list_every_setting_as_the_schema_declares_it() {
+        let docs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIGURATION.md")).unwrap().replace('\r', "");
+        assert!(docs.contains(&markdown_table()), "docs/CONFIGURATION.md's settings table is out of date");
     }
 
     #[test]
