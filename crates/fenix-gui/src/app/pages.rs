@@ -14,6 +14,9 @@ use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
 use crate::agenda_page::{self, AgendaPage};
 use crate::jira_page::{self, JiraPage};
+use crate::mib_def::{self, DefPage};
+use crate::mib_form::{self, InsertForm};
+use crate::mib_page::{self, MibPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -44,6 +47,9 @@ pub(super) enum PageModel {
     Review(Box<ReviewPage>),
     Agenda(Box<AgendaPage>),
     Jira(Box<JiraPage>),
+    Mib(Box<MibPage>),
+    MibDef(Box<DefPage>),
+    MibForm(Box<InsertForm>),
 }
 
 pub(super) struct PageState {
@@ -80,7 +86,9 @@ impl PageState {
             PageModel::Snippets(p) => p.typing(),
             PageModel::Agenda(p) => p.typing(),
             PageModel::Jira(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
+            PageModel::Mib(p) => p.typing(),
+            PageModel::MibForm(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => false,
         }
     }
 
@@ -93,6 +101,8 @@ impl PageState {
                 PageModel::UserSettings(p) => p.claims_space(),
                 PageModel::Agenda(p) => p.claims_space(),
                 PageModel::Jira(p) => p.claims_space(),
+                PageModel::Mib(p) => p.claims_space(),
+                PageModel::MibForm(p) => p.claims_space(),
                 _ => false,
             }
     }
@@ -112,7 +122,9 @@ impl PageState {
             PageModel::Snippets(p) => p.paste(text),
             PageModel::Agenda(p) => p.paste(text),
             PageModel::Jira(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
+            PageModel::Mib(p) => p.paste(text),
+            PageModel::MibForm(p) => p.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => {}
         }
         self.stale = true;
     }
@@ -165,6 +177,8 @@ pub enum PageEvent {
     JiraFields { buffer: BufferId, type_id: String, result: Result<Vec<fenix_jira::CreateField>, String> },
     /// A change to an issue went through, or didn't.
     JiraDone { buffer: BufferId, key: String, result: Result<String, String> },
+    /// A set of MIBs was read.
+    MibLoaded { key: mib_page::MibKey, set: Arc<fenix_mib::MibSet> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -213,15 +227,9 @@ fn run_command(mut command: std::process::Command, buffer: BufferId, generation:
 
 /// What the doctor asks of the world, answered the way the rest of
 /// Fenix would: Arduino's tools through the Arduino integration's own
-/// search, everything else on PATH; MIB roots from `config.ini`.
+/// search, everything else on PATH.
 pub(super) struct AppProbe {
     tools: fenix_embedded::Tools,
-    mib_roots: Vec<PathBuf>,
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    let canon = |p: &Path| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
-    canon(a) == canon(b)
 }
 
 impl Probe for AppProbe {
@@ -236,10 +244,6 @@ impl Probe for AppProbe {
 
     fn run(&self, program: &Path, args: &[&str], dir: &Path) -> Option<(bool, String)> {
         doctor::run_program(program, args, dir)
-    }
-
-    fn mib_registered(&self, dir: &Path) -> bool {
-        self.mib_roots.iter().any(|root| same_dir(root, dir))
     }
 }
 
@@ -258,7 +262,7 @@ fn age_since(then: i64) -> String {
 
 impl App {
     pub(super) fn app_probe(&self) -> AppProbe {
-        AppProbe { tools: self.embedded_tools(), mib_roots: self.config.mib_roots.iter().map(|(_, path)| path.clone()).collect() }
+        AppProbe { tools: self.embedded_tools() }
     }
 
     /// Where a program a page runs is -- `AppProbe::locate`, for a command
@@ -286,6 +290,9 @@ impl App {
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
             Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
+            Some(PageModel::Mib(_)) => "*mib*".to_string(),
+            Some(PageModel::MibDef(p)) => mib_def::title(self.mib_set_ready(&p.key).as_deref(), p),
+            Some(PageModel::MibForm(f)) => mib_form::title(f),
         }
     }
 
@@ -377,6 +384,18 @@ impl App {
         // the page is borrowed.
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
+        // The MIBs a MIB page shows, read (or started) before it's borrowed.
+        let mib_key = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Mib(p)) => Some(p.key.clone()),
+            Some(PageModel::MibDef(p)) => Some(p.key.clone()),
+            _ => None,
+        };
+        let mib = mib_key.map(|key| {
+            let (set, loading) = self.mib_page_ctx_set(&key);
+            let (here, source) = self.mib_key_here();
+            (set, loading, if here == key { source } else { String::new() })
+        });
+        let apid_hex = self.mib_apid_hex();
         let Some(state) = self.pages.get_mut(&id) else { return };
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
@@ -403,6 +422,15 @@ impl App {
                 };
                 jira_page::layout(p, &ctx, cols)
             }
+            PageModel::Mib(p) => {
+                let (set, loading, source) = mib.clone().unwrap_or_default();
+                mib_page::layout(p, &mib_page::Ctx { set: set.as_deref(), loading, apid_hex, source }, cols)
+            }
+            PageModel::MibDef(p) => {
+                let set = mib.clone().and_then(|m| m.0);
+                mib_def::layout(p, set.as_deref(), apid_hex, cols)
+            }
+            PageModel::MibForm(f) => mib_form::layout(f, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -488,8 +516,13 @@ impl App {
             return true;
         }
         let shift = self.modifiers.shift_key();
+        let is_def = matches!(state.model, PageModel::MibDef(_));
+        let is_form = matches!(state.model, PageModel::MibForm(_));
         let key = match (keypress.code, keypress.mods.ctrl) {
             (KeyCode::Char('c'), true) => Key::CtrlC,
+            (KeyCode::Char('o'), true) if is_def => Key::CtrlO,
+            (KeyCode::Char('i'), true) if is_def => Key::CtrlI,
+            (KeyCode::Named(FenixNamedKey::Enter), true) if is_form => Key::CtrlEnter,
             (KeyCode::Char('o'), true) if typing => Key::CtrlO,
             (_, true) => return false,
             (KeyCode::Char(' '), false) if claims_space => Key::Space,
@@ -510,9 +543,33 @@ impl App {
         };
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
+        let mib = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Mib(p)) => Some(p.key.clone()),
+            Some(PageModel::MibDef(p)) => Some(p.key.clone()),
+            _ => None,
+        }
+        .map(|key| (self.mib_page_ctx_set(&key), self.mib_key_here().1));
+        let apid_hex = self.mib_apid_hex();
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
         match &mut state.model {
+            PageModel::Mib(p) => {
+                let ((set, loading), source) = mib.unwrap_or_default();
+                let action = p.key(key, &mib_page::Ctx { set: set.as_deref(), loading, apid_hex, source });
+                self.mib_page_action(action);
+            }
+            PageModel::MibDef(p) => {
+                let action = match mib.and_then(|((set, _), _)| set) {
+                    Some(set) => p.key(key, &set),
+                    None if matches!(key, Key::Char('q') | Key::Escape) => mib_def::Action::Close,
+                    None => mib_def::Action::None,
+                };
+                self.mib_def_action(action);
+            }
+            PageModel::MibForm(f) => {
+                let action = f.key(key);
+                self.mib_form_action(action);
+            }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
                 let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
@@ -599,6 +656,7 @@ impl App {
             | PageEvent::JiraTypes { .. }
             | PageEvent::JiraFields { .. }
             | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
+            PageEvent::MibLoaded { key, set } => self.apply_mib_loaded(key, set),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
@@ -978,8 +1036,16 @@ impl App {
         for hook in &plan.hooks {
             match hook {
                 fenix_project::template::Hook::MibRoot { path, label } => {
-                    let root = if path == "." { dir.clone() } else { dir.join(path) };
-                    self.add_mib_root(root, label.clone());
+                    let mut settings = fenix_config::ProjectSettings::load(&dir);
+                    let mut roots = match settings.get("mib.roots") {
+                        Some(fenix_config::Value::Map(m)) => m.clone(),
+                        _ => Vec::new(),
+                    };
+                    roots.push((label.clone(), path.clone()));
+                    let saved = settings.set("mib.roots", Some(fenix_config::Value::Map(roots))).map_err(std::io::Error::other).and_then(|()| settings.save());
+                    if let Err(e) = saved {
+                        self.set_error(format!("couldn't list the MIB in .fenix/settings.toml: {e}"));
+                    }
                 }
             }
         }
@@ -1224,10 +1290,6 @@ impl App {
             }
             FixAction::Editor(fix) => {
                 match fix {
-                    EditorFix::RegisterMibRoot { path, label } => {
-                        self.add_mib_root(path, label);
-                        self.set_message("registered -- SPC m t finds its telecommands now");
-                    }
                     EditorFix::UseLanguageServer { language, executable, args } => {
                         let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
                             tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));

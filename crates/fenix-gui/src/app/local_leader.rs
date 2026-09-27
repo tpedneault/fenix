@@ -115,7 +115,7 @@ mod tests {
 
         app.start_local_leader();
         let labels = hint_labels(&app);
-        for expected in ["insert telecommand", "lookup telecommand", "refresh tags", "symbols"] {
+        for expected in ["insert a telecommand", "telecommand", "MIB page", "refresh tags", "symbols"] {
             assert!(labels.contains(&expected), "{expected} missing from {labels:?}");
         }
     }

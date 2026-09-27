@@ -74,13 +74,14 @@ pub enum Category {
     Forges,
     Jira,
     Embedded,
+    Mib,
     Vnc,
     Documents,
     Session,
 }
 
 impl Category {
-    pub const ALL: [Category; 13] = [
+    pub const ALL: [Category; 14] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -91,6 +92,7 @@ impl Category {
         Category::Forges,
         Category::Jira,
         Category::Embedded,
+        Category::Mib,
         Category::Vnc,
         Category::Documents,
         Category::Session,
@@ -107,7 +109,8 @@ impl Category {
             Category::Git => "Git",
             Category::Forges => "Forges",
             Category::Jira => "Jira & agenda",
-            Category::Embedded => "Embedded & MIB",
+            Category::Embedded => "Embedded",
+            Category::Mib => "SCOS-2000 MIB",
             Category::Vnc => "VNC",
             Category::Documents => "Workspaces",
             Category::Session => "Windows & session",
@@ -414,10 +417,19 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("embedded.arduino_cli", Embedded, "arduino-cli", Kind::Path, "Where arduino-cli is, when it isn't found by itself.", field!(embedded_arduino_cli, path_get, path_set)).default("found on PATH"),
         s("embedded.clangd", Embedded, "clangd", Kind::Path, "Where clangd is, when it isn't found by itself.", field!(embedded_clangd, path_get, path_set)).default("found on PATH"),
         s("embedded.arduino_language_server", Embedded, "Arduino language server", Kind::Path, "Where arduino-language-server is, when it isn't found by itself.", field!(embedded_arduino_language_server, path_get, path_set)).default("downloaded when needed"),
-        s("mib.roots", Embedded, "MIB roots", Kind::Map { key: "Name", value: "Folder", paths: true }, "Folders holding a MIB database.", field!(mib_roots, path_map_get, path_map_set)),
-        s("mib.telecommand_template", Embedded, "Telecommand template", Kind::Text, "How a telecommand is written; {name} and {args} are filled in.", field!(mib_telecommand_template, text_get, text_set)),
-        s("mib.telecommand_argument_template", Embedded, "Argument template", Kind::Text, "How each argument is written; {name} and {value} are filled in.", field!(mib_telecommand_argument_template, text_get, text_set)),
-        s("mib.telecommand_argument_separator", Embedded, "Argument separator", Kind::Text, "What goes between arguments.", field!(mib_telecommand_argument_separator, text_get, text_set)),
+        // SCOS-2000 MIB
+        s("mib.roots", Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it.", field!(mib_roots, path_map_get, path_map_set)).project(),
+        s("mib.default", Mib, "Default MIB", Kind::Text, "The MIB whose definition is used when several define the same name.", field!(mib_default, text_get, text_set)).default("the first").project(),
+        s("mib.include_yours", Mib, "Add your MIBs", Kind::Bool, "In a project with MIBs of its own, use yours too.", field!(mib_include_yours, bool_get, bool_set)).default("off").project(),
+        s("mib.telecommand_template", Mib, "Telecommand template", Kind::Text, "How an inserted telecommand is written: {mnemo}, {type}, {stype}, {apid}, {description}, {mib} and {arguments} are filled in.", field!(mib_telecommand_template, text_get, text_set)).default("telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]").project(),
+        s("mib.telecommand_argument_template", Mib, "Argument template", Kind::Text, "How each argument is written: {name} and {value} are filled in.", field!(mib_telecommand_argument_template, text_get, text_set)).default("{name}={value}").project(),
+        s("mib.telecommand_argument_separator", Mib, "Argument separator", Kind::Text, "What goes between arguments.", field!(mib_telecommand_argument_separator, text_get, text_set)).default("\", \"").project(),
+        s("mib.editor_files", Mib, "Files that know the MIB", Kind::List, "Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file.", (|c: &Config| list_get(&c.mib_editor_files), |c: &mut Config, v| {
+            c.mib_editor_files = list_set(v)?;
+            Ok(())
+        })).default("every file").project(),
+        s("mib.apid_format", Mib, "APIDs in", Kind::Choice(&["hex", "decimal"]), "How APIDs are shown.", field!(mib_apid_format, text_get, text_set)).default("hex"),
+        s("mib.watch", Mib, "Reload on change", Kind::Bool, "Reload a MIB when one of its .dat files changes on disk.", field!(mib_watch, bool_get, bool_set)).default("on"),
         // VNC
         s("vnc.hosts", Vnc, "Hosts", Kind::Records(HOST), "Machines SPC v connects to. No passwords: every host is taken to be on a trusted network.", (|c: &Config| (!c.vnc_hosts.is_empty()).then(|| Value::Records(c.vnc_hosts.iter().map(|(n, h, p)| vec![n.clone(), h.clone(), p.to_string()]).collect())), |c: &mut Config, v| {
             c.vnc_hosts = match v {

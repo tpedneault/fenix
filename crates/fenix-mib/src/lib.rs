@@ -3,25 +3,36 @@
 //! more configured root directories into an in-memory index, and
 //! provides the queries `fenix-gui` needs for telecommand/TM-packet/
 //! TM-parameter/calibration lookup and building a telecommand call from
-//! its MIB definition (`telecommand`). Host-agnostic: no knowledge of
+//! its MIB definition (`telecommand`). `MibSet` joins a project's MIBs
+//! into the five kinds of definition the MIB page lists, with what uses
+//! each and what's wrong in the files; `query` searches them, `detail`
+//! gathers what a definition's page shows, `types` decodes PTC/PFC.
+//! Host-agnostic: no knowledge of
 //! `Buffer`/rendering/pickers, the same role `fenix-completion`/`fenix-
 //! project`/`fenix-git` already play for their own external data
 //! sources -- `fenix-gui` wraps `Row`s into picker candidates and detail
 //! views the same way it already does for `ctags::TagEntry`/
 //! `GrepMatch`.
 
+pub mod detail;
 mod parse;
+pub mod query;
 mod row;
 pub mod schema;
+mod set;
 pub mod telecommand;
+pub mod types;
 
 use std::path::PathBuf;
 
+pub use parse::Problem;
+pub use query::Query;
 pub use row::{Row, RowSource};
+pub use set::{CalKind, DefRef, Entry, Kind, MibSet, Stamp};
 
 /// One configured MIB directory -- a label (shown in candidate lists and
 /// detail views) plus the directory containing its `.dat` table files.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MibRoot {
     pub label: String,
     pub path: PathBuf,
@@ -36,15 +47,21 @@ pub struct MibRoot {
 pub struct MibIndex {
     roots: Vec<MibRoot>,
     tables: std::collections::HashMap<String, Vec<Row>>,
+    problems: Vec<Problem>,
 }
 
 impl MibIndex {
     pub fn new(roots: Vec<MibRoot>) -> Self {
-        Self { roots, tables: std::collections::HashMap::new() }
+        Self { roots, tables: std::collections::HashMap::new(), problems: Vec::new() }
     }
 
     pub fn roots(&self) -> &[MibRoot] {
         &self.roots
+    }
+
+    /// What reading the files turned up: unreadable files, extra columns.
+    pub fn problems(&self) -> &[Problem] {
+        &self.problems
     }
 
     /// Reparses every known table (`schema::all_tables`) under every
@@ -55,11 +72,14 @@ impl MibIndex {
     /// `.dat` files elsewhere, so this isn't re-run automatically.
     pub fn refresh(&mut self) {
         self.tables.clear();
+        self.problems.clear();
         for table in schema::all_tables() {
             let mut rows = Vec::new();
             for (root_index, root) in self.roots.iter().enumerate() {
                 let file = root.path.join(format!("{table}.dat"));
-                rows.extend(parse::parse_table_file(root_index, &root.label, table, &file));
+                let (found, problems) = parse::parse_table_file(root_index, &root.label, table, &file);
+                rows.extend(found);
+                self.problems.extend(problems);
             }
             if !rows.is_empty() {
                 self.tables.insert(table.to_string(), rows);

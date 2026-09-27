@@ -205,19 +205,23 @@ pub struct Config {
     /// protection as `vnc_hosts`/`documents`/`workspaces` (see `save`'s
     /// own doc comment), since nothing in this app writes to it itself.
     pub lsp_servers: Vec<(String, String)>,
-    /// Configured SCOS-2000 MIB directories, `(label, path)`, in the
-    /// order they appear in `config.ini`'s `[mib]` section -- an actual
-    /// list, not an `Option<T>` like every other field here, since
-    /// "nothing configured" is just an empty `Vec`, no need to
-    /// distinguish that from "key present but empty" the way a scalar
-    /// setting would. Hand-authored by the user (see `[mib]`'s own
-    /// numbered-key format in `load`), never written by the app itself
-    /// -- `save` still round-trips it losslessly since it regenerates
-    /// every section from struct state on every call.
+    /// The SCOS-2000 MIBs, `(label, folder)`, in order. A project's own
+    /// `mib.roots` takes their place in that project.
     pub mib_roots: Vec<(String, PathBuf)>,
     pub mib_telecommand_template: Option<String>,
     pub mib_telecommand_argument_template: Option<String>,
     pub mib_telecommand_argument_separator: Option<String>,
+    /// The MIB whose definition wins a name several define.
+    pub mib_default: Option<String>,
+    /// In a project with its own MIBs, yours are used too.
+    pub mib_include_yours: Option<bool>,
+    /// File extensions where `K`, `gd` and completion know MIB names;
+    /// empty means every file.
+    pub mib_editor_files: Vec<String>,
+    /// "hex" or "decimal".
+    pub mib_apid_format: Option<String>,
+    /// Reload a MIB when one of its files changes.
+    pub mib_watch: Option<bool>,
     /// Whether to notice files changing on disk while they're open and
     /// re-read them. Unset means on, which is what anyone expects; the
     /// setting exists for a working copy on a network share, where a
@@ -519,6 +523,11 @@ impl Config {
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
+            mib_default: None,
+            mib_include_yours: None,
+            mib_editor_files: Vec::new(),
+            mib_apid_format: None,
+            mib_watch: None,
             watch_files: None,
             jira_base_url: None,
             jira_token: None,

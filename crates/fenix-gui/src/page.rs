@@ -25,8 +25,13 @@ pub enum Key {
     Backspace,
     Char(char),
     CtrlC,
-    /// Browse for a path, while one is being typed.
+    /// Browse for a path, while one is being typed; back, on a MIB
+    /// definition's page.
     CtrlO,
+    /// Forward, on a MIB definition's page.
+    CtrlI,
+    /// Done: insert what the form built.
+    CtrlEnter,
 }
 
 /// A colour role, resolved against the theme by `App`.

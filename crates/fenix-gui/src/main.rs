@@ -4,6 +4,9 @@
 
 mod agenda_page;
 mod jira_page;
+mod mib_def;
+mod mib_form;
+mod mib_page;
 mod app;
 mod commands;
 mod completion;

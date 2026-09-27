@@ -21,7 +21,7 @@ impl App {
     }
 
     /// The project the focused file is in, to offer its own settings.
-    fn settings_project(&self) -> Option<(PathBuf, String)> {
+    pub(super) fn settings_project(&self) -> Option<(PathBuf, String)> {
         let root = self.project_root.clone()?;
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
         Some((root, name))
@@ -294,10 +294,7 @@ impl App {
                 let chars = self.effective_iskeyword();
                 self.vim.set_iskeyword_extra(chars);
             }
-            "mib.roots" => {
-                self.mib_roots = self.config.mib_roots.iter().map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() }).collect();
-                self.mib_index = None;
-            }
+            "mib.roots" | "mib.default" | "mib.include_yours" | "mib.apid_format" => self.mib_settings_changed(),
             _ => {}
         }
         if let Some(window) = &self.window {
