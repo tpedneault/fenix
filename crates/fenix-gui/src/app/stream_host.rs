@@ -704,6 +704,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every live source of `dev/ccsds-sim/mission` against the running
+    /// simulator (`docker compose -f dev/ccsds-sim/docker-compose.yml up
+    /// -d`): each delivers packets the mission's MIB identifies, and the
+    /// CADUs come through Reed-Solomon and the randomizer. Run with
+    /// `cargo test -p fenix-gui simulator -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs the simulator running"]
+    fn every_simulator_source_delivers_identified_packets() {
+        let mission = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission");
+        let mission = fenix_lsp::normalize(std::fs::canonicalize(mission).unwrap());
+        let mut app = App::with_file(Some(mission.join("thermal_checkout.tcl").display().to_string()));
+        app.refresh_project_root();
+        let (key, _) = app.mib_key_here();
+        let set = app.mib_set(&key).expect("the mission's MIB");
+        let m = app.mission(key.project.as_deref());
+        let buffer = app.focused_buffer_id();
+        let sources = app.ccsds_sources();
+        assert_eq!(sources.len(), 5, "{sources:?}");
+        for src in sources {
+            let events: Arc<std::sync::Mutex<Vec<PageEvent>>> = Arc::default();
+            let sink = events.clone();
+            let send: Sender = Arc::new(move |e| sink.lock().unwrap().push(e));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (set, m, name, stop2) = (set.clone(), m.clone(), src.name.clone(), stop.clone());
+            let worker = std::thread::spawn(move || run_live(src, Some(set), m, buffer, send, stop2));
+            std::thread::sleep(Duration::from_secs(8));
+            stop.store(true, Ordering::Relaxed);
+            worker.join().unwrap();
+            let events = events.lock().unwrap();
+            let rows: Vec<&stream_page::Row> = events.iter().flat_map(|e| if let PageEvent::StreamRows { rows, .. } = e { rows.iter().collect() } else { Vec::new() }).collect();
+            let statuses: Vec<String> = events.iter().filter_map(|e| if let PageEvent::StreamStatus { text, .. } = e { Some(text.clone()) } else { None }).collect();
+            let hk = rows.iter().filter(|r| r.spid.as_deref() == Some("30211")).count();
+            let unknown = rows.iter().filter(|r| !r.idle && r.spid.is_none()).count();
+            let line = format!("{name}: {} packets, {hk} TCS_HK_FAST, {unknown} not in the MIB · {}", rows.len(), statuses.join(" · "));
+            println!("{line}");
+            assert!(hk >= 10, "{line}");
+        }
+    }
+
     #[test]
     fn framing_names_read() {
         let m = App::with_file(None).mission(None);

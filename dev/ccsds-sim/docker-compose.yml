@@ -1,0 +1,41 @@
+# A simulated spacecraft for validating Fenix's CCSDS tools against live
+# telemetry. Development scaffolding: never shipped, reachable only on
+# localhost, and receive-only from Fenix's side -- the simulator doesn't
+# take telecommands.
+#
+#   docker compose -f dev/ccsds-sim/docker-compose.yml up -d --build
+#
+# then open dev/ccsds-sim/mission in Fenix and SPC k l (see README.md).
+#
+# Ports: 10010 packets over TCP, 10011 CADUs over TCP, 4222 NATS; the
+# simulator sends UDP to the host's port 10015, where Fenix listens.
+
+services:
+  nats:
+    image: nats:2-alpine
+    container_name: fenix-ccsds-nats
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4222:4222"
+
+  sim:
+    build: .
+    container_name: fenix-ccsds-sim
+    restart: unless-stopped
+    depends_on:
+      - nats
+    environment:
+      SIM_NATS: "nats:4222"
+      SIM_NATS_SUBJECT: "tm.ops"
+      # Docker Desktop's name for the host; on Linux the extra_hosts
+      # line below makes it resolve too.
+      SIM_UDP_TARGET: "host.docker.internal:10015"
+      SIM_FILE: "/out/live.bin"
+      SIM_FILE_MAX: "4194304"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:10010:10010"
+      - "127.0.0.1:10011:10011"
+    volumes:
+      - ./mission/recordings:/out
