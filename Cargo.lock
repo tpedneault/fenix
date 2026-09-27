@@ -861,6 +861,9 @@ dependencies = [
 [[package]]
 name = "fenix-mib"
 version = "1.0.0"
+dependencies = [
+ "fenix-ccsds",
+]
 
 [[package]]
 name = "fenix-pdf"

@@ -14,7 +14,9 @@
 //! views the same way it already does for `ctags::TagEntry`/
 //! `GrepMatch`.
 
+pub mod checks;
 pub mod detail;
+pub mod packets;
 mod parse;
 pub mod query;
 mod row;

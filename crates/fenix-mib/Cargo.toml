@@ -8,3 +8,4 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+fenix-ccsds = { path = "../fenix-ccsds" }

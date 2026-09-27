@@ -526,6 +526,14 @@ impl MibSet {
         &self.problems
     }
 
+    /// More problems, found by checks that need more than the MIB
+    /// (`checks::run` with the project's profile), kept in order.
+    pub fn add_problems(&mut self, more: Vec<Problem>) {
+        self.problems.extend(more);
+        self.problems.sort_by(|a, b| (a.root, &a.file, a.line).cmp(&(b.root, &b.file, b.line)));
+        self.problems.dedup();
+    }
+
     pub fn stamp(&self) -> &Stamp {
         &self.stamp
     }
