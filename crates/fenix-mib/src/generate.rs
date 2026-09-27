@@ -202,6 +202,27 @@ pub fn xtce(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
     out
 }
 
+/// The PIC checks that tell TM packet `row` from others with its APID,
+/// type and subtype: (bit from the packet's start, bits, value) for PI1
+/// and PI2, as `packets::identify_tm` reads them.
+fn pi_checks(set: &MibSet, row: &crate::Row) -> Vec<(i64, i64, i64)> {
+    let (service, subtype, apid) = (parse_int(row.clean("PID_TYPE")), parse_int(row.clean("PID_STYPE")), parse_int(row.clean("PID_APID")));
+    let Some(pic) = set.index().rows("pic").iter().find(|r| {
+        parse_int(r.clean("PIC_TYPE")) == service
+            && parse_int(r.clean("PIC_STYPE")) == subtype
+            && r.get("PIC_APID").map(str::trim).filter(|a| !a.is_empty()).is_none_or(|a| parse_int(a) == apid)
+    }) else {
+        return Vec::new();
+    };
+    [("PIC_PI1_OFF", "PIC_PI1_WID", "PID_PI1_VAL"), ("PIC_PI2_OFF", "PIC_PI2_WID", "PID_PI2_VAL")]
+        .iter()
+        .filter_map(|(off, wid, val)| {
+            let (off, wid) = (parse_int(pic.clean(off))?, parse_int(pic.clean(wid))?);
+            (off >= 0 && wid > 0).then(|| (off * 8, wid, parse_int(row.clean(val)).unwrap_or(0)))
+        })
+        .collect()
+}
+
 /// A Wireshark Lua dissector: the space packet and PUS-C headers, then
 /// each packet's parameters by SPID, for packets carried over UDP.
 pub fn wireshark(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
@@ -216,16 +237,18 @@ pub fn wireshark(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
             out.push_str(&format!("params[\"{0}\"] = ProtoField.uint64(\"mib.p.{0}\", \"{0} {1}\")\nf[\"p_{0}\"] = params[\"{0}\"]\n", ident(&e.name), e.description.replace('"', "'")));
         }
     }
-    out.push_str("-- key = apid..\",\"..service..\",\"..subtype -> { name, { {param, bit, bits}, ... } }\nlocal packets = {\n");
+    out.push_str("-- { apid, service, subtype, { {bit, bits, value} checks of PI1/PI2 }, name, { {param, bit, bits}, ... } }\nlocal packets = {\n");
     for (i, e) in set.entries(Kind::TmPacket).iter().enumerate() {
         let spid = DefRef { kind: Kind::TmPacket, index: i };
         let r = &e.row;
         let ps: Vec<String> = placed(set, spid, profile, base).into_iter().filter(|p| p.bits <= 64 && p.ptc != "8").map(|p| format!("{{\"{}\", {}, {}}}", ident(&p.name), p.bit, p.bits)).collect();
+        let pis: Vec<String> = pi_checks(set, r).iter().map(|(b, n, v)| format!("{{{b}, {n}, {v}}}")).collect();
         out.push_str(&format!(
-            "  [\"{},{},{}\"] = {{ \"{} {}\", {{ {} }} }},\n",
+            "  {{ {}, {}, {}, {{ {} }}, \"{} {}\", {{ {} }} }},\n",
             parse_int(r.clean("PID_APID")).unwrap_or(0),
             parse_int(r.clean("PID_TYPE")).unwrap_or(0),
             parse_int(r.clean("PID_STYPE")).unwrap_or(0),
+            pis.join(", "),
             e.name,
             e.alias,
             ps.join(", ")
@@ -258,11 +281,20 @@ function p.dissector(tvb, pinfo, tree)
   local svc, sub = tvb(7, 1):uint(), tvb(8, 1):uint()
   t:add(f.svc, tvb(7, 1))
   t:add(f.sub, tvb(8, 1))
-  local def = packets[apid .. "," .. svc .. "," .. sub]
+  local def = nil
+  for _, d in ipairs(packets) do
+    if def == nil and d[1] == apid and d[2] == svc and d[3] == sub then
+      local ok = true
+      for _, c in ipairs(d[4]) do
+        if (c[1] + c[2]) > tvb:len() * 8 or bits(tvb, c[1], c[2]) ~= UInt64(c[3]) then ok = false end
+      end
+      if ok then def = d end
+    end
+  end
   if def == nil then return end
-  t:add(f.spid, def[1])
-  pinfo.cols.info = def[1]
-  for _, e in ipairs(def[2]) do
+  t:add(f.spid, def[5])
+  pinfo.cols.info = def[5]
+  for _, e in ipairs(def[6]) do
     local at, n = e[2], e[3]
     if (at + n) <= tvb:len() * 8 then
       t:add(params[e[1]], tvb(math.floor(at / 8), math.ceil(n / 8)), bits(tvb, at, n))
@@ -323,7 +355,7 @@ pub fn python(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
     out.push_str(&format!(
         r#""""Telecommands and TM packets from the MIB. encode(name, **args) -> bytes; decode(packet) -> (spid, {{param: raw}})."""
 
-PUS_C = {pus_c}
+PUS_C = {}
 SOURCE_ID = {src}
 
 
@@ -356,6 +388,7 @@ def _get(data, at, n):
 # name -> (apid, service, subtype, ack, [(argument or None, bit, bits, fixed value, {{text: raw}})])
 TELECOMMANDS = {{
 "#,
+        if pus_c { "True" } else { "False" },
         src = profile.tc_source_id
     ));
     for (i, e) in set.entries(Kind::Telecommand).iter().enumerate() {
@@ -383,22 +416,24 @@ TELECOMMANDS = {{
             els.join(", ")
         ));
     }
-    out.push_str("}\n\n# (apid, service, subtype) -> (spid, [(parameter, bit from the packet's start, bits)])\nPACKETS = {\n");
+    out.push_str("}\n\n# (apid, service, subtype, [(bit, bits, value) checks of PI1/PI2], spid, [(parameter, bit from the packet's start, bits)])\nPACKETS = [\n");
     for (i, e) in set.entries(Kind::TmPacket).iter().enumerate() {
         let spid = DefRef { kind: Kind::TmPacket, index: i };
         let r = &e.row;
         let ps: Vec<String> = placed(set, spid, profile, base).into_iter().filter(|p| p.bits <= 64).map(|p| format!("({:?}, {}, {})", p.name, p.bit, p.bits)).collect();
+        let pis: Vec<String> = pi_checks(set, r).iter().map(|(b, n, v)| format!("({b}, {n}, {v})")).collect();
         out.push_str(&format!(
-            "    ({}, {}, {}): ({:?}, [{}]),\n",
+            "    ({}, {}, {}, [{}], {:?}, [{}]),\n",
             parse_int(r.clean("PID_APID")).unwrap_or(0),
             parse_int(r.clean("PID_TYPE")).unwrap_or(0),
             parse_int(r.clean("PID_STYPE")).unwrap_or(0),
+            pis.join(", "),
             e.name,
             ps.join(", ")
         ));
     }
     out.push_str(
-        r#"}
+        r#"]
 
 
 def encode(name, seq=0, **args):
@@ -423,7 +458,11 @@ def encode(name, seq=0, **args):
 def decode(packet):
     apid = ((packet[0] << 8) | packet[1]) & 0x7FF
     service, subtype = packet[7], packet[8]
-    spid, params = PACKETS.get((apid, service, subtype), (None, []))
+    for a, s, t, checks, spid, params in PACKETS:
+        if (a, s, t) == (apid, service, subtype) and all(b + n <= len(packet) * 8 and _get(packet, b, n) == v for b, n, v in checks):
+            break
+    else:
+        return None, {}
     return spid, {p: _get(packet, bit, bits) for p, bit, bits in params if bit + bits <= len(packet) * 8}
 "#,
     );
@@ -490,6 +529,19 @@ pub fn vectors(set: &MibSet, profile: &Profile) -> String {
     out
 }
 
+/// The file generator `kind` makes.
+pub fn generate(kind: &str, set: &MibSet, profile: &Profile, base: OffsetBase) -> Option<String> {
+    Some(match kind {
+        "xtce" => xtce(set, profile, base),
+        "wireshark" => wireshark(set, profile, base),
+        "c" => c_header(set, profile, base),
+        "python" => python(set, profile, base),
+        "icd" => icd(set, profile, base),
+        "vectors" => vectors(set, profile),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,11 +557,12 @@ mod tests {
         assert!(roxmltree::Document::parse(&x).is_ok(), "well-formed XML");
         assert!(x.contains("<xtce:MetaCommand name=\"ZTC08101\"") && x.contains("<xtce:Enumeration value=\"2\" label=\"AUTO\"/>"));
         let lua = generate("wireshark", &set, &p, b).unwrap();
-        assert!(lua.contains("[\"1010,3,25\"] = { \"30211 TCS_HK_FAST\"") && lua.contains("DissectorTable.get(\"udp.port\")"), "{lua}");
+        assert!(lua.contains("{ 1010, 3, 25, {") && lua.contains("\"30211 TCS_HK_FAST\"") && lua.contains("DissectorTable.get(\"udp.port\")"), "{lua}");
         let c = generate("c", &set, &p, b).unwrap();
         assert!(c.contains("#define TC_ZTC08101_APID 1010") && c.contains("PAF00042_AUTO = 2,") && c.contains("#define TM_TCS_HK_FAST 30211u"), "{c}");
         let py = generate("python", &set, &p, b).unwrap();
-        assert!(py.contains("\"ZTC08101\": (1010, 8, 1,") && py.contains("def encode(name, seq=0, **args):"));
+        assert!(py.contains("\"ZTC08101\": (1010, 8, 1,") && py.contains("def encode(name, seq=0, **args):") && py.contains("PUS_C = True\n"));
+        run_python(&generate("python", &crate::packets::tests::mission(), &p, b).unwrap());
         let icd = generate("icd", &set, &p, b).unwrap();
         assert!(icd.contains("### ZTC08101 -- Set heater control mode") && icd.contains("| PTH00102 | 16+8 | enum8 | OFF ON AUTO |"), "{icd}");
         let v = generate("vectors", &set, &p, b).unwrap();
@@ -517,17 +570,25 @@ mod tests {
         assert!(generate("nope", &set, &p, b).is_none());
         std::fs::remove_dir_all(&root.path).ok();
     }
-}
 
-/// The file generator `kind` makes.
-pub fn generate(kind: &str, set: &MibSet, profile: &Profile, base: OffsetBase) -> Option<String> {
-    Some(match kind {
-        "xtce" => xtce(set, profile, base),
-        "wireshark" => wireshark(set, profile, base),
-        "c" => c_header(set, profile, base),
-        "python" => python(set, profile, base),
-        "icd" => icd(set, profile, base),
-        "vectors" => vectors(set, profile),
-        _ => return None,
-    })
+    /// Runs the generated module, when Python is installed: its encode
+    /// gives the bytes `packets::encode_tc` does, and its decode reads the
+    /// parameters back out of a TM packet.
+    fn run_python(module: &str) {
+        let dir = std::env::temp_dir().join(format!("fenix-mib-python-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mib.py"), module).unwrap();
+        let script = "import mib\n\
+            print(mib.encode('ZTC08101', seq=7, PTH00101=3, PTH00102='AUTO').hex())\n\
+            spid, params = mib.decode(bytes.fromhex('0bf2c1230016200319002300008 14b878a80000001010bb80a28023401'.replace(' ', '')))\n\
+            print(spid, params['NTH00123'], params['NTH00124'])\n\
+            print(mib.decode(bytes.fromhex('0bf2c123001620031900230000814b878a80000002010bb80a28023401'))[0])\n";
+        let Ok(out) = std::process::Command::new("python").arg("-c").arg(script).current_dir(&dir).output() else { return };
+        if !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("not found") {
+            return; // the Windows Store stub, not a Python
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(text.lines().collect::<Vec<_>>(), ["1bf2c007000929080100000c03023fa3", "30211 3000 2600", "None"]);
+    }
 }

@@ -460,7 +460,7 @@ pub fn decode_packet(set: Option<&MibSet>, bytes: &[u8], profile: &Profile, base
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::set::tests::{temp_root, write};
 
@@ -478,7 +478,7 @@ mod tests {
     /// The design document's mission: TM(3,25) SPID 30211 with SID 1 at
     /// octet 19, four parameters after it; ZTC08101 with a fixed function
     /// id, a line and a mode.
-    fn mission() -> MibSet {
+    pub(crate) fn mission() -> MibSet {
         let r = temp_root("packets");
         write(&r, "pic", &line(&["3", "25", "19", "16", "-1", "0"], 7));
         write(&r, "pid", &line(&["3", "25", "1010", "1", "0", "30211", "TCS fast housekeeping", "", "", "13", "Y", "", "", "1"], 16));

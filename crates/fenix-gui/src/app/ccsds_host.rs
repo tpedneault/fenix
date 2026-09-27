@@ -469,9 +469,43 @@ impl App {
     }
 
     /// `SPC f x`: the focused file (or the explorer's) as hex.
+    /// A file no text buffer can hold: NULs, or bytes that aren't UTF-8,
+    /// in its first 8 KB. Opening one shows it in the hex view.
+    pub(crate) fn looks_binary(path: &Path) -> bool {
+        use std::io::Read;
+        let Ok(f) = std::fs::File::open(path) else { return false };
+        let mut head = Vec::new();
+        if f.take(8192).read_to_end(&mut head).is_err() {
+            return false;
+        }
+        head.contains(&0) || std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+    }
+
+    /// The file the focused page shows -- a hex view's, a recording's --
+    /// so the project (and its MIBs) follow it as they follow a buffer.
+    pub(crate) fn page_file(&self) -> Option<PathBuf> {
+        let id = self.focused_buffer_id();
+        match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Hex(p)) => Some(p.path.clone()),
+            Some(PageModel::Stream(_)) => match self.stream_sources.get(&id) {
+                Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The file a mission command acts on: the explorer's selection, the
+    /// file a hex view shows, or the open buffer's.
+    pub(crate) fn ccsds_file_here(&mut self) -> Option<PathBuf> {
+        if self.main_view == MainView::Explorer {
+            return self.explorer_selected_path();
+        }
+        self.page_file().or_else(|| self.open().buffer.path().map(Path::to_path_buf))
+    }
+
     pub(crate) fn cmd_hex_view(&mut self) {
-        let path = if self.main_view == MainView::Explorer { self.explorer_selected_path() } else { self.open().buffer.path().map(Path::to_path_buf) };
-        let Some(path) = path.filter(|p| p.is_file()) else {
+        let Some(path) = self.ccsds_file_here().filter(|p| p.is_file()) else {
             self.set_error("no file here to show as hex");
             return;
         };

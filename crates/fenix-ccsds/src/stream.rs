@@ -274,6 +274,41 @@ fn drain_packets(part: &mut Vec<u8>, offset: usize, vc: u8, out: &mut Vec<Item>)
 }
 
 /// Every item in `bytes`, split as `framing` says.
+/// A text log with packets written in hex, one to a line (`14:32:05 rx tm
+/// 0B F2 C1 23 ...`): the longest hex run of each line, as a packet when it
+/// reads as one and as junk when it doesn't. Offsets are the lines' byte
+/// offsets. `None` when no line holds a packet, so the caller can try
+/// something else.
+pub fn hex_lines(text: &str) -> Option<Vec<Item>> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let at = offset;
+        offset += line.len();
+        let line = line.trim_end();
+        let chars = line.chars().count();
+        let mut best: Option<Vec<u8>> = None;
+        let mut col = 0;
+        while col < chars {
+            match crate::hex::around(line, col) {
+                Some((range, bytes)) => {
+                    if best.as_ref().is_none_or(|b| bytes.len() > b.len()) {
+                        best = Some(bytes);
+                    }
+                    col = range.end.max(col + 1);
+                }
+                None => col += 1,
+            }
+        }
+        let Some(bytes) = best else { continue };
+        match PrimaryHeader::decode(&bytes) {
+            Some(h) if h.plausible() && h.packet_len() == bytes.len() => out.push(Item::Packet { offset: at, bytes, vc: None }),
+            _ => out.push(Item::Junk { offset: at, len: line.len(), why: format!("line {}: {} octets of hex that aren't a packet", n + 1, bytes.len()) }),
+        }
+    }
+    out.iter().any(|i| matches!(i, Item::Packet { .. })).then_some(out)
+}
+
 pub fn split(bytes: &[u8], framing: Framing) -> Vec<Item> {
     let mut s = Splitter::new(framing);
     let mut out = s.feed(bytes);
@@ -339,6 +374,18 @@ mod tests {
 
     fn pkt(apid: u16, seq: u16, n: usize) -> Vec<u8> {
         Packet::build(PrimaryHeader { secondary_header: false, apid, seq_flags: 3, seq_count: seq, ..Default::default() }, &vec![seq as u8; n]).bytes
+    }
+
+    #[test]
+    fn hex_lines_read_a_log() {
+        let p = pkt(0x3F2, 7, 5);
+        let hex: Vec<String> = p.iter().map(|b| format!("{b:02X}")).collect();
+        let text = format!("14:32:04 bench: link up\n14:32:05 rx tm {}\n14:32:06 rx clcw 01 00 00 07\n", hex.join(" "));
+        let items = hex_lines(&text).unwrap();
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0], Item::Packet { offset: 24, bytes: p, vc: None });
+        assert!(matches!(&items[1], Item::Junk { why, .. } if why.starts_with("line 3")));
+        assert!(hex_lines("no packets here\n01 02 03 04\n").is_none());
     }
 
     /// The packets found, idle ones left out.

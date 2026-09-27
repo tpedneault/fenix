@@ -7391,7 +7391,8 @@ impl App {
     }
 
     fn refresh_project_root(&mut self) {
-        self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        let path = self.open().buffer.path().map(Path::to_path_buf).or_else(|| self.page_file());
+        self.project_root = path.as_deref().and_then(fenix_project::find_project_root);
         self.refresh_project_settings(false);
         self.mib_preload();
         self.refresh_embedded_indicator();
@@ -10224,6 +10225,10 @@ impl App {
         }
         if Self::looks_like_pdf(path) {
             self.open_pdf_path(path);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);
@@ -17015,6 +17020,10 @@ impl App {
     fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
             self.open_pdf_path_as(path, preview);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);

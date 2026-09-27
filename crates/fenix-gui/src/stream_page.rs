@@ -475,7 +475,8 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
     let packets = p.rows.iter().filter(|r| !r.idle).count();
     let gaps = p.lines().iter().filter(|l| matches!(l, Line::Gap { .. })).count();
     let bad = p.rows.iter().filter(|r| r.bad.is_some()).count();
-    let mut right = format!("{} packets · {gaps} gaps · {bad} bad", thousands(packets));
+    let plural = |n: usize, one: &str| format!("{} {one}{}", thousands(n), if n == 1 { "" } else { "s" });
+    let mut right = format!("{} · {} · {bad} bad", plural(packets, "packet"), plural(gaps, "gap"));
     if !p.done && !p.live {
         right.push_str(" · reading…");
     }
@@ -492,7 +493,7 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
         g.panels.push((2, left..e.max(left + 40)));
     }
     let names = ["Packets", "By APID", "Parameter", "Problems"];
-    let counts = [p.lines().len(), p.stats().len(), p.param.as_ref().map(|(_, s)| s.len()).unwrap_or(0), p.problems().len()];
+    let counts = [p.shown().len(), p.stats().len(), p.param.as_ref().map(|(_, s)| s.len()).unwrap_or(0), p.problems().len()];
     let mut x = left;
     for (i, name) in names.iter().enumerate() {
         x = g.put(4, x, &(i + 1).to_string(), Role::Accent) + 1;
@@ -699,7 +700,7 @@ mod tests {
         assert!(text.contains("⚠ 3 missing on APID 0x3F2 -- sequence 292 to 294"), "{text}");
         assert!(text.contains("CRC 60E5, computed 61E4"));
         assert!(!text.contains("0x7FF"), "idle packets hidden: {text}");
-        assert!(text.contains("5 packets · 1 gaps · 1 bad"), "{text}");
+        assert!(text.contains("5 packets · 1 gap · 1 bad"), "{text}");
         p.key(Key::Char(']'));
         assert!(matches!(p.lines()[p.sel[0]], Line::Gap { .. }));
         p.key(Key::Char('i'));

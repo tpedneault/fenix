@@ -140,6 +140,14 @@ fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&Mib
     }
 }
 
+/// How much of a text log is read for its hex lines.
+const TEXT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Text, not binary: no NULs, and nearly all of it printable.
+fn looks_like_text(head: &[u8]) -> bool {
+    !head.is_empty() && !head.contains(&0) && head.iter().filter(|b| b.is_ascii_graphic() || b.is_ascii_whitespace() || **b >= 0x80).count() * 100 >= head.len() * 98
+}
+
 /// Reads a recording in chunks; rows go back as they're found.
 fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSet>>, m: Mission, buffer: BufferId, send: Sender, stop: Arc<AtomicBool>) {
     let mut file = match std::fs::File::open(&path) {
@@ -153,6 +161,15 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
     let mut head = vec![0u8; 256 * 1024];
     let n = file.read(&mut head).unwrap_or(0);
     head.truncate(n);
+    if framing.is_none() && looks_like_text(&head) {
+        let mut text = head.clone();
+        let _ = (&mut file).take(TEXT_LIMIT).read_to_end(&mut text);
+        if let Some(items) = stream::hex_lines(&String::from_utf8_lossy(&text)) {
+            send(PageEvent::StreamInfo { buffer, framing: "hex lines · a text log with a packet in hex on a line".to_string() });
+            send_rows(&send, buffer, items, set.as_deref(), &m, true);
+            return;
+        }
+    }
     let (framing, why) = match framing {
         Some(f) => (f, "as asked".to_string()),
         None => guessed(&head, &m),
@@ -351,8 +368,7 @@ impl App {
     /// `SPC k f`: the file in the explorer, or the focused one, as a
     /// recording.
     pub(crate) fn cmd_ccsds_recording(&mut self) {
-        let path = if self.main_view == MainView::Explorer { self.explorer_selected_path() } else { self.open().buffer.path().map(Path::to_path_buf) };
-        match path.filter(|p| p.is_file()) {
+        match self.ccsds_file_here().filter(|p| p.is_file()) {
             Some(p) => self.open_recording(p, None),
             None => self.set_error("select a recording in the explorer (SPC f j), then SPC k f"),
         }

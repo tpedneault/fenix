@@ -122,7 +122,7 @@ pub fn layout(p: &StandardsPage, cols: usize) -> Page {
             Some(f) => f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             None => "not found -- o opens where to get it".to_string(),
         };
-        g.put(y, left + 83, &fit(&where_, width.saturating_sub(83)), if file.is_some() { Role::Muted } else { Role::Muted });
+        g.put(y, left + 83, &fit(&where_, width.saturating_sub(83)), Role::Muted);
         if i == p.sel {
             g.focus(y, left..left + width);
         }
