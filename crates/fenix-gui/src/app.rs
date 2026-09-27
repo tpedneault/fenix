@@ -6,6 +6,7 @@ mod editor_ui;
 mod todos;
 mod home;
 mod tabs;
+mod reader;
 mod agenda_sync;
 mod agenda_host;
 mod jira_host;
@@ -23,6 +24,9 @@ mod migrate;
 mod settings_host;
 mod snippets_host;
 mod review_host;
+mod motion_host;
+mod polish;
+mod which_key;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -70,8 +74,6 @@ use crate::icon;
 use crate::merge_view;
 use crate::keymap;
 use crate::markdown;
-use crate::pdf_outline;
-use crate::pdf_search;
 use crate::popup;
 use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
@@ -89,14 +91,18 @@ const BLINK_FADE: Duration = Duration::from_millis(120);
 /// below instead -- see the plan's "animations are short bursts, not
 /// continuous idle work" rationale.
 const ANIM_TICK: Duration = Duration::from_millis(16);
-/// How long a yank/paste pulse stays visible before fully fading out.
+/// How long a yank/paste pulse stays visible before fully fading out, by
+/// default -- `motion.speed` scales the real one (`Prefs::pulse_d`).
 /// Modeled on orbit-emacs's own yank/paste pulse feature.
+#[cfg(test)]
 const PULSE_DURATION: Duration = Duration::from_millis(300);
 /// Alpha the pulse starts at before fading -- brighter than the steady
 /// Visual-selection overlay so it reads as a distinct flash, not a
 /// held selection.
 const PULSE_PEAK_ALPHA: f32 = 0.45;
-/// How long the viewport takes to ease to a new scroll position.
+/// How long the viewport takes to ease to a new scroll position, by
+/// default -- `motion.scroll_ms` sets the real one (`Prefs::scroll_d`).
+#[cfg(test)]
 const SCROLL_DURATION: Duration = Duration::from_millis(150);
 /// How long a status/error message (`App::set_message`/`set_error`)
 /// stays visible in the modeline before the normal filename/Ln/Col
@@ -203,7 +209,7 @@ const COMPLETION_MARGIN: f32 = 4.0;
 /// room to render it).
 const COMPLETION_MAX_ROWS: usize = 10;
 
-/// An active yank/paste highlight, fading out over `PULSE_DURATION`.
+/// An active yank/paste highlight, fading out over `Prefs::pulse_d`.
 struct Pulse {
     range: std::ops::Range<usize>,
     started: Instant,
@@ -1397,189 +1403,6 @@ struct VncSession {
     resize_requested_for: (u16, u16),
 }
 
-/// How a `PdfSession`'s current page is scaled onto its pane -- what
-/// `pdf_target_size` turns into an actual pixel render target. `FitPage`/
-/// `FitWidth` consult the pane's own current pixel size (so a resize
-/// re-renders at a new target); `Percent` deliberately doesn't (so a
-/// resize just re-crops/re-pans the existing render instead of asking
-/// pdfium to render again) -- see `pdf_target_size`'s own doc comment.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PdfZoom {
-    FitPage,
-    FitWidth,
-    /// Percent of "native" size, where 100 means one render pixel per PDF
-    /// point (see `fenix_pdf::coords::percent_size`). Clamped to
-    /// `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_PERCENT` by every call site
-    /// that changes it (`pdf_zoom_in`/`pdf_zoom_out`), not by this type.
-    Percent(u32),
-}
-
-/// `Percent` zoom bounds -- generous enough to be useful (25% to read a
-/// dense multi-column page's overall layout, 400% to make fine print
-/// legible) while keeping the largest possible render (and its GPU
-/// texture) bounded: a 400%-zoomed US Letter page is already ~2448x3168
-/// px, comfortably inside any real GPU's texture size limit.
-const PDF_ZOOM_MIN_PERCENT: u32 = 25;
-const PDF_ZOOM_MAX_PERCENT: u32 = 400;
-/// How much `pdf_zoom_in`/`pdf_zoom_out` moves the effective percentage
-/// per press -- coarse on purpose (see the PDF viewing plan's own
-/// reasoning: a typed-percentage prompt is more precision than this
-/// feature needs).
-const PDF_ZOOM_STEP_PERCENT: u32 = 10;
-/// How far `pdf_pan` moves `PdfSession::scroll_offset` per keypress, in
-/// rendered pixels.
-const PDF_PAN_STEP_PX: u32 = 60;
-
-/// Turns a zoom mode into an actual pixel render target, given the
-/// page's native point size and the pane's current pixel size.
-/// Degenerate inputs (no known page size yet, or a zero-sized pane)
-/// return `(0, 0)`, which every call site treats as "nothing to render
-/// yet" rather than dispatching a bogus request.
-fn pdf_target_size(zoom: PdfZoom, page_pts: (f32, f32), pane_px: (u32, u32)) -> (u32, u32) {
-    if page_pts.0 <= 0.0 || page_pts.1 <= 0.0 || pane_px.0 == 0 || pane_px.1 == 0 {
-        return (0, 0);
-    }
-    match zoom {
-        PdfZoom::FitPage => fenix_pdf::coords::fit_page_size(page_pts.0, page_pts.1, pane_px.0, pane_px.1),
-        PdfZoom::FitWidth => fenix_pdf::coords::fit_width_size(page_pts.0, page_pts.1, pane_px.0),
-        PdfZoom::Percent(percent) => fenix_pdf::coords::percent_size(page_pts.0, page_pts.1, percent),
-    }
-}
-
-/// Where `open_pdf_path_with` puts a newly opened document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PdfPlacement {
-    /// Its own new workspace -- what opening a `.pdf` by path has always
-    /// done (`SPC f f`, the explorer, a CLI argument, the recent-files
-    /// list). A document opened out of nowhere shouldn't evict whatever
-    /// the user already had laid out in the current one.
-    NewWorkspace,
-    /// The currently focused pane, replacing whatever it was showing --
-    /// what `SPC r f`'s document index does. The user picked this
-    /// deliberately from a shelf of things they read constantly, in the
-    /// pane they were looking at; sending it to a new workspace would
-    /// make "open the Space Packet Protocol here" mean "open it
-    /// somewhere else".
-    FocusedPane,
-}
-
-/// How a session's current zoom reads in the modeline. `FitPage`/
-/// `FitWidth` have no percentage of their own, so they're named rather
-/// than converted into one (`pdf_effective_percent`'s derived number is
-/// for *stepping* from, not for display -- showing "97%" for what the
-/// user asked to be a fit would be noise, not information).
-fn pdf_zoom_label(session: &PdfSession) -> String {
-    match session.zoom {
-        PdfZoom::FitPage => "Fit page".to_string(),
-        PdfZoom::FitWidth => "Fit width".to_string(),
-        PdfZoom::Percent(percent) => format!("{percent}%"),
-    }
-}
-
-/// One open PDF document (`SPC r o`) -- one pane/buffer per document,
-/// same shape as `VncSession`. Keyed in `App::pdf_sessions` by the
-/// document's canonicalized path (not `fenix_pdf::PdfDocKey`, which is
-/// the worker's own internal identity for it) so reopening an
-/// already-open PDF switches to the existing pane instead of duplicating
-/// it, mirroring `vnc_sessions`'s own by-name dedup.
-struct PdfSession {
-    doc_key: fenix_pdf::PdfDocKey,
-    workspace_index: usize,
-    pane: fenix_window::WindowId,
-    buffer: BufferId,
-    page_count: u32,
-    current_page: u32,
-    /// Which page `texture` currently shows, if any -- `None` until the
-    /// first `PageRendered` reply lands. Compared against `current_page`
-    /// so a page-turn only needs a new render dispatched, not applied
-    /// (and vice versa: a stale reply for a page the session has already
-    /// turned away from again is still applied here, just immediately
-    /// superseded by the next one -- see `pending_request_id`'s own doc
-    /// comment for the actual staleness guard).
-    rendered_page: Option<u32>,
-    /// The pixel size last asked for in a dispatched `RenderPage` request
-    /// -- compared against `pdf_target_size`'s own current computation
-    /// every frame (see `redraw`'s pane-classification loop) to decide
-    /// whether a resize/zoom change needs a fresh render. `(0, 0)` until
-    /// the first request goes out.
-    last_requested_size: (u32, u32),
-    /// Bumped on every dispatched `RenderPage` request; a `PageRendered`/
-    /// `RenderFailed` reply whose own `request_id` doesn't match this is
-    /// stale (superseded by a later request, e.g. several resize events
-    /// in a row) and silently dropped -- see `fenix_pdf::PdfResponse::
-    /// PageRendered`'s own doc comment.
-    pending_request_id: u64,
-    /// This document's current page's native size, in PDF points (1/72
-    /// inch) -- `(0.0, 0.0)` until the first `Opened`/`PageRendered`
-    /// reply reports it. `pdf_target_size` can't compute anything
-    /// meaningful before this is known.
-    page_point_size: (f32, f32),
-    /// How this session is currently zoomed. Defaults to `FitPage`.
-    zoom: PdfZoom,
-    /// The pane's own current on-screen pixel size, refreshed
-    /// unconditionally every frame in `redraw`'s pane-classification loop
-    /// -- what `pdf_zoom_in`/`pdf_zoom_out`/`pdf_zoom_fit_page`/
-    /// `pdf_zoom_fit_width`/`pdf_goto_page` (all run from a keypress, not
-    /// from that loop) read to compute and dispatch a render immediately,
-    /// rather than changing `zoom`/`current_page` and waiting a frame for
-    /// the classification loop's own resize-detection to notice.
-    last_pane_size: (u32, u32),
-    /// Top-left pixel offset into `full_bgra` currently shown -- reset to
-    /// `(0, 0)` (top-left) by every fresh render (see `apply_pdf_
-    /// response`'s `PageRendered` arm). Only matters once a render is
-    /// larger than the pane in some dimension (`FitWidth`'s tall-page
-    /// case, or any `Percent` zoom bigger than what the pane can show
-    /// whole) -- clamped against `full_bgra`'s actual size and the pane's
-    /// current size every frame in `redraw`, not here.
-    scroll_offset: (u32, u32),
-    /// Whether the *next* render to land should start scrolled to the
-    /// bottom of the page rather than the top. Set only by a backwards
-    /// page turn that came from scrolling/paging *up* past the top edge
-    /// (`pdf_scroll`): continuing to scroll up should walk smoothly onto
-    /// the bottom of the previous page, the way every other reader
-    /// behaves, not jump to its top and hide everything the reader was
-    /// about to reach. Cleared as soon as it's applied, so an ordinary
-    /// page turn/jump/zoom still lands at the top.
-    land_at_bottom: bool,
-    /// The full, uncropped BGRA bitmap from the most recent `PageRendered`
-    /// reply that wasn't superseded -- unlike Phase 0's `pending_bgra`,
-    /// kept around rather than taken/cleared once uploaded, because
-    /// panning needs to re-crop this *same* render at a new `scroll_
-    /// offset` without asking pdfium to render again.
-    full_bgra: Option<(u32, u32, Vec<u8>)>,
-    /// `(visible_w, visible_h, scroll_x, scroll_y)` of whatever's
-    /// currently uploaded to `texture` -- compared each frame against
-    /// what the current pane size/`scroll_offset` actually calls for, so
-    /// `redraw` only touches the GPU when something real changed (a new
-    /// render, a resize, or a pan), not on every single frame regardless.
-    last_uploaded: Option<(u32, u32, u32, u32)>,
-    /// `None` until the GPU exists *and* a page has actually been
-    /// rendered -- created lazily in `redraw` (see `PdfPipeline::
-    /// create_texture`), recreated whenever the visible crop's pixel size
-    /// changes.
-    texture: Option<PdfTexture>,
-    /// This document's flattened bookmark tree, fetched lazily on the
-    /// first `SPC r o` and cached forever after -- a PDF's bookmark tree
-    /// can't change while it's open, so a later toggle-open never needs
-    /// to ask the worker again. `None` until fetched (or if the document
-    /// turns out to have no bookmarks, this stays `Some(vec![])`, not
-    /// `None` -- see `apply_pdf_response`'s `Outline` arm).
-    outline: Option<Vec<fenix_pdf::outline::OutlineEntry>>,
-    /// Bumped on every dispatched `Search` request; a `SearchResults`
-    /// reply whose own `request_id` doesn't match this is stale
-    /// (superseded by a newer search fired before the first one came
-    /// back) and silently dropped -- same guard `pending_request_id`
-    /// gives page renders.
-    pending_search_request_id: u64,
-    /// The query text of the most recently *dispatched* search, kept
-    /// here rather than threaded through `PdfResponse::SearchResults`
-    /// (which reports only matches, not the query that produced them) --
-    /// what `apply_pdf_response`'s `SearchResults` arm needs to render a
-    /// "(no matches for ...)" placeholder with the right text once the
-    /// reply lands. Empty until the first search.
-    last_search_query: String,
-}
-
 /// One running language server for one language and canonical project root.
 /// Unlike `VncSession`/`PdfSession`/etc., this has no pane/buffer/
 /// workspace of its own -- a language server has no UI surface by
@@ -2492,6 +2315,13 @@ enum ActivePicker {
     /// `SPC g c`, step two: pick the ref being compared. Carries the
     /// already-chosen base, since confirming needs both.
     CompareHead { base: String, picker: fenix_picker::PickerState<String> },
+    /// Enter on a settings-page row with more choices than `h`/`l` should
+    /// step through (the installed fonts): one of them, by name. What
+    /// it's for is `key`; confirming hands the choice back to the page.
+    SettingChoice { key: &'static str, picker: fenix_picker::PickerState<String> },
+    /// `SPC r t`: a PDF's headings, by name; confirming goes to the
+    /// heading's page.
+    PdfHeading(fenix_picker::PickerState<u32>),
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2633,6 +2463,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
+        ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
+        ActivePicker::PdfHeading(picker) => picker.push_char(c),
     }
 }
 
@@ -2673,6 +2505,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
+        ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
+        ActivePicker::PdfHeading(picker) => picker.backspace(),
     }
 }
 
@@ -2713,6 +2547,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
+        ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
+        ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
     }
 }
 
@@ -2756,6 +2592,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
+        ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
+        ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
     }
 }
 
@@ -2796,6 +2634,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareHead { picker, .. } => picker.query(),
+        ActivePicker::SettingChoice { picker, .. } => picker.query(),
+        ActivePicker::PdfHeading(picker) => picker.query(),
     }
 }
 
@@ -2836,6 +2676,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareHead { picker, .. } => picker.len(),
+        ActivePicker::SettingChoice { picker, .. } => picker.len(),
+        ActivePicker::PdfHeading(picker) => picker.len(),
     }
 }
 
@@ -2876,6 +2718,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
+        ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
+        ActivePicker::PdfHeading(picker) => picker.selected_row(),
     }
 }
 
@@ -2920,6 +2764,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -3101,6 +2947,13 @@ fn dired_action_for(keypress: KeyPress) -> Option<ExplorerAction> {
 /// Under test, a file of `name` no other `App` shares: tests run in
 /// parallel, and one that saves a MIB root or a project must not leak it
 /// into another -- or into the Fenix you actually use.
+/// A test that opens a PDF spawns a real `PdfWorker`, which binds pdfium --
+/// a process-wide library that crashes when two threads bring it up or
+/// tear it down at once, as parallel tests would. Such tests hold this
+/// for as long as their `App` lives.
+#[cfg(test)]
+static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn isolated_test_path(name: &str) -> PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3295,6 +3148,33 @@ fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: 
 /// need to paint a flat rect rather than color glyphs, so this bridges
 /// the same two representations every `rgba`/`text_color` pair in
 /// `theme.rs` already keeps separate for every other field.
+/// PDFs under a project -- the `SPC r f` shelf's last group. A few
+/// levels deep, skipping build output and hidden folders, and at most 50.
+fn project_pdfs(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 4 || out.len() >= 50 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || matches!(name, "target" | "node_modules" | "build" | "dist" | "__pycache__") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if App::looks_like_pdf(&path) && out.len() < 50 {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, 0, &mut out);
+    out
+}
+
 fn glyphon_to_rgba(color: glyphon::Color) -> [f32; 4] {
     [color.r() as f32 / 255.0, color.g() as f32 / 255.0, color.b() as f32 / 255.0, 1.0]
 }
@@ -5337,8 +5217,6 @@ fn is_readonly_buffer_kind(kind: BufferKind) -> bool {
             | BufferKind::Git
             | BufferKind::Vnc
             | BufferKind::Pdf
-            | BufferKind::PdfOutline
-            | BufferKind::PdfSearchResults
             | BufferKind::TaskOutput
             | BufferKind::Debug
             | BufferKind::ToolStatus
@@ -5458,6 +5336,7 @@ struct FrameState {
     bg_rect: Option<RectRenderer>,
     popup_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    motion_gpu: Option<motion_host::MotionGpu>,
     workspaces: WorkspaceList,
     cursor_pos: Option<(f32, f32)>,
     /// This frame's top-left corner in desktop coordinates -- see
@@ -5572,6 +5451,8 @@ pub struct App {
     /// while the mode badge -- pushed second -- stayed put.
     popup_rect: Option<RectRenderer>,
     caret_rect: Option<RectRenderer>,
+    /// What the animations and polish draw with -- see `MotionGpu`.
+    motion_gpu: Option<motion_host::MotionGpu>,
     /// The textured-quad pipeline every open VNC session's live
     /// framebuffer is drawn through -- one pipeline shared by every
     /// session (each owns its own `VncTexture`, see `VncSession`).
@@ -6177,60 +6058,32 @@ pub struct App {
     /// placeholder and refuse a redundant second connect attempt if the
     /// picker is used again on the same name before the first finishes.
     vnc_connecting: HashSet<String>,
-    /// Every open PDF document (`SPC r o`), keyed by canonicalized path --
-    /// see `PdfSession`'s own doc comment on why path rather than
-    /// `fenix_pdf::PdfDocKey`.
-    pdf_sessions: HashMap<PathBuf, PdfSession>,
-    /// Reusable staging buffer for PDF texture uploads, exactly the
-    /// `vnc_upload_scratch` idea one crate over: `redraw` crops the
-    /// visible window out of a session's full page render into this
-    /// before handing it to the GPU. Held here rather than allocated per
-    /// frame because a zoomed-in page's visible crop runs to several
-    /// megabytes and gets rewritten on every single pan keypress.
-    pdf_crop_scratch: Vec<u8>,
-    /// The one shared background worker for every open PDF document --
-    /// see `fenix_pdf`'s own top-level doc comment for why there's only
-    /// ever one, not one per document. Spawned lazily by `open_pdf_path`
-    /// on the first PDF this session ever opens, then kept for the rest
-    /// of the process's lifetime.
+    /// Every open PDF document, by its buffer -- see `reader::PdfDoc`.
+    pdf_docs: HashMap<BufferId, reader::PdfDoc>,
+    /// Each pane's view of a document it shows, by pane and buffer -- see
+    /// `reader::PdfView`.
+    pdf_views: HashMap<reader::ViewKey, reader::PdfView>,
+    /// The view read last -- what `SPC r` acts on from outside a PDF pane.
+    pdf_last_view: Option<reader::ViewKey>,
+    /// The reader's keys: a count or a `g`/`z` waiting for its next key,
+    /// and the view it was typed in (a count doesn't follow you to
+    /// another pane).
+    pdf_keys: crate::reader::Keys,
+    pdf_keys_view: Option<reader::ViewKey>,
+    /// Hands out view and request ids, unique across every document.
+    pdf_next_id: u64,
+    /// Renders asked for and not back yet: request -> the view and page.
+    pdf_requests: HashMap<u64, (reader::ViewKey, u32)>,
+    /// Where each PDF was left (`reader.remember`), from the places file
+    /// next to the recent files; written when it changed.
+    pdf_places: HashMap<PathBuf, crate::reader::SavedPlace>,
+    pdf_places_path: PathBuf,
+    pdf_places_dirty: bool,
+    /// `f`'s link labels, while they show.
+    pdf_hints: Option<reader::Hints>,
+    /// The one pdfium worker for every document (pdfium can't be called
+    /// from two threads), spawned with the first PDF opened.
     pdf_worker: Option<fenix_pdf::PdfWorker>,
-    /// The real on-disk filename for each open `BufferKind::Pdf` buffer,
-    /// keyed by `BufferId` -- consulted by `buffer_display_name`. A side
-    /// table rather than the buffer's own path because a PDF buffer is
-    /// deliberately kept pathless (see `BufferList::open_pdf`'s own doc
-    /// comment on why: a real path there would let a stray `:w` truncate
-    /// the actual PDF file on disk).
-    pdf_display_names: HashMap<BufferId, String>,
-    /// The outline pane currently open for a PDF session, if any --
-    /// keyed the same way `pdf_sessions` is (canonicalized PDF path).
-    /// `pdf_toggle_outline` consults this both to know whether to open a
-    /// new one or close the existing one, and to find the pane to close.
-    pdf_outline_panes: HashMap<PathBuf, fenix_window::WindowId>,
-    /// Per-line metadata for each open `BufferKind::PdfOutline` buffer's
-    /// generated text, keyed by that buffer's own `BufferId` -- same
-    /// per-buffer-keyed shape as `dashboard_lines`.
-    pdf_outline_lines: HashMap<BufferId, Vec<Option<pdf_outline::PdfOutlineLine>>>,
-    /// Which `pdf_sessions` key (PDF path) an outline buffer was opened
-    /// from -- what `pdf_outline_activate_selected` and `pdf_toggle_
-    /// outline` (when the outline pane itself is focused) use to find
-    /// the companion PDF pane/session.
-    pdf_outline_source: HashMap<BufferId, PathBuf>,
-    /// The search-results pane currently open for a PDF session, if any --
-    /// same "one at a time per session, keyed by canonicalized path" shape
-    /// as `pdf_outline_panes`. A fresh `SPC r /` search replaces whatever
-    /// results pane is already open for that session rather than stacking
-    /// a second one.
-    pdf_search_panes: HashMap<PathBuf, fenix_window::WindowId>,
-    /// Per-line metadata for each open `BufferKind::PdfSearchResults`
-    /// buffer's generated text, keyed by that buffer's own `BufferId` --
-    /// same per-buffer-keyed shape as `pdf_outline_lines`.
-    pdf_search_result_lines: HashMap<BufferId, Vec<Option<pdf_search::PdfSearchResultLine>>>,
-    /// Which `pdf_sessions` key (PDF path) a search-results buffer was
-    /// opened from -- what `pdf_search_activate_selected` and `pdf_
-    /// close_search_pane` (when the results pane itself is focused) use
-    /// to find the companion PDF pane/session. Mirrors `pdf_outline_
-    /// source` exactly.
-    pdf_search_source: HashMap<BufferId, PathBuf>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -6440,6 +6293,10 @@ pub struct App {
     blink_transition_start: Instant,
     next_blink: Instant,
     pulse: Option<Pulse>,
+    /// Everything else that's animating -- see `motion_host`.
+    motion: motion_host::MotionState,
+    /// The launch splash, fading out over the first frames.
+    splash_fade: Option<crate::splash::SplashFade>,
     /// The most recent status/error message, if any and not yet expired
     /// -- see `StatusMessage`'s own doc comment. Set via `set_message`/
     /// `set_error`; read (and its expiry checked) by `modeline_pieces`.
@@ -6861,19 +6718,17 @@ impl App {
         if let Some(path) = &file_arg {
             let path = Path::new(path);
             if Self::looks_like_pdf(path) {
-                // `with_file` couldn't route this to `open_pdf_path`
-                // itself (its own doc comment explains why: it runs
-                // before `self` exists, and opening a PDF needs `self`'s
-                // `event_proxy`/`pdf_worker`) -- it fell back to opening
-                // the dashboard instead, exactly as if no file argument
-                // had been given at all. That placeholder buffer is
-                // still the focused one right here, so it's grabbed and
-                // closed once the real PDF pane replaces it -- otherwise
-                // it would sit around forever as a phantom "*dashboard*"
-                // entry in the buffer switcher nobody asked for.
+                // `with_file` can't open a PDF (that needs `self`'s event
+                // proxy for the worker), so it opened the dashboard; the
+                // PDF gets a tab next to it now. A dashboard that isn't
+                // the workspace's Home would only linger in the buffer
+                // list, so it goes.
                 let placeholder = app.focused_buffer_id();
                 app.open_pdf_path(path);
-                if app.session.pending.is_none() { app.buffers.close(placeholder); }
+                if app.session.pending.is_none() && !app.is_a_workspace_home(placeholder) {
+                    app.buffers.close(placeholder);
+                    app.drop_buffer_from_every_strip(placeholder);
+                }
             } else {
                 app.open_startup_file(path);
             }
@@ -6918,6 +6773,7 @@ impl App {
         } else {
             fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
         };
+        let pdf_places_path = if cfg!(test) { isolated_test_path("pdf_places.tsv") } else { recent_files_path.with_file_name("pdf_places.tsv") };
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
         // Read-only here, same posture as `known_projects`/`recent_files`
         // just above: a test that constructs `App` via `with_file` reads
@@ -7016,6 +6872,7 @@ impl App {
             bg_rect: None,
             popup_rect: None,
             caret_rect: None,
+            motion_gpu: None,
             vnc_pipeline: None,
             pdf_pipeline: None,
             buffers,
@@ -7142,16 +6999,18 @@ impl App {
             vnc_focused: None,
             vnc_hidden_cursor: None,
             vnc_connecting: HashSet::new(),
-            pdf_sessions: HashMap::new(),
-            pdf_crop_scratch: Vec::new(),
+            pdf_docs: HashMap::new(),
+            pdf_views: HashMap::new(),
+            pdf_last_view: None,
+            pdf_keys: crate::reader::Keys::default(),
+            pdf_keys_view: None,
+            pdf_next_id: 0,
+            pdf_requests: HashMap::new(),
+            pdf_places: crate::reader::parse_places(&std::fs::read_to_string(&pdf_places_path).unwrap_or_default()),
+            pdf_places_path,
+            pdf_places_dirty: false,
+            pdf_hints: None,
             pdf_worker: None,
-            pdf_display_names: HashMap::new(),
-            pdf_outline_panes: HashMap::new(),
-            pdf_outline_lines: HashMap::new(),
-            pdf_outline_source: HashMap::new(),
-            pdf_search_panes: HashMap::new(),
-            pdf_search_result_lines: HashMap::new(),
-            pdf_search_source: HashMap::new(),
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -7206,6 +7065,8 @@ impl App {
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
             pulse: None,
+            motion: motion_host::MotionState::default(),
+            splash_fade: None,
             status_message: None,
             quit_confirm: false,
         }
@@ -7264,6 +7125,7 @@ impl App {
             bg_rect: std::mem::replace(&mut self.bg_rect, incoming.bg_rect),
             popup_rect: std::mem::replace(&mut self.popup_rect, incoming.popup_rect),
             caret_rect: std::mem::replace(&mut self.caret_rect, incoming.caret_rect),
+            motion_gpu: std::mem::replace(&mut self.motion_gpu, incoming.motion_gpu),
             workspaces: std::mem::replace(&mut self.workspaces, incoming.workspaces),
             cursor_pos: std::mem::replace(&mut self.cursor_pos, incoming.cursor_pos),
             origin: std::mem::replace(&mut self.frame_origin, incoming.origin),
@@ -7387,6 +7249,7 @@ impl App {
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
+        let motion_gpu = motion_host::MotionGpu::new(&gpu);
 
         let buffer = self.focused_buffer_id();
         let cursor = self.buffers.get(buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
@@ -7397,6 +7260,7 @@ impl App {
             bg_rect: Some(bg_rect),
             popup_rect: Some(popup_rect),
             caret_rect: Some(caret_rect),
+            motion_gpu: Some(motion_gpu),
             workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
             cursor_pos: None,
             origin: (0, 0),
@@ -7620,10 +7484,7 @@ impl App {
     fn close_sessions_in_active_frame(&mut self) {
         let panes = self.workspaces.all_panes();
 
-        let pdf_keys: Vec<PathBuf> = panes.iter().filter_map(|&pane| self.pdf_session_key_for_pane(pane)).collect();
-        for key in pdf_keys {
-            self.pdf_session_forget(&key);
-        }
+        self.pdf_forget_views_in(&panes);
         let vnc_keys: Vec<String> = panes.iter().filter_map(|&pane| self.vnc_session_key_for_pane(pane)).collect();
         for key in vnc_keys {
             self.vnc_session_close(&key);
@@ -7820,8 +7681,7 @@ impl App {
         // currently showing it). Keeping it here instead meant a file
         // opened while a VNC pane was focused got flung into a whole new
         // workspace rather than opening where you were looking.
-        self.pdf_session_key_for_pane(focused).is_some()
-            || self.docker_focused_role().is_some()
+        self.docker_focused_role().is_some()
             || self.git_focused_role().is_some()
             || self.task_session.as_ref().is_some_and(|s| s.pane == focused)
             || self.debug_session.as_ref().is_some_and(|s| {
@@ -10641,17 +10501,51 @@ impl App {
     /// hand-editing `settings.toml`, so "no matches" would be indis-
     /// tinguishable from "you haven't set this up yet".
     pub(crate) fn start_document_picker(&mut self) {
-        if self.config.documents.is_empty() {
-            self.set_error("no documents yet -- add them in SPC , (Documents & workspaces)".to_string());
+        let candidates: Vec<fenix_picker::Candidate<PathBuf>> = self.document_shelf().into_iter().map(|(label, path)| fenix_picker::Candidate::new(label, path)).collect();
+        if candidates.is_empty() {
+            self.set_error("no documents yet -- add them in SPC , (PDF reader), or open a PDF and it's listed here".to_string());
             return;
         }
-        let candidates = self
-            .config
-            .documents
-            .iter()
-            .map(|(name, path)| fenix_picker::Candidate::new(name.clone(), path.clone()))
-            .collect();
         self.enter_picker(ActivePicker::Document(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC r f`'s list, in order: the project's own shelf, yours, PDFs
+    /// read lately (with where you were), and PDFs in the project not on
+    /// a shelf. A document is listed once, in the first group it's in.
+    fn document_shelf(&self) -> Vec<(String, PathBuf)> {
+        let mut list: Vec<(String, PathBuf)> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let key = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut add = |list: &mut Vec<(String, PathBuf)>, label: String, path: PathBuf| {
+            if seen.insert(key(&path)) {
+                list.push((label, path));
+            }
+        };
+        let root = self.project_root.clone();
+        if let (Some(root), Some((_, project))) = (&root, &self.project_settings) {
+            if let Some(fenix_config::Value::Map(entries)) = project.values().get("documents") {
+                for (name, path) in entries {
+                    let path = PathBuf::from(path);
+                    let path = if path.is_absolute() { path } else { root.join(path) };
+                    add(&mut list, format!("project \u{b7} {name}"), path);
+                }
+            }
+        }
+        for (name, path) in &self.config.documents {
+            add(&mut list, name.clone(), path.clone());
+        }
+        for path in self.recent_files.paths().iter().filter(|p| Self::looks_like_pdf(p) && p.exists()) {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let at = self.pdf_places.get(path).map(|p| format!("  p. {} / {}", p.page + 1, p.pages)).unwrap_or_default();
+            add(&mut list, format!("recent \u{b7} {name}{at}"), path.clone());
+        }
+        if let Some(root) = &root {
+            for path in project_pdfs(root) {
+                let shown = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+                add(&mut list, format!("in project \u{b7} {shown}"), path);
+            }
+        }
+        list
     }
 
     /// Opens one `[documents]` entry in the focused pane. A PDF goes
@@ -10668,11 +10562,11 @@ impl App {
     /// empty.
     fn open_document(&mut self, path: &Path) {
         if !path.exists() {
-            self.set_error(format!("{} no longer exists -- check its entry in SPC , (Documents & workspaces)", path.display()));
+            self.set_error(format!("{} no longer exists -- check its entry in SPC , (PDF reader)", path.display()));
             return;
         }
         if Self::looks_like_pdf(path) {
-            self.open_pdf_path_with(path, PdfPlacement::FocusedPane);
+            self.open_pdf_path(path);
             return;
         }
         let id = self.buffers.open_path(path);
@@ -11256,875 +11150,6 @@ impl App {
             Ok(()) => self.set_message(format!("saved {}", path.display())),
             Err(err) => self.set_error(format!("couldn't save screenshot: {err}")),
         }
-    }
-
-    /// Whether `path` should open as a rendered PDF pane instead of an
-    /// ordinary text buffer -- checked by every real "open this path"
-    /// call site (`open_file_from_picker`, `explorer_open_selected`,
-    /// startup) before it ever reaches `BufferList::open_path`, which has
-    /// no notion of PDFs and would otherwise load the raw bytes as
-    /// (garbage) text. Same case-insensitive extension-check idiom as
-    /// `fenix_syntax::detect_language_from_path`.
-    fn looks_like_pdf(path: &Path) -> bool {
-        path.extension().and_then(|e| e.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-    }
-
-    /// Points the focused pane at `path` as a PDF (`SPC r o` and every
-    /// path-opening call site once `looks_like_pdf` says so) -- the PDF
-    /// equivalent of `open_file_from_picker`. Reuses an already-open
-    /// session for the same canonicalized path instead of duplicating it
-    /// (mirrors `open_vnc_session`'s "already open -> switch" branch);
-    /// otherwise spawns the shared worker if this is the first PDF
-    /// opened this run, creates the pane/buffer, and dispatches the
-    /// `Open` request -- the actual page count/render arrive later, async,
-    /// via `apply_pdf_response`.
-    pub(crate) fn open_pdf_path(&mut self, path: &Path) {
-        self.open_pdf_path_with(path, PdfPlacement::NewWorkspace);
-    }
-
-    /// `open_pdf_path` with an explicit `PdfPlacement` -- see that enum
-    /// for what each choice means and why the document index
-    /// (`SPC r f`) wants the other one.
-    fn open_pdf_path_with(&mut self, path: &Path, placement: PdfPlacement) {
-        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if let Some(session) = self.pdf_sessions.get(&canonical) {
-            let (workspace_index, pane) = (session.workspace_index, session.pane);
-            self.workspaces.switch_to_index(workspace_index);
-            self.windows_mut().focus(pane);
-            self.main_view = MainView::Editor;
-            self.wake_caret();
-            return;
-        }
-
-        if self.pdf_worker.is_none() {
-            let worker = match self.event_proxy.clone() {
-                Some(proxy) => fenix_pdf::PdfWorker::spawn(move |response| {
-                    let _ = proxy.send_event(FenixUserEvent::PdfResponse(response));
-                }),
-                // No event loop to report back through (every test) --
-                // the worker still runs (pdfium calls stay serialized
-                // through it, same as real use), its replies just have
-                // nowhere to go, mirroring `start_vnc_connect`'s own
-                // reasoning for why a synchronous fallback isn't used
-                // here: unlike a plain `VncClient::connect` call, calling
-                // pdfium directly on this thread would reintroduce the
-                // exact concurrent-access hazard the shared worker exists
-                // to prevent (see `fenix_pdf`'s own top-level doc comment).
-                None => fenix_pdf::PdfWorker::spawn(|_| {}),
-            };
-            self.pdf_worker = Some(worker);
-        }
-
-        // Retired *before* the new buffer is created and pointed at, so
-        // its own teardown (which clears `pane_titles` for the pane it
-        // was on -- the very pane about to be reused) can't wipe the new
-        // session's title back out from under it.
-        if placement == PdfPlacement::FocusedPane {
-            if let Some(previous) = self.pdf_session_key_for_pane(self.focused_pane_id()) {
-                if previous == canonical {
-                    return; // already showing exactly this document here
-                }
-                // Its outline/search companions belong to *that*
-                // document, so they go with it -- closed via their own
-                // functions (which need the session to still exist, hence
-                // before `pdf_session_forget`) rather than left as panes
-                // showing a stale bookmark list next to a different PDF.
-                // In the `NewWorkspace` case `remove_active()` takes care
-                // of these for free, which is why `pdf_session_close`
-                // doesn't need this.
-                self.pdf_close_outline_pane(&previous);
-                self.pdf_close_search_pane(&previous);
-                self.pdf_session_forget(&previous);
-            }
-        }
-
-        let buffer = self.buffers.open_pdf();
-        let cursor = Cursor::at_start();
-        match placement {
-            PdfPlacement::NewWorkspace => self.workspaces.new_workspace(buffer, cursor),
-            PdfPlacement::FocusedPane => self.open_buffer_in_focused_pane(buffer),
-        }
-        let workspace_index = self.workspaces.active_index();
-        let pane = self.focused_pane_id();
-        let name = canonical.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| canonical.display().to_string());
-        self.pane_titles.insert(pane, format!("PDF: {name}"));
-        self.pdf_display_names.insert(buffer, name);
-
-        let doc_key = fenix_pdf::PdfDocKey::new();
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::Open { key: doc_key, path: canonical.clone() });
-        }
-        self.pdf_sessions.insert(
-            canonical.clone(),
-            PdfSession {
-                doc_key,
-                workspace_index,
-                pane,
-                buffer,
-                page_count: 0,
-                current_page: 0,
-                rendered_page: None,
-                land_at_bottom: false,
-                last_requested_size: (0, 0),
-                pending_request_id: 0,
-                page_point_size: (0.0, 0.0),
-                zoom: PdfZoom::FitPage,
-                last_pane_size: (0, 0),
-                scroll_offset: (0, 0),
-                full_bgra: None,
-                last_uploaded: None,
-                texture: None,
-                outline: None,
-                pending_search_request_id: 0,
-                last_search_query: String::new(),
-            },
-        );
-        self.refresh_project_root();
-        self.record_recent_file(&canonical);
-        self.main_view = MainView::Editor;
-        self.wake_caret();
-    }
-
-    /// Finds whichever PDF session (if any) owns `pane` -- same "keyed by
-    /// something other than buffer/pane, so a linear scan" shape as
-    /// `vnc_session_key_for_pane`.
-    fn pdf_session_key_for_pane(&self, pane: fenix_window::WindowId) -> Option<PathBuf> {
-        self.pdf_sessions.iter().find(|(_, session)| session.pane == pane).map(|(key, _)| key.clone())
-    }
-
-    /// Same as `pdf_session_key_for_pane`, keyed by buffer instead -- what
-    /// `kill_buffer_now` needs to recognize "the buffer about to be
-    /// killed belongs to a PDF session" the same way it already does for
-    /// VNC (`vnc_session_key_for_buffer`).
-    fn pdf_session_key_for_buffer(&self, id: BufferId) -> Option<PathBuf> {
-        self.pdf_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
-    }
-
-    /// Tears down one PDF session: tells the shared worker to drop the
-    /// document (freeing pdfium's own handle for it), closes its buffer,
-    /// clears its pane title/display name, and removes its workspace --
-    /// mirrors `vnc_session_close` exactly. Also cleans up an open
-    /// outline companion pane's side-table entries, if it has one: the
-    /// pane/buffer itself is torn down for free by `remove_active()`
-    /// (the outline pane lives in the same workspace, since `pdf_toggle_
-    /// outline` opens it via a plain split), but `pdf_outline_panes`/
-    /// `pdf_outline_lines`/`pdf_outline_source` don't know that on their
-    /// own and would otherwise keep stale entries forever -- a real leak
-    /// over a long session's worth of opening/closing PDFs, and (worse)
-    /// a wrong answer if this same path is ever reopened: `pdf_outline_
-    /// panes` would still claim an outline pane exists for it when it
-    /// doesn't.
-    fn pdf_session_close(&mut self, key: &Path) {
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
-        self.pdf_session_forget(key);
-        self.workspaces.switch_to_index(workspace_index);
-        self.workspaces.remove_active();
-        self.refresh_project_root();
-        self.wake_caret();
-    }
-
-    /// Everything `pdf_session_close` does *except* removing the
-    /// session's workspace: drops the document on the worker, closes its
-    /// buffer, clears its pane title/display name, and forgets its
-    /// outline/search companion side-table entries. Split out because
-    /// `PdfPlacement::FocusedPane` needs exactly this and nothing more --
-    /// opening a document into a pane that already held a different PDF
-    /// has to retire that session (otherwise two sessions claim the same
-    /// pane and `redraw`'s `find(|s| s.pane == ...)` picks between them
-    /// by `HashMap` iteration order) while *keeping* the workspace the
-    /// new document is about to be shown in.
-    fn pdf_session_forget(&mut self, key: &Path) {
-        let Some(session) = self.pdf_sessions.remove(key) else { return };
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::Close { key: session.doc_key });
-        }
-        self.buffers.close(session.buffer);
-        self.pane_titles.remove(&session.pane);
-        self.pdf_display_names.remove(&session.buffer);
-        if self.pdf_outline_panes.remove(key).is_some() {
-            let stale_outline_buffers: Vec<BufferId> =
-                self.pdf_outline_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
-            for buffer in stale_outline_buffers {
-                self.pdf_outline_lines.remove(&buffer);
-                self.pdf_outline_source.remove(&buffer);
-            }
-        }
-        // Same leak/stale-answer reasoning as the outline cleanup just
-        // above, for a still-open search-results companion pane.
-        if self.pdf_search_panes.remove(key).is_some() {
-            let stale_search_buffers: Vec<BufferId> =
-                self.pdf_search_source.iter().filter(|(_, source)| source.as_path() == key).map(|(buffer, _)| *buffer).collect();
-            for buffer in stale_search_buffers {
-                self.pdf_search_result_lines.remove(&buffer);
-                self.pdf_search_source.remove(&buffer);
-            }
-        }
-    }
-
-    /// Dispatches a fresh `RenderPage` request for `key` at `target_w` x
-    /// `target_h` pixels, bumping `pending_request_id` first so a reply to
-    /// an earlier, now-superseded request gets dropped by `apply_pdf_
-    /// response` instead of clobbering a newer one. A no-op if the
-    /// session or worker doesn't exist, the document hasn't reported its
-    /// page count back yet, or `target_w`/`target_h` is degenerate
-    /// (nothing meaningful to render before either is known).
-    fn dispatch_pdf_render(&mut self, key: &Path, target_w: u32, target_h: u32) {
-        if target_w == 0 || target_h == 0 {
-            return;
-        }
-        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
-        if session.page_count == 0 {
-            return;
-        }
-        session.pending_request_id += 1;
-        session.last_requested_size = (target_w, target_h);
-        let (doc_key, request_id, page_index) = (session.doc_key, session.pending_request_id, session.current_page);
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::RenderPage { key: doc_key, request_id, page_index, target_w, target_h });
-        }
-    }
-
-    /// Recomputes this session's render target from its current `zoom` +
-    /// `page_point_size` + `last_pane_size` and dispatches it -- the
-    /// shared "something changed that isn't a plain resize" path every
-    /// keypress-driven mutator (`pdf_turn_page`, `pdf_goto_page`, the
-    /// `pdf_zoom_*` family) uses instead of duplicating this computation.
-    /// `redraw`'s own pane-classification loop does the equivalent
-    /// computation for the *resize* case specifically, since it's the
-    /// only place that learns about a resize in the first place -- this
-    /// is what everything else reaches for once `last_pane_size` is
-    /// already known from that loop's last pass.
-    fn pdf_dispatch_render_for_zoom(&mut self, key: &Path) {
-        let Some(session) = self.pdf_sessions.get(key) else { return };
-        let (target_w, target_h) = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
-        self.dispatch_pdf_render(key, target_w, target_h);
-    }
-
-    /// `FenixUserEvent::PdfResponse` handling. Every variant carries its
-    /// own `fenix_pdf::PdfDocKey`, not the path `pdf_sessions` is keyed
-    /// by, so each arm scans for the session whose `doc_key` matches
-    /// first -- a no-op (like `apply_vnc_frame`'s per-name lookup) if
-    /// that session's since been closed.
-    fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
-        match response {
-            fenix_pdf::PdfResponse::Opened { key, page_count, page_width_pts, page_height_pts } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
-                session.page_count = page_count;
-                session.page_point_size = (page_width_pts, page_height_pts);
-                // No render dispatched here -- `last_requested_size`
-                // stays `(0, 0)`, which `redraw`'s pane-classification
-                // loop (the only place that actually knows this pane's
-                // real current pixel size) treats as "never rendered
-                // yet" and requests the first render itself on the very
-                // next frame, the same way it reacts to any later resize.
-            }
-            fenix_pdf::PdfResponse::OpenFailed { key, message } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                self.set_error(format!("couldn't open {}: {message}", path.display()));
-            }
-            fenix_pdf::PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                let Some(session) = self.pdf_sessions.get_mut(&path) else { return };
-                if request_id != session.pending_request_id || page_index != session.current_page {
-                    return; // superseded by a later request/page turn since this one was dispatched
-                }
-                session.rendered_page = Some(page_index);
-                session.page_point_size = (page_width_pts, page_height_pts);
-                // A fresh render always starts scrolled to the top-left,
-                // and always invalidates whatever's currently uploaded
-                // (see `last_uploaded`'s own doc comment) -- `redraw`
-                // recreates the texture from `full_bgra` as needed, same
-                // "defer the actual GPU work to redraw" shape VNC's own
-                // `Resolution` arm uses.
-                // `u32::MAX` rather than a computed bottom offset:
-                // `redraw` already clamps `scroll_offset` against the
-                // render's real size and the pane's current size every
-                // frame (the only place both are known together), so
-                // "as far down as this page goes" needs no second copy
-                // of that math here.
-                session.scroll_offset = if session.land_at_bottom { (0, u32::MAX) } else { (0, 0) };
-                session.land_at_bottom = false;
-                session.full_bgra = Some((width, height, bgra));
-                session.last_uploaded = None;
-                // Self-correction for a PDF whose pages aren't all the
-                // same point-size: `page_width_pts`/`page_height_pts` is
-                // *this* page's real size, which may differ from whatever
-                // was assumed when this request was dispatched (there was
-                // no way to know ahead of a page actually being open) --
-                // if the target this page's real size calls for doesn't
-                // match what was actually rendered, the render just
-                // applied is wrong-sized and immediately superseded by a
-                // corrected one. The mutable `session` borrow must end
-                // before this call (`dispatch_pdf_render` needs its own
-                // `&mut self`), hence computing `corrected` here but
-                // calling after the match arm's borrow is out of scope.
-                //
-                // Tolerated to within a pixel on each axis rather than
-                // demanded exactly: real documents routinely vary their
-                // page boxes in the second decimal place (this is true of
-                // most standards PDFs -- a cover page at 595.22x842pt
-                // followed by a body at 595.38x841.98pt is typical), which
-                // rounds to a fit target one pixel off often enough that
-                // an exact comparison re-renders the whole page a second
-                // time on a large fraction of page turns. A pixel of
-                // difference is invisible -- the render is aspect-correct
-                // for its own page either way, and `redraw` centers it in
-                // the pane -- so paying a full re-render for it is pure
-                // waste on the one path that most needs to feel instant.
-                let corrected = pdf_target_size(session.zoom, session.page_point_size, session.last_pane_size);
-                let off_by = (corrected.0.abs_diff(width), corrected.1.abs_diff(height));
-                if corrected != (0, 0) && (off_by.0 > 1 || off_by.1 > 1) {
-                    self.dispatch_pdf_render(&path, corrected.0, corrected.1);
-                }
-            }
-            fenix_pdf::PdfResponse::RenderFailed { key, request_id, message } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                let Some(session) = self.pdf_sessions.get(&path) else { return };
-                if request_id != session.pending_request_id {
-                    return;
-                }
-                self.set_error(format!("couldn't render page: {message}"));
-            }
-            fenix_pdf::PdfResponse::Outline { key, entries } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                if let Some(session) = self.pdf_sessions.get_mut(&path) {
-                    session.outline = Some(entries.clone());
-                }
-                // Always opens the pane once fetched -- `FetchOutline` is
-                // only ever dispatched by `pdf_toggle_outline` wanting to
-                // show it, so there's no other reason a reply would be in
-                // flight. `pdf_open_outline_pane` re-focuses the session's
-                // own workspace/pane first, so this is correct even if the
-                // user navigated elsewhere while the fetch was in flight.
-                self.pdf_open_outline_pane(&path, &entries);
-            }
-            fenix_pdf::PdfResponse::SearchResults { key, request_id, matches } => {
-                let Some(path) = self.pdf_sessions.iter().find(|(_, s)| s.doc_key == key).map(|(p, _)| p.clone()) else { return };
-                let Some(session) = self.pdf_sessions.get(&path) else { return };
-                if request_id != session.pending_search_request_id {
-                    return; // superseded by a later search since this one was dispatched
-                }
-                let query = session.last_search_query.clone();
-                self.set_message(format!("{} match{} for \"{query}\"", matches.len(), if matches.len() == 1 { "" } else { "es" }));
-                self.pdf_open_or_update_search_pane(&path, &query, &matches);
-            }
-        }
-        self.wake_caret();
-    }
-
-    /// `SPC r n` / `SPC r p`: turns the focused PDF session to the next/
-    /// previous page (clamped to `0..page_count`), dispatching a fresh
-    /// render at the pane's last-known size and this session's current
-    /// zoom -- a no-op at either end of the document, and a no-op if the
-    /// focused pane isn't a PDF session at all.
-    fn pdf_turn_page(&mut self, delta: i32) {
-        self.pdf_turn_page_landing(delta, false);
-    }
-
-    /// `pdf_turn_page` plus control over where the new page starts
-    /// scrolled to -- `land_at_bottom` is what makes scrolling up past
-    /// the top of a page continue onto the *bottom* of the previous one
-    /// (see `PdfSession::land_at_bottom`). Returns whether a page turn
-    /// actually happened, which is what `pdf_scroll` needs to know to
-    /// tell "walked onto the next page" apart from "already at the last
-    /// page, so this scroll did nothing".
-    fn pdf_turn_page_landing(&mut self, delta: i32, land_at_bottom: bool) -> bool {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return false };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return false };
-        if session.page_count == 0 {
-            return false;
-        }
-        let new_page = (session.current_page as i32 + delta).clamp(0, session.page_count as i32 - 1) as u32;
-        if new_page == session.current_page {
-            return false;
-        }
-        session.current_page = new_page;
-        session.land_at_bottom = land_at_bottom;
-        self.pdf_dispatch_render_for_zoom(&key);
-        self.wake_caret();
-        true
-    }
-
-    pub(crate) fn pdf_next_page(&mut self) {
-        self.pdf_turn_page(1);
-    }
-
-    pub(crate) fn pdf_prev_page(&mut self) {
-        self.pdf_turn_page(-1);
-    }
-
-    /// `SPC r [` / `Home` and `SPC r ]` / `End`: jumps the focused PDF
-    /// session to the first/last page outright. A no-op if the focused
-    /// pane isn't a PDF session, or its page count isn't known yet.
-    pub(crate) fn pdf_first_page(&mut self) {
-        self.pdf_goto_page(1);
-    }
-
-    pub(crate) fn pdf_last_page(&mut self) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(page_count) = self.pdf_sessions.get(&key).map(|session| session.page_count) else { return };
-        self.pdf_goto_page(page_count);
-    }
-
-    /// Scrolls the focused PDF session's page vertically by `delta_px`
-    /// (positive = further *down* the page), turning to the next/previous
-    /// page once there's nothing left to scroll in that direction --
-    /// which is what makes a wheel notch, `j`/`k`, or an arrow key walk
-    /// through a whole document continuously, the way every other PDF
-    /// reader does, instead of dead-ending at the bottom of a page.
-    ///
-    /// The "nothing left to scroll" case covers the common one too:
-    /// fit-to-page renders the page to exactly the size it occupies, so
-    /// there is *never* anything to scroll under the default zoom and
-    /// every scroll gesture turns the page immediately.
-    ///
-    /// A page turn triggered by scrolling *up* lands on the bottom of the
-    /// previous page rather than its top (see `PdfSession::
-    /// land_at_bottom`), so scrolling back up retraces exactly the
-    /// content scrolling down just covered.
-    fn pdf_scroll(&mut self, delta_px: i32) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        let full_h = session.full_bgra.as_ref().map(|(_, h, _)| *h).unwrap_or(0);
-        // Same clamp `redraw` applies (and writes back) every frame --
-        // recomputed here because a keypress can land between two frames,
-        // and because `apply_pdf_response` deliberately parks a "start at
-        // the bottom" offset out of range for this to resolve.
-        let max_scroll_y = full_h.saturating_sub(full_h.min(session.last_pane_size.1));
-        let current = session.scroll_offset.1.min(max_scroll_y);
-        let next = (current as i64 + delta_px as i64).clamp(0, max_scroll_y as i64) as u32;
-        if next != current {
-            session.scroll_offset.1 = next;
-            self.wake_caret();
-            return;
-        }
-        // Already parked against the edge this scroll pushes toward, so
-        // the gesture means "keep going" -- into the next/previous page.
-        if delta_px > 0 {
-            self.pdf_turn_page_landing(1, false);
-        } else if delta_px < 0 {
-            self.pdf_turn_page_landing(-1, true);
-        }
-    }
-
-    /// `SPC r g`: starts the "type a page number" prompt -- a no-op if
-    /// the focused pane isn't a PDF session (nothing to jump within).
-    pub(crate) fn start_pdf_goto_page_prompt(&mut self) {
-        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
-            return;
-        }
-        self.pdf_goto_page_prompt = Some(String::new());
-        self.wake_caret();
-    }
-
-    /// Routes one keypress to the in-progress `pdf_goto_page_prompt` --
-    /// digits only (this is a 1-indexed page number, not free text), same
-    /// capturing shape as `find_file_prompt_key`.
-    fn pdf_goto_page_prompt_key(&mut self, key: KeyPress) {
-        let Some(input) = &mut self.pdf_goto_page_prompt else { return };
-        match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_goto_page_prompt = None,
-            KeyCode::Named(FenixNamedKey::Enter) => {
-                let input = self.pdf_goto_page_prompt.take().unwrap_or_default();
-                if let Ok(page_number) = input.parse::<u32>() {
-                    self.pdf_goto_page(page_number);
-                }
-            }
-            KeyCode::Named(FenixNamedKey::Backspace) => {
-                input.pop();
-            }
-            KeyCode::Char(c) if key.mods == Mods::default() && c.is_ascii_digit() => input.push(c),
-            _ => {}
-        }
-        self.wake_caret();
-    }
-
-    /// What to show in place of the modeline while `pdf_goto_page_prompt`
-    /// is active -- mirrors `find_file_prompt_text`.
-    fn pdf_goto_page_prompt_text(&self) -> Option<String> {
-        self.pdf_goto_page_prompt.as_ref().map(|input| format!("go to page: {input}"))
-    }
-
-    /// Jumps the focused PDF session directly to `page_number` (1-indexed,
-    /// as shown to the user -- clamped into `1..=page_count`, so an
-    /// out-of-range number lands on the nearest real page rather than
-    /// being rejected outright, same forgiving posture as most page-jump
-    /// UIs). A no-op if the focused pane isn't a PDF session, or its page
-    /// count isn't known yet.
-    fn pdf_goto_page(&mut self, page_number: u32) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        if session.page_count == 0 {
-            return;
-        }
-        let new_page = page_number.saturating_sub(1).min(session.page_count - 1);
-        if new_page == session.current_page {
-            return;
-        }
-        session.current_page = new_page;
-        self.pdf_dispatch_render_for_zoom(&key);
-        self.wake_caret();
-    }
-
-    /// The effective zoom percentage a session's *current* render sits
-    /// at, used to seed `pdf_zoom_in`/`pdf_zoom_out`'s step regardless of
-    /// which zoom mode got it there (`FitPage`/`FitWidth` have no
-    /// percentage of their own -- this derives one from the actual
-    /// rendered size against the page's native point width). Falls back
-    /// to `100` if nothing's been rendered yet or the page size isn't
-    /// known (nothing to derive a ratio from).
-    fn pdf_effective_percent(session: &PdfSession) -> u32 {
-        let (rendered_w, _) = session.last_requested_size;
-        let (page_w_pts, _) = session.page_point_size;
-        if rendered_w == 0 || page_w_pts <= 0.0 {
-            return 100;
-        }
-        ((rendered_w as f32 / page_w_pts) * 100.0).round().max(1.0) as u32
-    }
-
-    /// Shared body for `pdf_zoom_in`/`pdf_zoom_out`: steps the focused
-    /// session's effective zoom percentage by `delta_percent` (positive
-    /// or negative), clamped to `PDF_ZOOM_MIN_PERCENT..=PDF_ZOOM_MAX_
-    /// PERCENT`, switching it into `PdfZoom::Percent` regardless of
-    /// whatever mode it was in before -- a no-op if the focused pane
-    /// isn't a PDF session.
-    fn pdf_zoom_step(&mut self, delta_percent: i32) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        let current = Self::pdf_effective_percent(session);
-        let stepped = (current as i32 + delta_percent).clamp(PDF_ZOOM_MIN_PERCENT as i32, PDF_ZOOM_MAX_PERCENT as i32) as u32;
-        session.zoom = PdfZoom::Percent(stepped);
-        self.pdf_dispatch_render_for_zoom(&key);
-        self.wake_caret();
-    }
-
-    pub(crate) fn pdf_zoom_in(&mut self) {
-        self.pdf_zoom_step(PDF_ZOOM_STEP_PERCENT as i32);
-    }
-
-    pub(crate) fn pdf_zoom_out(&mut self) {
-        self.pdf_zoom_step(-(PDF_ZOOM_STEP_PERCENT as i32));
-    }
-
-    /// Shared body for `pdf_zoom_fit_page`/`pdf_zoom_fit_width`: sets the
-    /// focused session's zoom mode outright and dispatches a render for
-    /// it -- a no-op if the focused pane isn't a PDF session.
-    fn pdf_set_zoom(&mut self, zoom: PdfZoom) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        session.zoom = zoom;
-        self.pdf_dispatch_render_for_zoom(&key);
-        self.wake_caret();
-    }
-
-    pub(crate) fn pdf_zoom_fit_page(&mut self) {
-        self.pdf_set_zoom(PdfZoom::FitPage);
-    }
-
-    pub(crate) fn pdf_zoom_fit_width(&mut self) {
-        self.pdf_set_zoom(PdfZoom::FitWidth);
-    }
-
-    /// `h`/`j`/`k`/`l` while a PDF pane is focused (see `route_keypress`'s
-    /// own `BufferKind::Pdf` block): nudges `scroll_offset` by
-    /// `PDF_PAN_STEP_PX` in the given direction. Never clamped here --
-    /// `redraw`'s own crop computation clamps against `full_bgra`'s
-    /// actual size and the pane's current size every frame regardless of
-    /// how `scroll_offset` got to wherever it is, so an over-eager pan
-    /// past either edge just settles at that edge next frame rather than
-    /// needing its own bounds check here. A no-op if the focused pane
-    /// isn't a PDF session.
-    fn pdf_pan(&mut self, dx: i32, dy: i32) {
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        let step = PDF_PAN_STEP_PX as i32;
-        session.scroll_offset =
-            ((session.scroll_offset.0 as i32 + dx * step).max(0) as u32, (session.scroll_offset.1 as i32 + dy * step).max(0) as u32);
-        self.wake_caret();
-    }
-
-    /// Jumps the PDF session at `key` directly to `page_index`
-    /// (0-indexed, already clamped by the caller if needed) and
-    /// dispatches a fresh render for it. Unlike `pdf_goto_page`/`pdf_
-    /// turn_page` (which act on whichever pane is *focused*), this takes
-    /// an explicit session key -- what `pdf_outline_activate_selected`
-    /// needs, since the *focused* pane when `Enter` is pressed there is
-    /// the outline pane, not the PDF pane it should jump.
-    fn pdf_jump_session_to_page(&mut self, key: &Path, page_index: u32) {
-        let Some(session) = self.pdf_sessions.get_mut(key) else { return };
-        if session.page_count == 0 {
-            return;
-        }
-        let new_page = page_index.min(session.page_count - 1);
-        if new_page != session.current_page {
-            session.current_page = new_page;
-            self.pdf_dispatch_render_for_zoom(key);
-        }
-        self.wake_caret();
-    }
-
-    /// Closes the outline pane for the PDF session at `key`, if one is
-    /// currently open -- shared by `pdf_toggle_outline`'s toggle-off path
-    /// and `kill_buffer_now`'s "the buffer being killed is a `PdfOutline`
-    /// buffer" branch. Refocuses the companion PDF pane afterward so
-    /// toggling feels like a real toggle rather than a jump elsewhere.
-    fn pdf_close_outline_pane(&mut self, key: &Path) {
-        let Some(pane) = self.pdf_outline_panes.remove(key) else { return };
-        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let buffer = self.windows().content(pane).copied();
-        self.windows_mut().focus(pane);
-        if self.windows_mut().close_focused() {
-            self.workspaces.active_pane_states_mut().remove(&pane);
-            self.workspaces.active_scroll_anims_mut().remove(&pane);
-            self.workspaces.active_pane_tabs_mut().remove(&pane);
-        }
-        if let Some(buffer) = buffer {
-            self.buffers.close(buffer);
-            self.pdf_outline_lines.remove(&buffer);
-            self.pdf_outline_source.remove(&buffer);
-        }
-        self.windows_mut().focus(session_pane);
-        self.wake_caret();
-    }
-
-    /// Opens (or, if the worker's reply arrived after the user navigated
-    /// elsewhere, re-opens) an outline pane for the PDF session at `key`,
-    /// showing `entries` -- a plain vertical split off the session's own
-    /// PDF pane, so it always ends up right next to it regardless of
-    /// whatever else might currently be focused. Called both from `pdf_
-    /// toggle_outline`'s "already cached" synchronous path and from
-    /// `apply_pdf_response`'s `Outline` arm (the first-fetch path).
-    fn pdf_open_outline_pane(&mut self, key: &Path, entries: &[fenix_pdf::outline::OutlineEntry]) {
-        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
-        self.workspaces.switch_to_index(workspace_index);
-        self.windows_mut().focus(session_pane);
-
-        let (text, lines) = pdf_outline::render(entries);
-        let buffer = self.buffers.open_pdf_outline(&text);
-        let outline_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
-        self.workspaces.active_pane_states_mut().insert(outline_pane, PaneState::seeded_at(Cursor::at_start()));
-        self.pane_titles.insert(outline_pane, "Outline".to_string());
-        self.pdf_outline_lines.insert(buffer, lines);
-        self.pdf_outline_source.insert(buffer, key.to_path_buf());
-        self.pdf_outline_panes.insert(key.to_path_buf(), outline_pane);
-        self.wake_caret();
-    }
-
-    /// `SPC r o`: toggles the focused PDF session's outline/bookmarks
-    /// panel. Three cases: (1) the outline pane itself is focused --
-    /// close it and return to the PDF pane; (2) a PDF pane is focused and
-    /// its outline is already open -- close it (a real toggle, not
-    /// "always open"); (3) a PDF pane is focused and its outline isn't
-    /// open yet -- open it immediately from `PdfSession::outline` if
-    /// already cached from an earlier toggle, or dispatch `FetchOutline`
-    /// and let `apply_pdf_response`'s `Outline` arm open it once the
-    /// reply lands (the bookmark tree can't change while a document's
-    /// open, so this only ever happens once per session). A no-op if
-    /// neither a PDF pane nor its outline pane is focused.
-    pub(crate) fn pdf_toggle_outline(&mut self) {
-        let focused_buffer = self.focused_buffer_id();
-        if self.buffers.get(focused_buffer).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
-            if let Some(key) = self.pdf_outline_source.get(&focused_buffer).cloned() {
-                self.pdf_close_outline_pane(&key);
-            }
-            return;
-        }
-
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-
-        if self.pdf_outline_panes.contains_key(&key) {
-            self.pdf_close_outline_pane(&key);
-            return;
-        }
-
-        if let Some(entries) = self.pdf_sessions.get(&key).and_then(|session| session.outline.clone()) {
-            self.pdf_open_outline_pane(&key, &entries);
-            return;
-        }
-
-        let Some(session) = self.pdf_sessions.get(&key) else { return };
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::FetchOutline { key: session.doc_key });
-        }
-    }
-
-    /// `Enter` on a `BufferKind::PdfOutline` line (see `route_keypress`'s
-    /// own `PdfOutline` block): looks up what the cursor's current line
-    /// means via `pdf_outline_lines`, a no-op for a blank/unstyled line
-    /// (e.g. the "(this PDF has no bookmarks)" placeholder), and
-    /// otherwise jumps the companion PDF pane straight to that entry's
-    /// page -- mirrors `dashboard_activate_selected`'s own cursor-line ->
-    /// side-table -> action shape.
-    fn pdf_outline_activate_selected(&mut self) {
-        let cursor = self.cursor();
-        let line = self.open().buffer.line_col(&cursor).0;
-        let buffer_id = self.focused_buffer_id();
-        let page_index = self
-            .pdf_outline_lines
-            .get(&buffer_id)
-            .and_then(|lines| lines.get(line))
-            .and_then(|meta| meta.as_ref())
-            .map(|meta| meta.page_index);
-        let Some(page_index) = page_index else { return };
-        let Some(key) = self.pdf_outline_source.get(&buffer_id).cloned() else { return };
-        self.pdf_jump_session_to_page(&key, page_index);
-    }
-
-    /// `SPC r /`: starts the "type a search query" prompt -- a no-op if
-    /// the focused pane isn't a PDF session (nothing to search within),
-    /// same guard `start_pdf_goto_page_prompt` uses.
-    pub(crate) fn start_pdf_search_prompt(&mut self) {
-        if self.pdf_session_key_for_pane(self.focused_pane_id()).is_none() {
-            return;
-        }
-        self.pdf_search_prompt = Some(String::new());
-        self.wake_caret();
-    }
-
-    /// Routes one keypress to the in-progress `pdf_search_prompt` -- free
-    /// text (unlike `pdf_goto_page_prompt_key`'s digits-only), same
-    /// capturing shape as `find_file_prompt_key`.
-    fn pdf_search_prompt_key(&mut self, key: KeyPress) {
-        let Some(input) = &mut self.pdf_search_prompt else { return };
-        match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.pdf_search_prompt = None,
-            KeyCode::Named(FenixNamedKey::Enter) => {
-                let query = self.pdf_search_prompt.take().unwrap_or_default();
-                self.pdf_dispatch_search(query);
-            }
-            KeyCode::Named(FenixNamedKey::Backspace) => {
-                input.pop();
-            }
-            KeyCode::Char(c) if key.mods == Mods::default() => input.push(c),
-            _ => {}
-        }
-        self.wake_caret();
-    }
-
-    /// What to show in place of the modeline while `pdf_search_prompt` is
-    /// active -- mirrors `pdf_goto_page_prompt_text`.
-    fn pdf_search_prompt_text(&self) -> Option<String> {
-        self.pdf_search_prompt.as_ref().map(|input| format!("search pdf: {input}"))
-    }
-
-    /// Dispatches a `Search` request for the focused PDF session with
-    /// `query`, bumping `pending_search_request_id` first so a reply to
-    /// an earlier, now-superseded search gets dropped by `apply_pdf_
-    /// response` instead of clobbering a newer one -- same staleness
-    /// guard `pdf_dispatch_render` gives page renders. A no-op (blank
-    /// query, no focused PDF session, or no worker) leaves whatever
-    /// search-results pane already exists untouched.
-    fn pdf_dispatch_search(&mut self, query: String) {
-        if query.trim().is_empty() {
-            return;
-        }
-        let Some(key) = self.pdf_session_key_for_pane(self.focused_pane_id()) else { return };
-        let Some(session) = self.pdf_sessions.get_mut(&key) else { return };
-        session.pending_search_request_id += 1;
-        session.last_search_query = query.clone();
-        let request_id = session.pending_search_request_id;
-        let doc_key = session.doc_key;
-        if let Some(worker) = &self.pdf_worker {
-            worker.send(fenix_pdf::PdfRequest::Search { key: doc_key, request_id, query });
-        }
-        self.set_message("searching...");
-    }
-
-    /// Closes the search-results pane for the PDF session at `key`, if
-    /// one is currently open -- mirrors `pdf_close_outline_pane` exactly,
-    /// used by `kill_buffer_now`'s "the buffer being killed is a
-    /// `PdfSearchResults` buffer" branch (there's no dedicated toggle key
-    /// for search the way `SPC r o` doubles as open/close for the
-    /// outline -- a fresh `SPC r /` search just replaces this pane's
-    /// content in place instead, see `pdf_open_or_update_search_pane`).
-    fn pdf_close_search_pane(&mut self, key: &Path) {
-        let Some(pane) = self.pdf_search_panes.remove(key) else { return };
-        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let buffer = self.windows().content(pane).copied();
-        self.windows_mut().focus(pane);
-        if self.windows_mut().close_focused() {
-            self.workspaces.active_pane_states_mut().remove(&pane);
-            self.workspaces.active_scroll_anims_mut().remove(&pane);
-            self.workspaces.active_pane_tabs_mut().remove(&pane);
-        }
-        if let Some(buffer) = buffer {
-            self.buffers.close(buffer);
-            self.pdf_search_result_lines.remove(&buffer);
-            self.pdf_search_source.remove(&buffer);
-        }
-        self.windows_mut().focus(session_pane);
-        self.wake_caret();
-    }
-
-    /// Opens a search-results pane for the PDF session at `key` showing
-    /// `matches` (a plain vertical split off the session's own PDF pane,
-    /// same as `pdf_open_outline_pane`), or, if one's already open from
-    /// an earlier search on this same session, rewrites its buffer text
-    /// in place instead of stacking a second pane -- same "rewrite the
-    /// whole affected span as one step" tool (`Buffer::replace_range`)
-    /// `set_docker_buffer`'s refresh already uses, and the same
-    /// "a refreshed listing can reorder/add/remove rows, so an old cursor
-    /// position is meaningless against it" reasoning for resetting the
-    /// cursor to the top on every update.
-    fn pdf_open_or_update_search_pane(&mut self, key: &Path, query: &str, matches: &[fenix_pdf::search::PdfSearchMatch]) {
-        let (text, lines) = pdf_search::render(query, matches);
-
-        if let Some(&pane) = self.pdf_search_panes.get(key) {
-            if let Some(buffer) = self.windows().content(pane).copied() {
-                if let Some(ob) = self.buffers.get_mut(buffer) {
-                    let end = ob.buffer.len_chars();
-                    let mut scratch_cursor = Cursor::at_start();
-                    ob.buffer.replace_range(&mut scratch_cursor, 0, end, &text);
-                }
-                self.pdf_search_result_lines.insert(buffer, lines);
-                for p in self.windows().windows() {
-                    if self.windows().content(p) == Some(&buffer) {
-                        let ps = self.pane_state_mut(p);
-                        *ps = PaneState::seeded_at(Cursor::at_start());
-                    }
-                }
-                self.wake_caret();
-                return;
-            }
-        }
-
-        let Some(session_pane) = self.pdf_sessions.get(key).map(|session| session.pane) else { return };
-        let Some(workspace_index) = self.pdf_sessions.get(key).map(|session| session.workspace_index) else { return };
-        self.workspaces.switch_to_index(workspace_index);
-        self.windows_mut().focus(session_pane);
-
-        let buffer = self.buffers.open_pdf_search_results(&text);
-        let search_pane = self.windows_mut().split(SplitKind::Vertical, buffer);
-        self.workspaces.active_pane_states_mut().insert(search_pane, PaneState::seeded_at(Cursor::at_start()));
-        self.pane_titles.insert(search_pane, "Search results".to_string());
-        self.pdf_search_result_lines.insert(buffer, lines);
-        self.pdf_search_source.insert(buffer, key.to_path_buf());
-        self.pdf_search_panes.insert(key.to_path_buf(), search_pane);
-        self.wake_caret();
-    }
-
-    /// `Enter` on a `BufferKind::PdfSearchResults` line (see
-    /// `route_keypress`'s own `PdfSearchResults` block): looks up what
-    /// the cursor's current line means via `pdf_search_result_lines`, a
-    /// no-op for a blank/unstyled line (e.g. the "(no matches for ...)"
-    /// placeholder), and otherwise jumps the companion PDF pane straight
-    /// to that match's page -- mirrors `pdf_outline_activate_selected`
-    /// exactly.
-    fn pdf_search_activate_selected(&mut self) {
-        let cursor = self.cursor();
-        let line = self.open().buffer.line_col(&cursor).0;
-        let buffer_id = self.focused_buffer_id();
-        let page_index = self
-            .pdf_search_result_lines
-            .get(&buffer_id)
-            .and_then(|lines| lines.get(line))
-            .and_then(|meta| meta.as_ref())
-            .map(|meta| meta.page_index);
-        let Some(page_index) = page_index else { return };
-        let Some(key) = self.pdf_search_source.get(&buffer_id).cloned() else { return };
-        self.pdf_jump_session_to_page(&key, page_index);
     }
 
     /// Encodes `keypress` and writes it to the live terminal session, if
@@ -13643,21 +12668,10 @@ impl App {
             self.vnc_session_close(&key);
             return;
         }
-        if let Some(key) = self.pdf_session_key_for_buffer(id) {
-            self.pdf_session_close(&key);
-            return;
-        }
-        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfOutline) {
-            if let Some(key) = self.pdf_outline_source.get(&id).cloned() {
-                self.pdf_close_outline_pane(&key);
-                return;
-            }
-        }
-        if self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::PdfSearchResults) {
-            if let Some(key) = self.pdf_search_source.get(&id).cloned() {
-                self.pdf_close_search_pane(&key);
-                return;
-            }
+        // A document goes with its buffer; the buffer is closed below
+        // like any other.
+        if self.pdf_docs.contains_key(&id) {
+            self.pdf_close_doc(id);
         }
         // A pane-resident terminal's shell dies with its buffer -- see
         // `close_terminal_buffer` for why this, and not navigating away
@@ -14922,6 +13936,7 @@ impl App {
         let Some(buffer_id) = self.buffers.id_for_path(path) else {
             self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+            self.beacon_here();
             return;
         };
         let mut shown_somewhere = false;
@@ -14940,6 +13955,12 @@ impl App {
         if !shown_somewhere {
             self.open_file_as_preview(path);
             self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col: 1, text: String::new() });
+            self.beacon_here();
+        } else {
+            let prefs = self.motion();
+            if prefs.beacon {
+                self.start_beacon(buffer_id, line.saturating_sub(1), Instant::now(), prefs.beacon_d);
+            }
         }
     }
 
@@ -16413,9 +15434,11 @@ impl App {
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
+        self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
         }
+        self.pdf_reload_changed();
         let sweep = self.reload_buffers_changed_on_disk();
         let Some(message) = sweep.message() else { return };
         if sweep.is_bad() {
@@ -18161,6 +17184,7 @@ impl App {
         match self.event_proxy.clone() {
             Some(proxy) => {
                 self.set_message("fetching...");
+                self.motion.git_fetching = true;
                 std::thread::spawn(move || {
                     let result = fenix_git::fetch(&repo_root);
                     let _ = proxy.send_event(FenixUserEvent::GitFetched { result });
@@ -18174,6 +17198,7 @@ impl App {
     }
 
     fn apply_git_fetched(&mut self, result: Result<String, String>) {
+        self.motion.git_fetching = false;
         match result {
             Ok(_) => self.set_message("fetched"),
             Err(err) => self.set_error(format!("fetch failed: {}", err.trim())),
@@ -18833,6 +17858,19 @@ impl App {
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
             }
+            Some(ActivePicker::PdfHeading(picker)) => {
+                let Some(page) = picker.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.pdf_heading_picked(page);
+            }
+            Some(ActivePicker::SettingChoice { key, picker }) => {
+                let Some(value) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let key = *key;
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.setting_chosen(key, &value);
+            }
             Some(ActivePicker::CompareHead { base, picker }) => {
                 let Some(head) = picker.selected().map(|c| c.payload.clone()) else { return };
                 let base = base.clone();
@@ -18988,7 +18026,7 @@ impl App {
 
     fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
-            self.open_pdf_path(path);
+            self.open_pdf_path_as(path, preview);
             return;
         }
         let id = self.buffers.open_path(path);
@@ -20819,7 +19857,7 @@ impl App {
     pub(crate) fn start_workspace_launcher_picker(&mut self) {
         if self.config.workspaces.is_empty() {
             self.set_error(
-                "no workspaces on the shelf yet -- add them in SPC , (Documents & workspaces)".to_string(),
+                "no workspaces on the shelf yet -- add them in SPC , (Workspaces)".to_string(),
             );
             return;
         }
@@ -20938,7 +19976,9 @@ impl App {
     /// redraw. Save failure is non-fatal, same posture as `refresh_
     /// project_root`'s `known_projects.save()`.
     fn apply_theme(&mut self, theme: &'static Theme) {
+        let old = self.theme;
         self.theme = theme;
+        self.fade_theme_from(old);
         self.config.theme = Some(self.theme.name.to_string());
         if let Err(err) = self.config.save() {
             eprintln!("fenix: couldn't save theme choice: {err}");
@@ -21043,21 +20083,16 @@ impl App {
     /// than one central gate, since each animation is started from a
     /// different place and "just render it instantly instead" reads
     /// more clearly at the call site than a wrapped condition would.
+    #[cfg(test)]
     pub(crate) fn animations_enabled(&self) -> bool {
-        self.config.animations.unwrap_or(true)
+        crate::motion::level(&self.config) != crate::motion::Level::Off
     }
 
     /// `SPC t a`: flips `config.animations` and persists it -- lets the
     /// user A/B a responsiveness complaint against animation cost
     /// without editing `config.ini` by hand.
     pub(crate) fn toggle_animations(&mut self) {
-        let enabled = !self.animations_enabled();
-        self.config.animations = Some(enabled);
-        if let Err(err) = self.config.save() {
-            self.set_error(format!("couldn't save settings.toml: {err}"));
-        } else {
-            self.set_message(if enabled { "Animations on" } else { "Animations off" });
-        }
+        self.cycle_motion_level();
     }
 
     /// Resets the caret blink timer so an edit or navigation always leaves
@@ -21079,11 +20114,12 @@ impl App {
     /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
     /// whichever state the caret last toggled into.
     fn caret_alpha(&self) -> f32 {
-        if !self.animations_enabled() {
+        let prefs = self.motion();
+        if !prefs.caret_fade {
             return if self.blink_visible { 1.0 } else { 0.0 };
         }
         let elapsed = Instant::now().duration_since(self.blink_transition_start);
-        let t = ease_out_cubic(elapsed.as_secs_f32() / BLINK_FADE.as_secs_f32());
+        let t = ease_out_cubic(elapsed.as_secs_f32() / prefs.blink_fade_d.as_secs_f32().max(1e-3));
         if self.blink_visible { t } else { 1.0 - t }
     }
 
@@ -21152,6 +20188,7 @@ impl App {
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        self.motion.key_repeat = event.repeat;
         // Caps Lock has no `fenix_keymap::NamedKey` counterpart -- it's
         // never a meaningful vim/leader keybinding, so `keymap::to_
         // keypress` filters it out before either branch below would ever
@@ -21235,7 +20272,9 @@ impl App {
             self.change_capture_dirty = false;
         }
         self.change_capture.push(keypress);
+        let before = self.motion_before_key();
         self.route_keypress(keypress, event_loop);
+        self.motion_after_key(before, keypress);
         if self.vim.is_idle() {
             if self.change_capture_dirty {
                 self.last_change_keys = Some(std::mem::take(&mut self.change_capture));
@@ -21514,6 +20553,13 @@ impl App {
                 return;
             }
             if let KeyCode::Char(c) = keypress.code {
+                // A PDF has jumps of its own; with none to go back to, the
+                // editor's own jump list takes the key.
+                let pdf_jump = (c.eq_ignore_ascii_case(&'o') || c.eq_ignore_ascii_case(&'i')) && self.open().kind == BufferKind::Pdf;
+                if pdf_jump && self.pdf_jump_history(c.eq_ignore_ascii_case(&'o')) {
+                    self.wake_caret();
+                    return;
+                }
                 let id = if c.eq_ignore_ascii_case(&'s') {
                     Some("file.save")
                 } else if c.eq_ignore_ascii_case(&'z') && self.modifiers.shift_key() {
@@ -21552,8 +20598,8 @@ impl App {
 
         // Window-size-aware paging is a GUI concern, handled the same way
         // regardless of Vim mode -- fenix-vim doesn't know about viewport size.
-        if keypress == KeyPress::named(FenixNamedKey::PageUp)
-            || keypress == KeyPress::named(FenixNamedKey::PageDown)
+        if (keypress == KeyPress::named(FenixNamedKey::PageUp) || keypress == KeyPress::named(FenixNamedKey::PageDown))
+            && self.open().kind != BufferKind::Pdf
         {
             let page_size = match (&self.gpu, &self.text) {
                 (Some(gpu), Some(text)) => {
@@ -21581,6 +20627,14 @@ impl App {
         // never reach `self.vim`, so the selection's anchor/cursor stay
         // exactly as they were until whatever command they resolve to
         // (e.g. `format_selection`) reads them.
+        // In an open leader menu, Backspace goes up a level and Ctrl-n /
+        // Ctrl-p page through it (see `which_key`).
+        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
+            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
+        {
+            self.wake_caret();
+            return;
+        }
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
                 CommandRegistry::with_builtins().run(self, event_loop, id);
@@ -21694,99 +20748,10 @@ impl App {
             }
         }
 
-        // A PDF pane's buffer is deliberately empty (see `BufferKind`'s
-        // own doc comment on `Pdf`) -- there's no real text underneath
-        // for any of these to move a cursor through, so a reader's worth
-        // of bare keys is claimed here rather than falling through to Vim
-        // as harmless no-ops on nothing.
-        //
-        // Everything a reader reaches for without thinking is bound
-        // directly, because a three-key leader chord (`SPC r n`) per page
-        // is not a page-turn gesture anyone will use to read a 50-page
-        // document: `PageDown`/`PageUp` and `n`/`p` turn the page,
-        // `j`/`k` and the arrow keys scroll continuously *through* page
-        // boundaries (see `pdf_scroll`), `Home`/`End` jump to the first/
-        // last page, `+`/`-`/`0` zoom, and `/` searches. The `SPC r ...`
-        // leader bindings all still work and are what the which-key menu
-        // discovers -- these are the same commands, reachable in one
-        // keystroke while a PDF is actually focused. `SPC` itself never
-        // reaches here (the leader block above claims it first), which is
-        // why space isn't bound as a page-down.
-        if self.open().kind == BufferKind::Pdf && keypress.mods == Mods::default() {
-            match keypress.code {
-                KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => {
-                    self.pdf_pan(-1, 0);
-                    return;
-                }
-                KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => {
-                    self.pdf_pan(1, 0);
-                    return;
-                }
-                KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => {
-                    self.pdf_scroll(PDF_PAN_STEP_PX as i32);
-                    return;
-                }
-                KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => {
-                    self.pdf_scroll(-(PDF_PAN_STEP_PX as i32));
-                    return;
-                }
-                KeyCode::Named(FenixNamedKey::PageDown) | KeyCode::Char('n') => {
-                    self.pdf_next_page();
-                    return;
-                }
-                KeyCode::Named(FenixNamedKey::PageUp) | KeyCode::Named(FenixNamedKey::Backspace) | KeyCode::Char('p') => {
-                    self.pdf_prev_page();
-                    return;
-                }
-                KeyCode::Named(FenixNamedKey::Home) | KeyCode::Char('g') => {
-                    self.pdf_first_page();
-                    return;
-                }
-                KeyCode::Named(FenixNamedKey::End) | KeyCode::Char('G') => {
-                    self.pdf_last_page();
-                    return;
-                }
-                KeyCode::Char('+') | KeyCode::Char('=') => {
-                    self.pdf_zoom_in();
-                    return;
-                }
-                KeyCode::Char('-') => {
-                    self.pdf_zoom_out();
-                    return;
-                }
-                KeyCode::Char('0') => {
-                    self.pdf_zoom_fit_page();
-                    return;
-                }
-                KeyCode::Char('w') => {
-                    self.pdf_zoom_fit_width();
-                    return;
-                }
-                KeyCode::Char('/') => {
-                    self.start_pdf_search_prompt();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // A PDF outline pane is a real Vim-navigable buffer (see
-        // `BufferKind`'s own doc comment on `PdfOutline`) -- every other
-        // key still reaches Vim below unchanged (movement, `/` search,
-        // `gg`/`G`...); only `Enter` means something special on it, same
-        // shape as the Dashboard interception above.
-        if self.open().kind == BufferKind::PdfOutline && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
-            self.pdf_outline_activate_selected();
-            self.wake_caret();
-            return;
-        }
-
-        // A PDF search-results pane -- same shape as the outline
-        // interception just above, just jumping to a match's page
-        // instead of a bookmark's.
-        if self.open().kind == BufferKind::PdfSearchResults && keypress.code == KeyCode::Named(FenixNamedKey::Enter) {
-            self.pdf_search_activate_selected();
-            self.wake_caret();
+        // A PDF pane: the reader's keys (`reader::Keys`) -- counts,
+        // `j`/`k`, `J`/`K`, `gg`/`G`, `g` waiting for the tab keys, zoom,
+        // `/` and `n`. What it doesn't take goes on to the editor.
+        if self.open().kind == BufferKind::Pdf && self.reader_key(keypress) {
             return;
         }
 
@@ -22441,7 +21406,7 @@ impl App {
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
-                if self.animations_enabled() {
+                if self.motion().yank_pulse {
                     self.pulse = Some(Pulse { range, started: Instant::now() });
                 }
             }
@@ -22495,6 +21460,7 @@ impl App {
                 fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
                 fenix_vim::LspRequestKind::References => self.request_references(),
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
+                fenix_vim::LspRequestKind::FileUnderCursor => self.follow_link_under_cursor(),
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
@@ -22653,14 +21619,17 @@ impl App {
             // away) snaps instantly rather than blurring through an ease.
             // A target arriving while the *previous* ease for this pane
             // hasn't finished yet snaps too: that only happens when scroll
-            // targets are coming in faster than SCROLL_DURATION can settle
+            // targets are coming in faster than the scroll ease can settle
             // (held-key repeat, e.g. holding `j`), and re-triggering a
             // fresh 150ms ease on every one of those keystrokes would
             // otherwise make `rendered_scroll` perpetually chase a few
             // lines behind the cursor instead of ever catching up -- the
             // opposite of the "never sits between a keypress and its
             // effect" goal this animation was built for.
-            if !self.animations_enabled() || jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || self.workspaces.active_scroll_anims().contains_key(&pane) {
+            // A held key keeps snapping; anything else arriving mid-ease
+            // (the wheel's next notch) eases on from where the view is.
+            let chasing = self.motion.key_repeat && self.workspaces.active_scroll_anims().contains_key(&pane);
+            if !self.motion().smooth_scroll || jump > visible_lines.saturating_mul(SCROLL_SNAP_SCREENS) || chasing {
                 self.workspaces.active_scroll_anims_mut().remove(&pane);
                 self.pane_state_mut(pane).rendered_scroll = target as f32;
             } else {
@@ -22715,7 +21684,7 @@ impl App {
             return;
         };
         let (from, to, started) = (anim.from, anim.to, anim.started);
-        let t = Instant::now().duration_since(started).as_secs_f32() / SCROLL_DURATION.as_secs_f32();
+        let t = Instant::now().duration_since(started).as_secs_f32() / self.motion().scroll_d.as_secs_f32().max(1e-3);
         if t >= 1.0 {
             self.pane_state_mut(pane).rendered_scroll = to as f32;
             self.workspaces.active_scroll_anims_mut().remove(&pane);
@@ -22763,11 +21732,7 @@ impl App {
                 // registered.
                 self.vnc_session_key_for_buffer(buffer_id).map(|name| format!("VNC: {name}")).unwrap_or_else(|| "*vnc*".to_string())
             } else if ob.kind == BufferKind::Pdf {
-                self.pdf_display_names.get(&buffer_id).cloned().unwrap_or_else(|| "*pdf*".to_string())
-            } else if ob.kind == BufferKind::PdfOutline {
-                "*pdf outline*".to_string()
-            } else if ob.kind == BufferKind::PdfSearchResults {
-                "*pdf search*".to_string()
+                self.pdf_docs.get(&buffer_id).map(|doc| doc.name.clone()).unwrap_or_else(|| "*pdf*".to_string())
             } else if ob.kind == BufferKind::TaskOutput {
                 "*task output*".to_string()
             } else if ob.kind == BufferKind::Debug {
@@ -22898,6 +21863,8 @@ impl App {
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
+                Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
@@ -22997,12 +21964,7 @@ impl App {
         // *document* the reader is instead, which is the one thing a
         // reader checks the status line for (and the only place the
         // current zoom is visible at all).
-        if let Some(session) = self.pdf_session_key_for_pane(self.focused_pane_id()).and_then(|key| self.pdf_sessions.get(&key)) {
-            let position = if session.page_count == 0 {
-                "opening...".to_string()
-            } else {
-                format!("Page {}/{}   {}", session.current_page + 1, session.page_count, pdf_zoom_label(session))
-            };
+        if let Some(position) = self.pdf_modeline_position() {
             return (mode_label, format!("{filename}{workspace_indicator}   {position} "));
         }
         // Error/warning counts for whatever the focused buffer's own
@@ -23308,8 +22270,6 @@ impl App {
             || ob.kind == BufferKind::SearchReplace
             || ob.kind == BufferKind::Vnc
             || ob.kind == BufferKind::Pdf
-            || ob.kind == BufferKind::PdfOutline
-            || ob.kind == BufferKind::PdfSearchResults
             || ob.kind == BufferKind::TaskOutput
             || ob.kind == BufferKind::Debug
             || ob.kind == BufferKind::ToolStatus
@@ -23789,27 +22749,13 @@ impl App {
         })
     }
 
-    /// Key/label pairs for whichever pending sequence is currently active
-    /// (the leader menu takes priority, since it's the outermost one --
-    /// Vim can't be mid-sequence while a leader sequence is in progress).
-    /// Empty when nothing is pending.
-    fn pending_hints(&self) -> Vec<(KeyPress, &'static str)> {
-        if let Some(local) = &self.local_matcher {
-            local.pending_children()
-        } else if self.leader_matcher.is_pending() {
-            self.leader_matcher.pending_children()
-        } else {
-            self.vim.pending_children()
-        }
-    }
-
     /// Segments and current alpha for an active yank/paste pulse, or
     /// `None` when there isn't one. Fades quickly at first then lingers
     /// faintly, via the same ease-out curve as the caret (inverted: pulses
     /// start bright and fade, blink fades in toward its target instead).
     fn pulse_overlay(&self, visible_lines: usize) -> Option<(Segments, f32)> {
         let pulse = self.pulse.as_ref()?;
-        let t = Instant::now().duration_since(pulse.started).as_secs_f32() / PULSE_DURATION.as_secs_f32();
+        let t = Instant::now().duration_since(pulse.started).as_secs_f32() / self.motion().pulse_d.as_secs_f32().max(1e-3);
         let alpha = PULSE_PEAK_ALPHA * (1.0 - ease_out_cubic(t));
         if alpha <= 0.0 {
             return None;
@@ -23871,49 +22817,6 @@ impl App {
     /// `popup::max_rows` says actually fits above the modeline, with a
     /// trailing "+N more" summary row instead of letting the panel run
     /// under it.
-    fn which_key_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
-        let mut hints = self.pending_hints();
-        if hints.is_empty() {
-            return None;
-        }
-        hints.sort_by(|a, b| a.1.cmp(b.1));
-
-        let (char_width, line_height) = match &self.text {
-            Some(text) => (text.char_width(), text.line_height()),
-            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
-        };
-
-        let max_rows = popup::max_rows(modeline_top, text::WHICH_KEY_MARGIN, line_height, WHICH_KEY_PADDING);
-        let shown_count = if hints.len() > max_rows { max_rows.saturating_sub(1).max(1) } else { hints.len() };
-        let truncated = hints.len() - shown_count;
-
-        const KEY_COLUMN_CHARS: usize = 6;
-        let longest_label = hints[..shown_count].iter().map(|(_, label)| label.chars().count()).max().unwrap_or(0);
-        let content_chars = KEY_COLUMN_CHARS + longest_label + 1;
-        let max_width = (window_width - 2.0 * text::WHICH_KEY_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
-        let width = (content_chars as f32 * char_width + WHICH_KEY_PADDING)
-            .clamp(text::WHICH_KEY_MIN_WIDTH, text::WHICH_KEY_MAX_WIDTH.min(max_width));
-
-        let theme = self.theme;
-        let mut spans = Vec::new();
-        for (i, (key, label)) in hints[..shown_count].iter().enumerate() {
-            if i > 0 {
-                spans.push(("\n".to_string(), theme.fg_modeline, false));
-            }
-            spans.push((format!("{:<KEY_COLUMN_CHARS$}", keymap::describe_keypress(key)), theme.caret_text, false));
-            spans.push(((*label).to_string(), theme.fg_modeline, false));
-        }
-        if truncated > 0 {
-            spans.push(("\n".to_string(), theme.fg_modeline, false));
-            spans.push((format!("+{truncated} more"), theme.fg_modeline, false));
-        }
-
-        let row_count = shown_count + usize::from(truncated > 0);
-        let height = row_count as f32 * line_height + WHICH_KEY_PADDING;
-        let rect = popup::resolve(popup::Anchor::TopRight { margin: text::WHICH_KEY_MARGIN }, width, height, window_width, modeline_top);
-        Some((rect, spans))
-    }
-
     /// The Docker panel's contextual "view command options" popup (`x`
     /// on a Containers/Images/Volumes pane) -- mirrors `which_key_popup`'s
     /// shape, but its content is a small static per-`DockerPaneRole` list
@@ -24510,8 +23413,107 @@ impl App {
     /// descriptive title rather than tabs, and no cursor position to
     /// describe a path to, so a breadcrumb row there would only ever be
     /// blank.
+    /// A pane's tab strip, when the theme draws one and the pane isn't a
+    /// fixed-purpose panel with a title of its own: the tabs' rects,
+    /// which is active, the strip's text, the breadcrumb (for the buffer
+    /// and position in `crumbs_at`), each tab's text range and which are
+    /// in italics. Computed while `self` is still whole, since it needs
+    /// the buffers and workspaces.
+    #[allow(clippy::type_complexity)]
+    fn pane_tab_strip(
+        &self,
+        pane: fenix_window::WindowId,
+        rect: fenix_window::Rect,
+        line_height: f32,
+        is_focused: bool,
+        theme: &Theme,
+        crumbs_at: Option<(BufferId, usize)>,
+    ) -> (Vec<TabRect>, Vec<bool>, Vec<(String, glyphon::Color, bool)>, Vec<(String, glyphon::Color, bool)>, Vec<(usize, usize, usize, usize)>, Vec<usize>) {
+        if self.tab_style().is_none() || self.pane_titles.contains_key(&pane) {
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        }
+            // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
+            // body font (see `TextPipeline::title_metrics`), so its
+            // real glyphs are narrower per cell than the body `char_
+            // width` used elsewhere in this loop -- laying tabs out
+            // with that wider body measurement drifted the background/
+            // hit-test geometry further right of the actually-smaller
+            // rendered text with every tab.
+            let title_char_width =
+                self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+            let strip_rect = tab_strip_rect(fenix_window::Rect {
+                x: rect.x,
+                y: rect.y - title_reserved_height(line_height),
+                w: rect.w,
+                h: tab_strip_height(line_height),
+            });
+            // A pane's list is its complete navigation history, not its
+            // visible tabs. Lazily resolve names so repeated redraws
+            // while moving do work proportional to tabs that fit, not
+            // all files ever visited in that pane.
+            let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
+            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
+            let active_buffer = self.windows().content(pane).copied();
+            let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
+            let mut active_flags: Vec<bool> = Vec::new();
+            let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+            let mut italic: Vec<usize> = Vec::new();
+            let mut byte = 0usize;
+            for tab in &layout {
+                let is_active = Some(tab.buffer) == active_buffer;
+                active_flags.push(is_active);
+                let name_color =
+                    if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
+                // Home: the house, the workspace's name, and no ×
+                // -- blanks where it would be, so it measures and
+                // lines up like every other tab.
+                let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
+                let name = self.tab_label(tab.buffer);
+                let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
+                let dirty = self
+                    .buffers
+                    .get(tab.buffer)
+                    .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
+                // Truncated against `TAB_MAX_NAME_CHARS` directly, and
+                // padded up to `TAB_MIN_NAME_CHARS`, rather than
+                // derived back out of `tab.body.w`. That round trip
+                // (width -> budget -> text) was one half of why the
+                // drawn tab never matched its own glyphs: it assumed
+                // every rendered cell is `title_char_width` wide, which
+                // the icon span in particular is not.
+                let truncated = truncate_tab_name(&name, TAB_MAX_NAME_CHARS);
+                let label = if truncated.chars().count() < TAB_MIN_NAME_CHARS {
+                    format!("{truncated:<width$}", width = TAB_MIN_NAME_CHARS)
+                } else {
+                    truncated
+                };
+                // Byte ranges into the concatenated strip string, so
+                // `TextPipeline::title_span_bounds` can report where
+                // this tab and its close glyph actually landed once
+                // shaped. The title buffer holds only the tab row (the
+                // breadcrumb bar is its own buffer), so these offsets
+                // start at 0 and stay in that string's own space.
+                let icon_span = format!(" {icon_ch} ");
+                let name_span = format!("{label}{}", if dirty { "*" } else { "" });
+                let close_span = if is_home { "   " } else { " × " }.to_string();
+                let tab_start = byte;
+                byte += icon_span.len() + name_span.len();
+                let close_start = byte;
+                byte += close_span.len();
+                ranges.push((tab_start, byte, close_start, byte));
+                spans.push((icon_span, theme.icon_file, true));
+                if self.is_preview_tab(pane, tab.buffer) {
+                    italic.push(spans.len());
+                }
+                spans.push((name_span, name_color, false));
+                spans.push((close_span, theme.gutter_fg, false));
+            }
+            let crumbs = crumbs_at.map(|(buffer, at)| self.breadcrumb_spans(buffer, at)).unwrap_or_default();
+            (layout, active_flags, spans, crumbs, ranges, italic)
+    }
+
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
-        self.theme.show_tabs && !self.pane_titles.contains_key(&pane)
+        self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
     }
 
     fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {
@@ -24531,7 +23533,7 @@ impl App {
         // `tab_geometry`, so hit-testing and pixels now come from one
         // measurement instead of two disagreeing calculations. Cheaper
         // too -- this used to resolve display names on every mouse move.
-        let tabs = if self.theme.show_tabs { self.tab_geometry.clone() } else { Vec::new() };
+        let tabs = if self.tab_style().is_some() { self.tab_geometry.clone() } else { Vec::new() };
         let breadcrumb_panes = panes.iter().map(|(id, _)| *id).filter(|id| self.pane_has_breadcrumb(*id)).collect();
         FrameGeometry {
             panes,
@@ -24677,6 +23679,12 @@ impl App {
                 self.windows_mut().focus(id);
                 self.sidebar_focused = false;
                 self.terminal_focused = false;
+                if let Some(&(_, rect)) = geometry.panes.iter().find(|(p, _)| *p == id) {
+                    if self.ruler_click(id, rect, pos) {
+                        self.wake_caret();
+                        return;
+                    }
+                }
                 // Clicking a VNC pane both focuses and starts
                 // interacting with it (ordinary desktop convention);
                 // clicking anything else releases capture if some other
@@ -24806,7 +23814,17 @@ impl App {
     fn handle_wheel_at(&mut self, pos: (f32, f32), delta: MouseScrollDelta, window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
-        let lines = wheel_delta_lines(delta, line_height);
+        self.motion.key_repeat = false;
+        // A trackpad's small moves add up instead of each rounding away.
+        let lines = match delta {
+            MouseScrollDelta::PixelDelta(p) => {
+                let total = self.motion.wheel_remainder + p.y as f32 / line_height;
+                let whole = total.trunc();
+                self.motion.wheel_remainder = total - whole;
+                whole as isize
+            }
+            _ => wheel_delta_lines(delta, line_height),
+        };
         if lines == 0 {
             return;
         }
@@ -24856,17 +23874,21 @@ impl App {
                     if let Some(state) = self.windows().content(pane).copied().and_then(|b| self.terminal_buffers.get_mut(&b)) {
                         state.session.scroll(lines);
                     }
-                } else if self.pdf_session_key_for_pane(pane).is_some() {
-                    // A PDF pane has no text to scroll either -- the
-                    // wheel moves the rendered page instead, turning
-                    // pages once there's nothing left to scroll (see
-                    // `pdf_scroll`). Focus the pane first: `pdf_scroll`
-                    // acts on whatever session is *focused*, and clicking
-                    // into a document before wheeling it is a step nobody
-                    // performs in a PDF reader.
+                } else if self.pdf_view_in_pane(pane).is_some() {
+                    // A PDF pane scrolls its column of pages; with Ctrl
+                    // held the wheel zooms. Focused first, as nobody clicks
+                    // into a document before wheeling it.
                     self.windows_mut().focus(pane);
-                    let delta_px = -(lines as f32 * line_height).round() as i32;
-                    self.pdf_scroll(delta_px);
+                    if self.modifiers.control_key() {
+                        if lines > 0 {
+                            self.pdf_zoom_in();
+                        } else if lines < 0 {
+                            self.pdf_zoom_out();
+                        }
+                    } else {
+                        let delta_px = -(lines as f32 * line_height).round() as i32;
+                        self.pdf_scroll(delta_px);
+                    }
                 } else if pane == self.focused_pane_id() {
                     self.scroll_focused_pane(lines);
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
@@ -24944,6 +23966,22 @@ impl App {
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");
+        let now = Instant::now();
+        let prefs = self.motion();
+        let tab_style = self.tab_style();
+        // A theme change fades from the old theme's picture: draw that
+        // once more, only to copy it, then carry on in the new colours.
+        if let Some(old) = self.motion.theme_from.take() {
+            if self.gpu.as_ref().is_some_and(|gpu| gpu.can_copy_frames() && gpu.surface.is_some()) {
+                let new = self.theme;
+                self.theme = old;
+                self.motion.capture_frame = true;
+                self.redraw();
+                self.motion.capture_frame = false;
+                self.theme = new;
+                self.motion.theme_fade = Some(crate::motion::Anim::new(now, prefs.theme_d));
+            }
+        }
         // Cheap per-frame check (an integer comparison against `Buffer::
         // edit_count()`, same "cheap no-op most frames" shape as the PDF
         // resize-tracking and VNC resize-debounce loops just below in
@@ -25028,6 +24066,8 @@ impl App {
         if let Some(sidebar) = &self.sidebar {
             self.sidebar_scroll = scroll_to_include(self.sidebar_scroll, sidebar.selected, visible_lines);
         }
+        self.notice_explorer_growth(true, now);
+        self.notice_explorer_growth(false, now);
         let show_sidebar = self.sidebar_open && main_view == MainView::Editor;
         let sidebar_px = if show_sidebar { text::SIDEBAR_WIDTH } else { 0.0 };
         let sidebar_render = if show_sidebar {
@@ -25051,7 +24091,7 @@ impl App {
         let modeline_top = window_height - modeline_height;
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let pane_area = geometry.pane_area;
-        let layout = geometry.panes;
+        let layout = self.motion_layout(geometry.panes, pane_area, now);
         let focused_pane = self.windows().focused_id();
 
         // One entry per visible window pane -- built fresh every frame
@@ -25172,6 +24212,8 @@ impl App {
             row_accents: Vec<(usize, [f32; 4])>,
             /// Home only: its focus rail and logo.
             home: home::HomeOverlay,
+            /// The animations' marks and the polish -- see `PaneExtras`.
+            extra: motion_host::PaneExtras,
         }
 
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
@@ -25192,7 +24234,11 @@ impl App {
         // request (see the loop body below), since this is the only place
         // that actually knows each pane's real current on-screen pixel
         // size.
-        let mut pdf_panes: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        let mut pdf_panes: Vec<(reader::ViewKey, fenix_window::Rect)> = Vec::new();
+        // A PDF pane's sidebar background (under its text) and its
+        // search highlights (over its pages).
+        let mut pdf_under: Vec<((f32, f32, f32, f32), [f32; 4])> = Vec::new();
+        let mut pdf_highlights: Vec<((f32, f32, f32, f32), [f32; 4])> = Vec::new();
         // Where the focused page is scrolled to, for its popup.
         let mut page_popup_at: Option<PagePopupAt> = None;
         for (pane, rect) in &layout {
@@ -25313,6 +24359,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25401,6 +24448,7 @@ impl App {
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                         home: home::HomeOverlay::default(),
+                        extra: motion_host::PaneExtras::default(),
                     });
                     continue;
                 }
@@ -25431,17 +24479,11 @@ impl App {
                 // the right size the moment the overlay closes rather
                 // than re-fitting a frame later; only the *drawing* of
                 // the page is skipped (see `overlay_covers_pane`).
-                if let Some(key) = self.pdf_session_key_for_pane(pane) {
-                    let pane_px = (rect.w.max(1.0) as u32, rect.h.max(1.0) as u32);
-                    if let Some(session) = self.pdf_sessions.get_mut(&key) {
-                        session.last_pane_size = pane_px;
-                    }
-                    let needs_render = self.pdf_sessions.get(&key).is_some_and(|session| {
-                        session.page_count > 0 && pdf_target_size(session.zoom, session.page_point_size, pane_px) != session.last_requested_size
-                    });
-                    if needs_render {
-                        self.pdf_dispatch_render_for_zoom(&key);
-                    }
+                // A pane showing the document for the first time gets its
+                // view here: a tab moved in, a split, a tab reopened.
+                let pdf_key = self.pdf_view_in_pane(pane);
+                if let Some(key) = pdf_key {
+                    self.pdf_prepare_view(key, (rect.w.max(1.0), rect.h.max(1.0)), (char_width, line_height));
                 }
                 // While an overlay covers this pane, nothing is pushed
                 // to `pdf_panes` and no `PaneRender` is emitted here --
@@ -25449,12 +24491,22 @@ impl App {
                 // branches below, which render the overlay into this
                 // pane exactly as they would over any ordinary buffer.
                 if !overlay_covers_pane {
-                    pdf_panes.push((pane, rect));
+                    let mut pdf_spans = RowSpans::new();
+                    if let Some(key) = pdf_key {
+                        pdf_panes.push((key, rect));
+                        let chrome = self.pdf_chrome(key, rect, (char_width, line_height));
+                        pdf_spans = chrome.spans;
+                        pdf_under.extend(chrome.rects);
+                        pdf_highlights.extend(chrome.highlights);
+                    }
+                    // A PDF is a tab like any file, so its pane has the strip.
+                    let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) =
+                        self.pane_tab_strip(pane, rect, line_height, is_focused, theme, None);
                     panes_render.push(PaneRender {
                         pane,
                         rect,
                         title: pane_title,
-                        spans: Vec::new(),
+                        spans: pdf_spans,
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
@@ -25466,17 +24518,18 @@ impl App {
                         caret: None,
                         content_frac: 0.0,
                         gutter_px: 0.0,
-                        tabs_layout: Vec::new(),
-                        tab_active: Vec::new(),
-                        tab_spans: Vec::new(),
-                        breadcrumb_spans: Vec::new(),
-                        tab_ranges: Vec::new(),
-                        tab_italic: Vec::new(),
+                        tabs_layout,
+                        tab_active,
+                        tab_spans,
+                        breadcrumb_spans,
+                        tab_ranges,
+                        tab_italic,
                         has_breadcrumb,
                         gutter_marks: Vec::new(),
                         row_accents: Vec::new(),
                         indent_guides: Vec::new(),
                         home: home::HomeOverlay::default(),
+                        extra: motion_host::PaneExtras::default(),
                     });
                     continue;
                 }
@@ -25518,6 +24571,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25557,6 +24611,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
+                    extra: motion_host::PaneExtras::default(),
                 });
                 continue;
             }
@@ -25595,6 +24650,8 @@ impl App {
             // `PaneState` (seeded when it was created), so each renders
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
+            // Sideways scrolling eases a column at a time.
+            let shown_scroll_col = self.scroll_col(pane, pane_state.scroll_col, now);
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -25667,15 +24724,15 @@ impl App {
             let content_spans = match self.buffers.get(buffer_id) {
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
-                    line, &tab_stops, pane_state.scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()),
+                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()),
                 ),
                 Some(ob) => self.content_spans(
                     ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
-                    &syntax_highlights, line, &tab_stops, pane_state.scroll_col,
+                    &syntax_highlights, line, &tab_stops, shown_scroll_col,
                 ),
                 None => Vec::new(),
             };
-            let spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
+            let mut spans: RowSpans = content_spans.into_iter().map(|(s, c)| (s, c, false)).collect();
 
             // During a large animated pan the cursor's actual line can
             // legitimately be outside the currently-fetched window for
@@ -25703,7 +24760,7 @@ impl App {
             // position clamps to column 0 (still drawn, just from the
             // pane's left edge) instead of underflowing.
             let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(pane_state.scroll_col)
+                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(shown_scroll_col)
             };
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
@@ -25751,90 +24808,8 @@ impl App {
             // `self.buffer_display_name`/`self.buffers`/`self.workspaces`/
             // `self.windows()`, all off-limits once `text`/`bg_rect` hold
             // exclusive borrows of other `self` fields down there.
-            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) = if theme.show_tabs
-                && !self.pane_titles.contains_key(&pane)
-            {
-                // Tab-strip text renders at `text::TITLE_FONT_SCALE` of the
-                // body font (see `TextPipeline::title_metrics`), so its
-                // real glyphs are narrower per cell than the body `char_
-                // width` used elsewhere in this loop -- laying tabs out
-                // with that wider body measurement drifted the background/
-                // hit-test geometry further right of the actually-smaller
-                // rendered text with every tab.
-                let title_char_width =
-                    self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
-                let strip_rect = tab_strip_rect(fenix_window::Rect {
-                    x: rect.x,
-                    y: rect.y - title_reserved_height(line_height),
-                    w: rect.w,
-                    h: tab_strip_height(line_height),
-                });
-                // A pane's list is its complete navigation history, not its
-                // visible tabs. Lazily resolve names so repeated redraws
-                // while moving do work proportional to tabs that fit, not
-                // all files ever visited in that pane.
-                let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
-                let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
-                let active_buffer = self.windows().content(pane).copied();
-                let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
-                let mut active_flags: Vec<bool> = Vec::new();
-                let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
-                let mut italic: Vec<usize> = Vec::new();
-                let mut byte = 0usize;
-                for tab in &layout {
-                    let is_active = Some(tab.buffer) == active_buffer;
-                    active_flags.push(is_active);
-                    let name_color =
-                        if is_active { if is_focused { theme.caret_text } else { theme.fg_modeline } } else { theme.gutter_fg };
-                    // Home: the house, the workspace's name, and no ×
-                    // -- blanks where it would be, so it measures and
-                    // lines up like every other tab.
-                    let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
-                    let name = self.tab_label(tab.buffer);
-                    let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
-                    let dirty = self
-                        .buffers
-                        .get(tab.buffer)
-                        .is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
-                    // Truncated against `TAB_MAX_NAME_CHARS` directly, and
-                    // padded up to `TAB_MIN_NAME_CHARS`, rather than
-                    // derived back out of `tab.body.w`. That round trip
-                    // (width -> budget -> text) was one half of why the
-                    // drawn tab never matched its own glyphs: it assumed
-                    // every rendered cell is `title_char_width` wide, which
-                    // the icon span in particular is not.
-                    let truncated = truncate_tab_name(&name, TAB_MAX_NAME_CHARS);
-                    let label = if truncated.chars().count() < TAB_MIN_NAME_CHARS {
-                        format!("{truncated:<width$}", width = TAB_MIN_NAME_CHARS)
-                    } else {
-                        truncated
-                    };
-                    // Byte ranges into the concatenated strip string, so
-                    // `TextPipeline::title_span_bounds` can report where
-                    // this tab and its close glyph actually landed once
-                    // shaped. The title buffer holds only the tab row (the
-                    // breadcrumb bar is its own buffer), so these offsets
-                    // start at 0 and stay in that string's own space.
-                    let icon_span = format!(" {icon_ch} ");
-                    let name_span = format!("{label}{}", if dirty { "*" } else { "" });
-                    let close_span = if is_home { "   " } else { " × " }.to_string();
-                    let tab_start = byte;
-                    byte += icon_span.len() + name_span.len();
-                    let close_start = byte;
-                    byte += close_span.len();
-                    ranges.push((tab_start, byte, close_start, byte));
-                    spans.push((icon_span, theme.icon_file, true));
-                    if self.is_preview_tab(pane, tab.buffer) {
-                        italic.push(spans.len());
-                    }
-                    spans.push((name_span, name_color, false));
-                    spans.push((close_span, theme.gutter_fg, false));
-                }
-                let crumbs = self.breadcrumb_spans(buffer_id, pane_state.cursor.char_idx);
-                (layout, active_flags, spans, crumbs, ranges, italic)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            };
+            let (tabs_layout, tab_active, tab_spans, breadcrumb_spans, tab_ranges, tab_italic) =
+                self.pane_tab_strip(pane, rect, line_height, is_focused, theme, Some((buffer_id, pane_state.cursor.char_idx)));
 
             // Inline git gutter marks (Part 5) currently in view -- every
             // mark's 1-based file line is remapped to a row relative to
@@ -25873,6 +24848,47 @@ impl App {
                 } else {
                     Default::default()
                 };
+            let mut extra = motion_host::PaneExtras { buffer: Some(buffer_id), base_line: render_base_line, scroll_col: shown_scroll_col, ..Default::default() };
+            // A code pane's polish: problems, brackets, selection
+            // whitespace, the overview ruler, sticky scroll.
+            if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
+                let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let view = polish::PaneView {
+                    buffer: buffer_id,
+                    lines: visible_document_lines,
+                    rows: pane_visible_lines + 1,
+                    gutter_chars,
+                    scroll_col: shown_scroll_col,
+                    rendered_scroll,
+                    cursor_line: line,
+                    tab_rows: &tab_rows,
+                    selection: &selection_segments,
+                    remap_col: &remap_col,
+                };
+                let polished = self.polish_pane(&view, &mut spans, now);
+                extra.squiggles = polished.squiggles;
+                extra.ruler = polished.ruler;
+                if !folds_active {
+                    extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
+                }
+            }
+            if let Some(flash) = self.beacon_row(buffer_id, visible_document_lines, pane_visible_lines, now) {
+                extra.row_flashes.push(flash);
+            }
+            if is_focused && !folds_active {
+                let (added, seams) = self.change_overlays(buffer_id, pane_visible_lines + 1, now);
+                let [r, g, b, _] = glyphon_to_rgba(theme.git_staged);
+                extra.cell_flashes = added.into_iter().map(|(row, s, e, a)| (row, remap_col(row, s), remap_col(row, e), [r, g, b, 0.35 * a])).collect();
+                let [r, g, b, _] = glyphon_to_rgba(theme.git_conflicted);
+                extra.seams = seams.into_iter().map(|(row, col, lines, a)| (row, if lines { 0 } else { remap_col(row, col) }, lines, [r, g, b, 0.9 * a])).collect();
+            }
+            if let Some((first, count, shown)) = self.reveal_cover(motion_host::RevealTarget::Buffer(buffer_id), now) {
+                if first + count > render_base_line {
+                    let row = first.saturating_sub(render_base_line);
+                    let count = count - render_base_line.saturating_sub(first);
+                    extra.reveal = Some((row, count, shown));
+                }
+            }
             panes_render.push(PaneRender {
                 pane,
                 rect,
@@ -25902,6 +24918,7 @@ impl App {
                 indent_guides,
                 row_accents,
                 home: home_overlay,
+                extra,
             });
         }
 
@@ -25916,13 +24933,24 @@ impl App {
         };
         _profile.mark("CPU pane preparation complete");
         let (badge_bg, _badge_fg) = self.mode_colors();
+        let badge_bg = self.rail_color(badge_bg, now);
         // Top-right corner, clear of both the content the user is actively
         // editing (top-left, where the cursor usually is) and the modeline
         // (bottom) -- least likely to sit under whatever they're looking
         // at. Resolved (and, if needed, row-truncated) here rather than
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
-        let which_key_popup = overlays_here.then(|| self.which_key_popup(window_width, modeline_top)).flatten();
+        // The which-key drawer, once a sequence has waited long enough.
+        let which_key_popup = if overlays_here && self.which_key_open(now) {
+            self.which_key_pending().map(|pending| {
+                let drawer = self.which_key_drawer(&pending, window_width, window_height, modeline_top, char_width, line_height);
+                self.motion.which_key_pages = drawer.pages;
+                self.motion.which_key_drawer = Some(drawer.clone());
+                (drawer.rect, drawer.spans)
+            })
+        } else {
+            None
+        };
         // Never `Some` at the same time as `which_key_popup`/`completion_
         // popup` in practice -- it only shows while a Docker pane is
         // focused, where a leader/operator-pending sequence or an Insert-
@@ -25949,6 +24977,26 @@ impl App {
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         let caret_alpha = self.caret_alpha();
+        let message_alpha = self.message_alpha(now);
+        let jobs = self.background_jobs();
+        let frame_ws = (self.active_frame, self.workspaces.active);
+        let corner_radius = self.corner_radius();
+        let shadows = self.config.polish.shadows != Some(false);
+        let dim_amount = (self.config.polish.dim_unfocused != Some(false) && panes_render.len() > 1)
+            .then(|| self.config.polish.dim_amount.unwrap_or(30).min(90) as f32 / 100.0);
+        let sidebar_reveal = self.reveal_cover(motion_host::RevealTarget::Sidebar, now);
+        let explorer_reveal = self.reveal_cover(motion_host::RevealTarget::Explorer, now);
+        let explorer_scroll = self.explorer_scroll;
+        let sidebar_scroll = self.sidebar_scroll;
+        let rounded_selection = self.config.polish.rounded_selection != Some(false) && corner_radius > 0.0;
+        let show_indent_guides = self.config.polish.indent_guides != Some(false);
+        let show_active_guide = self.config.polish.active_indent_guide != Some(false);
+
+        // The pages each PDF pane shows, worked out while `self` is still
+        // whole.
+        let pdf_plans: Vec<(reader::ViewKey, Vec<reader::PageDraw>)> = pdf_panes.iter().map(|&(key, rect)| (key, self.pdf_draw_plan(key, rect))).collect();
+        let pdf_recolor = self.pdf_recolor();
+        let pdf_paper = self.pdf_paper();
 
         let (
             Some(window),
@@ -25959,6 +25007,7 @@ impl App {
             Some(caret_rect),
             Some(vnc_pipeline),
             Some(pdf_pipeline),
+            Some(motion_gpu),
         ) = (
             &self.window,
             &mut self.gpu,
@@ -25971,15 +25020,20 @@ impl App {
             // push_quad`), rather than written one-at-a-time mid-pass.
             &mut self.vnc_pipeline,
             &self.pdf_pipeline,
+            &mut self.motion_gpu,
         ) else {
             return;
         };
+        let motion_state = &mut self.motion;
 
         let live_panes: Vec<fenix_window::WindowId> = panes_render.iter().map(|p| p.pane).collect();
         for pane in &panes_render {
             let content_refs: Vec<(&str, glyphon::Color, bool)> =
                 pane.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs);
+            let sticky: RowSpans = polish::join_rows(pane.extra.sticky.clone());
+            let sticky_refs: Vec<(&str, glyphon::Color, bool)> = sticky.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_pane_sticky(pane.pane, pane.rect.w, &sticky_refs);
         }
         text.retain_panes(&live_panes);
 
@@ -26086,7 +25140,13 @@ impl App {
             let is_error_message =
                 self.status_message.as_ref().is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
             let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
-            let suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            let mut suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            // A message fades in and out; the file's own details don't.
+            if self.status_message.as_ref().is_some_and(|m| m.set_at.elapsed() < MESSAGE_DURATION) {
+                for (_, color) in &mut suffix_spans {
+                    *color = glyphon::Color::rgba(color.r(), color.g(), color.b(), (color.a() as f32 * message_alpha).round() as u8);
+                }
+            }
             let mut spans = Vec::with_capacity(suffix_spans.len() + 1);
             // The label reads *in* the mode's own accent now (Signal
             // Rail's rail-plus-label treatment), not as contrasting text
@@ -26110,15 +25170,24 @@ impl App {
         // (white on TempleOS specifically), unlike `gutter_fg`, which is
         // calibrated for contrast against the *content* background and
         // read as barely visible here.
+        // Background work leads the clock: its name, with the spinner
+        // drawn just left of it (see the overlay pass).
+        let job_text = match jobs.as_slice() {
+            [] => String::new(),
+            [one] => format!("{one}   "),
+            [first, rest @ ..] => format!("{first} +{}   ", rest.len()),
+        };
         let clock_text = modeline_clock_text();
-        let clock_chars = clock_text.chars().count();
+        let clock_chars = clock_text.chars().count() + job_text.chars().count();
         let box_width = window_width - text::PAD_LEFT;
         // `modeline_char_width`, not the body `char_width`: both this
         // text and the clock render at `MODELINE_FONT_SCALE`, so the body
         // measurement over-estimated every column here.
         let clock_shown = modeline_clock_fits(existing_chars, window_width, modeline_char_width, clock_chars);
         if clock_shown {
-            text.set_clock_rich(box_width, &[(clock_text.as_str(), theme.fg_modeline)]);
+            text.set_clock_rich(box_width, &[(job_text.as_str(), theme.gutter_fg), (clock_text.as_str(), theme.fg_modeline)]);
+        } else if !job_text.is_empty() {
+            text.set_clock_rich(box_width, &[(job_text.as_str(), theme.gutter_fg)]);
         } else {
             text.set_clock_rich(box_width, &[]);
         }
@@ -26126,47 +25195,37 @@ impl App {
         // `TextPipeline::clock_left_edge`.
         let clock_left = text.clock_left_edge();
 
+        // Every popup open this frame, then the ones still fading out --
+        // `popup_draws` decides each one's opacity and rise.
+        let mut open_popups: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)> = Vec::new();
+        if let Some((rect, spans)) = which_key_popup {
+            open_popups.push((popup::PopupId::WhichKey, rect, spans, None));
+        }
+        if let Some((rect, spans)) = docker_menu_popup {
+            open_popups.push((popup::PopupId::DockerMenu, rect, spans, None));
+        }
+        if let Some((rect, spans)) = git_menu_popup {
+            open_popups.push((popup::PopupId::GitMenu, rect, spans, None));
+        }
+        if let Some((rect, spans, selected_row)) = completion_popup {
+            open_popups.push((popup::PopupId::Completion, rect, spans, selected_row));
+        }
+        if let Some((rect, spans)) = hover_popup {
+            open_popups.push((popup::PopupId::Hover, rect, spans, None));
+        }
+        if let Some((rect, spans)) = prompt_popup {
+            open_popups.push((popup::PopupId::Prompt, rect, spans, None));
+        }
+        if let Some((rect, spans)) = page_popup {
+            open_popups.push((popup::PopupId::Page, rect, spans, None));
+        }
+        let popup_draws = motion_state.popup_draws(prefs, open_popups, now);
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
-        // The row (if any) the currently-open popup wants highlighted --
-        // only the completion popup has a notion of a "selected" row
-        // today (which-key has no selection), consulted below alongside
-        // the `bg_rect` background push shared by every popup kind.
-        let mut popup_selected_row: Option<usize> = None;
-        if let Some((rect, spans)) = &which_key_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::WhichKey, rect.w, &refs);
-            popup_rects.push((popup::PopupId::WhichKey, *rect));
-        }
-        if let Some((rect, spans)) = &docker_menu_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::DockerMenu, rect.w, &refs);
-            popup_rects.push((popup::PopupId::DockerMenu, *rect));
-        }
-        if let Some((rect, spans)) = &git_menu_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::GitMenu, rect.w, &refs);
-            popup_rects.push((popup::PopupId::GitMenu, *rect));
-        }
-        if let Some((rect, spans, selected_row)) = &completion_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Completion, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Completion, *rect));
-            popup_selected_row = *selected_row;
-        }
-        if let Some((rect, spans)) = &hover_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Hover, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Hover, *rect));
-        }
-        if let Some((rect, spans)) = &prompt_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Prompt, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Prompt, *rect));
-        }
-        if let Some((rect, spans)) = &page_popup {
-            let refs: Vec<(&str, glyphon::Color, bool)> = spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_popup_rich(popup::PopupId::Page, rect.w, &refs);
-            popup_rects.push((popup::PopupId::Page, *rect));
+        for draw in &popup_draws {
+            let fade = |c: glyphon::Color| glyphon::Color::rgba(c.r(), c.g(), c.b(), (c.a() as f32 * draw.alpha).round() as u8);
+            let refs: Vec<(&str, glyphon::Color, bool)> = draw.spans.iter().map(|(s, c, i)| (s.as_str(), fade(*c), *i)).collect();
+            text.set_popup_rich(draw.id, draw.rect.w, &refs);
+            popup_rects.push((draw.id, draw.rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
@@ -26211,11 +25270,15 @@ impl App {
             if let Some((row, col, rows)) = pane.home.rail {
                 bg_rect.push_rect(gpu, content_x + col as f32 * char_width, row_y(row), home::RAIL_PX, rows as f32 * line_height, theme.caret);
             }
-            for &(row, col_start, col_end) in &pane.selection_segments {
+            let corners = if rounded_selection { polish::selection_corners(&pane.selection_segments, 3.0) } else { Vec::new() };
+            for (i, &(row, col_start, col_end)) in pane.selection_segments.iter().enumerate() {
                 let x = content_x + col_start as f32 * char_width;
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
-                bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection);
+                match corners.get(i) {
+                    Some(&radii) => bg_rect.push_corners(gpu, x, y, w, line_height, radii, theme.selection),
+                    None => bg_rect.push_rect(gpu, x, y, w, line_height, theme.selection),
+                }
             }
             for &(row, col_start, col_end) in &pane.bracket_match_segments {
                 let x = content_x + col_start as f32 * char_width;
@@ -26237,6 +25300,41 @@ impl App {
                     let w = (col_end - col_start) as f32 * char_width;
                     bg_rect.push_rect(gpu, x, y, w, line_height, [r, g, b, *alpha]);
                 }
+            }
+            // The jump beacon: the whole landing row, once.
+            for &(row, color) in &pane.extra.row_flashes {
+                bg_rect.push_rect(gpu, pane.rect.x, row_y(row), pane.rect.w, line_height, color);
+            }
+            // What an undo, redo, repeat or substitution added...
+            for &(row, col_start, col_end, color) in &pane.extra.cell_flashes {
+                let x = content_x + col_start as f32 * char_width;
+                bg_rect.push_rect(gpu, x, row_y(row), (col_end.max(col_start + 1) - col_start) as f32 * char_width, line_height, color);
+            }
+            // ...and where it took text away.
+            for &(row, col, lines, color) in &pane.extra.seams {
+                if lines {
+                    bg_rect.push_rect(gpu, content_x, row_y(row) - 1.0, pane.rect.x + pane.rect.w - content_x, 2.0, color);
+                } else {
+                    bg_rect.push_rect(gpu, content_x + col as f32 * char_width - 1.0, row_y(row), 2.0, line_height, color);
+                }
+            }
+        }
+        // Sticky scroll's rows sit on the plain background, over whatever
+        // highlight the rows beneath them had.
+        for pane in panes_render.iter().filter(|p| !p.extra.sticky.is_empty()) {
+            let h = text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height;
+            bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y, pane.rect.w, h, theme.bg);
+        }
+        for &((x, y, w, h), color) in &pdf_under {
+            bg_rect.push_rect(gpu, x, y, w, h, color);
+        }
+        // Blank paper where a PDF page is still being rendered, so the
+        // column keeps its shape while the pages come in.
+        for (key, draws) in &pdf_plans {
+            let Some(view) = self.pdf_views.get(key) else { continue };
+            for draw in draws.iter().filter(|d| !view.cache.contains_key(&d.page)) {
+                let (x, y, w, h) = draw.dest;
+                bg_rect.push_rect(gpu, x, y, w, h, pdf_paper);
             }
         }
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
@@ -26374,24 +25472,44 @@ impl App {
             // same-height strip. This gives the two rows a deliberate
             // hierarchy rather than making them look like two unrelated
             // toolbars of identical weight.
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, breadcrumb_h, theme.sidebar_bg);
-            // The strip's own bottom divider. Order relative to the
-            // per-tab loop below no longer matters for this rect
-            // specifically -- it used to double as the active tab's own
-            // accent line's bottom edge (a bottom underline), which made
-            // draw order load-bearing; now that the accent is a top-edge
-            // bar (below), the two never occupy the same pixels.
-            bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
-            for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
-                if is_active {
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
-                    // A top-edge accent bar marks the selected tab --
-                    // Signal Rail's own convention (mirrors the modeline's
-                    // mode rail) -- rather than a bottom underline a
-                    // divider line could paint over.
-                    bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, 3.0, theme.mode_normal);
+            let active = pane.tabs_layout.iter().zip(&pane.tab_active).find(|(_, a)| **a).map(|(t, _)| t);
+            if tab_style == Some(crate::theme::TabStyle::Underline) {
+                // Look B: flat on the editor's own background. The active
+                // tab is its bright text over an underline in the mode's
+                // colour -- muted in a pane without the keyboard -- and a
+                // hairline sets Home apart from the tabs after it.
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, theme.bg);
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
+                if let Some(home) = pane.tabs_layout.first() {
+                    let x = (home.body.x + home.body.w + 2.0).round();
+                    bg_rect.push_rect(gpu, x, strip_y + 7.0, 1.0, (strip_h - 14.0).max(4.0), theme.divider);
                 }
-                bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
+                if let Some(tab) = active {
+                    let key = (frame_ws.0, frame_ws.1, pane.pane);
+                    let (x, w) = motion_state.tab_accent(prefs, key, (tab.body.x, tab.body.w), now);
+                    let color = if pane.pane == focused_pane { badge_bg } else { glyphon_to_rgba(theme.gutter_fg) };
+                    bg_rect.push_rect(gpu, x, strip_y + strip_h - 2.0, w, 2.0, color);
+                }
+            } else {
+                // Breadcrumbs are navigation chrome, but a shade closer to
+                // the editing canvas than the tab row, and a visibly
+                // shorter bar than it -- a deliberate hierarchy.
+                bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y, pane.rect.w, breadcrumb_h, theme.sidebar_bg);
+                bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
+                for (tab, &is_active) in pane.tabs_layout.iter().zip(&pane.tab_active) {
+                    if is_active {
+                        bg_rect.push_rect(gpu, tab.body.x, strip_y, tab.body.w, strip_h, theme.bg);
+                    }
+                    bg_rect.push_rect(gpu, tab.body.x + tab.body.w - 1.0, strip_y, 1.0, strip_h, theme.divider);
+                }
+                // A top-edge accent bar marks the selected tab -- Signal
+                // Rail's own convention (mirrors the modeline's mode rail)
+                // -- sliding over from the tab you were on.
+                if let Some(tab) = active {
+                    let key = (frame_ws.0, frame_ws.1, pane.pane);
+                    let (x, w) = motion_state.tab_accent(prefs, key, (tab.body.x, tab.body.w), now);
+                    bg_rect.push_rect(gpu, x, strip_y, w, 3.0, theme.mode_normal);
+                }
             }
             bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
         }
@@ -26454,9 +25572,9 @@ impl App {
             theme.bg[2] + (guide_fg[2] - theme.bg[2]) * INDENT_GUIDE_MIX,
             1.0,
         ];
-        for pane in &panes_render {
+        for pane in panes_render.iter().filter(|_| show_indent_guides) {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
-            let active_guide = pane.caret.and_then(|(row, _)| {
+            let active_guide = pane.caret.filter(|_| show_active_guide).and_then(|(row, _)| {
                 pane.indent_guides.iter().filter(|(r, _)| *r == row).map(|(_, col)| *col).max()
                     .map(|col| (row, col))
             });
@@ -26486,9 +25604,23 @@ impl App {
         caret_rect.clear();
         if let Some(focused) = panes_render.iter().find(|p| p.pane == focused_pane) {
             if let Some((row, col)) = focused.caret {
+                // Where the caret is drawn: gliding there after a motion.
+                let (mut caret_x, mut caret_y) =
+                    caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
+                if let Some(buffer) = focused.extra.buffer {
+                    let extra = &focused.extra;
+                    let spot = motion_host::CaretSpot {
+                        pane: (frame_ws.0, frame_ws.1, focused.pane),
+                        buffer,
+                        row: (row + extra.base_line) as f32,
+                        col: (col + extra.scroll_col) as f32,
+                    };
+                    let visible = text::lines_that_fit(focused.rect.h, line_height);
+                    let (shown_row, shown_col) = motion_state.caret_spot(prefs, spot, visible, now);
+                    caret_x += (shown_col - spot.col) * char_width;
+                    caret_y += (shown_row - spot.row) * line_height;
+                }
                 if caret_alpha > 0.0 {
-                    let (caret_x, caret_y) =
-                        caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
                     let [r, g, b, a] = theme.caret;
                     // Insert keeps the thin bar (an I-beam-style "about to
                     // type here" marker); every other mode (Normal, Visual,
@@ -26506,8 +25638,127 @@ impl App {
         }
         caret_rect.flush(gpu);
 
-        let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32)> =
-            panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac)).collect();
+        // Drawn over the text, under popups: panes without the keyboard
+        // dimmed, and rows still opening under an unfolded row covered
+        // from where they've got to.
+        let overlay = &mut motion_gpu.overlay;
+        overlay.clear();
+        if let Some(amount) = dim_amount.filter(|_| overlays_here) {
+            let [r, g, b, _] = theme.bg;
+            for pane in panes_render.iter().filter(|p| p.pane != focused_pane) {
+                let chrome = pane_chrome_height(line_height, pane.has_breadcrumb);
+                overlay.push_rect(gpu, pane.rect.x, pane.rect.y - chrome, pane.rect.w, pane.rect.h + chrome, [r, g, b, amount]);
+            }
+        }
+        let cover = |overlay: &mut RectRenderer, x: f32, w: f32, top: f32, rows: usize, shown: f32, clip: (f32, f32), color: [f32; 4]| {
+            let from = (top + rows as f32 * line_height * shown).max(clip.0);
+            let to = (top + rows as f32 * line_height).min(clip.1);
+            if to > from {
+                overlay.push_rect(gpu, x, from, w, to - from, color);
+            }
+        };
+        for pane in &panes_render {
+            if let Some((row, rows, shown)) = pane.extra.reveal {
+                let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+                cover(overlay, pane.rect.x, pane.rect.w, top, rows, shown, (pane.rect.y, pane.rect.y + pane.rect.h), theme.bg);
+            }
+        }
+        if let Some((first, rows, shown)) = sidebar_reveal.filter(|_| show_sidebar) {
+            if first + rows > sidebar_scroll {
+                let row = first.saturating_sub(sidebar_scroll);
+                cover(overlay, 0.0, text::SIDEBAR_WIDTH - 1.0, sidebar_row_y(row), rows, shown, (0.0, modeline_top), theme.sidebar_bg);
+            }
+        }
+        if let (Some((first, rows, shown)), true) = (explorer_reveal, main_view == MainView::Explorer) {
+            if let Some(pane) = panes_render.iter().find(|p| p.pane == focused_pane).filter(|_| first + rows > explorer_scroll) {
+                let row = first.saturating_sub(explorer_scroll);
+                let top = pane.rect.y + text::PAD_TOP + row as f32 * line_height;
+                cover(overlay, pane.rect.x, pane.rect.w, top, rows, shown, (pane.rect.y, pane.rect.y + pane.rect.h), theme.bg);
+            }
+        }
+        for pane in &panes_render {
+            let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
+            let sticky_h = if pane.extra.sticky.is_empty() { 0.0 } else { text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height };
+            // Problems, underlined with a wave.
+            for &(row, col_start, col_end, color) in &pane.extra.squiggles {
+                let y = row_y(row) + line_height - 4.0;
+                if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
+                    continue;
+                }
+                let x = content_x + col_start as f32 * char_width;
+                overlay.push_wave(gpu, x, y - 1.0, (col_end - col_start) as f32 * char_width, 5.0, 6.0, 1.3, 1.2, color);
+            }
+            // Sticky scroll's edge: a hairline and a soft shadow on the
+            // text scrolling under it.
+            if sticky_h > 0.0 {
+                let bottom = pane.rect.y + sticky_h;
+                overlay.push_shadow(gpu, pane.rect.x, bottom - 6.0, pane.rect.w, 6.0, 0.0, 5.0, [0.0, 0.0, 0.0, 0.35]);
+                overlay.push_rect(gpu, pane.rect.x, bottom - 1.0, pane.rect.w, 1.0, theme.divider);
+            }
+            // The overview ruler: the whole file down the right edge.
+            if let Some(ruler) = &pane.extra.ruler {
+                const RULER_W: f32 = 10.0;
+                let x = pane.rect.x + pane.rect.w - RULER_W;
+                let (top, h) = (pane.rect.y, pane.rect.h);
+                let lines = ruler.lines.max(1) as f32;
+                let at = |line: f32| top + (line / lines).clamp(0.0, 1.0) * h;
+                let fg = glyphon_to_rgba(theme.fg);
+                overlay.push_rect(gpu, x, top, RULER_W, h, [fg[0], fg[1], fg[2], 0.03]);
+                overlay.push_rect(gpu, x, top, 1.0, h, [fg[0], fg[1], fg[2], 0.08]);
+                let thumb_h = (ruler.visible / lines * h).max(8.0).min(h);
+                overlay.push_rect(gpu, x + 1.0, at(ruler.first).min(top + h - thumb_h), RULER_W - 1.0, thumb_h, [fg[0], fg[1], fg[2], 0.07]);
+                for &(line, mark) in &ruler.marks {
+                    let y = at(line as f32);
+                    let (dx, w, mh, color) = match mark {
+                        motion_host::RulerMark::Search => (2.0, 4.0, 2.0, theme.search_match),
+                        motion_host::RulerMark::Error => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_conflicted)),
+                        motion_host::RulerMark::Warning => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Added => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_staged)),
+                        motion_host::RulerMark::Modified => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Deleted => (1.0, 3.0, 2.0, glyphon_to_rgba(theme.git_conflicted)),
+                    };
+                    overlay.push_rect(gpu, x + dx, y.min(top + h - mh), w, mh, [color[0], color[1], color[2], 0.9]);
+                }
+                overlay.push_rect(gpu, x, at(ruler.cursor as f32).min(top + h - 1.0), RULER_W, 1.0, [fg[0], fg[1], fg[2], 0.8]);
+            }
+        }
+        for &((x, y, w, h), color) in &pdf_highlights {
+            overlay.push_rect(gpu, x, y, w, h, color);
+        }
+        overlay.flush(gpu);
+
+        // The spinner: the mark's blades lit in turn, just left of the
+        // work it's for.
+        let (surface_w, surface_h) = (gpu.config.width, gpu.config.height);
+        motion_gpu.sprites.begin(surface_w, surface_h);
+        if let (false, Some(clock_left), true) = (jobs.is_empty(), clock_left, prefs.progress) {
+            let size = (modeline_height * 0.62).round().max(8.0);
+            let lit = motion_host::spinner_blade(now, motion_host::spinner_epoch());
+            let x = (clock_left - size - 4.0).round();
+            let y = (modeline_top + (modeline_height - size) / 2.0).round();
+            motion_gpu.push_spinner(x, y, size, lit);
+        }
+        motion_gpu.sprites.flush();
+
+        // Over everything: the old theme's picture fading away, and the
+        // launch splash fading out over the first frames.
+        motion_gpu.top.begin(surface_w, surface_h);
+        if let (Some(anim), Some((_, snapshot))) = (motion_state.theme_fade.filter(|a| a.running(now)), &motion_gpu.snapshot) {
+            let alpha = 1.0 - anim.eased(now);
+            motion_gpu.top.push(snapshot, 0.0, 0.0, surface_w as f32, surface_h as f32, [1.0, 1.0, 1.0, alpha]);
+        }
+        motion_gpu.top.flush();
+        if let Some(fade) = self.splash_fade.as_mut() {
+            let t = now.saturating_duration_since(fade.started).as_secs_f32();
+            let alpha = fade.alpha(now);
+            fade.sprites.begin(surface_w, surface_h);
+            fade.scene.draw(&mut fade.sprites, surface_w, surface_h, t, fade.progress.max(1.0), alpha, true);
+            fade.sprites.flush();
+        }
+
+        let prepare_panes: Vec<(fenix_window::WindowId, fenix_window::Rect, f32, usize)> =
+            panes_render.iter().map(|p| (p.pane, p.rect, p.content_frac, p.extra.sticky.len())).collect();
         text.prepare(gpu, theme, &prepare_panes, &tab_text_rects, &breadcrumb_text_rects, show_sidebar, show_terminal);
 
         // Creates each visible VNC session's texture the first time it's
@@ -26642,58 +25893,21 @@ impl App {
         }
         vnc_pipeline.flush(gpu);
 
-        // Unlike the VNC loop just above (whole framebuffer always maps
-        // onto the whole pane), a PDF render can be smaller than the pane
-        // (fit-to-page/fit-width letterboxing) or larger (zoomed in) --
-        // so what actually gets uploaded is a crop of `full_bgra`, sized
-        // and positioned by `scroll_offset`, clamped against both the
-        // render's real size and the pane's current size (the only place
-        // both are known at once). `last_uploaded` records exactly what
-        // was last cropped/uploaded so a frame where nothing about the
-        // crop changed skips touching the GPU at all; `apply_pdf_
-        // response` resets it to `None` on every fresh render so a new
-        // bitmap always gets uploaded even if its crop key happens to
-        // coincide with the previous one.
-        let mut crop_scratch = std::mem::take(&mut self.pdf_crop_scratch);
-        for (pane, rect) in &pdf_panes {
-            let Some(session) = self.pdf_sessions.values_mut().find(|s| s.pane == *pane) else { continue };
-            let Some((full_w, full_h, full_bytes)) = &session.full_bgra else { continue };
-            let (full_w, full_h) = (*full_w, *full_h);
-            let pane_w = rect.w.max(1.0) as u32;
-            let pane_h = rect.h.max(1.0) as u32;
-            let visible_w = full_w.min(pane_w).max(1);
-            let visible_h = full_h.min(pane_h).max(1);
-            let max_scroll_x = full_w.saturating_sub(visible_w);
-            let max_scroll_y = full_h.saturating_sub(visible_h);
-            let scroll_x = session.scroll_offset.0.min(max_scroll_x);
-            let scroll_y = session.scroll_offset.1.min(max_scroll_y);
-            session.scroll_offset = (scroll_x, scroll_y);
-            let upload_key = (visible_w, visible_h, scroll_x, scroll_y);
-            if session.last_uploaded == Some(upload_key) && session.texture.is_some() {
-                continue;
+        // Rendered pages the worker has sent since the last frame go into
+        // textures of their own; the pixels are let go once uploaded.
+        for (key, draws) in &pdf_plans {
+            let Some(view) = self.pdf_views.get_mut(key) else { continue };
+            for draw in draws {
+                let Some(page) = view.cache.get_mut(&draw.page) else { continue };
+                let Some(bgra) = page.bgra.take() else { continue };
+                if page.texture.as_ref().map(|t| t.size()) != Some((page.w, page.h)) {
+                    page.texture = Some(pdf_pipeline.create_texture(gpu, page.w, page.h));
+                }
+                if let Some(texture) = &page.texture {
+                    pdf_pipeline.upload_rect(gpu, texture, 0, 0, page.w, page.h, &bgra);
+                }
             }
-            // Only recreate the texture when the crop's *size* changed
-            // (a resize/zoom/page-size change); a pan keeps the same
-            // size and only moves the window, so it reuses the texture
-            // and bind group it already has -- see `PdfTexture::size`.
-            if session.texture.as_ref().map(|tex| tex.size()) != Some((visible_w, visible_h)) {
-                session.texture = Some(pdf_pipeline.create_texture(gpu, visible_w, visible_h));
-            }
-            let Some(texture) = &session.texture else { continue };
-            // Fit-to-page (the default) renders the page to exactly the
-            // size it will occupy, so the "crop" is the whole bitmap far
-            // more often than not -- uploading `full_bgra` straight
-            // through in that case skips a multi-megabyte allocate-and-
-            // copy per page turn for no loss of generality.
-            if (visible_w, visible_h) == (full_w, full_h) && (scroll_x, scroll_y) == (0, 0) {
-                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, full_bytes);
-            } else {
-                fenix_pdf::crop::crop_bgra_into(&mut crop_scratch, full_bytes, full_w, full_h, scroll_x, scroll_y, visible_w, visible_h);
-                pdf_pipeline.upload_rect(gpu, texture, 0, 0, visible_w, visible_h, &crop_scratch);
-            }
-            session.last_uploaded = Some(upload_key);
         }
-        self.pdf_crop_scratch = crop_scratch;
 
         // Home's logo: drawn (by fenix-brand) at exactly the pixel height
         // its rows give it, so it's crisp at any font size, and uploaded
@@ -26714,11 +25928,12 @@ impl App {
         }
 
         _profile.mark("text and geometry preparation complete");
-        let frame = match gpu.surface.get_current_texture() {
+        let Some(surface) = &gpu.surface else { return };
+        let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                gpu.surface.configure(&gpu.device, &gpu.config);
+                surface.configure(&gpu.device, &gpu.config);
                 return;
             }
             status @ (wgpu::CurrentSurfaceTexture::Timeout
@@ -26773,25 +25988,16 @@ impl App {
             }
             // Same "before text, so title bars stay legible" reasoning as
             // the VNC loop just above.
-            for (pane, rect) in &pdf_panes {
-                let Some(session) = self.pdf_sessions.values().find(|s| s.pane == *pane) else { continue };
-                let (Some(texture), Some((visible_w, visible_h, _, _))) = (&session.texture, session.last_uploaded) else { continue };
-                // Centered within the pane, never stretched to fill it --
-                // unlike VNC's own draw call just above (whole framebuffer
-                // always maps onto the whole pane), a PDF render's pixel
-                // size is already the intended on-screen size (computed by
-                // `pdf_target_size`), so drawing it any larger/smaller
-                // than that would silently re-distort the very aspect
-                // ratio `fit_page_size`/`fit_width_size` exist to
-                // preserve. Smaller than `rect` in an axis (fit-to-page
-                // letterboxing) shows as blank pane background around it;
-                // this loop runs before `text.render` so a fully centered
-                // small page still leaves the title bar legible on top.
-                let dest_w = (visible_w as f32).min(rect.w);
-                let dest_h = (visible_h as f32).min(rect.h);
-                let dest_x = rect.x + (rect.w - dest_w) / 2.0;
-                let dest_y = rect.y + (rect.h - dest_h) / 2.0;
-                pdf_pipeline.draw(gpu, &mut pass, texture, dest_x, dest_y, dest_w, dest_h);
+            // Each page in sight, cut to its pane; a page still being
+            // rendered is the paper `bg_rect` already drew.
+            let mut slot = 0;
+            for (key, draws) in &pdf_plans {
+                let Some(view) = self.pdf_views.get(key) else { continue };
+                for draw in draws {
+                    let Some(texture) = view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()) else { continue };
+                    pdf_pipeline.draw_region(gpu, &mut pass, texture, slot, draw.dest, draw.uv, pdf_recolor);
+                    slot += 1;
+                }
             }
             if let (Some(logo), Some(pipeline)) = (self.home_logo.as_ref(), self.logo_pipeline.as_ref()) {
                 if let Some(texture) = &logo.texture {
@@ -26803,11 +26009,12 @@ impl App {
                         let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
                         let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
                         let y = top + (lines as f32 * line_height - h) / 2.0;
-                        pipeline.draw(gpu, &mut pass, texture, x.round(), y.round(), w, h);
+                        pipeline.draw(gpu, &mut pass, texture, 0, x.round(), y.round(), w, h);
                     }
                 }
             }
             text.render(&mut pass);
+            motion_gpu.overlay.render(&mut pass);
         }
         // Popups (background + text) and the caret are drawn in a second,
         // separate pass layered on top (`LoadOp::Load`, not `Clear`)
@@ -26828,34 +26035,55 @@ impl App {
             // doc comment for what reusing the base layer's renderer here
             // silently corrupted.
             popup_rect.clear();
-            for &(id, rect) in &popup_rects {
-                popup_rect.push_rect(gpu, rect.x + 3.0, rect.y + 3.0, rect.w, rect.h, [0.0, 0.0, 0.0, 0.25]);
-                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+            let with_alpha = |[r, g, b, a]: [f32; 4], alpha: f32| [r, g, b, a * alpha];
+            for draw in &popup_draws {
+                let (rect, alpha) = (draw.rect, draw.alpha);
+                if draw.id == popup::PopupId::WhichKey {
+                    if let Some(drawer) = &motion_state.which_key_drawer {
+                        which_key::paint_drawer(popup_rect, gpu, drawer, rect, modeline_top, badge_bg, theme, char_width, line_height, shadows);
+                        continue;
+                    }
+                }
+                if shadows {
+                    popup_rect.push_shadow(gpu, rect.x, rect.y + 4.0, rect.w, rect.h, corner_radius, 10.0, [0.0, 0.0, 0.0, 0.38 * alpha]);
+                }
                 let border = glyphon_to_rgba(theme.gutter_fg);
-                popup_rect.push_rect(gpu, rect.x, rect.y, rect.w, 1.0, border);
-                popup_rect.push_rect(gpu, rect.x, rect.y + rect.h - 1.0, rect.w, 1.0, border);
-                popup_rect.push_rect(gpu, rect.x, rect.y, 1.0, rect.h, border);
-                popup_rect.push_rect(gpu, rect.x + rect.w - 1.0, rect.y, 1.0, rect.h, border);
+                popup_rect.push_box(gpu, rect.x, rect.y, rect.w, rect.h, crate::rect::BoxStyle {
+                    radius: corner_radius,
+                    fill: with_alpha(theme.bg_modeline, alpha),
+                    border: 1.0,
+                    border_color: with_alpha(border, alpha),
+                });
                 // The completion popup's own selected-candidate row --
-                // `theme.selection`, not `theme.hl_line`: same reasoning
-                // the sidebar's own selected-row highlight already
-                // documents (see its own push_rect call, just above) --
-                // the popup has no caret of its own, so this has to
-                // actually stand out on its own, not just serve as a
-                // subtle secondary cue alongside a visible caret. Using
-                // `hl_line` here was the bug: on Visual Studio Dark it's
-                // barely distinguishable from this same popup's own
-                // `bg_modeline` background, making the selected row
-                // unreadable.
-                if id == popup::PopupId::Completion {
-                    if let Some(row) = popup_selected_row {
+                // `theme.selection`, not `theme.hl_line`: the popup has no
+                // caret of its own, so this has to stand out on its own.
+                if draw.id == popup::PopupId::Completion {
+                    if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
-                        popup_rect.push_rect(gpu, rect.x, y, rect.w, line_height, theme.selection);
+                        let inset = if corner_radius > 0.0 { 3.0 } else { 0.0 };
+                        popup_rect.push_box(gpu, rect.x + inset, y, rect.w - inset * 2.0, line_height, crate::rect::BoxStyle {
+                            radius: corner_radius.min(3.0),
+                            fill: with_alpha(theme.selection, alpha),
+                            border: 0.0,
+                            border_color: [0.0; 4],
+                        });
                     }
                 }
             }
             popup_rect.flush(gpu);
-            text.prepare_popups(gpu, theme, &popup_rects);
+            // Each popup's text inset, and where it's cut off: the
+            // which-key drawer never shows below the modeline's top.
+            let popup_text: Vec<(popup::PopupId, fenix_window::Rect, (f32, f32), f32)> = popup_rects
+                .iter()
+                .map(|&(id, rect)| {
+                    if id == popup::PopupId::WhichKey {
+                        (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    } else {
+                        (id, rect, (text::PAD_LEFT, 4.0), f32::MAX)
+                    }
+                })
+                .collect();
+            text.prepare_popups(gpu, theme, &popup_text);
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -26871,17 +26099,33 @@ impl App {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            motion_gpu.sprites.render(&mut pass);
             if !popup_rects.is_empty() {
                 popup_rect.render(&mut pass);
                 text.render_popups(&mut pass);
             }
             caret_rect.render(&mut pass);
+            motion_gpu.top.render(&mut pass);
+            if let Some(fade) = &self.splash_fade {
+                fade.sprites.render(&mut pass);
+            }
+        }
+        // The frame a theme change fades out of: copied before it's shown.
+        if motion_state.capture_frame {
+            let target = motion_gpu.snapshot_target(gpu);
+            encoder.copy_texture_to_texture(
+                frame.texture.as_image_copy(),
+                target.as_image_copy(),
+                wgpu::Extent3d { width: surface_w, height: surface_h, depth_or_array_layers: 1 },
+            );
         }
         _profile.mark("surface acquired and commands encoded");
         gpu.queue.submit(Some(encoder.finish()));
         window.pre_present_notify();
         gpu.queue.present(frame);
         _profile.mark("present complete");
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| crate::profile::launch_mark("first frame"));
         text.trim();
         // Publish the tab geometry this frame actually drew, so mouse
         // hit-testing (`frame_geometry`) uses the exact same measured
@@ -26897,32 +26141,65 @@ impl App {
 /// drawn from `fenix-brand` -- the same geometry `build.rs` embeds into
 /// the `.exe` as its resource icon (what Explorer and a taskbar pin read
 /// before the process is even running), so the two can't disagree.
-fn fenix_icon() -> Option<Icon> {
+pub(crate) fn fenix_icon() -> Option<Icon> {
     let icon = fenix_brand::app_icon(256);
     Icon::from_rgba(icon.rgba, icon.width, icon.height).ok()
 }
 
-impl ApplicationHandler<FenixUserEvent> for App {
-    /// Thin trait-required wrapper around `handle_user_event` -- see
-    /// that method's own doc comment for why the actual logic lives
-    /// there instead of here (same "extract the `ActiveEventLoop`-free
-    /// part so it's directly testable" reasoning `handle_key`/
-    /// `test_vim_key` already established for keyboard input).
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
-        self.handle_user_event(event);
+impl App {
+    /// Takes the window `window`'s surface back from the launch splash
+    /// and lets the splash fade out over the first frames. With no
+    /// splash back (it was off, or its thread failed), the surface is
+    /// made afresh if it has to be.
+    pub(crate) fn end_splash(&mut self, window: WindowId, splash: Option<crate::splash::SplashReturn>) {
+        let active = self.window.as_ref().is_some_and(|w| w.id() == window);
+        let frame = if active { None } else { (0..self.frames.len()).find(|&f| self.frame_window(f).is_some_and(|w| w.id() == window)) };
+        let gpu = match frame {
+            None => self.gpu.as_mut(),
+            Some(f) => self.frames[f].as_mut().and_then(|state| state.gpu.as_mut()),
+        };
+        let Some(gpu) = gpu else { return };
+        match splash {
+            Some(back) => {
+                gpu.restore_surface(back.surface);
+                gpu.resize(PhysicalSize::new(back.config.width, back.config.height));
+                gpu.apply_pending_resize();
+                self.splash_fade = Some(crate::splash::SplashFade {
+                    sprites: back.sprites,
+                    scene: back.scene,
+                    started: back.started,
+                    progress: back.progress,
+                    fade_from: Instant::now(),
+                    still: back.still,
+                });
+            }
+            None if gpu.surface.is_none() => {
+                let window = if active { self.window.clone() } else { frame.and_then(|f| self.frame_window(f).cloned()) };
+                if let (Some(context), Some(window)) = (&self.gpu_context, window) {
+                    let fresh = context.attach(window);
+                    match frame {
+                        None => self.gpu = Some(fresh),
+                        Some(f) => {
+                            if let Some(state) = self.frames[f].as_mut() {
+                                state.gpu = Some(fresh);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-
-        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
-        let window =
-            Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
-
-        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+    /// Everything `resumed` does once the first window and its GPU exist:
+    /// fonts, the text and rect pipelines, then the saved windows.
+    /// `progress` hears how far along it is (0 to 1), for the launch
+    /// splash; the window's surface may be on loan to the splash while
+    /// this runs, which nothing here needs.
+    pub(crate) fn start_in(&mut self, event_loop: &ActiveEventLoop, window: Arc<Window>, gpu_context: GpuContext, gpu: GpuState, progress: &dyn Fn(f32)) {
         let fonts = Rc::new(RefCell::new(text::FontContext::new(&gpu)));
+        crate::profile::launch_mark("fonts");
+        progress(0.75);
         // No priming call needed for pane content -- `redraw()` populates
         // every visible pane's `GlyphBuffer` fresh (creating it lazily)
         // on the first real frame, which winit already requests
@@ -26935,6 +26212,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let vnc_pipeline = VncPipeline::new(&gpu);
         let pdf_pipeline = PdfPipeline::new(&gpu);
         let logo_pipeline = PdfPipeline::new_blended(&gpu);
+        self.motion_gpu = Some(motion_host::MotionGpu::new(&gpu));
+        progress(0.85);
 
         self.window = Some(window);
         self.gpu_context = Some(gpu_context);
@@ -26957,6 +26236,34 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.vnc_hidden_cursor = Some(event_loop.create_custom_cursor(hidden_cursor_source));
         self.refresh_frame_origin();
         self.restore_saved_windows(event_loop);
+        progress(0.95);
+        crate::profile::launch_mark("resumed");
+    }
+}
+
+impl ApplicationHandler<FenixUserEvent> for App {
+    /// Thin trait-required wrapper around `handle_user_event` -- see
+    /// that method's own doc comment for why the actual logic lives
+    /// there instead of here (same "extract the `ActiveEventLoop`-free
+    /// part so it's directly testable" reasoning `handle_key`/
+    /// `test_vim_key` already established for keyboard input).
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
+        self.handle_user_event(event);
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let window =
+            Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
+        crate::profile::launch_mark("window");
+
+        let (gpu_context, gpu) = pollster::block_on(GpuContext::new(window.clone()));
+        crate::profile::launch_mark("gpu");
+        self.start_in(event_loop, window, gpu_context, gpu, &|_| {});
     }
 
     /// The one place every quit path is guaranteed to pass through --
@@ -27055,6 +26362,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 let pos = (position.x as f32, position.y as f32);
                 self.cursor_pos = Some(pos);
                 self.handle_vnc_pointer_move(pos);
+                self.pdf_mouse_move(pos);
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
                     self.update_hover_cursor(pos, window_width, window_height);
                 }
@@ -27071,6 +26379,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 if let Some(pos) = self.cursor_pos {
                     self.handle_vnc_pointer_button(pos, button, state == ElementState::Pressed);
+                    // After the click has focused the pane: a link or a
+                    // drag selecting text in a PDF.
+                    self.pdf_mouse(pos, button, state == ElementState::Pressed);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -27120,9 +26431,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // everything settles, fall back to the long, efficient wait for
         // the next blink toggle -- an idle editor still does no per-frame
         // work between blinks.
-        let blink_transitioning = self.animations_enabled() && now.duration_since(self.blink_transition_start) < BLINK_FADE;
+        let prefs = self.motion();
+        let blink_transitioning = prefs.caret_fade && now.duration_since(self.blink_transition_start) < prefs.blink_fade_d;
         let pulse_active = match &self.pulse {
-            Some(p) if now.duration_since(p.started) < PULSE_DURATION => true,
+            Some(p) if now.duration_since(p.started) < prefs.pulse_d => true,
             Some(_) => {
                 self.pulse = None; // expired -- drop it so redraw stops drawing it
                 needs_redraw = true;
@@ -27147,7 +26459,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let scroll_animating = (0..self.frames.len())
             .filter_map(|frame| self.frame_workspaces(frame))
             .any(|workspaces| workspaces.active_scroll_anims().contains_key(&workspaces.active().focused_id()));
-        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused;
+        self.prune_motion(now);
+        let animating = blink_transitioning || pulse_active || scroll_animating || vnc_focused || self.motion_animating(now);
         if animating {
             needs_redraw = true;
         }
@@ -27170,6 +26483,19 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // has no other reason to wake up.
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         let wait_until = wait_until.min(self.next_disk_check);
+        // A message about to fade, or the spinner's next blade.
+        let wait_until = match self.motion_next_wake(now) {
+            Some(wake) if wake <= now => {
+                for frame in 0..self.frames.len() {
+                    if let Some(window) = self.frame_window(frame) {
+                        window.request_redraw();
+                    }
+                }
+                now + ANIM_TICK
+            }
+            Some(wake) => wait_until.min(wake),
+            None => wait_until,
+        };
         // A pending listing has no other reason to wake the loop: nothing
         // is animating and no key was pressed, so without this the "still
         // reading" line would never appear and a slow share would look
@@ -27401,6 +26727,7 @@ impl App {
             bg_rect: None,
             popup_rect: None,
             caret_rect: None,
+            motion_gpu: None,
             workspaces: WorkspaceList::new(WindowTree::new(buffer), cursor),
             cursor_pos: None,
             origin: (0, 0),
@@ -28352,23 +27679,33 @@ index 0000000..1111111 100644
     }
 
     #[test]
-    fn toggle_animations_flips_and_persists_the_setting() {
-        // Isolated `Config` -- same reasoning as `set_shiftwidth_command_
-        // persists_the_new_width`: `toggle_animations` calls `config.
-        // save()`, which must not write into the real dev machine's
-        // config.ini.
+    fn spc_t_a_cycles_the_motion_level_and_persists_it() {
+        // Isolated `Config`: `toggle_animations` saves, which must not
+        // write into the real dev machine's settings.
         let dir = TempDir::new("toggle_animations_persists");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
-        assert!(app.animations_enabled());
+        assert_eq!(crate::motion::level(&app.config), crate::motion::Level::Subtle);
 
+        app.toggle_animations();
+        assert_eq!(crate::motion::level(&app.config), crate::motion::Level::Full);
         app.toggle_animations();
         assert!(!app.animations_enabled());
         let reloaded = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
-        assert_eq!(reloaded.animations, Some(false));
+        assert_eq!(reloaded.motion.level.as_deref(), Some("off"));
 
         app.toggle_animations();
         assert!(app.animations_enabled());
+    }
+
+    #[test]
+    fn spc_t_a_turns_motion_back_on_after_animations_were_switched_off() {
+        let dir = TempDir::new("toggle_animations_from_off");
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        app.config.animations = Some(false);
+        app.toggle_animations();
+        assert!(app.animations_enabled(), "the old all-off switch no longer overrides the new level");
     }
 
     #[test]
@@ -28520,6 +27857,7 @@ index 0000000..1111111 100644
 
         // One more line down before the ease had a chance to settle -- the
         // exact shape of holding `j`.
+        app.motion.key_repeat = true;
         {
             let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
             buffer.move_down(cursor);
@@ -28528,6 +27866,30 @@ index 0000000..1111111 100644
         let ps = app.pane_state(pane);
         assert_eq!(ps.rendered_scroll, ps.scroll_line as f32, "must snap, not compound the lag from the still-active ease");
         assert!(!app.workspaces.active_scroll_anims().contains_key(&pane));
+    }
+
+    #[test]
+    fn a_new_scroll_target_that_isnt_a_held_key_eases_on_from_where_the_view_is() {
+        // The wheel's next notch arriving mid-ease: no snap.
+        let mut app = App::with_file(None);
+        for _ in 0..60 {
+            app.test_insert('\n');
+        }
+        app.test_set_cursor(Cursor::at_start());
+        for _ in 0..15 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        app.ensure_cursor_visible(10);
+        let pane = app.focused_pane_id();
+        for _ in 0..5 {
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.move_down(cursor);
+        }
+        app.ensure_cursor_visible(10);
+        let ps = app.pane_state(pane);
+        assert!(app.workspaces.active_scroll_anims().contains_key(&pane), "still easing");
+        assert!(ps.rendered_scroll < ps.scroll_line as f32);
     }
 
     #[test]
@@ -34234,85 +33596,6 @@ configure_board stm32
         let r = popup_beside_row(at, 12, 70, 300.0, 100.0, 450.0, 1000.0, cw, lh).unwrap();
         assert_eq!(r.x + r.w, 700.0);
         assert!(popup_beside_row(at, 5, 4, 200.0, 100.0, 450.0, 1000.0, cw, lh).is_none(), "scrolled out of view above");
-    }
-
-    #[test]
-    fn which_key_popup_is_none_when_nothing_is_pending() {
-        let app = App::with_file(None);
-        assert!(app.which_key_popup(800.0, 580.0).is_none());
-    }
-
-    #[test]
-    fn which_key_popup_lists_pending_leader_children_sorted_by_label() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        app.leader_matcher.feed(KeyPress::char('t')); // SPC t: "line numbers", "theme"
-
-        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        // "line numbers" sorts before "theme" -- alphabetical by label.
-        assert!(joined.find("line numbers").unwrap() < joined.find("theme").unwrap());
-        assert!(joined.contains('n')); // the `n` key column, for line numbers
-        assert!(!joined.contains("more")); // both entries fit, nothing truncated
-    }
-
-    #[test]
-    fn which_key_popup_key_column_uses_caret_text_not_a_content_calibrated_color() {
-        // Regression test for a real readability bug: the key column used
-        // to be `theme.syntax_keyword`, a color calibrated for `bg` (the
-        // content background). On TempleOS that color happens to be
-        // identical to `bg_modeline` (the popup's own background), making
-        // every key binding invisible. `caret_text` is guaranteed
-        // high-contrast against `bg_modeline` in every theme.
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        let (_, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-        assert_eq!(spans[0].1, app.theme.caret_text); // spans[0] is the first entry's key column
-    }
-
-    #[test]
-    fn which_key_popup_rect_never_extends_past_the_window_or_under_the_modeline() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups
-
-        // A window far too short for 8 rows -- this is the bug this popup
-        // system fixes: the panel used to have no notion of "not enough
-        // room" and could draw its background/text straight through the
-        // modeline bar.
-        let modeline_top = 40.0;
-        let (rect, _) = app.which_key_popup(300.0, modeline_top).unwrap();
-
-        assert!(rect.x >= 0.0);
-        assert!(rect.y >= 0.0);
-        assert!(rect.x + rect.w <= 300.0 + 0.01);
-        assert!(rect.y <= modeline_top);
-    }
-
-    #[test]
-    fn which_key_popup_widens_to_fit_a_longer_label_than_the_minimum() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' '));
-        let (root_rect, _) = app.which_key_popup(800.0, 580.0).unwrap(); // short group labels only
-
-        app.leader_matcher = keymap::leader_trie().matcher();
-        app.leader_matcher.feed(KeyPress::char(' '));
-        app.leader_matcher.feed(KeyPress::named(FenixNamedKey::Tab)); // "remove workspace" (16 chars) lives here
-        let (workspace_rect, spans) = app.which_key_popup(800.0, 580.0).unwrap();
-
-        assert_eq!(root_rect.w, text::WHICH_KEY_MIN_WIDTH); // short labels clamp to the floor
-        assert!(workspace_rect.w > root_rect.w); // longer label pushes the panel wider
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.contains("remove workspace")); // never character-truncated
-    }
-
-    #[test]
-    fn which_key_popup_truncates_and_reports_how_many_more_when_content_overflows() {
-        let mut app = App::with_file(None);
-        app.leader_matcher.feed(KeyPress::char(' ')); // root: 8 top-level groups, more than fit below
-
-        let (_, spans) = app.which_key_popup(300.0, 40.0).unwrap();
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.contains("more"));
     }
 
     #[test]
@@ -41745,12 +41028,11 @@ configure_board stm32
     }
 
     #[test]
-    fn is_readonly_buffer_kind_covers_docker_git_vnc_pdf_and_pdf_outline_only() {
+    fn is_readonly_buffer_kind_covers_docker_git_vnc_and_pdf() {
         assert!(is_readonly_buffer_kind(BufferKind::Docker));
         assert!(is_readonly_buffer_kind(BufferKind::Git));
         assert!(is_readonly_buffer_kind(BufferKind::Vnc));
         assert!(is_readonly_buffer_kind(BufferKind::Pdf));
-        assert!(is_readonly_buffer_kind(BufferKind::PdfOutline));
         assert!(!is_readonly_buffer_kind(BufferKind::Text));
         assert!(!is_readonly_buffer_kind(BufferKind::Dashboard));
         // A listing is read-only *by kind*; rename mode is the
@@ -41836,7 +41118,7 @@ configure_board stm32
 
         assert!(app.active_picker.is_none());
         assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("Documents & workspaces")));
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("SPC , (PDF reader)")));
     }
 
     #[test]
@@ -41862,675 +41144,6 @@ configure_board stm32
 
         assert_eq!(app.focused_pane_id(), pane, "opening in place must not spawn a new workspace");
         assert!(app.open().buffer.text().contains("reference notes"));
-    }
-
-    #[test]
-    fn pdf_target_size_fit_page_delegates_to_fit_page_size() {
-        assert_eq!(pdf_target_size(PdfZoom::FitPage, (100.0, 200.0), (800, 800)), fenix_pdf::coords::fit_page_size(100.0, 200.0, 800, 800));
-    }
-
-    #[test]
-    fn pdf_target_size_fit_width_delegates_to_fit_width_size() {
-        assert_eq!(pdf_target_size(PdfZoom::FitWidth, (100.0, 200.0), (400, 800)), fenix_pdf::coords::fit_width_size(100.0, 200.0, 400));
-    }
-
-    #[test]
-    fn pdf_target_size_percent_delegates_to_percent_size_and_ignores_pane_size() {
-        let a = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (400, 400));
-        let b = pdf_target_size(PdfZoom::Percent(150), (612.0, 792.0), (4000, 4000));
-        assert_eq!(a, fenix_pdf::coords::percent_size(612.0, 792.0, 150));
-        assert_eq!(a, b, "percent zoom must not depend on pane size");
-    }
-
-    #[test]
-    fn pdf_target_size_is_zero_before_the_page_size_is_known() {
-        assert_eq!(pdf_target_size(PdfZoom::FitPage, (0.0, 0.0), (800, 800)), (0, 0));
-    }
-
-    #[test]
-    fn pdf_target_size_is_zero_for_a_zero_sized_pane() {
-        assert_eq!(pdf_target_size(PdfZoom::FitPage, (612.0, 792.0), (0, 800)), (0, 0));
-    }
-
-    #[test]
-    fn pdf_effective_percent_derives_100_from_a_one_pixel_per_point_render() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_100.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792);
-        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
-    }
-
-    #[test]
-    fn pdf_effective_percent_derives_200_from_a_double_size_render() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_effective_percent_200.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (1224, 1584);
-        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 200);
-    }
-
-    #[test]
-    fn pdf_effective_percent_falls_back_to_100_before_anything_has_rendered() {
-        let (_guard, key, app) = test_open_pdf("pdf_effective_percent_fallback.pdf");
-        assert_eq!(App::pdf_effective_percent(app.pdf_sessions.get(&key).unwrap()), 100);
-    }
-
-    /// `open_pdf_path` spawns a real `fenix_pdf::PdfWorker` thread, which
-    /// binds and initializes the real pdfium native library -- a process-
-    /// wide resource the same way the OS clipboard is (see `CLIPBOARD_
-    /// TEST_LOCK`'s own doc comment), and just as unsafe to touch from
-    /// several threads at once. Production code never hits this (exactly
-    /// one `App`, hence exactly one `PdfWorker`, for the process's whole
-    /// lifetime), but the test harness runs every `#[test]` fn in
-    /// parallel by default, and each one below builds its own `App` (so
-    /// its own from-scratch `PdfWorker`) -- without this lock, several
-    /// tests' worker threads raced to initialize pdfium concurrently and
-    /// reliably crashed the whole test binary (`STATUS_ACCESS_VIOLATION`).
-    static PDF_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Opens a PDF-kind pane the same way `open_pdf_path` does (real
-    /// worker/session/pane wiring, no real pdfium/GPU needed since the
-    /// worker's replies never arrive synchronously in a test) and then
-    /// seeds it with a known page count/size, as if `Opened` had already
-    /// landed -- what every `pdf_goto_page`/`pdf_zoom_*`/`pdf_pan` test
-    /// below needs before those methods do anything.
-    ///
-    /// Builds the `App` itself (rather than taking `&mut App`) so it can
-    /// return `(guard, path, app)` with `guard` named *first* in the
-    /// tuple pattern -- Rust drops a multi-binding `let` in reverse of
-    /// the pattern's left-to-right order, so naming `app` *last* means it
-    /// (and the `PdfWorker`/pdfium instance it owns) is fully dropped and
-    /// joined before `PDF_WORKER_TEST_LOCK` is released at the end of the
-    /// caller's test function. Returning just the guard alongside an
-    /// already-constructed `App` (the first version of this helper) was
-    /// provably not enough: `app` still outlived and dropped *after* that
-    /// guard at the end of each test (reverse-declaration-order, `app`
-    /// having been declared first), so two tests' `PdfWorker` threads
-    /// could still tear down pdfium concurrently on the way out --
-    /// intermittently crashing the test binary (`STATUS_BREAKPOINT`) even
-    /// with the lock in place, until the lock was made to cover the
-    /// worker's *entire* lifetime, spawn through join, not just the spawn
-    /// moment.
-    fn test_open_pdf(path: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf, App) {
-        let guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut app = App::with_file(None);
-        app.open_pdf_path(Path::new(path));
-        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
-        let session = app.pdf_sessions.get_mut(&canonical).expect("session just opened");
-        session.page_count = 10;
-        session.page_point_size = (612.0, 792.0);
-        session.last_pane_size = (612, 792);
-        (guard, canonical, app)
-    }
-
-    #[test]
-    fn closing_a_frame_forgets_the_pdf_session_that_lived_in_it() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close.pdf");
-        assert!(app.pdf_sessions.contains_key(&key));
-
-        let elsewhere = app.buffers.open_scratch();
-        let second = app.test_add_frame(elsewhere);
-        app.activate_frame(second);
-        app.drop_frame(0); // the frame the PDF is open in
-
-        assert!(
-            !app.pdf_sessions.contains_key(&key),
-            "the pdfium worker would still be holding the document open with no pane left to show it"
-        );
-        assert_eq!(app.frames.len(), 1);
-        assert_one_live_frame(&app);
-    }
-
-    #[test]
-    fn closing_a_frame_leaves_a_pdf_session_open_in_another_frame_alone() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_frame_close_other.pdf");
-        let elsewhere = app.buffers.open_scratch();
-        let second = app.test_add_frame(elsewhere);
-
-        app.drop_frame(second);
-
-        assert!(app.pdf_sessions.contains_key(&key), "closing an unrelated frame must not tear down this one's session");
-    }
-
-    /// Seeds a session with a render taller than its pane, so there is
-    /// something to actually scroll -- `test_open_pdf`'s own defaults
-    /// leave the page fitting the pane exactly (nothing to scroll, every
-    /// scroll turns the page), which is the *other* case worth testing.
-    fn seed_scrollable_render(app: &mut App, key: &Path) {
-        let session = app.pdf_sessions.get_mut(key).expect("session open");
-        session.last_pane_size = (612, 400);
-        session.full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
-        session.scroll_offset = (0, 0);
-    }
-
-    #[test]
-    fn pdf_scroll_moves_within_a_page_that_is_taller_than_the_pane() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_within.pdf");
-        seed_scrollable_render(&mut app, &key);
-
-        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.scroll_offset.1, PDF_PAN_STEP_PX);
-        assert_eq!(session.current_page, 0, "scrolling within a page must not turn it");
-    }
-
-    #[test]
-    fn pdf_scroll_past_the_bottom_edge_turns_to_the_next_page_at_its_top() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_bottom.pdf");
-        seed_scrollable_render(&mut app, &key);
-        // Park it against the bottom edge (792 rendered - 400 visible).
-        app.pdf_sessions.get_mut(&key).unwrap().scroll_offset = (0, 392);
-
-        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.current_page, 1);
-        assert!(!session.land_at_bottom, "a forward page turn starts at the top of the new page");
-    }
-
-    #[test]
-    fn pdf_scroll_past_the_top_edge_turns_back_and_lands_at_the_bottom() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_past_top.pdf");
-        seed_scrollable_render(&mut app, &key);
-        app.pdf_sessions.get_mut(&key).unwrap().current_page = 3;
-
-        app.pdf_scroll(-(PDF_PAN_STEP_PX as i32));
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.current_page, 2);
-        assert!(session.land_at_bottom, "scrolling back up must continue onto the bottom of the previous page");
-    }
-
-    #[test]
-    fn pdf_scroll_turns_the_page_immediately_when_the_render_fits_the_pane() {
-        // The fit-page default: nothing to scroll within the page, so a
-        // scroll gesture is a page turn outright.
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_fitting.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
-
-        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 1);
-    }
-
-    #[test]
-    fn pdf_scroll_at_the_last_page_bottom_is_a_no_op_rather_than_wrapping() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_scroll_last_page.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().full_bgra = Some((612, 792, vec![0u8; 612 * 792 * 4]));
-        app.pdf_sessions.get_mut(&key).unwrap().current_page = 9;
-
-        app.pdf_scroll(PDF_PAN_STEP_PX as i32);
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
-    }
-
-    #[test]
-    fn pdf_first_and_last_page_jump_to_the_ends_of_the_document() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_first_last.pdf");
-
-        app.pdf_last_page();
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
-
-        app.pdf_first_page();
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
-    }
-
-    #[test]
-    fn a_rendered_page_lands_at_the_bottom_only_when_scrolling_back_asked_for_it() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_landing.pdf");
-        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
-        app.pdf_sessions.get_mut(&key).unwrap().land_at_bottom = true;
-        let request_id = app.pdf_sessions.get(&key).unwrap().pending_request_id;
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::PageRendered {
-            key: doc_key,
-            request_id,
-            page_index: 0,
-            width: 612,
-            height: 792,
-            bgra: vec![0u8; 612 * 792 * 4],
-            page_width_pts: 612.0,
-            page_height_pts: 792.0,
-        });
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        // Deliberately out of range -- `redraw` clamps it down to this
-        // render's real bottom; see `apply_pdf_response`'s own comment.
-        assert_eq!(session.scroll_offset, (0, u32::MAX));
-        assert!(!session.land_at_bottom, "the landing request is consumed by the render it applied to");
-    }
-
-    #[test]
-    fn the_modeline_shows_the_page_and_zoom_for_a_pdf_pane_not_a_line_and_column() {
-        let (_guard, _key, mut app) = test_open_pdf("pdf_modeline.pdf");
-        app.pdf_goto_page(4);
-
-        let modeline = app.modeline_text();
-
-        assert!(modeline.contains("Page 4/10"), "{modeline}");
-        assert!(modeline.contains("Fit page"), "{modeline}");
-        assert!(!modeline.contains("Ln "), "{modeline}");
-    }
-
-    #[test]
-    fn pdf_goto_page_jumps_to_the_1_indexed_page_and_dispatches_a_render() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_jumps.pdf");
-
-        app.pdf_goto_page(5);
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.current_page, 4);
-        assert_eq!(session.last_requested_size, fenix_pdf::coords::fit_page_size(612.0, 792.0, 612, 792));
-    }
-
-    #[test]
-    fn pdf_goto_page_clamps_past_the_last_page_to_the_last_page() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_clamps.pdf");
-
-        app.pdf_goto_page(9999);
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 9);
-    }
-
-    #[test]
-    fn pdf_goto_page_prompt_round_trip_via_key_events() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt.pdf");
-
-        app.start_pdf_goto_page_prompt();
-        assert_eq!(app.pdf_goto_page_prompt.as_deref(), Some(""));
-        for ch in "3".chars() {
-            app.pdf_goto_page_prompt_key(KeyPress::char(ch));
-        }
-        assert_eq!(app.pdf_goto_page_prompt_text(), Some("go to page: 3".to_string()));
-        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        assert!(app.pdf_goto_page_prompt.is_none());
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 2);
-    }
-
-    #[test]
-    fn pdf_goto_page_prompt_escape_cancels_without_moving_the_page() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_goto_page_prompt_escape.pdf");
-
-        app.start_pdf_goto_page_prompt();
-        app.pdf_goto_page_prompt_key(KeyPress::char('3'));
-        app.pdf_goto_page_prompt_key(KeyPress::named(FenixNamedKey::Escape));
-
-        assert!(app.pdf_goto_page_prompt.is_none());
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
-    }
-
-    #[test]
-    fn start_pdf_goto_page_prompt_is_a_no_op_without_a_focused_pdf_pane() {
-        let mut app = App::with_file(None);
-        app.start_pdf_goto_page_prompt();
-        assert!(app.pdf_goto_page_prompt.is_none());
-    }
-
-    #[test]
-    fn pdf_zoom_in_steps_up_from_the_effective_percent_and_switches_to_percent_zoom() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size = (612, 792); // 100%
-
-        app.pdf_zoom_in();
-
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.zoom, PdfZoom::Percent(110));
-    }
-
-    #[test]
-    fn pdf_zoom_out_steps_down_and_clamps_at_the_minimum() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_out_clamp.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT);
-        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
-            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MIN_PERCENT);
-
-        app.pdf_zoom_out();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MIN_PERCENT));
-    }
-
-    #[test]
-    fn pdf_zoom_in_clamps_at_the_maximum() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_in_clamp.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT);
-        app.pdf_sessions.get_mut(&key).unwrap().last_requested_size =
-            fenix_pdf::coords::percent_size(612.0, 792.0, PDF_ZOOM_MAX_PERCENT);
-
-        app.pdf_zoom_in();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::Percent(PDF_ZOOM_MAX_PERCENT));
-    }
-
-    #[test]
-    fn pdf_zoom_fit_page_and_fit_width_switch_modes_and_dispatch() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_zoom_fit.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().zoom = PdfZoom::Percent(200);
-
-        app.pdf_zoom_fit_width();
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitWidth);
-
-        app.pdf_zoom_fit_page();
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().zoom, PdfZoom::FitPage);
-    }
-
-    #[test]
-    fn pdf_pan_moves_scroll_offset_in_the_given_direction() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_pan.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().scroll_offset = (100, 100);
-
-        app.pdf_pan(1, 0);
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100));
-
-        app.pdf_pan(0, -1);
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (100 + PDF_PAN_STEP_PX, 100 - PDF_PAN_STEP_PX));
-    }
-
-    #[test]
-    fn pdf_pan_never_underflows_past_zero() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_pan_underflow.pdf");
-
-        app.pdf_pan(-1, -1);
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().scroll_offset, (0, 0));
-    }
-
-    fn sample_outline() -> Vec<fenix_pdf::outline::OutlineEntry> {
-        vec![
-            fenix_pdf::outline::OutlineEntry { title: "Chapter 1".to_string(), page_index: 0, depth: 0 },
-            fenix_pdf::outline::OutlineEntry { title: "Chapter 2".to_string(), page_index: 6, depth: 0 },
-        ]
-    }
-
-    #[test]
-    fn pdf_toggle_outline_opens_a_split_pane_from_already_cached_entries() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_open.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
-        let panes_before = app.windows().window_count();
-
-        app.pdf_toggle_outline();
-
-        assert_eq!(app.windows().window_count(), panes_before + 1);
-        assert!(app.pdf_outline_panes.contains_key(&key));
-        let outline_buffer = app.focused_buffer_id();
-        assert_eq!(app.buffers.get(outline_buffer).unwrap().kind, BufferKind::PdfOutline);
-        assert_eq!(app.pdf_outline_source.get(&outline_buffer), Some(&key));
-        assert_eq!(app.pdf_outline_lines.get(&outline_buffer).unwrap().len(), 2);
-        assert_eq!(app.open().buffer.text(), "Chapter 1\nChapter 2\n");
-    }
-
-    #[test]
-    fn pdf_toggle_outline_a_second_time_closes_it_and_refocuses_the_pdf_pane() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_close.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline(); // opens the outline pane and focuses it
-        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
-        let panes_with_outline = app.windows().window_count();
-
-        app.pdf_toggle_outline(); // outline pane is currently focused -- this closes it
-
-        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
-        assert!(!app.pdf_outline_panes.contains_key(&key));
-        assert!(app.pdf_outline_lines.is_empty());
-        assert!(app.pdf_outline_source.is_empty());
-        assert_eq!(app.focused_pane_id(), pdf_pane);
-    }
-
-    #[test]
-    fn pdf_toggle_outline_with_no_cached_outline_dispatches_a_fetch_without_opening_a_pane_yet() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_toggle_outline_fetch.pdf");
-        let panes_before = app.windows().window_count();
-
-        app.pdf_toggle_outline();
-
-        // Nothing to show yet -- no reply has landed (the worker's real
-        // reply, if any, has nowhere to go in a test with no event proxy;
-        // see `test_open_pdf`'s own doc comment).
-        assert_eq!(app.windows().window_count(), panes_before);
-        assert!(!app.pdf_outline_panes.contains_key(&key));
-        assert!(app.pdf_sessions.get(&key).unwrap().outline.is_none());
-    }
-
-    #[test]
-    fn apply_pdf_response_outline_caches_it_and_opens_the_pane() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_apply_outline_response.pdf");
-        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
-        let panes_before = app.windows().window_count();
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::Outline { key: doc_key, entries: sample_outline() });
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().outline, Some(sample_outline()));
-        assert_eq!(app.windows().window_count(), panes_before + 1);
-        assert!(app.pdf_outline_panes.contains_key(&key));
-    }
-
-    #[test]
-    fn pdf_outline_activate_selected_jumps_the_companion_pdf_pane_to_that_entrys_page() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline(); // opens and focuses the outline pane
-
-        // Move the cursor to the second line ("Chapter 2", page_index 6).
-        let start = app.open().buffer.line_start_char(1);
-        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
-
-        app.pdf_outline_activate_selected();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
-    }
-
-    #[test]
-    fn pdf_outline_activate_selected_on_the_no_bookmarks_placeholder_line_does_nothing() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_activate_empty.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(Vec::new());
-        app.pdf_toggle_outline();
-
-        app.pdf_outline_activate_selected();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
-    }
-
-    #[test]
-    fn killing_the_outline_buffer_directly_cleans_up_the_same_as_toggling_it_off() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_outline_kill_buffer.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline(); // outline pane is now focused
-        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
-        let panes_with_outline = app.windows().window_count();
-
-        app.kill_buffer_now();
-
-        assert_eq!(app.windows().window_count(), panes_with_outline - 1);
-        assert!(!app.pdf_outline_panes.contains_key(&key));
-        assert_eq!(app.focused_pane_id(), pdf_pane);
-    }
-
-    #[test]
-    fn pdf_session_close_cleans_up_a_still_open_outline_panes_side_tables() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_outline.pdf");
-        app.pdf_sessions.get_mut(&key).unwrap().outline = Some(sample_outline());
-        app.pdf_toggle_outline();
-
-        app.pdf_session_close(&key);
-
-        assert!(app.pdf_outline_panes.is_empty());
-        assert!(app.pdf_outline_lines.is_empty());
-        assert!(app.pdf_outline_source.is_empty());
-    }
-
-    fn sample_matches() -> Vec<fenix_pdf::search::PdfSearchMatch> {
-        vec![
-            fenix_pdf::search::PdfSearchMatch { page_index: 0, char_index: 5, context: "the quick brown fox".to_string() },
-            fenix_pdf::search::PdfSearchMatch { page_index: 6, char_index: 0, context: "jumps over the lazy dog".to_string() },
-        ]
-    }
-
-    #[test]
-    fn start_pdf_search_prompt_is_a_no_op_without_a_focused_pdf_pane() {
-        let mut app = App::with_file(None);
-        app.start_pdf_search_prompt();
-        assert!(app.pdf_search_prompt.is_none());
-    }
-
-    #[test]
-    fn pdf_search_prompt_round_trip_via_key_events_dispatches_a_search() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt.pdf");
-
-        app.start_pdf_search_prompt();
-        assert_eq!(app.pdf_search_prompt.as_deref(), Some(""));
-        for ch in "fox".chars() {
-            app.pdf_search_prompt_key(KeyPress::char(ch));
-        }
-        assert_eq!(app.pdf_search_prompt_text(), Some("search pdf: fox".to_string()));
-        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        assert!(app.pdf_search_prompt.is_none());
-        let session = app.pdf_sessions.get(&key).unwrap();
-        assert_eq!(session.pending_search_request_id, 1);
-        assert_eq!(session.last_search_query, "fox");
-    }
-
-    #[test]
-    fn pdf_search_prompt_escape_cancels_without_dispatching_a_search() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_prompt_escape.pdf");
-
-        app.start_pdf_search_prompt();
-        app.pdf_search_prompt_key(KeyPress::char('x'));
-        app.pdf_search_prompt_key(KeyPress::named(FenixNamedKey::Escape));
-
-        assert!(app.pdf_search_prompt.is_none());
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().pending_search_request_id, 0);
-    }
-
-    #[test]
-    fn apply_pdf_response_search_results_opens_a_split_pane_with_one_line_per_match() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        session.last_search_query = "dog".to_string();
-        let doc_key = session.doc_key;
-        let panes_before = app.windows().window_count();
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-
-        assert_eq!(app.windows().window_count(), panes_before + 1);
-        assert!(app.pdf_search_panes.contains_key(&key));
-        let results_buffer = app.focused_buffer_id();
-        assert_eq!(app.buffers.get(results_buffer).unwrap().kind, BufferKind::PdfSearchResults);
-        assert_eq!(app.pdf_search_source.get(&results_buffer), Some(&key));
-        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 2);
-        assert!(app.open().buffer.text().contains("p.  1  the quick brown fox"));
-        assert!(app.open().buffer.text().contains("p.  7  jumps over the lazy dog"));
-    }
-
-    #[test]
-    fn apply_pdf_response_search_results_with_a_stale_request_id_is_dropped() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_stale.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 2; // a newer search has since been dispatched
-        let doc_key = session.doc_key;
-        let panes_before = app.windows().window_count();
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-
-        assert_eq!(app.windows().window_count(), panes_before);
-        assert!(!app.pdf_search_panes.contains_key(&key));
-    }
-
-    #[test]
-    fn a_second_search_rewrites_the_existing_results_pane_instead_of_stacking_a_new_one() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_second_search.pdf");
-        let doc_key = app.pdf_sessions.get(&key).unwrap().doc_key;
-        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 1;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-        let panes_with_results = app.windows().window_count();
-        let results_pane = *app.pdf_search_panes.get(&key).unwrap();
-
-        app.pdf_sessions.get_mut(&key).unwrap().pending_search_request_id = 2;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults {
-            key: doc_key,
-            request_id: 2,
-            matches: vec![fenix_pdf::search::PdfSearchMatch { page_index: 2, char_index: 0, context: "banana".to_string() }],
-        });
-
-        assert_eq!(app.windows().window_count(), panes_with_results); // no new pane
-        assert_eq!(*app.pdf_search_panes.get(&key).unwrap(), results_pane); // same pane
-        let results_buffer = *app.windows().content(results_pane).unwrap();
-        assert_eq!(app.pdf_search_result_lines.get(&results_buffer).unwrap().len(), 1);
-        assert!(app.buffers.get(results_buffer).unwrap().buffer.text().contains("banana"));
-    }
-
-    #[test]
-    fn apply_pdf_response_search_results_with_no_matches_shows_the_explanatory_placeholder() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_apply_search_response_empty.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        session.last_search_query = "xylophone".to_string();
-        let doc_key = session.doc_key;
-
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
-
-        assert_eq!(app.open().buffer.text(), "(no matches for \"xylophone\")");
-    }
-
-    #[test]
-    fn pdf_search_activate_selected_jumps_the_companion_pdf_pane_to_that_matchs_page() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        let doc_key = session.doc_key;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-
-        // Move the cursor to the second line (page_index 6).
-        let start = app.open().buffer.line_start_char(1);
-        app.test_set_cursor(Cursor { char_idx: start, sticky_col: 0 });
-
-        app.pdf_search_activate_selected();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 6);
-    }
-
-    #[test]
-    fn pdf_search_activate_selected_on_the_no_matches_placeholder_line_does_nothing() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_activate_empty.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        let doc_key = session.doc_key;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: Vec::new() });
-
-        app.pdf_search_activate_selected();
-
-        assert_eq!(app.pdf_sessions.get(&key).unwrap().current_page, 0);
-    }
-
-    #[test]
-    fn killing_the_search_results_buffer_directly_cleans_up_the_same_as_closing_it() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_search_kill_buffer.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        let doc_key = session.doc_key;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-        let pdf_pane = app.pdf_sessions.get(&key).unwrap().pane;
-        let panes_with_results = app.windows().window_count();
-
-        app.kill_buffer_now();
-
-        assert_eq!(app.windows().window_count(), panes_with_results - 1);
-        assert!(!app.pdf_search_panes.contains_key(&key));
-        assert_eq!(app.focused_pane_id(), pdf_pane);
-    }
-
-    #[test]
-    fn pdf_session_close_cleans_up_a_still_open_search_panes_side_tables() {
-        let (_guard, key, mut app) = test_open_pdf("pdf_session_close_with_search.pdf");
-        let session = app.pdf_sessions.get_mut(&key).unwrap();
-        session.pending_search_request_id = 1;
-        let doc_key = session.doc_key;
-        app.apply_pdf_response(fenix_pdf::PdfResponse::SearchResults { key: doc_key, request_id: 1, matches: sample_matches() });
-
-        app.pdf_session_close(&key);
-
-        assert!(app.pdf_search_panes.is_empty());
-        assert!(app.pdf_search_result_lines.is_empty());
-        assert!(app.pdf_search_source.is_empty());
     }
 
     #[test]

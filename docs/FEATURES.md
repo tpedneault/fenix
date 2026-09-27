@@ -425,7 +425,7 @@ Everything Fenix does, by area. For the keys, see
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
   workspaces (`SPC TAB`) -- name one (`SPC TAB r`), jump straight to it
   by name instead of only cycling (`SPC TAB TAB`), or define a shelf of
-  them in `SPC ,` (Documents & workspaces) and open-or-switch-to one on
+  them in `SPC ,` (Workspaces) and open-or-switch-to one on
   demand (`SPC TAB f`). Every pane shows a small title bar naming its
   buffer (the filename, or a placeholder like `*dashboard*`/`*docker*`/
   a dired buffer's own directory for one with no path) -- with a split
@@ -872,29 +872,30 @@ Everything Fenix does, by area. For the keys, see
   resolution, falling back to client-side scaling when the server
   doesn't support that or declines a particular size. No encryption or
   authentication at all -- trusted-network hosts only.
-- **PDF viewer** (`SPC r ...`): open a `.pdf` file the same way you'd
-  open any other file (typed path, the explorer, a CLI argument) and it
-  renders as a scaled-to-fit page in an ordinary, splittable pane instead
-  of loading as text. The mouse wheel, `j`/`k` and the arrow keys scroll
-  the document continuously -- straight through page boundaries, so a
-  scroll never dead-ends at the bottom of a page -- and `PageDown`/
-  `PageUp`, `n`/`p`, `Home`/`End` turn/jump pages outright, all as bare
-  single keystrokes while a PDF pane is focused. `SPC r g` jumps
-  straight to a typed page number; `+`/`-`/`0`/`w` (or `SPC r =`/
-  `SPC r -`/`SPC r 0`/`SPC r w`) zoom in/out and fit the page/width, with
-  `h`/`l` panning sideways across whatever doesn't fit in the pane at the
-  current zoom. The status line shows `Page N/M` and the current zoom in
-  place of the line/column an ordinary buffer shows. The render
-  re-fits automatically on window resize (except at a fixed percentage
-  zoom, which stays put across a resize on purpose). `SPC r o` toggles a
-  split-pane outline/bookmarks panel -- a real, Vim-navigable listing
-  where `Enter` on an entry jumps the PDF straight to its page. `SPC r /`
-  searches the whole document for a word or phrase and lists every match
-  (page number plus surrounding context) in its own split pane, `Enter`
-  jumping straight to that match's page the same way the outline does.
-  Requires `pdfium.dll` (see
-  [Optional external tools](BUILDING.md#optional-external-tools)) -- without it,
-  opening a PDF shows an error instead of a blank pane.
+- **PDF reader** (`SPC r ...`): a `.pdf` opens like any file (typed
+  path, the explorer, a recent file, a CLI argument, a jump) -- as a tab
+  in the focused pane, fitted to its width -- and can be moved, closed,
+  reopened and shown in two panes at different pages. Reading uses Vim's
+  keys over one continuous column of pages: `j`/`k` scroll, `Ctrl-d`/`Ctrl-u` and
+  `Ctrl-f`/`Ctrl-b` by half and whole screens, `J`/`K` turn the page,
+  `gg`, `G` and `{n}G` go to a page, counts repeat, and `g` waits so
+  `gt`/`gT`/`gh` still move between tabs. `+`/`-` zoom in steps, `=`
+  switches between fit width and fit page, `zw`/`zp`/`z0` pick one.
+  `o` opens a sidebar with the outline (folding, the section you're in
+  marked), the search's matches and your marks; `/` searches as you
+  type, highlighting every match on the page, and `n`/`N` go through
+  them one by one; `m{a}` and `'{a}` set and use marks, and `Ctrl-o`
+  comes back from a jump. `SPC r t` picks a heading by name. Pages can be
+  drawn as printed or in the theme's colours (`SPC r c`, or `reader.colors`
+  in `SPC ,`); each PDF reopens where you left it, Home lists what you're
+  reading, `yp` copies a `file.pdf#page=38` link that `gf` follows from
+  any note, a PDF your build rewrites reloads in place, and sessions bring
+  PDF panes back. Text can be selected -- by dragging, or `v` and Vim's
+  motions -- and `y` copies it with the lines run together; `f` labels
+  every link in sight to follow by typing, and a click follows one. `SPC m` lists the reader's commands, and
+  `SPC r` works from any pane on the PDF read last. Requires
+  `pdfium.dll` (see [Optional external tools](BUILDING.md#optional-external-tools))
+  -- without it, opening a PDF shows an error instead of a blank pane.
 
 ## Code intelligence, tasks and debugging
 
@@ -988,6 +989,43 @@ Everything Fenix does, by area. For the keys, see
   project's own launch target -- required for anything that isn't "the
   script I have open" -- comes from `.fenix/tools.json`'s `launch`
   (`program`, `args`, `cwd`, `env`; `SPC p ,` edits it).
+- **Key menu**: pause after `SPC` (or Vim's `g`, `z`, `]`, `[`, or `SPC m`)
+  and a drawer opens up out of the modeline showing what can come next.
+  Its header is the keys pressed so far as keycaps and the group's name;
+  below, the keys in columns, groups first (each marked `+` with how many
+  commands it holds) then commands, or a group's own sections (git's
+  View / Branch & remote / This change). Keys are ordered by key, so none
+  moves when a label changes (`which_key.order = "label"` sorts by what
+  they do). Backspace goes up a level; a group too big for 40% of the
+  window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
+  waits `which_key.delay_ms` (250 ms) before opening, so a quick
+  `SPC f f` never flashes it; once open, deeper levels show at once.
+- **Motion and polish**: the window opens at once with a launch splash --
+  the Fenix mark assembling, then breathing, over a line that fills as
+  startup gets further -- drawn from its own thread, so a slow start
+  never looks like a hang; it holds still with animations off and only
+  `motion.splash = false` hides it. While editing, a jump (`gd`, a
+  search, `Ctrl-O`, a picker, a mark, a debugger stop) flashes the line
+  it lands on; undo, redo, `.` and `:s` flash what they changed and mark
+  where text went; popups fade in rising from where they open and fade
+  out; modeline messages fade instead of cutting off, and an error
+  flashes the mode rail; background work (a fetch, a task, a Jira sync,
+  a language server starting) shows in the modeline beside the mark's
+  blades lighting in turn; the mode colour blends between modes; the
+  active tab's accent slides to the next tab; sideways scrolling eases;
+  a theme change cross-fades. `full` adds the caret gliding along a
+  motion, unfolded rows opening downwards, and panes moving to a split
+  or close. Popups get rounded corners and soft shadows; problems from
+  language servers are underlined with a wave, with the cursor line's
+  message at its end; an overview ruler down each code pane's right edge
+  shows the visible part, search matches, problems and changes (click
+  it to jump); sticky scroll pins the headers of the scopes you're
+  inside; a Visual selection is rounded and shows its whitespace;
+  unfocused panes are dimmed; brackets can be coloured by depth.
+  `motion.level` (`SPC t a`) sets how much moves, every animation and
+  every piece of polish has its own setting (the Motion and Appearance
+  categories of `SPC ,`), and `editor.animations = false` still stops
+  them all.
 - **Tool status**: `SPC l m` opens a single-pane listing of every
   language with a built-in LSP server or DAP adapter -- the exact
   command that would be launched (a `[lsp]` override if configured,

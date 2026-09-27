@@ -27,6 +27,10 @@ struct Document {
     #[serde(default)]
     recovery: Option<String>,
     cursor: usize,
+    /// A PDF: reopened in the reader (where it was left comes from the
+    /// places file), never read as text.
+    #[serde(default)]
+    pdf: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -158,8 +162,15 @@ impl App {
                 conflict: dirty && self.externally_changed.contains(&id),
                 recovery: self.unnamed_snapshots.get(&id).and_then(|p| p.file_name()).and_then(|n| n.to_str()).map(str::to_string),
                 disk: self.disk_state.get(&id).copied().or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
-                path: path.clone(), text: (dirty || path.is_none()).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx,
+                path: path.clone(), text: (dirty || path.is_none()).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, pdf: false,
             });
+        }
+        // Each open PDF, by its path.
+        let mut pdfs: Vec<(BufferId, PathBuf)> = self.pdf_docs.iter().map(|(&id, doc)| (id, doc.path.clone())).collect();
+        pdfs.sort_by(|a, b| a.1.cmp(&b.1));
+        for (id, path) in pdfs {
+            ids.insert(id, documents.len());
+            documents.push(Document { path: Some(path), text: None, dirty: false, disk: None, conflict: false, recovery: None, cursor: 0, pdf: true });
         }
         let frames = (0..self.frames.len()).map(|frame| {
             let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
@@ -288,6 +299,16 @@ impl App {
         let mut warnings = Vec::new();
         let recovery = self.recovery_dir.as_ref().map(|dir| fenix_recovery::list(dir)).unwrap_or_default();
         for mut doc in saved.documents {
+            if doc.pdf {
+                match doc.path.as_ref().filter(|p| p.exists()) {
+                    Some(path) => documents.push(Some(self.pdf_buffer_for(path))),
+                    None => {
+                        warnings.push(format!("{}: not there any more", doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()));
+                        documents.push(None);
+                    }
+                }
+                continue;
+            }
             // Recovery is written before the session checkpoint. A newer snapshot
             // can contain edits from a crash or failed session write in between.
             if let Some(snapshot) = recovery.iter().find(|snapshot| {
@@ -609,7 +630,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0,
+                conflict: false, recovery: None, cursor: 0, pdf: false,
             }],
             frames: vec![SavedFrame {
                 active: 1,
@@ -660,7 +681,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0,
+                conflict: false, recovery: None, cursor: 0, pdf: false,
             }],
             frames: vec![SavedFrame {
                 active: 0,
@@ -988,4 +1009,17 @@ mod tests {
         assert!(restored.open().buffer.is_dirty());
     }
 
+    #[test]
+    fn a_session_keeps_pdfs_and_says_so() {
+        let _guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = std::env::temp_dir().join(format!("fenix-session-pdf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kept.pdf");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+        let mut app = App::with_file(None);
+        app.open_pdf_path(&path);
+        let json = serde_json::to_string(&app.capture_session()).unwrap();
+        assert!(json.contains("kept.pdf") && json.contains("\"pdf\":true"), "{json}");
+        drop(app);
+    }
 }

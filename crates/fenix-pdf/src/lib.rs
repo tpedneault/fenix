@@ -22,10 +22,9 @@
 //! or pulled in here at all.
 
 mod render;
-pub mod coords;
-pub mod crop;
 pub mod outline;
 pub mod search;
+pub mod text;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +61,10 @@ impl Default for PdfDocKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfRequest {
     Open { key: PdfDocKey, path: PathBuf },
-    RenderPage { key: PdfDocKey, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
+    /// `view` names which of the caller's views of the document asked:
+    /// two panes can show one document at different pages, and each
+    /// needs its own render.
+    RenderPage { key: PdfDocKey, view: u64, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
     /// Fetches and flattens the document's bookmark tree (see the
     /// `outline` module). Cheap relative to `RenderPage` (no
     /// rasterization involved), but still routed through the same
@@ -79,7 +81,20 @@ pub enum PdfRequest {
     /// requests are (see `coalesce_render_requests`) -- a search is one
     /// explicit `Enter` press, not a high-frequency event like a window
     /// resize, so there's no flood of these to thin out.
-    Search { key: PdfDocKey, request_id: u64, query: String },
+    /// Searches from `from_page` on, a few pages at a time: each batch
+    /// is answered with the matches it found, then the rest of the search
+    /// goes to the back of the queue, so renders keep coming while a long
+    /// document is searched. `match_case` as for smart-case.
+    Search { key: PdfDocKey, request_id: u64, query: String, match_case: bool, from_page: u32 },
+    /// Drops the renders still queued for `view` of `key` whose page isn't
+    /// in `keep` -- sent when the view scrolls, so pages scrolled past
+    /// aren't rendered after the ones now on screen. A render already
+    /// under way finishes.
+    Cancel { key: PdfDocKey, view: u64, keep: Vec<u32> },
+    /// A page's characters and their boxes, for selecting and copying.
+    Text { key: PdfDocKey, page: u32 },
+    /// A page's links.
+    Links { key: PdfDocKey, page: u32 },
     Close { key: PdfDocKey },
 }
 
@@ -87,12 +102,11 @@ pub enum PdfRequest {
 /// `response_sink` (see `PdfWorker::spawn`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfResponse {
-    /// `page_width_pts`/`page_height_pts` are page 0's native size, in PDF
-    /// points (1/72 inch) -- the caller needs these *before* it can even
-    /// compute a fit-to-page/fit-width/percent render target (see
-    /// `coords::fit_page_size`/`fit_width_size`/`percent_size`), and
-    /// there's no render to piggyback them on yet at this point.
-    Opened { key: PdfDocKey, page_count: u32, page_width_pts: f32, page_height_pts: f32 },
+    /// Every page's size in PDF points (1/72 inch), in order -- the
+    /// caller lays the whole document out before rendering any of it.
+    /// Read without loading the pages, so it's cheap even for a long
+    /// document.
+    Opened { key: PdfDocKey, pages: Vec<(f32, f32)> },
     OpenFailed { key: PdfDocKey, message: String },
     /// A page finished rendering, as a tightly-packed BGRA buffer of
     /// exactly `width` x `height` pixels (matches the `target_w`/
@@ -126,7 +140,12 @@ pub enum PdfResponse {
     /// `PageRendered`. Empty `matches` (not an error) for a query with no
     /// hits anywhere in the document -- that's a completely normal search
     /// outcome, not a failure.
-    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch> },
+    /// `done` on the last batch.
+    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch>, done: bool },
+    /// Reply to `Text`; empty for a page with no text (a scan).
+    Text { key: PdfDocKey, page: u32, chars: Vec<text::PageChar> },
+    /// Reply to `Links`.
+    Links { key: PdfDocKey, page: u32, links: Vec<text::PageLink> },
 }
 
 /// One shared background worker for every open PDF document in the
@@ -181,31 +200,56 @@ impl Drop for PdfWorker {
     }
 }
 
-/// Collapses a batch of requests drained from the channel in one go so
-/// that, per `key`, only the *last* `RenderPage` request in the batch
-/// survives -- everything before it is dropped silently (no
-/// `RenderFailed` reply; the caller never sees these as having been
-/// dispatched at all, since from its perspective a newer request for the
-/// same session already supersedes them). `Open`/`FetchOutline`/`Search`/
-/// `Close` requests, and `RenderPage` requests for a *different* key, are
-/// never touched or reordered -- only same-key `RenderPage` entries are thinned out,
-/// preserving every other request's original position. This is what
-/// keeps a live window resize (which can queue many `RenderPage`
-/// requests for the same session faster than pdfium can render them)
-/// from visibly lagging behind: only the final, current pane size is
-/// ever actually rendered.
+/// Thins the worker's queue: of the `RenderPage`s for one page of one
+/// view, only the last survives (a resize can ask for many sizes faster
+/// than pdfium renders one); a `Cancel` drops the renders queued before it
+/// for its view that aren't of a page it keeps, and goes itself. Nothing
+/// else is dropped or reordered.
 fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
     use std::collections::HashMap;
-    let mut latest_render_index: HashMap<PdfDocKey, usize> = HashMap::new();
+    let mut dropped = vec![false; pending.len()];
     for (i, req) in pending.iter().enumerate() {
-        if let PdfRequest::RenderPage { key, .. } = req {
-            latest_render_index.insert(*key, i);
+        if let PdfRequest::Cancel { key, view, keep } = req {
+            dropped[i] = true;
+            for (j, earlier) in pending[..i].iter().enumerate() {
+                if let PdfRequest::RenderPage { key: k, view: v, page_index, .. } = earlier {
+                    if k == key && v == view && !keep.contains(page_index) {
+                        dropped[j] = true;
+                    }
+                }
+            }
+        }
+    }
+    // Only the newest search of a document goes on.
+    let mut newest_search: HashMap<PdfDocKey, u64> = HashMap::new();
+    for req in &pending {
+        if let PdfRequest::Search { key, request_id, .. } = req {
+            let newest = newest_search.entry(*key).or_insert(*request_id);
+            *newest = (*newest).max(*request_id);
+        }
+    }
+    for (i, req) in pending.iter().enumerate() {
+        if let PdfRequest::Search { key, request_id, .. } = req {
+            if newest_search.get(key) != Some(request_id) {
+                dropped[i] = true;
+            }
+        }
+    }
+    let mut latest: HashMap<(PdfDocKey, u64, u32), usize> = HashMap::new();
+    for (i, req) in pending.iter().enumerate() {
+        if let PdfRequest::RenderPage { key, view, page_index, .. } = req {
+            if !dropped[i] {
+                latest.insert((*key, *view, *page_index), i);
+            }
         }
     }
     pending
         .into_iter()
         .enumerate()
-        .filter(|(i, req)| !matches!(req, PdfRequest::RenderPage { key, .. } if latest_render_index.get(key) != Some(i)))
+        .filter(|(i, req)| {
+            !dropped[*i]
+                && !matches!(req, PdfRequest::RenderPage { key, view, page_index, .. } if latest.get(&(*key, *view, *page_index)) != Some(i))
+        })
         .map(|(_, req)| req)
         .collect()
 }
@@ -215,7 +259,37 @@ mod tests {
     use super::*;
 
     fn render_req(key: PdfDocKey, request_id: u64) -> PdfRequest {
-        PdfRequest::RenderPage { key, request_id, page_index: 0, target_w: 100, target_h: 100 }
+        PdfRequest::RenderPage { key, view: 0, request_id, page_index: 0, target_w: 100, target_h: 100 }
+    }
+
+    fn page_req(key: PdfDocKey, view: u64, page_index: u32) -> PdfRequest {
+        PdfRequest::RenderPage { key, view, request_id: page_index as u64, page_index, target_w: 100, target_h: 100 }
+    }
+
+    #[test]
+    fn coalesce_keeps_one_render_per_page_so_a_view_can_ask_for_several_pages() {
+        let key = PdfDocKey::new();
+        let pending = vec![page_req(key, 1, 3), page_req(key, 1, 4), page_req(key, 1, 3)];
+        assert_eq!(coalesce_render_requests(pending), vec![page_req(key, 1, 4), page_req(key, 1, 3)]);
+    }
+
+    #[test]
+    fn cancel_drops_the_views_queued_renders_except_the_pages_it_keeps() {
+        let key = PdfDocKey::new();
+        let other = PdfDocKey::new();
+        let pending = vec![
+            page_req(key, 1, 3),
+            page_req(key, 1, 4),
+            page_req(key, 2, 3),
+            page_req(other, 1, 3),
+            PdfRequest::Cancel { key, view: 1, keep: vec![4, 9] },
+            page_req(key, 1, 9),
+        ];
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![page_req(key, 1, 4), page_req(key, 2, 3), page_req(other, 1, 3), page_req(key, 1, 9)],
+            "only view 1's page 3 goes; later renders and other views' stay"
+        );
     }
 
     #[test]
@@ -236,6 +310,23 @@ mod tests {
         let b = PdfDocKey::new();
         let pending = vec![render_req(a, 1), render_req(b, 1), render_req(a, 2)];
         assert_eq!(coalesce_render_requests(pending), vec![render_req(b, 1), render_req(a, 2)]);
+    }
+
+    #[test]
+    fn coalesce_keeps_the_last_render_of_each_view_of_one_document() {
+        let key = PdfDocKey::new();
+        let view = |view, request_id| PdfRequest::RenderPage { key, view, request_id, page_index: 0, target_w: 100, target_h: 100 };
+        let pending = vec![view(1, 1), view(2, 2), view(1, 3)];
+        assert_eq!(coalesce_render_requests(pending), vec![view(2, 2), view(1, 3)]);
+    }
+
+    #[test]
+    fn only_the_newest_search_of_a_document_goes_on() {
+        let key = PdfDocKey::new();
+        let other = PdfDocKey::new();
+        let search = |key, request_id| PdfRequest::Search { key, request_id, query: "x".into(), match_case: false, from_page: 0 };
+        let pending = vec![search(key, 1), search(other, 1), search(key, 2)];
+        assert_eq!(coalesce_render_requests(pending), vec![search(other, 1), search(key, 2)]);
     }
 
     #[test]

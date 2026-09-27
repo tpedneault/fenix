@@ -33,7 +33,9 @@ pub struct GpuContext {
 /// context reference) so every existing `gpu.device`/`gpu.queue` call
 /// site keeps working unchanged.
 pub struct GpuState {
-    pub surface: wgpu::Surface<'static>,
+    /// `None` only while the launch splash is drawing on it from its own
+    /// thread (`take_surface`/`restore_surface`).
+    pub surface: Option<wgpu::Surface<'static>>,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub config: wgpu::SurfaceConfiguration,
@@ -105,13 +107,18 @@ impl GpuContext {
             config.format = non_srgb;
         }
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // Copying a frame out is how the theme cross-fade keeps the old
+        // colours to fade from.
+        if surface.get_capabilities(&adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         surface.configure(&device, &config);
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let context =
             Self { instance, adapter, device: Arc::clone(&device), queue: Arc::clone(&queue), format: config.format };
-        let state = GpuState { surface, device, queue, config, size, pending_resize: None };
+        let state = GpuState { surface: Some(surface), device, queue, config, size, pending_resize: None };
         (context, state)
     }
 
@@ -136,10 +143,13 @@ impl GpuContext {
             .expect("surface unsupported by adapter");
         config.format = self.format;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        if surface.get_capabilities(&self.adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         surface.configure(&self.device, &config);
 
         GpuState {
-            surface,
+            surface: Some(surface),
             device: Arc::clone(&self.device),
             queue: Arc::clone(&self.queue),
             config,
@@ -150,6 +160,20 @@ impl GpuContext {
 }
 
 impl GpuState {
+    /// Lends the surface to the splash thread; `restore_surface` takes it
+    /// back, with the size the splash last drew at.
+    pub fn take_surface(&mut self) -> Option<wgpu::Surface<'static>> {
+        self.surface.take()
+    }
+
+    pub fn restore_surface(&mut self, surface: wgpu::Surface<'static>) {
+        self.surface = Some(surface);
+    }
+
+    /// Whether a frame can be copied out (see `GpuContext::new`).
+    pub fn can_copy_frames(&self) -> bool {
+        self.config.usage.contains(wgpu::TextureUsages::COPY_SRC)
+    }
 
     /// Records the window's latest reported size -- doesn't touch the
     /// surface itself; see `pending_resize`'s own doc comment for why
@@ -170,7 +194,9 @@ impl GpuState {
             self.size = size;
             self.config.width = size.width;
             self.config.height = size.height;
-            self.surface.configure(&self.device, &self.config);
+            if let Some(surface) = &self.surface {
+                surface.configure(&self.device, &self.config);
+            }
         }
     }
 }

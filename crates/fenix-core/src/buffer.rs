@@ -21,6 +21,9 @@ pub struct EditDelta {
     pub removed: String,
 }
 
+/// How many edits `take_changes` keeps before giving up on them.
+const MAX_LOGGED_CHANGES: usize = 2048;
+
 /// A single undoable change: replaces `removed` with `inserted` at `at`.
 /// Applying it forward performs the edit; applying its inverse reverses it.
 struct Edit {
@@ -63,6 +66,12 @@ pub struct Buffer {
     redo_stack: Vec<Edit>,
     pending: Option<Pending>,
     pending_syntax_edits: Vec<EditDelta>,
+    /// The same edits again, for whoever wants to show what changed
+    /// (`take_changes`) -- kept apart from `pending_syntax_edits` so the
+    /// two readers never take each other's. Capped: a change too big to
+    /// show clears it and sets `changes_overflowed`.
+    change_log: Vec<EditDelta>,
+    changes_overflowed: bool,
     /// Monotonically increasing on every real content mutation (insert,
     /// delete, undo, redo) -- unlike `dirty` (which only ever flips
     /// false-to-true once, until the next save), this changes on *every*
@@ -84,6 +93,8 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
             edit_count: 0,
         }
     }
@@ -104,6 +115,8 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
             edit_count: 0,
         }
     }
@@ -119,6 +132,8 @@ impl Buffer {
             redo_stack: Vec::new(),
             pending: None,
             pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
             edit_count: 0,
         })
     }
@@ -210,7 +225,23 @@ impl Buffer {
     /// undo stack which coalesces contiguous edits into runs -- see
     /// `EditDelta`'s doc comment for why the distinction matters.
     fn log_edit(&mut self, start_char: usize, removed: String, new_end_char: usize) {
+        if self.change_log.len() < MAX_LOGGED_CHANGES {
+            self.change_log.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
+        } else {
+            self.change_log.clear();
+            self.changes_overflowed = true;
+        }
         self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+    }
+
+    /// Every edit since the last call, in order -- `None` when there were
+    /// too many to be worth showing one by one.
+    pub fn take_changes(&mut self) -> Option<Vec<EditDelta>> {
+        let changes = std::mem::take(&mut self.change_log);
+        if std::mem::take(&mut self.changes_overflowed) {
+            return None;
+        }
+        Some(changes)
     }
 
     /// Drains and returns every low-level edit recorded since the last

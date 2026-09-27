@@ -80,6 +80,9 @@ pub enum LocalContext {
     /// from the reference elisp implementation's own `SPC M` scheme),
     /// plus Tcl's ctags-based symbols.
     Tcl,
+    /// A PDF pane: the reader's commands, for finding them without
+    /// knowing its keys.
+    Reader,
 }
 
 impl LocalContext {
@@ -88,6 +91,7 @@ impl LocalContext {
         match self {
             LocalContext::Arduino => "arduino",
             LocalContext::Tcl => "tcl",
+            LocalContext::Reader => "reader",
         }
     }
 
@@ -106,6 +110,23 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('d')], "debug", "embedded.debug");
                 t.insert(&[KeyPress::char('n')], "new sketch", "embedded.new_sketch");
                 t.insert(&[KeyPress::char('i')], "project info", "embedded.info");
+            }
+            LocalContext::Reader => {
+                t.insert(&[KeyPress::char('n')], "next page (J)", "pdf.next_page");
+                t.insert(&[KeyPress::char('p')], "previous page (K)", "pdf.prev_page");
+                t.insert(&[KeyPress::char('g')], "go to page ({n}G)", "pdf.goto_page");
+                t.insert(&[KeyPress::char('[')], "first page (gg)", "pdf.first_page");
+                t.insert(&[KeyPress::char(']')], "last page (G)", "pdf.last_page");
+                t.insert(&[KeyPress::char('=')], "zoom in (+)", "pdf.zoom_in");
+                t.insert(&[KeyPress::char('-')], "zoom out (-)", "pdf.zoom_out");
+                t.insert(&[KeyPress::char('w')], "fit width (zw)", "pdf.fit_width");
+                t.insert(&[KeyPress::char('f')], "fit page (zp)", "pdf.fit_page");
+                t.insert(&[KeyPress::char('o')], "outline sidebar (o)", "pdf.toggle_outline");
+                t.insert(&[KeyPress::char('t')], "go to a heading", "pdf.headings");
+                t.insert(&[KeyPress::char('c')], "paper / theme colours", "pdf.colors");
+                t.insert(&[KeyPress::char('y')], "copy a link to this page (yp)", "pdf.copy_link");
+                t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
+                t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
             }
             LocalContext::Tcl => {
                 t.insert(&[KeyPress::char('i')], "insert telecommand", "mib.insert_telecommand");
@@ -144,6 +165,10 @@ pub fn local_trie(contexts: &[LocalContext]) -> &'static KeyTrie<&'static str> {
 ///
 /// Deliberately sparse: only wires groups that have a real command
 /// behind them today.
+/// The order sections come in within a which-key group; any other
+/// section follows these, and unsectioned keys come last.
+pub const WHICH_KEY_SECTIONS: &[&str] = &["View", "Branch & remote", "This change"];
+
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -192,7 +217,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
         t.insert(&[spc, KeyPress::char('t'), KeyPress::char('f')], "fullscreen", "view.toggle_fullscreen");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "animations", "view.toggle_animations");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "motion", "view.toggle_animations");
+        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('d')], "inline problems", "view.cycle_diagnostics");
 
         t.label_group(&[spc, KeyPress::char('e')], "explorer");
         t.insert(
@@ -314,6 +340,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // most of what's done to a repository; these are the ways in,
         // and what's done from the file being edited.
         t.label_group(&[spc, KeyPress::char('g')], "git");
+        // The which-key drawer lists git's keys in these sections, in
+        // this order (`WHICH_KEY_SECTIONS`).
+        for (keys, section) in [("glGhHBec", "View"), ("wfprmPMz", "Branch & remote"), ("adix", "This change")] {
+            for key in keys.chars() {
+                t.set_section(&[spc, KeyPress::char('g'), KeyPress::char(key)], section);
+            }
+        }
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "status page", "git.open");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log", "git.log");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
@@ -413,7 +446,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "find document", "pdf.documents");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('0')], "fit page", "pdf.fit_page");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "toggle outline", "pdf.toggle_outline");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "outline sidebar", "pdf.toggle_outline");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('t')], "go to a heading", "pdf.headings");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('c')], "paper / theme colours", "pdf.colors");
+        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('y')], "copy a link to this page", "pdf.copy_link");
         t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
 
         t.label_group(&[spc, KeyPress::char('c')], "code");

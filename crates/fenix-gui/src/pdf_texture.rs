@@ -5,9 +5,15 @@ use crate::gpu::GpuState;
 struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
+    /// Recolouring: the colour white becomes (`w` = 1 turns it on) and
+    /// the colour black becomes. See `pdf_texture.wgsl`.
+    paper: [f32; 4],
+    ink: [f32; 4],
 }
 
 const VERTICES_PER_QUAD: usize = 6;
+/// How many quads one frame can draw: every page in sight in every pane.
+pub const MAX_QUADS: usize = 256;
 
 /// One rendered PDF page as a sampled GPU texture. Recreated (`PdfPipeline
 /// ::create_texture`) whenever its pixel size changes (a page turn, a
@@ -50,9 +56,9 @@ pub struct PdfPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// Exactly one quad's worth of vertices, rewritten via
-    /// `queue.write_buffer` immediately before every `draw` call -- a PDF
-    /// pane is always exactly one rectangle.
+    /// `MAX_QUADS` quads' worth of vertices. Each `draw` in a frame writes
+    /// its own slot: the writes all land before the pass runs, so two
+    /// draws sharing one slot would both end up where the last one put it.
     vertex_buffer: wgpu::Buffer,
 }
 
@@ -114,6 +120,8 @@ impl PdfPipeline {
                     attributes: &[
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -150,7 +158,7 @@ impl PdfPipeline {
 
         let vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pdf-vertex-buffer"),
-            size: (VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
+            size: (MAX_QUADS * VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -212,9 +220,40 @@ impl PdfPipeline {
     }
 
     /// Draws `tex` scaled to exactly fill the pixel rect
-    /// `(dest_x, dest_y, dest_w, dest_h)`. Same NDC-space quad conversion
-    /// `vnc_texture::VncPipeline::draw`/`RectRenderer::push_rect` use.
-    pub fn draw<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass PdfTexture, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) {
+    /// `(dest_x, dest_y, dest_w, dest_h)`, using vertex slot `slot`
+    /// (`0..MAX_QUADS`, distinct for each draw in a frame; a slot past the
+    /// end is skipped).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw<'pass>(&'pass self, gpu: &GpuState, pass: &mut wgpu::RenderPass<'pass>, tex: &'pass PdfTexture, slot: usize, dest_x: f32, dest_y: f32, dest_w: f32, dest_h: f32) {
+        self.draw_region(gpu, pass, tex, slot, (dest_x, dest_y, dest_w, dest_h), (0.0, 0.0, 1.0, 1.0), None);
+    }
+
+    /// Draws the part `uv` (`(u0, v0, u1, v1)`, 0..1) of `tex` into the
+    /// pixel rect `dest` -- a page cut to the pane it's scrolled in --
+    /// recoloured when `recolor` is `(paper, ink)`: white becomes `paper`,
+    /// black `ink`, and colours keep their hue. Same NDC-space quad
+    /// conversion `vnc_texture::VncPipeline::draw`/`RectRenderer::
+    /// push_rect` use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_region<'pass>(
+        &'pass self,
+        gpu: &GpuState,
+        pass: &mut wgpu::RenderPass<'pass>,
+        tex: &'pass PdfTexture,
+        slot: usize,
+        dest: (f32, f32, f32, f32),
+        uv: (f32, f32, f32, f32),
+        recolor: Option<([f32; 3], [f32; 3])>,
+    ) {
+        if slot >= MAX_QUADS {
+            return;
+        }
+        let (dest_x, dest_y, dest_w, dest_h) = dest;
+        let (u0, v0, u1, v1) = uv;
+        let (paper, ink) = match recolor {
+            Some((p, i)) => ([p[0], p[1], p[2], 1.0], [i[0], i[1], i[2], 0.0]),
+            None => ([0.0; 4], [0.0; 4]),
+        };
         let sw = gpu.config.width as f32;
         let sh = gpu.config.height as f32;
         let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
@@ -225,18 +264,20 @@ impl PdfPipeline {
         let p11 = to_ndc(dest_x + dest_w, dest_y + dest_h);
 
         let vertices = [
-            Vertex { position: p00, uv: [0.0, 0.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
-            Vertex { position: p10, uv: [1.0, 0.0] },
-            Vertex { position: p11, uv: [1.0, 1.0] },
-            Vertex { position: p01, uv: [0.0, 1.0] },
+            Vertex { position: p00, uv: [u0, v0], paper, ink },
+            Vertex { position: p10, uv: [u1, v0], paper, ink },
+            Vertex { position: p01, uv: [u0, v1], paper, ink },
+            Vertex { position: p10, uv: [u1, v0], paper, ink },
+            Vertex { position: p11, uv: [u1, v1], paper, ink },
+            Vertex { position: p01, uv: [u0, v1], paper, ink },
         ];
-        gpu.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        let offset = (slot * VERTICES_PER_QUAD * std::mem::size_of::<Vertex>()) as wgpu::BufferAddress;
+        gpu.queue.write_buffer(&self.vertex_buffer, offset, bytemuck::cast_slice(&vertices));
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &tex.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..VERTICES_PER_QUAD as u32, 0..1);
+        let first = (slot * VERTICES_PER_QUAD) as u32;
+        pass.draw(first..first + VERTICES_PER_QUAD as u32, 0..1);
     }
 }

@@ -55,6 +55,35 @@ pub fn mark(size: u32) -> Image {
     canvas.into_image()
 }
 
+/// One blade of the mark -- 0 the stem, 1 the long arm, 2 the short arm
+/// -- drawn where it sits in the whole mark, `size` pixels square, so the
+/// three can be moved and faded separately and still line up.
+pub fn blade(index: usize, size: u32) -> Image {
+    let mut canvas = Canvas::new(size, size);
+    let unit = size as f32 / GRID;
+    if let Some((color, points)) = MARK.get(index) {
+        let contour: Vec<(f32, f32)> = points.iter().map(|&(px, py)| (px * unit, py * unit)).collect();
+        canvas.fill(&[contour], *color, 1.0);
+    }
+    canvas.into_image()
+}
+
+/// "fenix" alone in `text`, its capitals `cap_height` pixels tall, with
+/// a pixel of room on every side.
+pub fn wordmark(cap_height: u32, text: [u8; 3]) -> Image {
+    let em = cap_height as f32 / wordmark::CAP_HEIGHT;
+    let pad = 1.0;
+    let width = ((wordmark::MAX_X - wordmark::MIN_X) * em + pad * 2.0).ceil() as u32;
+    let height = ((wordmark::MAX_Y - wordmark::MIN_Y) * em + pad * 2.0).ceil() as u32;
+    let origin_x = pad - wordmark::MIN_X * em;
+    let baseline = pad - wordmark::MIN_Y * em;
+    let mut canvas = Canvas::new(width.max(1), height.max(1));
+    let contours: Vec<Vec<(f32, f32)>> =
+        wordmark::CONTOURS.iter().map(|c| c.iter().map(|&(x, y)| (origin_x + x * em, baseline + y * em)).collect()).collect();
+    canvas.fill(&contours, text, 1.0);
+    canvas.into_image()
+}
+
 /// The app icon: the mark at 60 % on a graphite tile with a 22.5 %
 /// corner radius and a hairline edge. At 16 px and below the tile goes --
 /// there are too few pixels for both, and the mark is what has to read.

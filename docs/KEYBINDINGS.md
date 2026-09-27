@@ -27,7 +27,8 @@ popup shows what keys continue it.
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
-| `SPC t a` | Toggle caret-fade/scroll-ease/yank-pulse animations on/off |
+| `SPC t a` | Cycle motion: off, subtle, full |
+| `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e d` | Two listings side by side (copy/move default to the other one) |
 | `SPC e o` / `SPC e O` | Open with the system's default app / show it in Explorer |
@@ -130,22 +131,30 @@ popup shows what keys continue it.
 | `SPC v v` | Open (or switch to) a configured VNC session by name |
 | `SPC v q` | Close the focused VNC session |
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
-| `SPC r n` | Turn the focused PDF session to the next page |
-| `SPC r p` | Turn the focused PDF session to the previous page |
+| `SPC r n` / `SPC r p` | Next / previous page of the PDF read last |
 | `SPC r g` | Prompt for a page number and jump to it |
 | `SPC r [` / `SPC r ]` | Jump to the first / last page |
-| `SPC r =` / `SPC r -` | Zoom the focused PDF session in / out |
+| `SPC r =` / `SPC r -` | Zoom in / out |
 | `SPC r f` | Open a document from the document index (`SPC ,` > Documents) |
-| `SPC r 0` | Fit the page to the pane |
-| `SPC r w` | Fit the page's width to the pane |
-| `SPC r o` | Toggle the focused PDF session's outline/bookmarks panel |
-| `SPC r /` | Search the focused PDF session's text for a word or phrase |
-| wheel, `j` / `k`, `Down` / `Up` | Scroll the document, continuing onto the next/previous page at an edge (PDF panes only) |
-| `PageDown` / `PageUp`, `n` / `p` | Next / previous page (PDF panes only) |
-| `Home` / `End`, `g` / `G` | First / last page (PDF panes only) |
-| `h` / `l`, `Left` / `Right` | Pan sideways while the page is wider than the pane (PDF panes only) |
-| `+` / `-` / `0` / `w` / `/` | Zoom in / out, fit page, fit width, search (PDF panes only) |
+| `SPC r 0` / `SPC r w` | Fit the page / its width to the pane |
+| `SPC r o` | Open or close the sidebar (outline, matches, marks) |
+| `SPC r t` | Go to a heading of the PDF, picked by name |
+| `SPC r c` | Draw PDF pages as printed or in the theme's colours |
+| `SPC r y` | Copy a link to the PDF page being read (`file.pdf#page=38`) |
+| `SPC r /` | Search the document's text |
+| wheel, `j` / `k`, `{n}j` | Scroll the column of pages; `Ctrl` + wheel zooms (PDF panes) |
+| `Ctrl-d` / `Ctrl-u`, `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | Half a screen / a screen (PDF panes) |
+| `J` / `K`, `{n}J` | Next / previous page (PDF panes) |
+| `gg` / `G` / `{n}G` | First / last / page n (PDF panes) |
+| `h` / `l` | Pan sideways (PDF panes) |
+| `+` / `-` / `=` / `zw` / `zp` / `z0` | Zoom in / out, fit width or page in turn, fit width, fit page, 100% (PDF panes) |
+| `o` / `/` / `n` / `N` | Sidebar, search, next / previous match (PDF panes) |
+| `m{a}` / `'{a}`, `Ctrl-o` / `Ctrl-i` | Set / go to a mark, back / forward through jumps (PDF panes) |
+| `yp` | Copy a link to this page (PDF panes) |
+| `v`, drag | Select text; `w` `b` `e` `0` `$` `j` `k` extend it, `y` copies (PDF panes) |
+| `f`, click | Label the links in sight and follow one by typing it; a click follows a link (PDF panes) |
 | `gd` | Go to definition (LSP) |
+| `gf` | Open the file named under the cursor, in the preview tab -- a `spec.pdf#page=38` link opens the PDF at that page |
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
@@ -157,6 +166,7 @@ popup shows what keys continue it.
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
 | `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
+| `SPC m` (PDF) | The reader's commands: pages, zoom, outline, search, the document index |
 | `SPC m i` (Tcl) | Build and insert a telecommand from the MIB |
 | `SPC m t` (Tcl) | Fuzzy-find a MIB telecommand and view its details |
 | `SPC m k` (Tcl) | Fuzzy-find a MIB TM packet and view its details |
@@ -203,7 +213,7 @@ popup shows what keys continue it.
 | `SPC TAB ]` / `SPC TAB [` | Next / previous workspace |
 | `SPC TAB d` | Remove the active workspace |
 | `SPC TAB TAB` | Switch to an open workspace by name |
-| `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Documents & workspaces) -- switches to it if already open, otherwise creates it |
+| `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
 ## File explorer sidebar (`SPC e t`)
@@ -441,36 +451,67 @@ configured host is on a trusted local network. Don't point this at
 anything reachable over an untrusted network without your own tunnel
 (SSH port-forwarding, a VPN) in front of it.
 
-## PDF viewer (`SPC r ...`)
+## PDF reader (`SPC r ...`)
 
-Opening a `.pdf` -- by typed path (`SPC f f`), the explorer, a recent
-file, or a CLI argument -- renders it as a scaled-to-fit page in an
-ordinary, splittable pane instead of loading its raw bytes as text.
-Rendering happens on one shared background worker (every open PDF
-shares it), so opening a document never blocks the editor and several
-can be open at once.
+A `.pdf` opens like any other file -- by typed path (`SPC f f`), the
+explorer, a recent file, the document index, a CLI argument, or a jump
+(which uses the pane's preview tab) -- as a **tab in the focused pane**,
+after the one you were on. Its tab moves, closes and reopens like any
+other; `SPC b k` closes the document itself. Opening a PDF that's
+already open doesn't load it again: it gets a tab here (or its own tab
+back). One background worker renders every document, so opening one
+never blocks the editor.
 
-Reading is done with bare single keystrokes while the PDF pane is
-focused -- a three-key leader chord per page is not a page-turn gesture
-anyone would use to read a 50-page document. The `SPC r ...` bindings all
-still work (and are what the which-key menu discovers); they're the same
-commands, just reachable in one keystroke here.
+Where you are -- page, zoom, scroll -- belongs to the **pane**, so the
+same document can be shown in two splits at different pages. A pane
+showing a document for the first time starts where you last were in it.
+The default zoom is **fit width**: the page's width fills the pane.
+
+The pages are laid out **one under the other in a single column**, so
+scrolling goes straight from the bottom of one page onto the top of the
+next -- there are no page turns, only positions. Only the pages in sight
+are drawn, the ones just below and above are rendered ahead so reading
+on never waits, and a page that isn't ready yet shows as blank paper at
+its size, so nothing jumps when it arrives. A zoom keeps the same place
+at the top of the pane.
+
+The reader's keys are Vim's, with counts. Anything else -- the leader,
+`:`, `Ctrl-w`, `Ctrl-o` -- goes to the editor as usual, and `SPC m` lists
+the reader's commands.
 
 | Keys | Action |
 |---|---|
-| mouse wheel, `j` / `k`, `Down` / `Up` | Scroll the page; at the bottom/top edge, continue onto the next/previous page |
-| `PageDown` / `PageUp`, `n` / `p`, `SPC r n` / `SPC r p` | Next / previous page |
-| `Home` / `End`, `g` / `G`, `SPC r [` / `SPC r ]` | First / last page |
+| mouse wheel, `j` / `k`, `Down` / `Up`, `{n}j` | Scroll the column of pages |
+| `Ctrl` + wheel | Zoom in / out |
+| `Ctrl-d` / `Ctrl-u` | Half a screen down / up |
+| `Ctrl-f` / `Ctrl-b`, `PageDown` / `PageUp` | A screen down / up |
+| `J` / `K`, `{n}J`, `SPC r n` / `SPC r p` | Next / previous page, at its top |
+| `gg`, `G`, `{n}G`, `Home` / `End` | First page, last page, page n |
+| `gt` / `gT` / `gh` / `g<Tab>` | The pane's tabs, as in a text buffer |
 | `SPC r g` | Prompt for a page number and jump to it |
-| `+` / `-`, `SPC r =` / `SPC r -` | Zoom in / out, in coarse 10% steps |
-| `0`, `SPC r 0` | Fit the whole page to the pane (the default) |
-| `w`, `SPC r w` | Fit the page's width to the pane -- a tall page then scrolls vertically instead of shrinking further |
-| `h` / `l`, `Left` / `Right` | Pan sideways once the page is wider than the pane |
-| `SPC r o` | Toggle the outline/bookmarks panel |
-| `/`, `SPC r /` | Search the document's text |
+| `+` / `-`, `SPC r =` / `SPC r -` | Zoom in / out through 25% ... 400% |
+| `=` | Fit width and fit page, in turn |
+| `zw` / `zp` / `z0` | Fit width / fit page / 100% (the page's real size on this screen) |
+| `h` / `l`, `Left` / `Right` | Pan sideways when the page is wider than the pane |
+| `o`, `SPC r o` | Open or close the sidebar: outline, matches, marks |
+| `SPC r t` | Go to a heading, picked by name |
+| `/`, `SPC r /` | Search as you type; `Enter` goes to the first match from here |
+| `n` / `N` | The next / previous match, going round the ends |
+| `Esc` | Hide the matches' highlights, or close the sidebar |
+| `m{a}` / `'{a}` | Set a mark here / go back to it |
+| `Ctrl-o` / `Ctrl-i` | Back / forward through jumps (`gg`, `G`, `{n}G`, headings, matches, marks) |
+| `yp`, `SPC r y` | Copy a link to this page, `file.pdf#page=38` |
+| `v` | Select text from the top line in sight; `w` `b` `e` `h` `l` `0` `$` `j` `k` extend it across pages, `y` copies, `Esc` stops |
+| drag | Select text with the mouse; `y` copies |
+| `f` | Label every link in sight; typing a label follows it, `Esc` cancels |
+| click | Follow a link |
+| `SPC r c` | Pages as printed, or in the theme's colours |
 
-`SPC r f` opens a fuzzy picker over a **document index** you keep in
-`SPC ,` (Documents & workspaces), or by hand in `settings.toml`:
+`SPC r ...` also works from another pane -- the outline, or the code
+you're reading the document for -- and acts on the PDF read last.
+
+`SPC r f` opens the **shelf**: a fuzzy picker over the documents you
+keep by name in `SPC ,` (PDF reader), or by hand in `settings.toml`:
 
 ```toml
 [documents]
@@ -478,78 +519,89 @@ commands, just reachable in one keystroke here.
 "Time Code Formats" = 'C:\refs\301x0b4.pdf'
 ```
 
-Each entry is a display name and a path. The picker lists and
-fuzzy-matches the *names*, so a reference you open constantly is two
-keystrokes and a few characters away rather than a path to go hunting
-for. Confirming opens that document **in the focused pane**, replacing
-whatever it was showing -- unlike every other way of opening a PDF
-(`SPC f f`, the explorer, a CLI argument), which gives the document its
-own workspace. Picking a reference off a shelf means "show it to me
-here", and if the pane already held a different PDF, that one (and its
-outline/search companion panes) is retired first. An entry can point at
-any file Fenix opens, not just a PDF -- a Markdown or plain-text
-reference opens as ordinary editable text. A path that has since moved
-is reported by name instead of opening an empty buffer, and an empty or
-missing `[documents]` section says so rather than opening a picker over
-nothing.
+A project can keep a shelf of its own in its `.fenix/settings.toml`
+(paths from the project), listed first as `project · Name`. Then come
+yours, then PDFs you've read lately (`recent · spec.pdf  p. 38 / 212`),
+then PDFs in the project that aren't on a shelf (`in project ·
+docs/icd.pdf`). A document is listed once. An entry can point at any
+file Fenix opens, not just a PDF; a path that has since moved is
+reported by name.
 
-Scrolling is continuous across page boundaries in both directions:
-scrolling past the bottom of a page turns to the next one at its top,
-and scrolling back up past the top turns to the previous one at its
-*bottom*, so scrolling back retraces exactly what scrolling forward
-covered. Under the default fit-page zoom there is never anything to
-scroll within a page, so every scroll gesture simply turns the page.
+The status line shows `Page N/M` (the page across the middle of the
+pane) and the zoom (`Fit width`, `Fit page`,
+or a percentage) where an ordinary buffer shows `Ln`/`Col`, and a count
+or `g`/`z` while you type it.
 
-The status line shows `Page N/M` and the current zoom (`Fit page`,
-`Fit width`, or a percentage) where an ordinary buffer shows `Ln`/`Col`
--- a PDF pane has no text and no cursor, so a line/column there would be
-meaningless.
+The **sidebar** (`o`) runs down the reader's left edge -- beside the
+pages, or over them in a narrow pane -- with three lists that `Tab`
+goes between: the **outline**, the **matches** of the last search and
+the document's **marks**. It opens on the outline with the keyboard in
+it: `j`/`k`/`gg`/`G` move, `Enter` goes there and hands the keyboard
+back to the pages, `o`, `q` or `Esc` close it. The outline is a tree:
+`za` folds an entry, `h` folds or goes up to the parent, `l` unfolds,
+`zM`/`zR` fold and unfold everything, and the section you're reading
+stays marked as you scroll. A PDF with no bookmarks says so.
 
-The outline panel (`SPC r o`) opens as a split next to the PDF pane,
-listing the document's bookmark tree flattened into indented lines (a
-nested bookmark just gets deeper indentation -- there's no tree widget,
-so this is the whole tree in one flat, ordinary buffer). It's real,
-Vim-navigable text: move around it with `j`/`k`/`gg`/`G`/`/` like
-anything else, and press `Enter` on an entry to jump the PDF straight to
-its page. `SPC r o` again -- from either the outline pane or the PDF
-pane -- closes it. The outline is fetched once per document (a PDF's
-bookmarks can't change while it's open) and cached, so reopening it is
-instant after the first time; a PDF with no bookmarks at all shows a
-single explanatory line instead of an empty pane.
+**Search** (`/`) searches as you type -- a capital letter makes it
+match case -- and highlights every match on the pages, the current one
+more strongly; the prompt counts them as they're found. `Enter` goes to
+the first match from the page you're on (as soon as it's found), and
+`n`/`N` step through the matches one by one, going round the ends. The
+modeline keeps the query and `3/17`; `Esc` hides the highlights. A long
+document is searched a few pages at a time, so pages keep rendering
+while it's searched.
 
-`SPC r /` prompts for a search query and, once it comes back, opens (or
-reuses, if one's already showing for this document) a results pane
-listing every match in page order as `p.NNN  <context>` -- one line per
-occurrence, anywhere in the document, not just the current page. It's
-the same kind of real, Vim-navigable buffer the outline panel is;
-`Enter` on a result jumps the PDF pane straight to that match's page. A
-query with no hits shows an explanatory placeholder line rather than an
-empty pane, same as the outline's no-bookmarks case. Search runs fresh
-against the document each time rather than keeping the whole document's
-text extracted in memory between searches -- there's no results cache to
-go stale, just a brief "searching..." status message while it works.
+**Marks**: `m{a}` marks where the pane's top is and `'{a}` comes back;
+they're listed in the sidebar. Every jump -- `gg`, `G`, `{n}G`, a
+heading, a match, a mark -- can be undone with `Ctrl-o` and redone with
+`Ctrl-i`; with no jumps left, `Ctrl-o` goes back to the buffer before,
+as in any other pane.
 
-The page re-renders to fit whenever its pane is resized, *except* at a
-fixed zoom percentage (`SPC r =`/`SPC r -`), which stays exactly where
-you left it across a resize instead of silently re-fitting -- panning
-with `hjkl` then just shows a different part of the same render, no
-fresh page turn needed. Fit-page/fit-width do still re-render on
-resize, since what "fits" depends on the pane's own size by definition.
+The pages re-render to fit when the pane is resized, except at a
+percentage, which stays where you left it. A zoom percentage is of the
+page's real size on this screen, so 100% looks the same on a scaled
+display. Every page of a document shares one scale; a narrower page sits
+centred.
 
-Pages are rasterized straight to BGRA and uploaded to a GPU texture. The
-crop that's uploaded is only recomputed when the visible window actually
-changes (a page turn, a resize, a zoom, a pan), the texture behind it is
-only recreated when that crop's *size* changes, and a render that
-already fits the pane exactly -- the fit-page default -- is uploaded
-without being copied through a crop buffer at all.
+**Colours**: `reader.colors` (`SPC ,` > PDF reader > Page colours) draws
+pages as printed -- `paper`, the default -- or in the current `theme`'s
+colours: white becomes the theme's background, black its text, and
+colours keep their hue, with the gaps between pages a shade darker.
+`SPC r c` switches it; every open PDF changes at once. Photos are
+recoloured too.
 
-A PDF pane's buffer is always empty and pathless -- the rendered page
-lives in a GPU texture, not the buffer's own text -- so `:w`/`SPC f s`
-on one is a no-op, same as every other generated panel in Fenix;
-there's no risk of a stray save overwriting the real PDF file on disk.
+**Where you were**: each PDF reopens at the place, zoom and marks you
+left it with (`reader.remember`, on), kept in `pdf_places.tsv` beside
+your recent files. Home lists the PDFs you're reading with the page
+you're on, and sessions bring PDF panes back. `reader.zoom` sets how a
+PDF opens the first time (fit width or fit page), `reader.page_gap` the
+space between pages, and `reader.sidebar` whether the sidebar sits beside
+the pages, over them, or beside them when there's room.
+
+**Links**: `yp` (or `SPC r y`) copies a link to the page you're on --
+`specs/133x0b2e2.pdf#page=38`, from the project when the PDF is in it --
+to the clipboard. `gf` on such a link, in any buffer (a Markdown note, a
+task, a code comment), opens the PDF at that page in the preview tab;
+`gf` on any other file name opens that file.
+
+**Text and links**: dragging across a page selects its text, and so does
+`v` from the keyboard -- starting at the top line in sight, extended with
+Vim's `w` `b` `e` `h` `l` `0` `$` `j` `k`, on across pages. `y` copies it
+to the clipboard and the unnamed register with the lines run together
+and a word split by a hyphen at a line's end mended. A scanned page has
+no text and says so. `f` puts a label on every link in sight; typing one
+follows it, and a click on a link does the same. A link to another page
+is a jump (`Ctrl-o` comes back); a web or mail link opens in your
+browser -- any other kind is refused, since it comes from the document.
+
+**Rebuilt PDFs**: with `editor.watch_files` on, a PDF rewritten on disk
+-- LaTeX, Typst, Doxygen, a datasheet downloaded again -- is read again,
+every view keeping its place.
+
+A PDF pane's buffer is empty and pathless -- the pages live in GPU
+textures -- so `:w` on one does nothing and can't overwrite the PDF.
 Needs `pdfium.dll` (see [Optional external tools](BUILDING.md#optional-external-tools))
--- without it, opening a PDF reports the error in the status line
-rather than rendering.
+-- without it, opening a PDF reports the error in the status line.
 
 ## Autocompletion popup (Tcl, Insert mode)
 

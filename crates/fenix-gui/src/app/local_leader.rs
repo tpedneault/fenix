@@ -12,6 +12,9 @@ impl App {
     /// first -- the project it belongs to, then its language.
     pub(super) fn local_contexts(&self) -> Vec<LocalContext> {
         let mut contexts = Vec::new();
+        if self.open().kind == BufferKind::Pdf {
+            contexts.push(LocalContext::Reader);
+        }
         if fenix_embedded::project_root_of(&self.integration_root()).is_some() {
             contexts.push(LocalContext::Arduino);
         }
@@ -28,7 +31,7 @@ impl App {
         let contexts = self.local_contexts();
         if contexts.is_empty() {
             self.local_matcher = None;
-            self.set_message("SPC m has nothing for this buffer -- it has menus in Arduino sketches and Tcl files");
+            self.set_message("SPC m has nothing for this buffer -- it has menus in PDFs, Arduino sketches and Tcl files");
             return;
         }
         let names: Vec<&str> = contexts.iter().map(|c| c.name()).collect();
@@ -83,7 +86,7 @@ mod tests {
     }
 
     fn hint_labels(app: &App) -> Vec<&'static str> {
-        let mut labels: Vec<&str> = app.pending_hints().into_iter().map(|(_, l)| l).collect();
+        let mut labels: Vec<&str> = app.which_key_pending().map(|p| p.hints).unwrap_or_default().into_iter().map(|h| h.label).collect();
         labels.sort();
         labels
     }
@@ -125,7 +128,7 @@ mod tests {
         let mut app = open(&file);
         app.start_local_leader();
         assert!(app.local_matcher.is_none());
-        assert!(app.pending_hints().is_empty());
+        assert!(app.which_key_pending().is_none());
         assert!(app.status_message.as_ref().unwrap().text.contains("nothing for this buffer"));
     }
 

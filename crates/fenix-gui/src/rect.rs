@@ -5,6 +5,21 @@ use crate::gpu::GpuState;
 struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
+    /// Offset from the box's centre, in pixels.
+    local: [f32; 2],
+    half_size: [f32; 2],
+    /// Radius, border width, blur, unused -- all zero for a plain rect.
+    params: [f32; 4],
+    border_color: [f32; 4],
+}
+
+/// How a rounded box is drawn: `push_box`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxStyle {
+    pub radius: f32,
+    pub fill: [f32; 4],
+    pub border: f32,
+    pub border_color: [f32; 4],
 }
 
 /// How many rects one renderer's vertex buffer is *initially* sized for
@@ -55,17 +70,13 @@ impl RectRenderer {
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 8,
-                            shader_location: 1,
-                        },
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x4,
+                        2 => Float32x2,
+                        3 => Float32x2,
+                        4 => Float32x4,
+                        5 => Float32x4,
                     ],
                 })],
                 compilation_options: Default::default(),
@@ -100,23 +111,56 @@ impl RectRenderer {
     /// Queue one rect in pixel space (top-left x/y, width/height), color as
     /// straight-alpha RGBA in 0..1.
     pub fn push_rect(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        self.push_quad(gpu, (x, y, w, h), (x, y, w, h), color, [0.0; 4], [0.0; 4]);
+    }
+
+    /// A box with rounded corners, and a border when `style.border` is
+    /// more than zero. A radius of 0 and no border is `push_rect`.
+    pub fn push_box(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, style: BoxStyle) {
+        let params = [style.radius.max(0.0), style.border.max(0.0), 0.0, 0.0];
+        self.push_quad(gpu, (x, y, w, h), (x, y, w, h), style.fill, params, style.border_color);
+    }
+
+    /// A box with its own radius at each corner: top-left, top-right,
+    /// bottom-right, bottom-left -- a selection's rows, rounded only
+    /// where no neighbouring row continues them.
+    pub fn push_corners(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, radii: [f32; 4], color: [f32; 4]) {
+        self.push_quad(gpu, (x, y, w, h), (x, y, w, h), color, [0.0, 0.0, 0.0, 1.0], radii);
+    }
+
+    /// A wavy line through the middle of `(x, y, w, h)`: one wave every
+    /// `period` pixels, `amplitude` high, `thickness` thick.
+    pub fn push_wave(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, period: f32, amplitude: f32, thickness: f32, color: [f32; 4]) {
+        self.push_quad(gpu, (x, y, w, h), (x, y, w, h), color, [0.0, 0.0, 0.0, 2.0], [period, amplitude, thickness, 0.0]);
+    }
+
+    /// A soft shadow under a box: the box's shape with its edge spread
+    /// over `blur` pixels either side.
+    pub fn push_shadow(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, color: [f32; 4]) {
+        let blur = blur.max(0.5);
+        let quad = (x - blur, y - blur, w + blur * 2.0, h + blur * 2.0);
+        self.push_quad(gpu, quad, (x, y, w, h), color, [radius.max(0.0), 0.0, blur, 0.0], [0.0; 4]);
+    }
+
+    /// Two triangles covering `quad`, shaded as the box `shape` (both
+    /// `(x, y, w, h)` in pixels): a shadow's quad is larger than its box.
+    fn push_quad(&mut self, gpu: &GpuState, quad: (f32, f32, f32, f32), shape: (f32, f32, f32, f32), color: [f32; 4], params: [f32; 4], border_color: [f32; 4]) {
         let sw = gpu.config.width as f32;
         let sh = gpu.config.height as f32;
-        let to_ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
-
-        let p00 = to_ndc(x, y);
-        let p10 = to_ndc(x + w, y);
-        let p01 = to_ndc(x, y + h);
-        let p11 = to_ndc(x + w, y + h);
-
-        self.vertices.extend_from_slice(&[
-            Vertex { position: p00, color },
-            Vertex { position: p10, color },
-            Vertex { position: p01, color },
-            Vertex { position: p10, color },
-            Vertex { position: p11, color },
-            Vertex { position: p01, color },
-        ]);
+        let (x, y, w, h) = quad;
+        let (sx, sy, sw_, sh_) = shape;
+        let centre = (sx + sw_ / 2.0, sy + sh_ / 2.0);
+        let half_size = [sw_ / 2.0, sh_ / 2.0];
+        let vertex = |px: f32, py: f32| Vertex {
+            position: [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0],
+            color,
+            local: [px - centre.0, py - centre.1],
+            half_size,
+            params,
+            border_color,
+        };
+        let (v00, v10, v01, v11) = (vertex(x, y), vertex(x + w, y), vertex(x, y + h), vertex(x + w, y + h));
+        self.vertices.extend_from_slice(&[v00, v10, v01, v10, v11, v01]);
     }
 
     fn new_buffer(gpu: &GpuState, vertices: usize) -> wgpu::Buffer {

@@ -192,6 +192,10 @@ pub enum LspRequestKind {
     GoToDefinition,
     References,
     Hover,
+    /// `gf`: not a language server's -- the host opens the file named
+    /// under the cursor. It rides this path because it's the same shape:
+    /// a `g` key the host answers.
+    FileUnderCursor,
 }
 
 struct Register {
@@ -751,6 +755,43 @@ impl VimState {
     /// The key/label pairs reachable from wherever a pending sequence
     /// currently sits, for a which-key-style hint in the host UI. Empty
     /// when nothing is pending.
+    /// `pending_children` with what the which-key menu draws: groups,
+    /// counts, sections.
+    pub fn pending_hints(&self) -> Vec<fenix_keymap::Hint> {
+        if self.pending_op.is_some() {
+            self.pending_matcher.pending_hints()
+        } else if self.normal_matcher.is_pending() {
+            self.normal_matcher.pending_hints()
+        } else if self.visual_matcher.is_pending() {
+            self.visual_matcher.pending_hints()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The pending group's label, when it has one.
+    pub fn pending_label(&self) -> Option<&'static str> {
+        if self.normal_matcher.is_pending() {
+            self.normal_matcher.label()
+        } else if self.visual_matcher.is_pending() {
+            self.visual_matcher.label()
+        } else {
+            self.pending_matcher.label()
+        }
+    }
+
+    /// The keys of the sequence waiting on more input, as far as it's
+    /// got: `g`, `z`, `]`.
+    pub fn pending_path(&self) -> Vec<KeyPress> {
+        if self.normal_matcher.is_pending() {
+            self.normal_matcher.path().to_vec()
+        } else if self.visual_matcher.is_pending() {
+            self.visual_matcher.path().to_vec()
+        } else {
+            self.pending_matcher.path().to_vec()
+        }
+    }
+
     pub fn pending_children(&self) -> Vec<(KeyPress, &'static str)> {
         if self.pending_op.is_some() {
             self.pending_matcher.pending_children()

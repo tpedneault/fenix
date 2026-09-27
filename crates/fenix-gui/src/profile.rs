@@ -26,3 +26,13 @@ impl Drop for Scope {
         }
     }
 }
+
+/// Prints how long after launch `stage` was reached, with FENIX_PROFILE
+/// set: the first call starts the clock, so `main` calls it first.
+pub fn launch_mark(stage: &'static str) {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    if std::env::var_os("FENIX_PROFILE").is_some() {
+        eprintln!("fenix-profile launch/{stage}: {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+    }
+}

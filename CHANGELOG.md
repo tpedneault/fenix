@@ -6,6 +6,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Motion and polish: a launch splash, a key menu that opens after a
+  pause on `SPC`, `g`, `z`, `]`, `[` or `SPC m`, animations that show
+  what changed (jumps, undo, popups, modeline messages, mode colour,
+  tabs, themes), rounded popups with shadows, wavy underlines for
+  problems, an overview ruler, sticky scroll, dimmed unfocused panes and
+  rainbow brackets. `motion.level` and a setting per effect, in a new
+  Motion category of `SPC ,`.
+- The PDF reader, rebuilt: a PDF opens as a tab like any file and can be
+  read in two panes at once; its pages scroll as one continuous column
+  and are rendered ahead; a sidebar holds the outline, the search's
+  matches and marks; search highlights every match on the page; text
+  can be selected and copied, and links followed with `f` or a click;
+  pages can be drawn in the theme's colours; each PDF reopens where you
+  left it; Home lists what you're reading; the shelf (`SPC r f`) can
+  come from the project; PDFs rewritten on disk reload; sessions keep
+  PDF panes.
+- `gf` opens the file named under the cursor; `spec.pdf#page=38` opens
+  the PDF at that page, and `yp` in a PDF copies such a link.
+- Enter on the Font setting lists the installed fonts to pick from.
+
+### Changed
+
+- **Breaking:** the PDF reader's keys follow Vim. `J`/`K` turn the page
+  (`n`/`p` did), `gg`/`G`/`{n}G` go to a page (`g` went to page 1),
+  `=`, `zw`, `zp` and `z0` fit the page (`0` and `w` did), and `n`/`N`
+  now step through search matches. `SPC r` keeps its keys.
+- `SPC t a` cycles motion between off, subtle and full instead of
+  switching animations on and off.
+- The PDF reader's settings (`documents` among them) have a category of
+  their own in `SPC ,`; "Documents & workspaces" is now "Workspaces".
+  Setting keys are unchanged.
+
 ## [1.0.0] - 2026-09-26
 
 The first release. Fenix is a keyboard-first, GPU-rendered text editor
