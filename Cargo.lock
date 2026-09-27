@@ -864,6 +864,7 @@ name = "fenix-mib"
 version = "1.0.0"
 dependencies = [
  "fenix-ccsds",
+ "roxmltree",
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ use crate::packet_page::{self, PacketPage};
 use crate::hex_page::{self, HexPage};
 use crate::time_page::{self, TimePage};
 use crate::stream_page::{self, StreamPage};
+use crate::standards_page::{self, StandardsPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -58,6 +59,7 @@ pub(super) enum PageModel {
     Time(Box<TimePage>),
     Hex(Box<HexPage>),
     Stream(Box<StreamPage>),
+    Standards(Box<StandardsPage>),
 }
 
 pub(super) struct PageState {
@@ -99,7 +101,7 @@ impl PageState {
             PageModel::Time(p) => p.typing(),
             PageModel::Hex(p) => p.typing(),
             PageModel::Stream(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => false,
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) | PageModel::Standards(_) => false,
         }
     }
 
@@ -141,7 +143,7 @@ impl PageState {
             PageModel::Time(p) => p.paste(text),
             PageModel::Hex(p) => p.paste(text),
             PageModel::Stream(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => {}
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) | PageModel::Standards(_) => {}
         }
         self.stale = true;
     }
@@ -318,6 +320,7 @@ impl App {
             Some(PageModel::Time(_)) => "*time*".to_string(),
             Some(PageModel::Hex(p)) => hex_page::title(p),
             Some(PageModel::Stream(p)) => stream_page::title(p),
+            Some(PageModel::Standards(_)) => "*standards*".to_string(),
         }
     }
 
@@ -467,6 +470,7 @@ impl App {
             PageModel::Time(p) => time_page::layout(p, cols),
             PageModel::Hex(p) => hex_page::layout(p, cols),
             PageModel::Stream(p) => stream_page::layout(p, cols),
+            PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -621,6 +625,10 @@ impl App {
             PageModel::Stream(p) => {
                 let action = p.key(key);
                 self.stream_page_action(id, action);
+            }
+            PageModel::Standards(p) => {
+                let action = p.key(key);
+                self.standards_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();

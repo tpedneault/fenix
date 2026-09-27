@@ -9,3 +9,4 @@ publish.workspace = true
 
 [dependencies]
 fenix-ccsds = { path = "../fenix-ccsds" }
+roxmltree = "0.20"

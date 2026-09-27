@@ -53,10 +53,7 @@ pub fn run(set: &MibSet, o: &Options) -> Vec<Problem> {
     for (i, e) in pkts.iter().enumerate() {
         let spid = DefRef { kind: Kind::TmPacket, index: i };
         let slots = detail::packet_slots(set, spid);
-        let head = match o.base {
-            OffsetBase::PacketStart => 0,
-            OffsetBase::AfterHeaders => 6 + parse_int(e.row.clean("PID_DFHSIZE")).filter(|n| *n > 0).map(|n| n as usize).unwrap_or_else(|| pus::tm_header_len(o.profile)),
-        };
+        let head = crate::packets::params_start(set, spid, o.profile, o.base);
         let mut spans: Vec<(usize, usize, &str)> = Vec::new();
         for s in &slots {
             let Some(p) = s.param else { continue };

@@ -76,7 +76,14 @@ pub fn identify_tm(set: &MibSet, pkt: &Packet, sec: Option<&Secondary>) -> Optio
 }
 
 /// The octet `PLF_OFFBY` counts from in `pkt`, for `spid`.
-fn param_base(set: &MibSet, spid: DefRef, profile: &Profile, base: OffsetBase) -> usize {
+/// The octet a packet's `PLF_OFFBY` counts from: per the project's
+/// setting, except that a packet read from XTCE counts from its start
+/// (XTCE locations are from the container's start).
+pub fn params_start(set: &MibSet, spid: DefRef, profile: &Profile, base: OffsetBase) -> usize {
+    let row = &set.get(spid).row;
+    if row.source.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
+        return 0;
+    }
     match base {
         OffsetBase::PacketStart => 0,
         OffsetBase::AfterHeaders => {
@@ -194,7 +201,7 @@ fn trim_float(y: f64) -> String {
 /// checked.
 pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, base: OffsetBase) -> Field {
     let e = set.get(spid);
-    let start = param_base(set, spid, profile, base);
+    let start = params_start(set, spid, profile, base);
     let mut children = Vec::new();
     for slot in detail::packet_slots(set, spid) {
         let Some(param) = slot.param else {

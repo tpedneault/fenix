@@ -263,7 +263,36 @@ impl App {
 
     /// Opens a standard's PDF at `heading`, when the library has it.
     pub(crate) fn open_standard(&mut self, std: &str, heading: Option<&str>) {
-        self.set_message(format!("{std}{} -- set ccsds.library to open the standards", heading.map(|h| format!(" · {h}")).unwrap_or_default()));
+        use crate::standards_page::{file_for, pdfs_in, STANDARDS};
+        let Some(standard) = STANDARDS.iter().find(|s| s.id == std) else {
+            self.set_message(format!("{std}{}", heading.map(|h| format!(" · {h}")).unwrap_or_default()));
+            return;
+        };
+        let pdfs = self.config.ccsds_library.as_deref().map(pdfs_in).unwrap_or_default();
+        match file_for(standard, &pdfs).cloned() {
+            Some(path) => match heading {
+                Some(h) => self.pdf_open_at_heading(&path, h),
+                None => self.open_pdf_path(&path),
+            },
+            None => self.set_error(format!("{std} ({}) isn't in the standards folder -- SPC k ? says where to get it", standard.title)),
+        }
+    }
+
+    /// `SPC k ?`: the standards library.
+    pub(crate) fn cmd_ccsds_standards(&mut self) {
+        let page = crate::standards_page::StandardsPage::new(self.config.ccsds_library.clone());
+        self.open_page(PageModel::Standards(Box::new(page)));
+    }
+
+    pub(super) fn standards_action(&mut self, id: BufferId, action: crate::standards_page::Action) {
+        use crate::standards_page::Action as A;
+        match action {
+            A::None => {}
+            A::Close => self.close_page(id),
+            A::Open(path) => self.open_pdf_path(&path),
+            A::Url(url) => self.open_url(url),
+            A::Settings => self.open_settings_page(crate::settings_page::Scope::You, Some("ccsds.library")),
+        }
     }
 }
 

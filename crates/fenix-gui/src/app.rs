@@ -2236,6 +2236,9 @@ enum ActivePicker {
     MibInsert(fenix_picker::PickerState<fenix_mib::DefRef>),
     /// `SPC k l`: a live source, by its index in `ccsds_sources`.
     CcsdsSource(fenix_picker::PickerState<usize>),
+    /// `SPC k g`: what to generate from the MIB, by its index in
+    /// `fenix_mib::generate::KINDS`.
+    MibGenerate(fenix_picker::PickerState<usize>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
     /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
@@ -2319,6 +2322,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::MibDef(s) => s.push_char(c),
         ActivePicker::MibInsert(s) => s.push_char(c),
         ActivePicker::CcsdsSource(s) => s.push_char(c),
+        ActivePicker::MibGenerate(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2357,6 +2361,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::MibDef(s) => s.backspace(),
         ActivePicker::MibInsert(s) => s.backspace(),
         ActivePicker::CcsdsSource(s) => s.backspace(),
+        ActivePicker::MibGenerate(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2395,6 +2400,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::MibDef(s) => s.move_selection(delta),
         ActivePicker::MibInsert(s) => s.move_selection(delta),
         ActivePicker::CcsdsSource(s) => s.move_selection(delta),
+        ActivePicker::MibGenerate(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2436,6 +2442,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::MibDef(s) => s.toggle_mark(),
         ActivePicker::MibInsert(s) => s.toggle_mark(),
         ActivePicker::CcsdsSource(s) => s.toggle_mark(),
+        ActivePicker::MibGenerate(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2474,6 +2481,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::MibDef(s) => s.query(),
         ActivePicker::MibInsert(s) => s.query(),
         ActivePicker::CcsdsSource(s) => s.query(),
+        ActivePicker::MibGenerate(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2512,6 +2520,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::MibDef(s) => s.len(),
         ActivePicker::MibInsert(s) => s.len(),
         ActivePicker::CcsdsSource(s) => s.len(),
+        ActivePicker::MibGenerate(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2550,6 +2559,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::MibDef(s) => s.selected_row(),
         ActivePicker::MibInsert(s) => s.selected_row(),
         ActivePicker::CcsdsSource(s) => s.selected_row(),
+        ActivePicker::MibGenerate(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2592,6 +2602,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::MibDef(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CcsdsSource(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibGenerate(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -16884,6 +16895,12 @@ impl App {
                     }
                 }
             }
+            Some(ActivePicker::MibGenerate(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.mib_generate(i);
+            }
             Some(ActivePicker::CcsdsSource(state)) => {
                 let Some(i) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -20819,6 +20836,7 @@ impl App {
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
                 Some(picker @ ActivePicker::MibInsert(_)) => ("INSERT TC", picker_len(picker)),
                 Some(picker @ ActivePicker::CcsdsSource(_)) => ("SOURCE", picker_len(picker)),
+                Some(picker @ ActivePicker::MibGenerate(_)) => ("GENERATE", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),

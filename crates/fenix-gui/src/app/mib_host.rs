@@ -626,6 +626,35 @@ impl App {
         true
     }
 
+    /// `SPC k g`: something to generate from the project's MIBs.
+    pub(crate) fn cmd_mib_generate(&mut self) {
+        let (key, _) = self.mib_key_here();
+        if key.roots.is_empty() {
+            self.set_error("no MIB for this project -- SPC k , lists one in its settings");
+            return;
+        }
+        let candidates = fenix_mib::generate::KINDS.iter().enumerate().map(|(i, (_, file, what))| fenix_picker::Candidate::new(format!("{file:<18} {what}"), i)).collect();
+        self.enter_picker(ActivePicker::MibGenerate(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Writes generated file `kind` into the project's `generated/` and
+    /// opens it.
+    pub(crate) fn mib_generate(&mut self, kind: usize) {
+        let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
+        let Some((name, file, _)) = fenix_mib::generate::KINDS.get(kind) else { return };
+        let mission = self.mission(key.project.as_deref());
+        let Some(text) = fenix_mib::generate::generate(name, &set, &mission.profile, mission.base) else { return };
+        let dir = key.project.clone().unwrap_or_else(|| PathBuf::from(".")).join("generated");
+        let path = dir.join(file);
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
+            Ok(()) => {
+                self.open_file_from_picker(&path);
+                self.set_message(format!("wrote {} -- regenerate it with SPC k g after the MIB changes", path.display()));
+            }
+            Err(e) => self.set_error(format!("couldn't write {}: {e}", path.display())),
+        }
+    }
+
     /// Checks the telecommand calls of the focused file against the MIB,
     /// when it changed since the last look.
     pub(super) fn mib_check_scripts(&mut self) {

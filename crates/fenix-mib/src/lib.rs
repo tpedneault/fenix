@@ -16,6 +16,7 @@
 
 pub mod checks;
 pub mod detail;
+pub mod generate;
 pub mod packets;
 mod parse;
 pub mod query;
@@ -24,8 +25,11 @@ pub mod schema;
 mod set;
 pub mod telecommand;
 pub mod types;
+mod xtce;
 
 use std::path::PathBuf;
+
+type HashMapRows = std::collections::HashMap<String, Vec<Row>>;
 
 pub use parse::Problem;
 pub use query::Query;
@@ -75,9 +79,24 @@ impl MibIndex {
     pub fn refresh(&mut self) {
         self.tables.clear();
         self.problems.clear();
+        // An XTCE file as a root: its rows, table by table.
+        let mut xtce: Vec<HashMapRows> = Vec::new();
+        for (root_index, root) in self.roots.iter().enumerate() {
+            if root.path.is_file() && root.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
+                let (tables, problems) = xtce::read(root_index, &root.label, &root.path);
+                xtce.push(tables);
+                self.problems.extend(problems);
+            }
+        }
         for table in schema::all_tables() {
             let mut rows = Vec::new();
+            for from_xml in &mut xtce {
+                rows.extend(from_xml.remove(table).unwrap_or_default());
+            }
             for (root_index, root) in self.roots.iter().enumerate() {
+                if root.path.is_file() {
+                    continue;
+                }
                 let file = root.path.join(format!("{table}.dat"));
                 let (found, problems) = parse::parse_table_file(root_index, &root.label, table, &file);
                 rows.extend(found);

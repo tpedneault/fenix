@@ -318,6 +318,8 @@ impl CommandRegistry {
         registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
         registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", cmd_ccsds_recording);
         registry.register("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", cmd_ccsds_live);
+        registry.register("mib.generate", "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", cmd_mib_generate);
+        registry.register("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", cmd_ccsds_standards);
         registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
@@ -1049,6 +1051,14 @@ fn cmd_ccsds_recording(ctx: &mut CommandCtx) {
 
 fn cmd_ccsds_live(ctx: &mut CommandCtx) {
     ctx.app.cmd_ccsds_live();
+}
+
+fn cmd_mib_generate(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_generate();
+}
+
+fn cmd_ccsds_standards(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_standards();
 }
 
 fn cmd_ccsds_decode(ctx: &mut CommandCtx) {
