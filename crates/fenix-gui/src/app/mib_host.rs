@@ -269,6 +269,7 @@ impl App {
         let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
         let candidates = self.mib_picker(&set, &Kind::ALL);
         self.mib_picker_key = key;
+        self.mib_pick_for_stream = None;
         self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -281,6 +282,7 @@ impl App {
             return;
         }
         self.mib_picker_key = key;
+        self.mib_pick_for_stream = None;
         self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
     }
 

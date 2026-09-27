@@ -10,6 +10,7 @@ mod mib_page;
 mod packet_page;
 mod hex_page;
 mod time_page;
+mod stream_page;
 mod app;
 mod commands;
 mod completion;

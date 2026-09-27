@@ -29,6 +29,7 @@ mod polish;
 mod which_key;
 mod mib_host;
 mod ccsds_host;
+mod stream_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2233,6 +2234,8 @@ enum ActivePicker {
     MibDef(fenix_picker::PickerState<fenix_mib::DefRef>),
     /// `SPC k i`: a telecommand; confirming opens the insert form.
     MibInsert(fenix_picker::PickerState<fenix_mib::DefRef>),
+    /// `SPC k l`: a live source, by its index in `ccsds_sources`.
+    CcsdsSource(fenix_picker::PickerState<usize>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
     /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
@@ -2315,6 +2318,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibDef(s) => s.push_char(c),
         ActivePicker::MibInsert(s) => s.push_char(c),
+        ActivePicker::CcsdsSource(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2352,6 +2356,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibDef(s) => s.backspace(),
         ActivePicker::MibInsert(s) => s.backspace(),
+        ActivePicker::CcsdsSource(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2389,6 +2394,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibDef(s) => s.move_selection(delta),
         ActivePicker::MibInsert(s) => s.move_selection(delta),
+        ActivePicker::CcsdsSource(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2429,6 +2435,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::MibDef(s) => s.toggle_mark(),
         ActivePicker::MibInsert(s) => s.toggle_mark(),
+        ActivePicker::CcsdsSource(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2466,6 +2473,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibDef(s) => s.query(),
         ActivePicker::MibInsert(s) => s.query(),
+        ActivePicker::CcsdsSource(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2503,6 +2511,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibDef(s) => s.len(),
         ActivePicker::MibInsert(s) => s.len(),
+        ActivePicker::CcsdsSource(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2540,6 +2549,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibDef(s) => s.selected_row(),
         ActivePicker::MibInsert(s) => s.selected_row(),
+        ActivePicker::CcsdsSource(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2581,6 +2591,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibDef(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CcsdsSource(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5871,6 +5882,10 @@ pub struct App {
     /// The values last inserted for a telecommand, per project, for the
     /// form to open with next time.
     mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
+    /// Where each stream page's packets come from.
+    stream_sources: HashMap<BufferId, stream_host::StreamSource>,
+    /// A stream page waiting for a parameter from the `MibDef` picker.
+    mib_pick_for_stream: Option<BufferId>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6652,6 +6667,8 @@ impl App {
             mib_picker_key: Default::default(),
             mib_origins: HashMap::new(),
             mib_last: HashMap::new(),
+            stream_sources: HashMap::new(),
+            mib_pick_for_stream: None,
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -16841,8 +16858,22 @@ impl App {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let key = self.mib_picker_key.clone();
-                self.open_mib_def(key, def);
+                match self.mib_pick_for_stream.take() {
+                    Some(page) => {
+                        self.show_page(page);
+                        self.stream_follow(page, def);
+                    }
+                    None => {
+                        let key = self.mib_picker_key.clone();
+                        self.open_mib_def(key, def);
+                    }
+                }
+            }
+            Some(ActivePicker::CcsdsSource(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_live(i);
             }
             Some(ActivePicker::MibInsert(state)) => {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
@@ -20772,6 +20803,7 @@ impl App {
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
                 Some(picker @ ActivePicker::MibInsert(_)) => ("INSERT TC", picker_len(picker)),
+                Some(picker @ ActivePicker::CcsdsSource(_)) => ("SOURCE", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),

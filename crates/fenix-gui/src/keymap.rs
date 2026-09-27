@@ -418,6 +418,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('d')], "decode the hex here", "ccsds.decode");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('b')], "copy this call as bytes", "mib.copy_bytes");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('T')], "time converter", "ccsds.time");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('f')], "open a recording", "ccsds.recording");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('l')], "follow a live source", "ccsds.live");
 
         // The agenda: the page and its tabs, and what you reach for from
         // a file -- a new task, a task from here, the clock. A task's own

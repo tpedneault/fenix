@@ -20,6 +20,7 @@ use crate::mib_page::{self, MibPage};
 use crate::packet_page::{self, PacketPage};
 use crate::hex_page::{self, HexPage};
 use crate::time_page::{self, TimePage};
+use crate::stream_page::{self, StreamPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -56,6 +57,7 @@ pub(super) enum PageModel {
     Packet(Box<PacketPage>),
     Time(Box<TimePage>),
     Hex(Box<HexPage>),
+    Stream(Box<StreamPage>),
 }
 
 pub(super) struct PageState {
@@ -96,6 +98,7 @@ impl PageState {
             PageModel::MibForm(p) => p.typing(),
             PageModel::Time(p) => p.typing(),
             PageModel::Hex(p) => p.typing(),
+            PageModel::Stream(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => false,
         }
     }
@@ -113,6 +116,7 @@ impl PageState {
                 PageModel::MibForm(p) => p.claims_space(),
                 PageModel::Time(p) => p.typing(),
                 PageModel::Hex(p) => p.typing(),
+                PageModel::Stream(p) => p.typing(),
                 _ => false,
             }
     }
@@ -136,6 +140,7 @@ impl PageState {
             PageModel::MibForm(p) => p.paste(text),
             PageModel::Time(p) => p.paste(text),
             PageModel::Hex(p) => p.paste(text),
+            PageModel::Stream(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => {}
         }
         self.stale = true;
@@ -191,6 +196,10 @@ pub enum PageEvent {
     JiraDone { buffer: BufferId, key: String, result: Result<String, String> },
     /// A set of MIBs was read.
     MibLoaded { key: mib_page::MibKey, set: Arc<fenix_mib::MibSet> },
+    /// A stream page's next packets.
+    StreamRows { buffer: BufferId, rows: Vec<stream_page::Row>, lost: Vec<(usize, u8, u64)>, junk: Vec<(usize, usize, String)>, done: bool },
+    StreamInfo { buffer: BufferId, framing: String },
+    StreamStatus { buffer: BufferId, text: String, ok: bool },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -308,6 +317,7 @@ impl App {
             Some(PageModel::Packet(p)) => packet_page::title(p),
             Some(PageModel::Time(_)) => "*time*".to_string(),
             Some(PageModel::Hex(p)) => hex_page::title(p),
+            Some(PageModel::Stream(p)) => stream_page::title(p),
         }
     }
 
@@ -342,6 +352,9 @@ impl App {
     /// Closes page `id` and its buffer; panes showing it go back to the
     /// buffer used before.
     pub(super) fn close_page(&mut self, id: BufferId) {
+        if let Some(PageModel::Stream(p)) = self.pages.get(&id).map(|s| &s.model) {
+            p.close();
+        }
         self.pages.remove(&id);
         self.buffers.close(id);
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
@@ -453,6 +466,7 @@ impl App {
             PageModel::Packet(p) => packet_page::layout(p, cols),
             PageModel::Time(p) => time_page::layout(p, cols),
             PageModel::Hex(p) => hex_page::layout(p, cols),
+            PageModel::Stream(p) => stream_page::layout(p, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -604,6 +618,10 @@ impl App {
                 let action = p.key(key);
                 self.hex_page_action(id, action);
             }
+            PageModel::Stream(p) => {
+                let action = p.key(key);
+                self.stream_page_action(id, action);
+            }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
                 let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
@@ -691,6 +709,7 @@ impl App {
             | PageEvent::JiraFields { .. }
             | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
             PageEvent::MibLoaded { key, set } => self.apply_mib_loaded(key, set),
+            event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)

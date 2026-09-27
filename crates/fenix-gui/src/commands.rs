@@ -316,6 +316,8 @@ impl CommandRegistry {
         registry.register("mib.copy_bytes", "Copy the telecommand call on this line as its packet's bytes", cmd_mib_copy_bytes);
         registry.register("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", cmd_ccsds_time);
         registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
+        registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", cmd_ccsds_recording);
+        registry.register("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", cmd_ccsds_live);
         registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
@@ -1039,6 +1041,14 @@ fn cmd_ccsds_time(ctx: &mut CommandCtx) {
 
 fn cmd_ccsds_hex(ctx: &mut CommandCtx) {
     ctx.app.cmd_hex_view();
+}
+
+fn cmd_ccsds_recording(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_recording();
+}
+
+fn cmd_ccsds_live(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_live();
 }
 
 fn cmd_ccsds_decode(ctx: &mut CommandCtx) {

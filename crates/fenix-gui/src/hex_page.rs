@@ -49,6 +49,11 @@ impl HexPage {
         self.prompt.is_some()
     }
 
+    /// Puts the cursor at `offset`.
+    pub fn goto(&mut self, offset: usize) {
+        self.move_to(offset as isize);
+    }
+
     pub fn paste(&mut self, text: &str) {
         match &mut self.prompt {
             Some(Prompt::Search(s)) | Some(Prompt::Goto(s)) => s.push_str(text.trim()),
