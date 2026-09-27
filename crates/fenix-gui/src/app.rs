@@ -28,6 +28,7 @@ mod motion_host;
 mod polish;
 mod which_key;
 mod mib_host;
+mod ccsds_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -7828,7 +7829,7 @@ impl App {
     /// message; this fires on every `K` press, including ones with
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
-        if let Some(card) = self.mib_hover() {
+        if let Some(card) = self.mib_hover().or_else(|| self.ccsds_hex_hover()) {
             self.lsp_hover = Some(card);
             return;
         }

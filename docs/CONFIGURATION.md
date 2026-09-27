@@ -215,6 +215,26 @@ when it's out of date).
 | `mib.editor_files` | a list | every file | Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file. *A project can set it.* |
 | `mib.apid_format` | hex / decimal | hex | How APIDs are shown. |
 | `mib.watch` | true / false | on | Reload a MIB when one of its .dat files changes on disk. |
+| `mib.check_scripts` | true / false | on | Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments. *A project can set it.* |
+| **CCSDS & PUS** | | | |
+| `ccsds.pus` | c / a / none | c | The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets. *A project can set it.* |
+| `ccsds.tm_time` | text | cuc 4.2 | The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none. *A project can set it.* |
+| `ccsds.epoch` | text | 1958-01-01 TAI | What on-board times count from: a date and time, then TAI, UTC or GPS. *A project can set it.* |
+| `ccsds.crc` | ccitt16 / iso / none | ccitt16 | The check at the end of a packet, where the MIB doesn't say: CRC-16-CCITT, the ISO checksum, or none. *A project can set it.* |
+| `ccsds.tc_source_id` | 0–65535 | 0 | The source ID written into telecommand packets Fenix builds. *A project can set it.* |
+| `ccsds.plf_offset` | after-headers / packet-start | after-headers | Where the MIB's PLF_OFFBY counts from: after the packet's headers (PID_DFHSIZE), or its first octet. *A project can set it.* |
+| `ccsds.frame_type` | tm / aos / uslp / tc | tm | The transfer frames recordings and live sources carry, when they carry frames. *A project can set it.* |
+| `ccsds.frame_length` | 7–65535 | 1115 | Octets in a transfer frame, without its sync marker or Reed-Solomon check symbols. *A project can set it.* |
+| `ccsds.frame_asm` | true / false | on | Frames are preceded by the 1ACFFC1D attached sync marker (CADUs). *A project can set it.* |
+| `ccsds.frame_randomized` | true / false | off | Frames went through the CCSDS pseudo-randomizer. *A project can set it.* |
+| `ccsds.frame_rs_depth` | 0–8 | 0 | Interleave depth of the (255,223) Reed-Solomon code; 0 when there's none. Code words are corrected. *A project can set it.* |
+| `ccsds.frame_ocf` | true / false | on | TM or AOS frames end in an operational control field (the CLCW). *A project can set it.* |
+| `ccsds.frame_fecf` | true / false | off | Frames end in a CRC-16 frame error control field. *A project can set it.* |
+| `ccsds.vc_names` | vc = name | – | A name for each virtual channel, shown wherever its frames are. *A project can set it.* |
+| `ccsds.sources` | [[tables]] of name, address, subject, framing | – | Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames, or records N. Fenix only receives. *A project can set it.* |
+| `ccsds.checks_off` | a list | – | Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time. *A project can set it.* |
+| `ccsds.library` | a path | – | The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading. |
+| `ccsds.leap_seconds` | a path | built in | A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has. |
 | **VNC** | | | |
 | `vnc.hosts` | [[tables]] of name, host, port | – | Machines SPC v connects to. No passwords: every host is taken to be on a trusted network. |
 | **Workspaces** | | | |

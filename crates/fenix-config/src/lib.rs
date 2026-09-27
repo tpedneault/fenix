@@ -222,6 +222,30 @@ pub struct Config {
     pub mib_apid_format: Option<String>,
     /// Reload a MIB when one of its files changes.
     pub mib_watch: Option<bool>,
+    /// Diagnostics for telecommand calls in scripts.
+    pub mib_check_scripts: Option<bool>,
+    /// The CCSDS and PUS profile: how a mission's packets and frames
+    /// are laid out beyond what its MIB says.
+    pub ccsds_pus: Option<String>,
+    pub ccsds_tm_time: Option<String>,
+    pub ccsds_epoch: Option<String>,
+    pub ccsds_crc: Option<String>,
+    pub ccsds_tc_source_id: Option<i64>,
+    pub ccsds_plf_offset: Option<String>,
+    pub ccsds_frame_type: Option<String>,
+    pub ccsds_frame_length: Option<i64>,
+    pub ccsds_frame_asm: Option<bool>,
+    pub ccsds_frame_randomized: Option<bool>,
+    pub ccsds_frame_rs_depth: Option<i64>,
+    pub ccsds_frame_ocf: Option<bool>,
+    pub ccsds_frame_fecf: Option<bool>,
+    pub ccsds_vc_names: Vec<(String, String)>,
+    /// Live sources: name, address, NATS subject, framing.
+    pub ccsds_sources: Vec<Vec<String>>,
+    pub ccsds_library: Option<PathBuf>,
+    pub ccsds_leap_seconds: Option<PathBuf>,
+    /// Standards checks turned off.
+    pub ccsds_checks_off: Vec<String>,
     /// Whether to notice files changing on disk while they're open and
     /// re-read them. Unset means on, which is what anyone expects; the
     /// setting exists for a working copy on a network share, where a
@@ -528,6 +552,25 @@ impl Config {
             mib_editor_files: Vec::new(),
             mib_apid_format: None,
             mib_watch: None,
+            mib_check_scripts: None,
+            ccsds_pus: None,
+            ccsds_tm_time: None,
+            ccsds_epoch: None,
+            ccsds_crc: None,
+            ccsds_tc_source_id: None,
+            ccsds_plf_offset: None,
+            ccsds_frame_type: None,
+            ccsds_frame_length: None,
+            ccsds_frame_asm: None,
+            ccsds_frame_randomized: None,
+            ccsds_frame_rs_depth: None,
+            ccsds_frame_ocf: None,
+            ccsds_frame_fecf: None,
+            ccsds_vc_names: Vec::new(),
+            ccsds_sources: Vec::new(),
+            ccsds_library: None,
+            ccsds_leap_seconds: None,
+            ccsds_checks_off: Vec::new(),
             watch_files: None,
             jira_base_url: None,
             jira_token: None,
@@ -1223,7 +1266,11 @@ mod tests {
             Kind::List => Value::List(vec!["alex".into(), "sam".into()]),
             Kind::Map { paths: true, .. } => Value::Map(vec![("First one".into(), r"C:\refs\a b.pdf".into()), ("b".into(), "/refs/b".into())]),
             Kind::Map { .. } => Value::Map(vec![("k 1".into(), "flag".into()), ("k2".into(), "10103: On Hold".into())]),
-            Kind::Records(_) => Value::Records(vec![vec!["build-vm".into(), "10.0.0.5".into(), "5901".into()], vec!["test".into(), "127.0.0.1".into(), "5900".into()]]),
+            Kind::Records(fields) => Value::Records(
+                (0..2)
+                    .map(|row| fields.iter().enumerate().map(|(i, f)| match f.range { Some((min, _)) => (min + 1 + row).to_string(), None => format!("v{row} {i}") }).collect())
+                    .collect(),
+            ),
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
         };
         let settable: Vec<&Setting> = settings().iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();

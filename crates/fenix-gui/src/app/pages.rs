@@ -17,6 +17,9 @@ use crate::jira_page::{self, JiraPage};
 use crate::mib_def::{self, DefPage};
 use crate::mib_form::{self, InsertForm};
 use crate::mib_page::{self, MibPage};
+use crate::packet_page::{self, PacketPage};
+use crate::hex_page::{self, HexPage};
+use crate::time_page::{self, TimePage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -50,6 +53,9 @@ pub(super) enum PageModel {
     Mib(Box<MibPage>),
     MibDef(Box<DefPage>),
     MibForm(Box<InsertForm>),
+    Packet(Box<PacketPage>),
+    Time(Box<TimePage>),
+    Hex(Box<HexPage>),
 }
 
 pub(super) struct PageState {
@@ -88,7 +94,9 @@ impl PageState {
             PageModel::Jira(p) => p.typing(),
             PageModel::Mib(p) => p.typing(),
             PageModel::MibForm(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => false,
+            PageModel::Time(p) => p.typing(),
+            PageModel::Hex(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => false,
         }
     }
 
@@ -103,6 +111,8 @@ impl PageState {
                 PageModel::Jira(p) => p.claims_space(),
                 PageModel::Mib(p) => p.claims_space(),
                 PageModel::MibForm(p) => p.claims_space(),
+                PageModel::Time(p) => p.typing(),
+                PageModel::Hex(p) => p.typing(),
                 _ => false,
             }
     }
@@ -124,7 +134,9 @@ impl PageState {
             PageModel::Jira(p) => p.paste(text),
             PageModel::Mib(p) => p.paste(text),
             PageModel::MibForm(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => {}
+            PageModel::Time(p) => p.paste(text),
+            PageModel::Hex(p) => p.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) | PageModel::Packet(_) => {}
         }
         self.stale = true;
     }
@@ -293,6 +305,9 @@ impl App {
             Some(PageModel::Mib(_)) => "*mib*".to_string(),
             Some(PageModel::MibDef(p)) => mib_def::title(self.mib_set_ready(&p.key).as_deref(), p),
             Some(PageModel::MibForm(f)) => mib_form::title(f),
+            Some(PageModel::Packet(p)) => packet_page::title(p),
+            Some(PageModel::Time(_)) => "*time*".to_string(),
+            Some(PageModel::Hex(p)) => hex_page::title(p),
         }
     }
 
@@ -396,6 +411,10 @@ impl App {
             (set, loading, if here == key { source } else { String::new() })
         });
         let apid_hex = self.mib_apid_hex();
+        let form_bytes = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib_form_bytes(f)),
+            _ => None,
+        };
         let Some(state) = self.pages.get_mut(&id) else { return };
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
@@ -430,7 +449,10 @@ impl App {
                 let set = mib.clone().and_then(|m| m.0);
                 mib_def::layout(p, set.as_deref(), apid_hex, cols)
             }
-            PageModel::MibForm(f) => mib_form::layout(f, cols),
+            PageModel::MibForm(f) => mib_form::layout(f, form_bytes.as_ref(), cols),
+            PageModel::Packet(p) => packet_page::layout(p, cols),
+            PageModel::Time(p) => time_page::layout(p, cols),
+            PageModel::Hex(p) => hex_page::layout(p, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -569,6 +591,18 @@ impl App {
             PageModel::MibForm(f) => {
                 let action = f.key(key);
                 self.mib_form_action(action);
+            }
+            PageModel::Packet(p) => {
+                let action = p.key(key);
+                self.packet_page_action(id, action);
+            }
+            PageModel::Time(p) => {
+                let action = p.key(key);
+                self.time_page_action(id, action);
+            }
+            PageModel::Hex(p) => {
+                let action = p.key(key);
+                self.hex_page_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();

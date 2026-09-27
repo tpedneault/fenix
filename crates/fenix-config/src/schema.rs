@@ -75,13 +75,14 @@ pub enum Category {
     Jira,
     Embedded,
     Mib,
+    Ccsds,
     Vnc,
     Documents,
     Session,
 }
 
 impl Category {
-    pub const ALL: [Category; 14] = [
+    pub const ALL: [Category; 15] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -93,6 +94,7 @@ impl Category {
         Category::Jira,
         Category::Embedded,
         Category::Mib,
+        Category::Ccsds,
         Category::Vnc,
         Category::Documents,
         Category::Session,
@@ -111,6 +113,7 @@ impl Category {
             Category::Jira => "Jira & agenda",
             Category::Embedded => "Embedded",
             Category::Mib => "SCOS-2000 MIB",
+            Category::Ccsds => "CCSDS & PUS",
             Category::Vnc => "VNC",
             Category::Documents => "Workspaces",
             Category::Session => "Windows & session",
@@ -307,6 +310,13 @@ macro_rules! sub {
     };
 }
 
+const SOURCE: &[Field] = &[
+    Field { name: "name", label: "Name", range: None, default: None },
+    Field { name: "address", label: "Address", range: None, default: None },
+    Field { name: "subject", label: "NATS subject", range: None, default: Some("") },
+    Field { name: "framing", label: "Framing", range: None, default: Some("guess") },
+];
+
 const HOST: &[Field] = &[
     Field { name: "name", label: "Name", range: None, default: None },
     Field { name: "host", label: "Host", range: None, default: None },
@@ -430,6 +440,45 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         })).default("every file").project(),
         s("mib.apid_format", Mib, "APIDs in", Kind::Choice(&["hex", "decimal"]), "How APIDs are shown.", field!(mib_apid_format, text_get, text_set)).default("hex"),
         s("mib.watch", Mib, "Reload on change", Kind::Bool, "Reload a MIB when one of its .dat files changes on disk.", field!(mib_watch, bool_get, bool_set)).default("on"),
+        s("mib.check_scripts", Mib, "Check scripts", Kind::Bool, "Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments.", field!(mib_check_scripts, bool_get, bool_set)).default("on").project(),
+        // CCSDS & PUS
+        s("ccsds.pus", Ccsds, "PUS edition", Kind::Choice(&["c", "a", "none"]), "The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets.", field!(ccsds_pus, text_get, text_set)).default("c").project(),
+        s("ccsds.tm_time", Ccsds, "TM time format", Kind::Text, "The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none.", field!(ccsds_tm_time, text_get, text_set)).default("cuc 4.2").project(),
+        s("ccsds.epoch", Ccsds, "Epoch", Kind::Text, "What on-board times count from: a date and time, then TAI, UTC or GPS.", field!(ccsds_epoch, text_get, text_set)).default("1958-01-01 TAI").project(),
+        s("ccsds.crc", Ccsds, "Packet error control", Kind::Choice(&["ccitt16", "iso", "none"]), "The check at the end of a packet, where the MIB doesn't say: CRC-16-CCITT, the ISO checksum, or none.", field!(ccsds_crc, text_get, text_set)).default("ccitt16").project(),
+        s("ccsds.tc_source_id", Ccsds, "TC source ID", Kind::Int { min: 0, max: 65535 }, "The source ID written into telecommand packets Fenix builds.", (|c: &Config| int(&c.ccsds_tc_source_id), |c: &mut Config, v| {
+            c.ccsds_tc_source_id = int_set(v)?;
+            Ok(())
+        })).default("0").project(),
+        s("ccsds.plf_offset", Ccsds, "Parameter offsets from", Kind::Choice(&["after-headers", "packet-start"]), "Where the MIB's PLF_OFFBY counts from: after the packet's headers (PID_DFHSIZE), or its first octet.", field!(ccsds_plf_offset, text_get, text_set)).default("after-headers").project(),
+        s("ccsds.frame_type", Ccsds, "Frames", Kind::Choice(&["tm", "aos", "uslp", "tc"]), "The transfer frames recordings and live sources carry, when they carry frames.", field!(ccsds_frame_type, text_get, text_set)).default("tm").project(),
+        s("ccsds.frame_length", Ccsds, "Frame length", Kind::Int { min: 7, max: 65535 }, "Octets in a transfer frame, without its sync marker or Reed-Solomon check symbols.", (|c: &Config| int(&c.ccsds_frame_length), |c: &mut Config, v| {
+            c.ccsds_frame_length = int_set(v)?;
+            Ok(())
+        })).default("1115").project(),
+        s("ccsds.frame_asm", Ccsds, "Sync marker", Kind::Bool, "Frames are preceded by the 1ACFFC1D attached sync marker (CADUs).", field!(ccsds_frame_asm, bool_get, bool_set)).default("on").project(),
+        s("ccsds.frame_randomized", Ccsds, "Randomized", Kind::Bool, "Frames went through the CCSDS pseudo-randomizer.", field!(ccsds_frame_randomized, bool_get, bool_set)).default("off").project(),
+        s("ccsds.frame_rs_depth", Ccsds, "Reed-Solomon depth", Kind::Int { min: 0, max: 8 }, "Interleave depth of the (255,223) Reed-Solomon code; 0 when there's none. Code words are corrected.", (|c: &Config| int(&c.ccsds_frame_rs_depth), |c: &mut Config, v| {
+            c.ccsds_frame_rs_depth = int_set(v)?;
+            Ok(())
+        })).default("0").project(),
+        s("ccsds.frame_ocf", Ccsds, "Frames carry an OCF", Kind::Bool, "TM or AOS frames end in an operational control field (the CLCW).", field!(ccsds_frame_ocf, bool_get, bool_set)).default("on").project(),
+        s("ccsds.frame_fecf", Ccsds, "Frames carry an FECF", Kind::Bool, "Frames end in a CRC-16 frame error control field.", field!(ccsds_frame_fecf, bool_get, bool_set)).default("off").project(),
+        s("ccsds.vc_names", Ccsds, "Virtual channels", Kind::Map { key: "VC", value: "Name", paths: false }, "A name for each virtual channel, shown wherever its frames are.", field!(ccsds_vc_names, map_get, map_set)).project(),
+        s("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames, or records N. Fenix only receives.", (|c: &Config| (!c.ccsds_sources.is_empty()).then(|| Value::Records(c.ccsds_sources.clone())), |c: &mut Config, v| {
+            c.ccsds_sources = match v {
+                None => Vec::new(),
+                Some(Value::Records(rows)) => rows,
+                Some(other) => return Err(format!("expected sources, got {}", other.describe())),
+            };
+            Ok(())
+        })).project(),
+        s("ccsds.checks_off", Ccsds, "Checks turned off", Kind::List, "Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time.", (|c: &Config| list_get(&c.ccsds_checks_off), |c: &mut Config, v| {
+            c.ccsds_checks_off = list_set(v)?;
+            Ok(())
+        })).project(),
+        s("ccsds.library", Ccsds, "Standards folder", Kind::Path, "The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading.", field!(ccsds_library, path_get, path_set)),
+        s("ccsds.leap_seconds", Ccsds, "Leap seconds", Kind::Path, "A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has.", field!(ccsds_leap_seconds, path_get, path_set)).default("built in"),
         // VNC
         s("vnc.hosts", Vnc, "Hosts", Kind::Records(HOST), "Machines SPC v connects to. No passwords: every host is taken to be on a trusted network.", (|c: &Config| (!c.vnc_hosts.is_empty()).then(|| Value::Records(c.vnc_hosts.iter().map(|(n, h, p)| vec![n.clone(), h.clone(), p.to_string()]).collect())), |c: &mut Config, v| {
             c.vnc_hosts = match v {

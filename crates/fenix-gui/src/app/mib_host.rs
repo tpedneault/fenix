@@ -128,8 +128,12 @@ impl App {
             return;
         }
         slot.loading = true;
+        let mission = self.mission(key.project.as_deref());
         self.page_spawn(move |send| {
-            let set = MibSet::load(key.roots.clone(), key.default.as_deref());
+            let mut set = MibSet::load(key.roots.clone(), key.default.as_deref());
+            let options = fenix_mib::checks::Options { disabled: &mission.checks_off, base: mission.base, profile: &mission.profile };
+            let found = fenix_mib::checks::run(&set, &options);
+            set.add_problems(found);
             send(PageEvent::MibLoaded { key, set: Arc::new(set) });
         });
     }
@@ -467,6 +471,57 @@ impl App {
             }
             mib_form::Action::Open(def) => self.open_mib_def(key, def),
             mib_form::Action::Insert(text) => self.mib_form_insert(id, text),
+            mib_form::Action::CopyBytes | mib_form::Action::DecodeBytes => {
+                let Some(PageModel::MibForm(f)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let name = f.name().to_string();
+                let origin = self.mib_origins.get(&id).map(|o| o.buffer);
+                match self.mib_form_bytes(f) {
+                    Ok(bytes) if action == mib_form::Action::DecodeBytes => self.open_packet_page(bytes, format!("{name} from the form")),
+                    Ok(bytes) => self.mib_copy_literal(&bytes, origin, &name),
+                    Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
+                }
+            }
+        }
+    }
+
+    /// The form's telecommand as a packet, from its arguments.
+    pub(super) fn mib_form_bytes(&self, f: &InsertForm) -> Result<Vec<u8>, String> {
+        let set = self.mib_set_ready(&f.key).ok_or("the MIB isn't read yet")?;
+        let mission = self.mission(f.key.project.as_deref());
+        fenix_mib::packets::encode_tc(&set, f.tc, &f.arguments(), &mission.profile, f.seq).map(|p| p.bytes)
+    }
+
+    /// `bytes` on the clipboard, written the way `buffer`'s language
+    /// writes bytes.
+    fn mib_copy_literal(&mut self, bytes: &[u8], buffer: Option<BufferId>, what: &str) {
+        let ext = buffer.and_then(|b| self.buffers.get(b)).and_then(|ob| ob.buffer.path()).and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let text = fenix_ccsds::hex::literal(bytes, &ext);
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(text);
+        }
+        self.set_message(format!("copied {what}'s packet, {} bytes", bytes.len()));
+    }
+
+    /// `SPC k b`: the telecommand call on this line, as its packet's
+    /// bytes on the clipboard.
+    pub(crate) fn cmd_mib_copy_bytes(&mut self) {
+        let Some((key, set)) = self.mib_set_here(MibPending::EditCall) else { return };
+        let buffer = self.focused_buffer_id();
+        let (line, _) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        let text = text.trim_end_matches(['\n', '\r']);
+        let Some(tc) = words(text).into_iter().find_map(|(_, w)| set.resolve(w).filter(|d| d.kind == Kind::Telecommand)) else {
+            self.set_error("no telecommand from this project's MIBs on this line");
+            return;
+        };
+        let templates = self.mib_templates(&key);
+        let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
+        let args = mib_form::read_arguments(text, &names, &templates);
+        let mission = self.mission(key.project.as_deref());
+        let name = set.get(tc).name.clone();
+        match fenix_mib::packets::encode_tc(&set, tc, &args, &mission.profile, 0) {
+            Ok(p) => self.mib_copy_literal(&p.bytes, Some(buffer), &name),
+            Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
         }
     }
 
