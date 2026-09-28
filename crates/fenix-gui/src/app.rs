@@ -23695,6 +23695,7 @@ impl App {
             let is_page = self.is_page_buffer(buffer_id);
             if is_page {
                 self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
+                self.page_scroll_to_top(buffer_id, pane, pane_visible_lines);
             }
             let is_dashboard = is_home || is_page;
             if is_focused {
