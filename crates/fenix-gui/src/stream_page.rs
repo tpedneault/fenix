@@ -5,13 +5,48 @@
 //! parameter through the packets, `4` lists every problem. The host
 //! reads (or receives) off the UI thread and hands rows over as they
 //! come; this lays them out and answers keys.
+//!
+//! `/` filters whichever tab is showing, and the others with it: words
+//! found in a packet's name, SPID, time, APID, service or check, and
+//! `key:value` terms (`apid:0x100..0x1FF`, `type:3`, `check:bad`,
+//! `dir:tc`, `value:`, `limits:out`, ...), any of them excluded with a
+//! `-` in front. See `FILTER_HELP`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mib_page::{thousands, MibKey};
-use crate::page::{fit, fit_tail, frame, Grid, Key, Page, Popup, Role};
+use crate::page::{fit, frame, Filter, Grid, Key, Page, Popup, Role};
+
+/// The filter's terms, for the hint and the help.
+const FILTER_HELP: &str = "words, apid: type: stype: spid: name: vc: seq: len: time: dir:tc|tm check:bad value: limits:out, -term excludes, a..b ranges";
+
+/// Whether `n` is what `v` says: a number, or a range `a..b` (either end
+/// left open).
+fn number_is(v: &str, n: i64) -> bool {
+    match v.split_once("..") {
+        Some((lo, hi)) => {
+            let lo = if lo.trim().is_empty() { Some(i64::MIN) } else { fenix_mib::types::parse_int(lo) };
+            let hi = if hi.trim().is_empty() { Some(i64::MAX) } else { fenix_mib::types::parse_int(hi) };
+            matches!((lo, hi), (Some(lo), Some(hi)) if (lo..=hi).contains(&n))
+        }
+        None => fenix_mib::types::parse_int(v) == Some(n),
+    }
+}
+
+/// A filter term and whether it's excluded (`-term`).
+fn terms(text: &str) -> impl Iterator<Item = (bool, &str)> {
+    text.split_whitespace().map(|t| match t.strip_prefix('-').filter(|r| !r.is_empty()) {
+        Some(rest) => (true, rest),
+        None => (false, t),
+    })
+}
+
+/// The terms that are about a parameter's samples, not their packets.
+fn sample_term(key: &str) -> bool {
+    matches!(key, "value" | "raw" | "limits" | "limit")
+}
 
 /// One packet of the stream.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -97,8 +132,8 @@ pub struct StreamPage {
     pub param: Option<(String, Vec<Sample>)>,
     pub stop: Arc<AtomicBool>,
     tab: Tab,
-    query: String,
-    searching: bool,
+    /// `/`: what every tab shows.
+    pub filter: Filter,
     pub show_idle: bool,
     sel: [usize; 4],
     /// Follow the newest row (live).
@@ -142,8 +177,7 @@ impl StreamPage {
             param: None,
             stop: Arc::new(AtomicBool::new(false)),
             tab: Tab::Packets,
-            query: String::new(),
-            searching: false,
+            filter: Filter::default(),
             show_idle: false,
             sel: [0; 4],
             follow: live,
@@ -154,50 +188,107 @@ impl StreamPage {
     }
 
     pub fn typing(&self) -> bool {
-        self.searching
+        self.filter.typing
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.searching {
-            self.query.extend(text.chars().filter(|c| !c.is_control()));
-        }
+        self.filter.paste(text);
+        self.sel = [0; 4];
     }
 
     pub fn close(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
-    /// Whether `row` passes the search: words in its name, `apid:`,
-    /// `type:`, `stype:`, `spid:`, `vc:` and `check:bad`.
+    /// Whether `row` passes the filter (see `term_matches`).
     fn matches(&self, row: &Row) -> bool {
         if row.idle && !self.show_idle {
             return false;
         }
-        for token in self.query.split_whitespace() {
-            let ok = match token.split_once(':') {
-                Some((k, v)) => {
-                    let num = fenix_mib::types::parse_int(v);
-                    match k.to_ascii_lowercase().as_str() {
-                        "apid" => num == Some(row.apid as i64),
-                        "type" => row.pus.is_some_and(|p| Some(p.0 as i64) == num),
-                        "stype" | "subtype" => row.pus.is_some_and(|p| Some(p.1 as i64) == num),
-                        "spid" => row.spid.as_deref() == Some(v),
-                        "vc" => row.vc.is_some_and(|c| Some(c as i64) == num),
-                        "check" | "crc" => (v == "bad") == row.bad.is_some(),
-                        "seq" => num == Some(row.seq as i64),
-                        _ => false,
-                    }
-                }
-                None => {
-                    let t = token.to_lowercase();
-                    row.label.to_lowercase().contains(&t) || row.spid.as_deref().is_some_and(|s| s.contains(&t))
-                }
-            };
-            if !ok {
+        terms(&self.filter.text).all(|(not, t)| Self::term_matches(row, t) != not)
+    }
+
+    /// One term against a packet. A word is looked for in its name,
+    /// SPID, time, APID (`0x3f2`), service (`3,25`), what's wrong with it
+    /// and what it verifies; `key:value` compares one thing. A term about
+    /// samples (`value:`) passes every packet.
+    fn term_matches(row: &Row, token: &str) -> bool {
+        let Some((k, v)) = token.split_once(':') else {
+            let t = token.to_lowercase();
+            let hay = format!(
+                "{} {} {} 0x{:03x} {} {} {}",
+                row.label,
+                row.spid.as_deref().unwrap_or(""),
+                row.time.as_deref().unwrap_or(""),
+                row.apid,
+                row.pus.map(|(a, b)| format!("{a},{b}")).unwrap_or_default(),
+                // The check as its column reads.
+                row.bad.as_deref().unwrap_or("ok"),
+                row.verifies.as_deref().unwrap_or("")
+            )
+            .to_lowercase();
+            return hay.contains(&t);
+        };
+        let v_low = v.to_lowercase();
+        match k.to_ascii_lowercase().as_str() {
+            "apid" => number_is(v, row.apid as i64),
+            "type" => row.pus.is_some_and(|p| number_is(v, p.0 as i64)),
+            "stype" | "subtype" => row.pus.is_some_and(|p| number_is(v, p.1 as i64)),
+            "spid" => row.spid.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(v) || s.to_lowercase().starts_with(&v_low)),
+            "name" => row.label.to_lowercase().contains(&v_low),
+            "vc" => row.vc.is_some_and(|c| number_is(v, c as i64)),
+            "seq" => number_is(v, row.seq as i64),
+            "len" => number_is(v, row.len as i64),
+            "time" => row.time.as_deref().is_some_and(|t| t.to_lowercase().contains(&v_low)),
+            "check" | "crc" => match v_low.as_str() {
+                "bad" => row.bad.is_some(),
+                "ok" | "good" => row.bad.is_none(),
+                other => row.bad.as_deref().is_some_and(|b| b.to_lowercase().contains(other)),
+            },
+            "dir" => match v_low.as_str() {
+                "tc" => row.is_tc,
+                "tm" => !row.is_tc,
+                _ => false,
+            },
+            "verifies" => row.verifies.as_deref().is_some_and(|t| t.to_lowercase().contains(&v_low)),
+            k if sample_term(k) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether a sample of the followed parameter passes the filter: its
+    /// packet does, and `value:`, `raw:` and `limits:out` (or `in`) agree.
+    fn sample_matches(&self, s: &Sample) -> bool {
+        if let Some(row) = self.rows.get(s.row) {
+            if !self.matches(row) {
                 return false;
             }
         }
-        true
+        terms(&self.filter.text).all(|(not, t)| {
+            let ok = match t.split_once(':') {
+                Some((k, v)) if sample_term(&k.to_ascii_lowercase()) => {
+                    let v = v.to_lowercase();
+                    match k.to_ascii_lowercase().as_str() {
+                        "value" => s.value.to_lowercase().contains(&v) || s.number.is_some_and(|n| number_is(&v, n.round() as i64) && v.contains("..")),
+                        "raw" => s.raw.to_lowercase().contains(&v),
+                        _ => match v.as_str() {
+                            "out" | "off" | "broken" => s.off.is_some(),
+                            "in" | "within" => s.off.is_none(),
+                            "hard" => s.off.as_ref().is_some_and(|o| o.1),
+                            "soft" => s.off.as_ref().is_some_and(|o| !o.1),
+                            _ => false,
+                        },
+                    }
+                }
+                _ => return true,
+            };
+            ok != not
+        })
+    }
+
+    /// The followed parameter's samples the filter leaves.
+    pub fn samples_shown(&self) -> Vec<&Sample> {
+        self.param.as_ref().map(|(_, all)| all.iter().filter(|s| self.sample_matches(s)).collect()).unwrap_or_default()
     }
 
     /// The packets tab's lines: the rows shown, with sequence gaps.
@@ -225,23 +316,31 @@ impl StreamPage {
         out
     }
 
+    /// Totals by APID, of the packets the filter leaves; an APID's gaps
+    /// are its own sequence's, whichever of its packets are shown.
     fn stats(&self) -> BTreeMap<u16, ApidStats> {
         let mut out: BTreeMap<u16, ApidStats> = BTreeMap::new();
         let mut last: BTreeMap<u16, u16> = BTreeMap::new();
-        for r in self.rows.iter().filter(|r| !r.idle || self.show_idle) {
+        let mut gaps: BTreeMap<u16, (u32, u64)> = BTreeMap::new();
+        for r in self.rows.iter().filter(|r| !r.idle && !r.is_tc) {
+            if let Some(p) = last.insert(r.apid, r.seq) {
+                let missing = (r.seq as u32 + 0x4000 - p as u32 - 1) % 0x4000;
+                if missing > 0 {
+                    let g = gaps.entry(r.apid).or_default();
+                    g.0 += 1;
+                    g.1 += missing as u64;
+                }
+            }
+        }
+        for r in self.rows.iter().filter(|r| self.matches(r)) {
             let s = out.entry(r.apid).or_default();
             s.packets += 1;
             if r.bad.is_some() {
                 s.bad += 1;
             }
-            if !r.is_tc {
-                if let Some(p) = last.insert(r.apid, r.seq) {
-                    let missing = (r.seq as u32 + 0x4000 - p as u32 - 1) % 0x4000;
-                    if missing > 0 {
-                        s.gaps += 1;
-                        s.missing += missing as u64;
-                    }
-                }
+            if let Some(&(n, missing)) = gaps.get(&r.apid) {
+                s.gaps = n;
+                s.missing = missing;
             }
             if s.first.is_none() {
                 s.first = r.time.clone();
@@ -258,7 +357,15 @@ impl StreamPage {
         out
     }
 
-    /// Every problem, as (text, the row it's at).
+    /// Whether a problem that's about no packet (frames lost, octets
+    /// skipped) passes the filter: its words are in `text`, and no term
+    /// asks for something about a packet.
+    fn loose_matches(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        terms(&self.filter.text).all(|(not, t)| if t.contains(':') { not } else { text.contains(&t.to_lowercase()) != not })
+    }
+
+    /// Every problem the filter leaves, as (text, the row it's at).
     fn problems(&self) -> Vec<(String, Option<usize>)> {
         let mut out = Vec::new();
         for l in self.lines() {
@@ -267,7 +374,7 @@ impl StreamPage {
                 out.push((format!("APID 0x{apid:03X}: {missing} missing, sequence {from} to {to}"), at));
             }
         }
-        for (i, r) in self.rows.iter().enumerate() {
+        for (i, r) in self.rows.iter().enumerate().filter(|(_, r)| self.matches(r)) {
             if let Some(why) = &r.bad {
                 out.push((format!("0x{:X} APID 0x{:03X} seq {}: {why}", r.offset, r.apid, r.seq), Some(i)));
             } else if !r.idle && !r.is_tc && r.spid.is_none() && r.pus.is_some() {
@@ -281,8 +388,9 @@ impl StreamPage {
             // A frame that arrived with something wrong has no length here.
             out.push((if *len == 0 { format!("0x{offset:X}: {why}") } else { format!("0x{offset:X}: {len} octets skipped -- {why}") }, None));
         }
-        if let Some((name, samples)) = &self.param {
-            for s in samples.iter().filter(|s| s.off.is_some()) {
+        out.retain(|(text, row)| row.is_some() || self.loose_matches(text));
+        if let Some((name, _)) = &self.param {
+            for s in self.samples_shown().into_iter().filter(|s| s.off.is_some()) {
                 let (why, _) = s.off.clone().unwrap_or_default();
                 out.push((format!("{name} = {} at {}: {why}", s.value, s.time.clone().unwrap_or_default()), Some(s.row)));
             }
@@ -294,7 +402,7 @@ impl StreamPage {
         match self.tab {
             Tab::Packets => self.lines().len(),
             Tab::Apids => self.stats().len(),
-            Tab::Parameter => self.param.as_ref().map(|(_, s)| s.len()).unwrap_or(0),
+            Tab::Parameter => self.samples_shown().len(),
             Tab::Problems => self.problems().len(),
         }
     }
@@ -311,11 +419,11 @@ impl StreamPage {
                 Line::Row(i) => Some(*i),
                 Line::Gap { .. } => None,
             },
-            Tab::Parameter => self.param.as_ref()?.1.get(s).map(|x| x.row),
+            Tab::Parameter => self.samples_shown().get(s).map(|x| x.row),
             Tab::Problems => self.problems().get(s)?.1,
             Tab::Apids => {
                 let apid = *self.stats().keys().nth(s)?;
-                self.rows.iter().position(|r| r.apid == apid)
+                self.rows.iter().position(|r| r.apid == apid && self.matches(r))
             }
         }
     }
@@ -342,27 +450,20 @@ impl StreamPage {
             }
             return Action::None;
         }
-        if self.searching {
-            match key {
-                Key::Escape => {
-                    self.searching = false;
-                    self.query.clear();
-                }
-                Key::Enter => self.searching = false,
-                Key::Backspace => {
-                    self.query.pop();
-                }
-                Key::Char(c) => self.query.push(c),
-                Key::Space => self.query.push(' '),
-                _ => {}
+        if self.filter.typing {
+            if self.filter.key(key) {
+                self.sel = [0; 4];
             }
-            self.sel[0] = 0;
             return Action::None;
         }
         let n = self.count();
         let t = self.tab_index();
         let s = &mut self.sel[t];
         match key {
+            Key::Escape if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.sel = [0; 4];
+            }
             Key::Char('q') | Key::Escape => return Action::Close,
             Key::Char('?') => self.help = true,
             Key::Char(c @ '1'..='4') => self.tab = TABS[c as usize - '1' as usize],
@@ -386,10 +487,8 @@ impl StreamPage {
                 *s = n.saturating_sub(1);
                 self.follow = self.live;
             }
-            Key::Char('/') => {
-                self.searching = true;
-                self.tab = Tab::Packets;
-            }
+            // Whichever tab is showing: the filter narrows them all.
+            Key::Char('/') => self.filter.start(),
             Key::Char('i') => {
                 self.show_idle = !self.show_idle;
                 self.note = Some((if self.show_idle { "idle packets shown" } else { "idle packets hidden" }.into(), false));
@@ -441,7 +540,7 @@ impl StreamPage {
     fn write_items(&self) -> Vec<(String, Write)> {
         let mut items = vec![("the packets shown, as binary".to_string(), Write::Binary), ("the packets shown, as hex lines".to_string(), Write::Hex)];
         if let Some((name, _)) = &self.param {
-            items.push((format!("{name}'s samples, as CSV"), Write::Csv));
+            items.push((format!("{name}'s samples shown, as CSV"), Write::Csv));
         }
         items
     }
@@ -460,7 +559,7 @@ impl StreamPage {
 }
 
 /// Eight-level bars across the samples.
-fn curve(samples: &[Sample], width: usize) -> String {
+fn curve(samples: &[&Sample], width: usize) -> String {
     let values: Vec<f64> = samples.iter().filter_map(|s| s.number).collect();
     if values.len() < 2 || width == 0 {
         return String::new();
@@ -502,13 +601,13 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
     // The framing takes what the status leaves it.
     g.put(1, x, &fit(&p.framing, rx.saturating_sub(x + 2)), Role::Muted);
     g.put(1, rx, &right, rrole);
-    let search = if p.searching { format!("/ {}▏", p.query) } else if p.query.is_empty() { "/ filter: words, apid: type: stype: spid: vc: seq: check:bad".to_string() } else { format!("/ {}  (Esc clears)", p.query) };
-    let e = g.put(2, left, &fit_tail(&search, width), if p.searching { Role::Title } else { Role::Muted });
-    if p.searching {
-        g.panels.push((2, left..e.max(left + 40)));
+    let (search, role) = p.filter.line(&format!("filter: {FILTER_HELP}"), width);
+    let e = g.put(2, left, &search, role);
+    if p.filter.typing {
+        g.panels.push((2, left..e.max(left + 40).min(left + width)));
     }
     let names = ["Packets", "By APID", "Parameter", "Problems"];
-    let counts = [p.shown().len(), p.stats().len(), p.param.as_ref().map(|(_, s)| s.len()).unwrap_or(0), p.problems().len()];
+    let counts = [p.shown().len(), p.stats().len(), p.samples_shown().len(), p.problems().len()];
     let mut x = left;
     for (i, name) in names.iter().enumerate() {
         x = g.put(4, x, &(i + 1).to_string(), Role::Accent) + 1;
@@ -605,18 +704,20 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
             None => {
                 g.put(y, left, "t picks a TM parameter to follow through the packets.", Role::Muted);
             }
-            Some((name, samples)) => {
+            Some((name, all)) => {
+                let samples = p.samples_shown();
                 let nums: Vec<f64> = samples.iter().filter_map(|s| s.number).collect();
+                let count = if samples.len() == all.len() { format!("{} samples", samples.len()) } else { format!("{} of {} samples", samples.len(), all.len()) };
                 let summary = if nums.is_empty() {
-                    format!("{name} · {} samples", samples.len())
+                    format!("{name} · {count}")
                 } else {
                     let (lo, hi) = nums.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
                     let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                    format!("{name} · {} samples · min {lo:.3} · max {hi:.3} · mean {mean:.3}", samples.len())
+                    format!("{name} · {count} · min {lo:.3} · max {hi:.3} · mean {mean:.3}")
                 };
                 g.put(y, left, &summary, Role::Title);
                 y += 1;
-                let c = curve(samples, width.saturating_sub(8));
+                let c = curve(&samples, width.saturating_sub(8));
                 if !c.is_empty() {
                     g.put(y, left, "curve", Role::Muted);
                     g.put(y, left + 8, &c, Role::Good);
@@ -674,7 +775,9 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
             ("1-4 Tab", "packets, by APID, a parameter, problems"),
             ("j k g G d u", "move; G follows a live source"),
             ("] [", "next, previous gap"),
-            ("/", "filter: words, apid: type: stype: spid: vc: seq: check:bad"),
+            ("/", "filter every tab: words, apid: type: stype: spid: name:"),
+            ("", "vc: seq: len: time: dir:tc check:bad value: limits:out"),
+            ("", "-term leaves out, apid:0x100..0x1FF a range; Esc clears"),
             ("i", "idle packets shown, hidden"),
             ("Enter x", "inspect the packet, its bytes in hex"),
             ("f", "inspect the CADU or CLTU it came in"),
@@ -690,7 +793,11 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
         all.extend(rows);
         g.popup = Some(Popup { line: anchor, col: left + 4, rows: all });
     }
-    g.keys(left, width, &[("1-4", "tabs"), ("Enter", "inspect"), ("f", "its frame"), ("/", "filter"), ("] [", "gaps"), ("t", "parameter"), ("w", "write"), ("x", "hex"), ("?", "all keys"), ("q", "close")]);
+    if p.filter.typing {
+        g.keys(left, width, &[("Enter", "keep"), ("Esc", "clear"), ("Ctrl-← →", "a word")]);
+    } else {
+        g.keys(left, width, &[("1-4", "tabs"), ("Enter", "inspect"), ("f", "its frame"), ("/", "filter"), ("] [", "gaps"), ("t", "parameter"), ("w", "write"), ("x", "hex"), ("?", "all keys"), ("q", "close")]);
+    }
     g.finish()
 }
 
@@ -745,6 +852,45 @@ mod tests {
         assert_eq!(p.key(Key::Enter), Action::Inspect(3));
         p.key(Key::Char('w'));
         assert_eq!(p.key(Key::Enter), Action::Write(Write::Binary));
+    }
+
+    fn filter(p: &mut StreamPage, text: &str) {
+        p.key(Key::Char('/'));
+        p.paste(text);
+        p.key(Key::Enter);
+    }
+
+    #[test]
+    fn the_filter_narrows_every_tab_with_ranges_exclusions_and_words() {
+        let mut p = page();
+        p.lost.push((0x400, 1, 2));
+        p.key(Key::Char('2'));
+        filter(&mut p, "apid:0x100..0x1FF");
+        assert_eq!(p.tab, Tab::Apids, "/ stays on the tab it's typed on");
+        assert_eq!(p.shown(), vec![4]);
+        let text = layout(&p, 160).text;
+        assert!(text.contains("0x100") && !text.contains("0x3F2"), "{text}");
+        p.key(Key::Escape);
+        filter(&mut p, "-apid:0x3f2");
+        assert_eq!(p.shown(), vec![4], "a - leaves out");
+        p.key(Key::Escape);
+        filter(&mut p, "0x3f2 3,25 ok");
+        assert_eq!(p.shown(), vec![0, 1, 2], "words find the APID, the service and the check");
+        p.key(Key::Escape);
+        filter(&mut p, "check:bad");
+        p.key(Key::Char('4'));
+        let problems = p.problems();
+        assert!(problems.iter().any(|(t, r)| t.contains("CRC") && *r == Some(3)), "{problems:?}");
+        assert!(!problems.iter().any(|(t, _)| t.contains("frames lost")), "a frame loss isn't about a bad packet: {problems:?}");
+        p.key(Key::Escape);
+        filter(&mut p, "lost");
+        assert!(p.problems().iter().any(|(t, _)| t.contains("frames lost on VC 1")));
+        p.key(Key::Escape);
+        p.param = Some(("NTH00123".into(), (0..5).map(|i| Sample { row: i.min(4), time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 2).then(|| ("soft limit".to_string(), false)) }).collect()));
+        p.key(Key::Char('3'));
+        filter(&mut p, "limits:out -apid:0x100");
+        assert_eq!(p.samples_shown().iter().map(|s| s.raw.as_str()).collect::<Vec<_>>(), ["3"], "out of limits, and not in APID 0x100's packet");
+        assert!(layout(&p, 160).text.contains("NTH00123 · 1 of 5 samples"));
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! `Ctrl-i` (or `H`/`L`) go back and forward, like a browser.
 //!
 //! The page is built as a `Doc` first, so the keys and the layout agree
-//! on where the links are.
+//! on where the links are. `/` narrows its rows -- a packet's hundreds of
+//! parameters, a calibration's points, what uses it -- to those with
+//! every word typed, and drops the sections left with none.
 
 use std::path::PathBuf;
 
@@ -14,7 +16,7 @@ use fenix_mib::detail::{self, CalBody};
 use fenix_mib::{CalKind, DefRef, Kind, MibSet};
 
 use crate::mib_page::{kind_role, MibKey};
-use crate::page::{fit, frame, wrap, Grid, Key, Page, Popup, Role};
+use crate::page::{fit, frame, wrap, Filter, Grid, Key, Page, Popup, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -88,6 +90,62 @@ impl Doc {
             Line::Cells(cells) => cells[cell].target.as_ref(),
             _ => None,
         }
+    }
+
+    /// The rows with every word of `filter` in them, and the column
+    /// headings above them; a section left with no rows goes. The facts,
+    /// the bit bar and the definition's own file line always stay.
+    fn narrowed(self, filter: &Filter) -> (Doc, usize) {
+        if filter.is_empty() {
+            return (self, 0);
+        }
+        let is_row = |line: &Line| match line {
+            // Column headings: muted capitals, nothing to follow.
+            Line::Cells(cells) => !cells.iter().all(|c| c.target.is_none() && c.role == Role::Muted && !c.text.chars().any(char::is_lowercase)),
+            _ => false,
+        };
+        let keep = |line: &Line| match line {
+            Line::Cells(cells) => {
+                cells.iter().any(|c| matches!(c.target, Some(Target::Row(..)))) || filter.matches(&cells.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" "))
+            }
+            _ => true,
+        };
+        // Sections: from a heading (and the blank before it) to the next.
+        let mut sections: Vec<Vec<(usize, Line)>> = vec![Vec::new()];
+        let lines: Vec<Line> = self.lines;
+        let n = lines.len();
+        for (i, line) in lines.into_iter().enumerate() {
+            if matches!(line, Line::Heading(..)) {
+                let blank = if matches!(sections.last().and_then(|s| s.last()), Some((_, Line::Blank))) { sections.last_mut().and_then(|s| s.pop()) } else { None };
+                sections.push(blank.into_iter().collect());
+            }
+            sections.last_mut().expect("a section").push((i, line));
+        }
+        let mut out = Doc::default();
+        let mut map = vec![usize::MAX; n];
+        let mut hidden = 0;
+        for section in sections {
+            let rows = section.iter().filter(|(_, l)| is_row(l)).count();
+            let kept: Vec<(usize, Line)> = section.into_iter().filter(|(_, l)| !is_row(l) || keep(l)).collect();
+            let kept_rows = kept.iter().filter(|(_, l)| is_row(l)).count();
+            hidden += rows - kept_rows;
+            if rows > 0 && kept_rows == 0 {
+                continue;
+            }
+            for (i, line) in kept {
+                map[i] = out.lines.len();
+                out.lines.push(line);
+            }
+        }
+        // A blank the page no longer needs at the top.
+        if matches!(out.lines.first(), Some(Line::Blank)) {
+            out.lines.remove(0);
+            for m in map.iter_mut().filter(|m| **m != usize::MAX) {
+                *m -= 1;
+            }
+        }
+        out.element_rows = self.element_rows.iter().map(|&r| map[r]).collect();
+        (out, hidden)
     }
 }
 
@@ -500,11 +558,27 @@ pub struct DefPage {
     pending_g: bool,
     help: bool,
     pub note: Option<(String, bool)>,
+    /// `/`: only the rows with these words.
+    pub filter: Filter,
 }
 
 impl DefPage {
     pub fn new(key: MibKey, def: DefRef) -> Self {
-        DefPage { key, history: vec![def], at: 0, focus: 0, raw: false, pending_g: false, help: false, note: None }
+        DefPage { key, history: vec![def], at: 0, focus: 0, raw: false, pending_g: false, help: false, note: None, filter: Filter::default() }
+    }
+
+    pub fn typing(&self) -> bool {
+        self.filter.typing
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        self.filter.paste(text);
+        self.focus = 0;
+    }
+
+    /// The page for the definition shown, narrowed by the filter.
+    fn doc(&self, set: &MibSet) -> (Doc, usize) {
+        build(set, self.current(), self.raw).narrowed(&self.filter)
     }
 
     pub fn current(&self) -> DefRef {
@@ -520,6 +594,7 @@ impl DefPage {
         self.history.push(def);
         self.at += 1;
         self.focus = 0;
+        self.filter.clear();
     }
 
     pub fn back(&mut self) -> bool {
@@ -528,6 +603,7 @@ impl DefPage {
         }
         self.at -= 1;
         self.focus = 0;
+        self.filter.clear();
         true
     }
 
@@ -537,6 +613,7 @@ impl DefPage {
         }
         self.at += 1;
         self.focus = 0;
+        self.filter.clear();
         true
     }
 
@@ -546,7 +623,13 @@ impl DefPage {
             self.help = false;
             return Action::None;
         }
-        let doc = build(set, self.current(), self.raw);
+        if self.filter.typing {
+            if self.filter.key(key) {
+                self.focus = 0;
+            }
+            return Action::None;
+        }
+        let (doc, _) = self.doc(set);
         let links = doc.links();
         let focus = self.focus.min(links.len().saturating_sub(1));
         if std::mem::take(&mut self.pending_g) {
@@ -562,8 +645,13 @@ impl DefPage {
         }
         let line_of = |i: usize| links.get(i).map(|l| l.0);
         match key {
+            Key::Escape if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.focus = 0;
+            }
             Key::Char('q') | Key::Escape => return Action::Close,
             Key::Char('?') => self.help = true,
+            Key::Char('/') => self.filter.start(),
             Key::Char('g') => self.pending_g = true,
             Key::Char('G') => self.focus = links.len().saturating_sub(1),
             // Down a line: the first link on the next line with one.
@@ -611,7 +699,7 @@ impl DefPage {
                 self.note = Some(("i inserts a telecommand -- open one first".into(), true));
             }
             Key::Char('y') => return Action::Copy(set.get(self.current()).name.clone()),
-            Key::Char('m') | Key::Char('/') => return Action::MibPage,
+            Key::Char('m') => return Action::MibPage,
             _ => {}
         }
         Action::None
@@ -675,7 +763,17 @@ pub fn layout(page: &DefPage, set: Option<&MibSet>, apid_hex: bool, cols: usize)
         y += 1;
     }
 
-    let doc = build(set, def, page.raw);
+    let (label, role) = page.filter.line("filter the rows below: parameters, points, what uses it", width);
+    let end = g.put(y, left, &label, role);
+    if page.filter.typing {
+        g.panels.push((y, left..end.max(left + 30).min(left + width)));
+    }
+    let (doc, hidden) = page.doc(set);
+    if hidden > 0 {
+        let note = format!("{hidden} row{} hidden", if hidden == 1 { "" } else { "s" });
+        g.put(y, (left + width).saturating_sub(note.chars().count()), &note, Role::Muted);
+    }
+    y += 1;
     let links = doc.links();
     let focus = links.get(page.focus.min(links.len().saturating_sub(1))).copied();
     // Which telecommand element the focus is on, for the bar.
@@ -757,7 +855,8 @@ pub fn layout(page: &DefPage, set: Option<&MibSet>, apid_hex: bool, cols: usize)
             ("y", "copy the name"),
             ("gf", "open its .dat line"),
             ("r", "raw fields"),
-            ("m /", "the MIB page"),
+            ("/", "filter the rows"),
+            ("m", "the MIB page"),
             ("q", "close"),
         ]
         .iter()
@@ -772,7 +871,11 @@ pub fn layout(page: &DefPage, set: Option<&MibSet>, apid_hex: bool, cols: usize)
     if def.kind == Kind::Telecommand {
         keys.push(("i", "insert"));
     }
-    keys.extend([("y", "copy name"), ("gf", ".dat line"), ("r", "raw"), ("m", "MIB page"), ("?", "all keys"), ("q", "close")]);
+    if page.filter.typing {
+        keys = vec![("Enter", "keep"), ("Esc", "clear")];
+    } else {
+        keys.extend([("/", "filter"), ("y", "copy name"), ("gf", ".dat line"), ("r", "raw"), ("m", "MIB page"), ("?", "all keys"), ("q", "close")]);
+    }
     g.keys(left, width, &keys);
     g.finish()
 }
@@ -797,6 +900,38 @@ mod tests {
         assert!(text.contains("APPLICATION DATA · 16 BITS"), "{text}");
         assert!(text.contains("[") && text.contains("Line"), "the bar: {text}");
         assert!(text.contains("PTH00102") && text.contains("OFF ON AUTO (AUTO)"), "{text}");
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn slash_narrows_the_rows_and_drops_sections_left_empty() {
+        let (set, root) = set();
+        let tc = set.find(Kind::Telecommand, 0, "ZTC08101").unwrap();
+        let mut page = DefPage::new(MibKey { roots: vec![root.clone()], ..Default::default() }, tc);
+        page.key(Key::Char('/'), &set);
+        assert!(page.typing());
+        for c in "MODE".chars() {
+            page.key(if c == ' ' { Key::Space } else { Key::Char(c) }, &set);
+        }
+        let text = layout(&page, Some(&set), true, 160).text;
+        assert!(text.contains("PTH00102") && !text.contains("PTH00101"), "only the matching parameter: {text}");
+        assert!(text.contains("NAME") && text.contains("1 row hidden"), "its column headings stay: {text}");
+        page.key(Key::Enter, &set);
+        assert!(!page.typing());
+        // The one link left is the one followed.
+        assert_eq!(page.key(Key::Enter, &set), Action::None);
+        assert_eq!(set.get(page.current()).name, "PTH00102");
+        assert!(page.filter.is_empty(), "a new definition starts unfiltered");
+        page.key(Key::CtrlO, &set);
+        page.key(Key::Char('/'), &set);
+        for c in "nothing-like-it".chars() {
+            page.key(Key::Char(c), &set);
+        }
+        let text = layout(&page, Some(&set), true, 160).text;
+        assert!(!text.contains("PARAMETERS"), "a section with no rows left goes: {text}");
+        assert!(text.contains("ccf.dat"), "the file line stays: {text}");
+        page.key(Key::Escape, &set);
+        assert!(page.filter.is_empty() && layout(&page, Some(&set), true, 160).text.contains("PTH00101"));
         std::fs::remove_dir_all(&root.path).ok();
     }
 

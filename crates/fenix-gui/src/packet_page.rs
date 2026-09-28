@@ -4,14 +4,16 @@
 //! with a MIB, `fenix_mib::packets`), drawn beside the bytes, each byte
 //! coloured by the layer it belongs to and the selected field's bytes
 //! outlined. `Enter` on a field that names something opens it: a MIB
-//! definition, or the standard that defines the field.
+//! definition, or the standard that defines the field. `/` finds fields
+//! by name, raw bytes, value or check -- unfolding what hides them -- and
+//! `n`/`N` step through what it found.
 
 use std::collections::HashSet;
 
 use fenix_ccsds::field::{Check, Field, Link};
 
 use crate::mib_page::MibKey;
-use crate::page::{fit, frame, Grid, Key, Page, Popup, Role};
+use crate::page::{fit, frame, Filter, Grid, Key, Page, Popup, Role};
 
 /// What the bytes are read as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +69,8 @@ pub struct PacketPage {
     pending_z: bool,
     help: bool,
     pub note: Option<(String, bool)>,
+    /// `/`: fields with these words.
+    pub filter: Filter,
 }
 
 /// One visible row: its index in the tree's walk, depth, field.
@@ -88,6 +92,23 @@ fn rows(root: &Field, folded: &HashSet<usize>) -> Vec<(usize, usize, Field)> {
     out
 }
 
+/// Whether `f` has every word of `filter` in its name, raw bytes, value
+/// or check. A group by its name only: its value sums up the fields in
+/// it, which are found themselves.
+fn field_matches(f: &Field, filter: &Filter) -> bool {
+    if filter.is_empty() {
+        return false;
+    }
+    if !f.children.is_empty() {
+        return filter.matches(&f.name);
+    }
+    let check = match &f.check {
+        Some(Check::Ok(m) | Check::Warn(m) | Check::Bad(m)) => m.as_str(),
+        None => "",
+    };
+    filter.matches(&format!("{} {} {} {check}", f.name, f.raw, f.value))
+}
+
 /// A tree as plain text, for the clipboard.
 pub fn tree_text(root: &Field) -> String {
     root.walk()
@@ -106,7 +127,69 @@ pub fn tree_text(root: &Field) -> String {
 
 impl PacketPage {
     pub fn new(key: MibKey, bytes: Vec<u8>, source: String) -> Self {
-        PacketPage { key, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None }
+        PacketPage { key, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None, filter: Filter::default() }
+    }
+
+    pub fn typing(&self) -> bool {
+        self.filter.typing
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        self.filter.paste(text);
+        self.find(0, true);
+    }
+
+    /// The fields the filter finds, by their place in the tree's walk.
+    fn found(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return Vec::new();
+        }
+        self.root.walk().into_iter().enumerate().filter(|(_, (_, f))| field_matches(f, &self.filter)).map(|(i, _)| i).collect()
+    }
+
+    /// The walk index of the selected row.
+    fn sel_index(&self) -> Option<usize> {
+        let r = rows(&self.root, &self.folded);
+        r.get(self.sel.min(r.len().saturating_sub(1))).map(|(i, _, _)| *i)
+    }
+
+    /// Selects field `i` of the walk, unfolding whatever it's inside.
+    fn reveal(&mut self, i: usize) {
+        let walk = self.root.walk();
+        let mut depth = walk.get(i).map(|(d, _)| *d).unwrap_or(0);
+        for j in (0..i).rev() {
+            if depth == 0 {
+                break;
+            }
+            if walk[j].0 < depth {
+                self.folded.remove(&j);
+                depth = walk[j].0;
+            }
+        }
+        if let Some(at) = rows(&self.root, &self.folded).iter().position(|(k, _, _)| *k == i) {
+            self.sel = at;
+        }
+    }
+
+    /// Goes to the next field found from the selection (`skip`: past it)
+    /// -- or the previous, going back -- wrapping at the end.
+    fn find(&mut self, skip: usize, forward: bool) {
+        let found = self.found();
+        if found.is_empty() {
+            if !self.filter.is_empty() {
+                self.note = Some(("no field has that".into(), true));
+            }
+            return;
+        }
+        let here = self.sel_index().unwrap_or(0);
+        let next = if forward {
+            found.iter().copied().find(|&i| i >= here + skip).or_else(|| found.first().copied())
+        } else {
+            found.iter().rev().copied().find(|&i| i < here).or_else(|| found.last().copied())
+        };
+        if let Some(i) = next {
+            self.reveal(i);
+        }
     }
 
     fn selected(&self) -> Option<Field> {
@@ -136,6 +219,12 @@ impl PacketPage {
             }
             return Action::None;
         }
+        if self.filter.typing {
+            if self.filter.key(key) {
+                self.find(0, true);
+            }
+            return Action::None;
+        }
         let r = rows(&self.root, &self.folded);
         let n = r.len();
         if std::mem::take(&mut self.pending_z) {
@@ -145,8 +234,12 @@ impl PacketPage {
             return Action::None;
         }
         match key {
+            Key::Escape if !self.filter.is_empty() => self.filter.clear(),
             Key::Char('q') | Key::Escape => return Action::Close,
             Key::Char('?') => self.help = true,
+            Key::Char('/') => self.filter.start(),
+            Key::Char('n') => self.find(1, true),
+            Key::Char('N') => self.find(0, false),
             Key::Down | Key::Char('j') => self.sel = (self.sel + 1).min(n.saturating_sub(1)),
             Key::Up | Key::Char('k') => self.sel = self.sel.saturating_sub(1),
             Key::Char('g') => self.sel = 0,
@@ -222,14 +315,27 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
     if let Some((text, bad)) = &p.note {
         g.put(3, left + 60, &fit(text, width.saturating_sub(60)), if *bad { Role::Bad } else { Role::Good });
     }
-    g.rule(4, left..left + width);
+    let found = p.found();
+    let (search, role) = p.filter.line("find a field: its name, raw bytes, value or check", width / 2);
+    let e = g.put(4, left, &search, role);
+    if p.filter.typing {
+        g.panels.push((4, left..e.max(left + 30)));
+    }
+    if !p.filter.is_empty() {
+        let count = match found.iter().position(|&i| Some(i) == p.sel_index()) {
+            Some(k) => format!("{} of {} · n N", k + 1, found.len()),
+            None => format!("{} found · n N", found.len()),
+        };
+        g.put(4, e + 2, &count, if found.is_empty() { Role::Bad } else { Role::Muted });
+    }
+    g.rule(5, left..left + width);
 
     let r = rows(&p.root, &p.folded);
     let sel = p.sel.min(r.len().saturating_sub(1));
     let selected = r.get(sel).map(|(_, _, f)| (f.bit, f.bit + f.bits));
 
     // The bytes.
-    let top = 5;
+    let top = 6;
     let hex_w = 6 + 16 * 3 + 1 + 16;
     let side = width >= hex_w + 60;
     let layers: Vec<(usize, usize)> = p.root.children.iter().map(|c| (c.bit, c.bit + c.bits)).collect();
@@ -276,7 +382,10 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
         let name_role = if f.link.is_some() { Role::Accent } else if *depth == 0 || !f.children.is_empty() { Role::Title } else { Role::Text };
         let nx = tx + depth * 2;
         let e = g.put(y, nx, fold, Role::Muted);
-        g.put(y, e, &fit(&f.name, raw_x.saturating_sub(e + 1)), name_role);
+        let ne = g.put(y, e, &fit(&f.name, raw_x.saturating_sub(e + 1)), name_role);
+        if found.binary_search(i).is_ok() {
+            g.panels.push((y, e..ne.max(e + 1)));
+        }
         g.put(y, raw_x, &fit(&f.raw, val_x.saturating_sub(raw_x + 1)), Role::Muted);
         let (m, role, msg) = mark(&f.check);
         let value = if msg.is_empty() || matches!(f.check, Some(Check::Ok(_))) { f.value.clone() } else { format!("{} -- {msg}", f.value) };
@@ -305,6 +414,7 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
             ("j k g G", "fields"),
             ("Enter", "open what the field names; else fold"),
             ("Space za", "fold, unfold"),
+            ("/ n N", "find fields by name, bytes, value; next, previous"),
             ("y Y b", "copy the value, the whole decode, the bytes"),
             ("a", "read the bytes as something else"),
             ("p", "the project's CCSDS settings"),
@@ -317,7 +427,11 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
         all.extend(rows);
         g.popup = Some(Popup { line: anchor, col: tx + 4, rows: all });
     }
-    g.keys(left, width, &[("j k", "fields"), ("Enter", "open"), ("za", "fold"), ("y", "copy value"), ("Y", "copy all"), ("b", "copy bytes"), ("a", "read as"), ("p", "profile"), ("?", "all keys"), ("q", "close")]);
+    if p.filter.typing {
+        g.keys(left, width, &[("Enter", "keep"), ("Esc", "clear")]);
+    } else {
+        g.keys(left, width, &[("j k", "fields"), ("Enter", "open"), ("za", "fold"), ("/", "find"), ("n N", "next, previous"), ("y", "copy value"), ("Y", "copy all"), ("b", "copy bytes"), ("a", "read as"), ("?", "all keys"), ("q", "close")]);
+    }
     g.finish()
 }
 
@@ -358,6 +472,31 @@ mod tests {
         p.key(Key::Char('j'));
         let text = layout(&p, 200).text;
         assert!(text.contains("0450  50 51 52") && !text.contains("0000  00 01"), "the CLCW's row is shown: {text}");
+    }
+
+    #[test]
+    fn slash_finds_fields_unfolding_them_and_n_steps_through() {
+        let mut p = page();
+        // Fold the whole packet: what's found is unfolded to.
+        p.key(Key::Space);
+        assert_eq!(rows(&p.root, &p.folded).len(), 1);
+        p.key(Key::Char('/'));
+        p.paste("apid");
+        p.key(Key::Enter);
+        let f = p.selected().unwrap();
+        assert_eq!(f.name, "APID", "the first match, unfolded to");
+        assert!(rows(&p.root, &p.folded).len() > 1);
+        let text = layout(&p, 200).text;
+        assert!(text.contains("/ apid") && text.contains("1 of"), "{text}");
+        let before = p.sel;
+        p.key(Key::Char('n'));
+        p.key(Key::Char('N'));
+        assert_eq!(p.sel, before, "n then N comes back");
+        p.key(Key::Escape);
+        assert!(p.filter.is_empty());
+        p.key(Key::Char('/'));
+        p.paste("no-such-field");
+        assert!(p.note.as_ref().is_some_and(|n| n.1), "says nothing has it");
     }
 
     #[test]

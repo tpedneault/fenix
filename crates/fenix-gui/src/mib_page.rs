@@ -157,6 +157,41 @@ impl MibPage {
         hits
     }
 
+    /// The Services tab as the search leaves it: the telecommands and
+    /// packets the search finds, or every one of a service whose name has
+    /// the words typed ("housekeeping").
+    pub fn services_shown(&self, set: &MibSet) -> Vec<(u8, Vec<DefRef>)> {
+        let all = services(set, self.only);
+        if self.query.trim().is_empty() {
+            return all;
+        }
+        let found: std::collections::HashSet<DefRef> = [Kind::Telecommand, Kind::TmPacket].into_iter().flat_map(|k| self.hits(set, k)).map(|h| h.def).collect();
+        let words: Vec<String> = self.query.split_whitespace().filter(|w| !w.contains(':')).map(str::to_lowercase).collect();
+        all.into_iter()
+            .filter_map(|(service, defs)| {
+                let name = fenix_ccsds::pus::service_name(service).unwrap_or("").to_lowercase();
+                if !words.is_empty() && words.iter().all(|w| name.contains(w.as_str()) || service.to_string() == *w) {
+                    return Some((service, defs));
+                }
+                let defs: Vec<DefRef> = defs.into_iter().filter(|d| found.contains(d)).collect();
+                (!defs.is_empty()).then_some((service, defs))
+            })
+            .collect()
+    }
+
+    /// The problems with every word of the search in their MIB, file or
+    /// message.
+    pub fn problems_shown<'a>(&self, set: &'a MibSet) -> Vec<&'a fenix_mib::Problem> {
+        let words: Vec<String> = self.query.split_whitespace().map(str::to_lowercase).collect();
+        set.problems()
+            .iter()
+            .filter(|p| {
+                let hay = format!("{} {}:{} {}", set.root_label(p.root), p.file.display(), p.line.unwrap_or(0), p.message).to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .collect()
+    }
+
     fn selected(&self, set: &MibSet) -> Option<DefRef> {
         let hits = self.hits(set, self.tab);
         hits.get(self.sel[slot(self.tab)].min(hits.len().saturating_sub(1))).map(|h| h.def)
@@ -190,6 +225,10 @@ impl MibPage {
                 _ => {}
             }
             self.sel = [0; 5];
+            self.svc_sel = 0;
+            if self.problems.is_some() {
+                self.problems = Some(0);
+            }
             return Action::None;
         }
         let Some(set) = ctx.set else {
@@ -202,15 +241,17 @@ impl MibPage {
             };
         };
         if let Some(at) = self.problems {
-            let n = set.problems().len();
+            let shown = self.problems_shown(set);
+            let n = shown.len();
             match key {
+                Key::Char('/') => self.searching = true,
                 Key::Escape | Key::Char('!') | Key::Char('q') => self.problems = None,
                 Key::Down | Key::Char('j') => self.problems = Some((at + 1).min(n.saturating_sub(1))),
                 Key::Up | Key::Char('k') => self.problems = Some(at.saturating_sub(1)),
                 Key::Char('g') => self.problems = Some(0),
                 Key::Char('G') => self.problems = Some(n.saturating_sub(1)),
                 Key::Enter => {
-                    if let Some(p) = set.problems().get(at) {
+                    if let Some(p) = shown.get(at) {
                         return Action::OpenFile(p.file.clone(), p.line.unwrap_or(1));
                     }
                 }
@@ -219,8 +260,16 @@ impl MibPage {
             return Action::None;
         }
         if self.services {
-            let defs: Vec<DefRef> = services(set, self.only).into_iter().flat_map(|(_, d)| d).collect();
+            let defs: Vec<DefRef> = self.services_shown(set).into_iter().flat_map(|(_, d)| d).collect();
             match key {
+                Key::Char('/') => {
+                    self.searching = true;
+                    self.svc_sel = 0;
+                }
+                Key::Escape if !self.query.is_empty() => {
+                    self.query.clear();
+                    self.svc_sel = 0;
+                }
                 Key::Char('q') | Key::Escape => return Action::Close,
                 Key::Char(c @ '1'..='5') => {
                     self.services = false;
@@ -454,7 +503,7 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
         }
         x = g.put(4, end + 1, &thousands(counts[i]), Role::Muted) + 3;
     }
-    let svc = services(set, page.only);
+    let svc = page.services_shown(set);
     x = g.put(4, x, "6", Role::Accent) + 1;
     let end = g.put(4, x, "Services", if page.services { Role::Title } else { Role::Muted });
     if page.services {
@@ -515,18 +564,19 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
             y += 1;
         }
         if svc.is_empty() {
-            g.put(y, left, "No telecommands or packets with a service type.", Role::Muted);
+            let why = if page.query.trim().is_empty() { "No telecommands or packets with a service type." } else { "Nothing matches -- Esc clears the search." };
+            g.put(y, left, why, Role::Muted);
         }
         if page.help {
             help(&mut g, anchor, left);
         }
-        g.keys(left, width, &[("1-6", "tabs"), ("j k", "move"), ("Enter", "open"), ("i", "insert"), ("m", "one MIB"), ("q", "close")]);
+        g.keys(left, width, &[("1-6", "tabs"), ("j k", "move"), ("/", "search"), ("Enter", "open"), ("i", "insert"), ("m", "one MIB"), ("q", "close")]);
         return g.finish();
     }
 
     if let Some(at) = page.problems {
-        problems(&mut g, set, at, left, width, y);
-        g.keys(left, width, &[("Enter", "open the line"), ("j k", "move"), ("Esc", "back")]);
+        problems(&mut g, set, &page.problems_shown(set), at, left, width, y);
+        g.keys(left, width, &[("Enter", "open the line"), ("j k", "move"), ("/", "search"), ("Esc", "back")]);
         return g.finish();
     }
 
@@ -651,11 +701,16 @@ fn empty(g: &mut Grid, ctx: &Ctx, left: usize, width: usize) {
     }
 }
 
-fn problems(g: &mut Grid, set: &MibSet, at: usize, left: usize, width: usize, top: usize) {
+fn problems(g: &mut Grid, set: &MibSet, shown: &[&fenix_mib::Problem], at: usize, left: usize, width: usize, top: usize) {
     let mut y = top;
-    g.heading(y, left, width, &format!("Problems · {}", set.problems().len()));
+    let all = set.problems().len();
+    let count = if shown.len() == all { all.to_string() } else { format!("{} of {all}", shown.len()) };
+    g.heading(y, left, width, &format!("Problems · {count}"));
     y += 1;
-    for (i, p) in set.problems().iter().enumerate() {
+    if shown.is_empty() {
+        g.put(y, left + 1, "Nothing matches -- Esc clears the search.", Role::Muted);
+    }
+    for (i, p) in shown.iter().enumerate() {
         let file = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let at_line = p.line.map(|l| format!("{file}:{l}")).unwrap_or(file);
         let label = set.root_label(p.root);
@@ -806,6 +861,44 @@ pub(crate) mod tests {
         assert_eq!(set.get(def).name, "ZTC17001");
         page.key(Key::Char('1'), &c);
         assert!(!page.services);
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn the_search_narrows_the_services_and_the_problems_too() {
+        let root = fixture();
+        std::fs::write(root.path.join("paf.dat"), format!("PAF00042\tHeater mode\tU\t3{}\n", "\tx".repeat(30))).unwrap();
+        let set = MibSet::load(vec![root.clone()], None);
+        let mut page = MibPage::new(MibKey { roots: vec![root.clone()], ..Default::default() });
+        let c = ctx(&set);
+        page.key(Key::Char('6'), &c);
+        page.key(Key::Char('/'), &c);
+        for ch in "heater".chars() {
+            page.key(Key::Char(ch), &c);
+        }
+        page.key(Key::Enter, &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.contains("8 · FUNCTION MANAGEMENT") && !text.contains("17 · TEST"), "{text}");
+        // A service's own name finds all of it.
+        page.key(Key::Escape, &c);
+        page.key(Key::Char('/'), &c);
+        for ch in "test".chars() {
+            page.key(Key::Char(ch), &c);
+        }
+        page.key(Key::Enter, &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.contains("17 · TEST") && !text.contains("FUNCTION MANAGEMENT"), "{text}");
+        assert!(!set.problems().is_empty(), "the fixture has a problem to find");
+        {
+            page.key(Key::Char('1'), &c);
+            page.key(Key::Char('!'), &c);
+            page.key(Key::Char('/'), &c);
+            for ch in "no-such-problem".chars() {
+                page.key(Key::Char(ch), &c);
+            }
+            let text = layout(&page, &c, 160).text;
+            assert!(text.contains(&format!("PROBLEMS · 0 OF {}", set.problems().len())), "{text}");
+        }
         std::fs::remove_dir_all(&root.path).ok();
     }
 

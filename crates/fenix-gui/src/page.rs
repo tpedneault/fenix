@@ -161,6 +161,86 @@ pub fn fit_tail(s: &str, max: usize) -> String {
     out
 }
 
+/// A page's `/` filter: what's typed, whether it has the keyboard, and
+/// its caret. Every word typed must appear, in any case.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filter {
+    pub text: String,
+    pub typing: bool,
+    caret: Option<usize>,
+}
+
+impl Filter {
+    /// `/`: the keyboard to the filter, the caret at the end of it.
+    pub fn start(&mut self) {
+        self.typing = true;
+        self.caret = None;
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.typing = false;
+        self.caret = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+
+    /// A key while typing: `Esc` clears it, `Enter` (or `Down`) keeps it
+    /// and hands the keyboard back, the rest edit it. Whether what it
+    /// matches may have changed.
+    pub fn key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Escape => {
+                self.clear();
+                true
+            }
+            Key::Enter | Key::Down | Key::Tab => {
+                self.typing = false;
+                false
+            }
+            _ => {
+                let mut at = self.caret.unwrap_or(self.text.chars().count());
+                let changed = edit_line(&mut self.text, &mut at, key);
+                self.caret = Some(at);
+                changed
+            }
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        if self.typing {
+            let mut at = self.caret.unwrap_or(usize::MAX);
+            insert_at(&mut self.text, &mut at, text);
+            self.caret = Some(at);
+        }
+    }
+
+    /// The words typed, lowercased.
+    pub fn words(&self) -> Vec<String> {
+        self.text.split_whitespace().map(str::to_lowercase).collect()
+    }
+
+    /// Whether `hay` has every word typed.
+    pub fn matches(&self, hay: &str) -> bool {
+        let hay = hay.to_lowercase();
+        self.words().iter().all(|w| hay.contains(w.as_str()))
+    }
+
+    /// The filter's line: being typed, set, or a `hint` of what it does.
+    pub fn line(&self, hint: &str, width: usize) -> (String, Role) {
+        if self.typing {
+            let caret = self.caret.unwrap_or(usize::MAX).min(self.text.chars().count());
+            (format!("/ {}", with_caret(&self.text, caret, width.saturating_sub(2))), Role::Title)
+        } else if self.is_empty() {
+            (fit(&format!("/ {hint}"), width), Role::Muted)
+        } else {
+            (fit_tail(&format!("/ {}  (/ changes it, Esc clears)", self.text), width), Role::Accent)
+        }
+    }
+}
+
 /// A one-line field's caret: `key` applied to `text` with the caret at
 /// char `caret` -- moving it (arrows, `Ctrl` a word at a time, `Home`,
 /// `End`) or typing and deleting there. Whether the key was one of those.

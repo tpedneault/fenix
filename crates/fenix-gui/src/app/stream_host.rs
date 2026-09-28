@@ -684,9 +684,9 @@ impl App {
                 p.shown().iter().map(|&i| format!("{:08X}  {}\n", p.rows[i].offset, fenix_ccsds::field::hex(&p.rows[i].bytes))).collect::<String>().into_bytes(),
             ),
             stream_page::Write::Csv => {
-                let Some((name, samples)) = &p.param else { return };
+                let Some((name, _)) = &p.param else { return };
                 let mut csv = String::from("time,raw,value,limits\n");
-                for s in samples {
+                for s in p.samples_shown() {
                     csv.push_str(&format!("{},{},\"{}\",\"{}\"\n", s.time.clone().unwrap_or_default(), s.raw, s.value, s.off.as_ref().map(|o| o.0.clone()).unwrap_or_default()));
                 }
                 (PathBuf::from(format!("{}-{name}.csv", base.display())), csv.into_bytes())

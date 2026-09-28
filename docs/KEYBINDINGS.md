@@ -379,12 +379,24 @@ is already Fenix's global leader-key trigger -- Files uses separate
 `s`/`S` keys instead, the same distinct-keys-per-action convention the
 Docker panel's own `s`/`S`/`R` already established.
 
+## A field being typed on a page (settings, filters, forms)
+
+| Keys | |
+|---|---|
+| `←` `→` / `Ctrl-←` `Ctrl-→` | Move the caret a character / a word |
+| `Home` `End` | To the start, the end |
+| `Backspace` `Delete` / `Ctrl-Backspace` `Ctrl-W` | Delete a character / the word before the caret |
+| `Ctrl-O` | Browse for the path being typed (a path setting, a list of paths, the project's program and cwd) |
+| `Ctrl-V` | Paste at the caret |
+
+In the explorer a setting opens, `Enter` picks a file and `S` the folder shown.
+
 ## MIB (`SPC k k`)
 
 | Keys | MIB page |
 |---|---|
 | `1`-`5`, `Tab` | Telecommands, TC parameters, TM packets, TM parameters, calibrations |
-| `/` | Search: words, and `field:value` filters (`Tab` completes a field) |
+| `/` | Search: words, and `field:value` filters (`Tab` completes a field); it narrows the services and the problems too |
 | `Enter` / `i` / `y` | A definition's page / insert the telecommand / copy the name |
 | `o` / `m` / `p` | Sort by the next column / one MIB of several / preview on and off |
 | `!` / `R` / `a` `A` | Problems in the files / read again / the project's MIB settings, yours |
@@ -396,6 +408,7 @@ Docker panel's own `s`/`S`/`R` already established.
 | `Enter` | Follow the link |
 | `Ctrl-o` `Ctrl-i` (`H` `L`) | Back / forward |
 | `u` / `i` / `y` | What uses it / insert the telecommand / copy the name |
+| `/` / `Esc` | Only the rows with these words (parameters, points, what uses it) / every row again |
 | `gf` / `r` / `m` | Its `.dat` line / raw fields / the MIB page |
 
 | Keys | Insert form |
@@ -414,6 +427,7 @@ Docker panel's own `s`/`S`/`R` already established.
 |---|---|
 | `j` `k` / `g` `G` | Fields |
 | `Tab` / `za` | Fold |
+| `/` / `n` `N` | Find fields by name, bytes, value or check / the next, previous one |
 | `Enter` | Open the field's MIB definition or standard |
 | `y` / `Y` / `b` | Copy the value / the whole decode / the bytes |
 | `a` / `p` | Read as a packet, frame, CLTU, CFDP PDU, CLCW or time / the mission settings |
@@ -421,11 +435,18 @@ Docker panel's own `s`/`S`/`R` already established.
 | Keys | Recording or live source |
 |---|---|
 | `1`-`4`, `Tab` | Packets, by APID, a parameter, problems |
-| `/` / `i` | Filter / idle packets shown or hidden |
+| `/` / `i` | Filter every tab / idle packets shown or hidden |
 | `]` `[` | Next, previous sequence gap |
 | `Enter` / `x` | Inspect the packet / show it in the hex view |
 | `f` | Inspect the CADU or CLTU it came in |
 | `t` / `w` / `F` | Follow a TM parameter / write what's shown / read with another framing |
+
+The filter takes words (found in a packet's name, SPID, time, APID,
+service and check) and terms: `apid:` `type:` `stype:` `vc:` `seq:`
+`len:` (a number, or a range like `apid:0x100..0x1FF`), `spid:` `name:`
+`time:` `verifies:`, `dir:tc` or `dir:tm`, `check:bad` or `check:ok`,
+and for the followed parameter `value:` `raw:` `limits:out` (`in`,
+`soft`, `hard`). A `-` in front leaves out what a term matches.
 
 | Keys | Hex view |
 |---|---|

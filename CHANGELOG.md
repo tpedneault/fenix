@@ -65,6 +65,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python module, an ICD or test vectors from it. XTCE files can be
   listed as MIBs.
 - A tab keeps its cursor when you switch away and back.
+- Fields typed on a page have a caret: arrows, `Ctrl-←`/`Ctrl-→` a word
+  at a time, `Home`/`End`, `Delete`, and `Ctrl-Backspace` (or `Ctrl-W`)
+  to delete a word. `Ctrl-O` browses from the name of a list of paths
+  and from the project's program and cwd, and the explorer's `S` picks
+  a folder for any path setting.
+- Search where the mission pages lacked it: `/` on a MIB definition's
+  page keeps the rows with the words typed; the MIB page's search
+  narrows the services tab and the problems list; the packet inspector
+  finds fields (`/`, `n`, `N`); a recording's or a live source's filter
+  narrows every tab -- by APID, the followed parameter's samples,
+  problems -- and takes ranges (`apid:0x100..0x1FF`), `name:`, `time:`,
+  `len:`, `dir:tc`, `check:ok`, `value:`, `limits:out` and `-` to leave
+  something out.
+
+### Fixed
+
+- Inserting a telecommand no longer freezes Fenix when the project's
+  argument template doesn't name the argument before its value
+  (`{value}`): such calls are read back by position.
+- The Git graph and the Log page open quickly on a large repository:
+  git is no longer asked for `--date-order`, which reads the whole
+  history first; the History view reads off the UI thread; and Git and
+  diff buffers stop copying their line data on every frame.
 
 ### Changed
 
@@ -83,6 +106,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are `SPC m a`/`SPC m d` -- MIBs are listed in the settings (`SPC k ,`).
   The MIB settings have a category of their own in `SPC ,`; their keys
   are unchanged.
+- On a MIB definition's page `/` filters the page; `m` still opens the
+  MIB page.
 
 ## [1.0.0] - 2026-09-26
 
