@@ -87,6 +87,7 @@ popup shows what keys continue it.
 | `SPC g P` | Open a pull request for this branch, prefilled from its commits |
 | `SPC g M` | The review inbox (the older Merge Requests view with `[git] layout = panes`) |
 | `]h` / `[h` | Next / previous changed hunk in the file |
+| `]d` / `[d` | Next / previous problem: a language server's, or a telecommand call checked against the MIB |
 | `SPC g a` / `SPC g d` / `SPC g i` | Stage / discard / preview the hunk under the cursor |
 | `SPC g B` / `SPC g e` | Blame beside the text / the commit behind this line |
 | `SPC g x x` | Resolve conflicts side by side (the Merge view) |
@@ -408,6 +409,7 @@ In the explorer a setting opens, `Enter` picks a file and `S` the folder shown.
 | `Enter` | Follow the link |
 | `Ctrl-o` `Ctrl-i` (`H` `L`) | Back / forward |
 | `u` / `i` / `y` | What uses it / insert the telecommand / copy the name |
+| `t` | Follow the TM parameter through the recording or live source open |
 | `/` / `Esc` | Only the rows with these words (parameters, points, what uses it) / every row again |
 | `gf` / `r` / `m` | Its `.dat` line / raw fields / the MIB page |
 
@@ -430,6 +432,7 @@ In the explorer a setting opens, `Enter` picks a file and `S` the folder shown.
 | `/` / `n` `N` | Find fields by name, bytes, value or check / the next, previous one |
 | `Enter` | Open the field's MIB definition or standard |
 | `y` / `Y` / `b` | Copy the value / the whole decode / the bytes |
+| `t` | Follow the TM parameter selected through the recording or live source open |
 | `a` / `p` | Read as a packet, frame, CLTU, CFDP PDU, CLCW or time / the mission settings |
 
 | Keys | Recording or live source |
@@ -440,6 +443,7 @@ In the explorer a setting opens, `Enter` picks a file and `S` the folder shown.
 | `Enter` / `x` | Inspect the packet / show it in the hex view |
 | `f` | Inspect the CADU or CLTU it came in |
 | `t` / `w` / `F` | Follow a TM parameter / write what's shown / read with another framing |
+| `c` / `r` | On the parameter: its next limit crossing / the curve from raw or engineering values |
 
 The filter takes words (found in a packet's name, SPID, time, APID,
 service and check) and terms: `apid:` `type:` `stype:` `vc:` `seq:`
@@ -461,6 +465,11 @@ and for the followed parameter `value:` `raw:` `limits:out` (`in`,
 | `j` `k` | The formats |
 | `Enter` `c` / `e` | Type a time / edit this one |
 | `n` / `y` / `i` | Now / copy / insert the on-board time |
+
+| Keys | Standards (`SPC k ?`) |
+|---|---|
+| `Enter` / `o` / `f` | Open the standard / where to get it / the folder setting |
+| `/` | Search every standard's text; `Enter` on a match opens it at its page, `Esc` goes back |
 
 ## Agenda (`SPC a a`) and Jira (`SPC j j`)
 

@@ -1162,13 +1162,19 @@ Everything Fenix does, by area. For the keys, see
     reads them as something else -- a TM, TC, AOS or USLP frame (with
     Reed-Solomon correction and de-randomization), a CLTU, a CFDP PDU,
     a CLCW, a time code. A field names the standard defining it, and
-    `Enter` opens that standard's PDF at the heading. `K` on hex in a
-    file gives a one-line summary; `SPC k b` or `y` in the insert form
-    copies a telecommand's packet bytes.
+    `Enter` opens that standard's PDF at the heading, and `t` on a TM
+    parameter follows it through the recording open. `K` on hex in a
+    file gives a one-line summary, and `K` on an on-board time
+    (`814B878A.8000`, or its octets) says when it was; `SPC k b` or `y`
+    in the insert form copies a telecommand's packet bytes.
   - **Time** (`SPC k T`): an on-board time (CUC or CDS) against UTC,
     TAI, GPS, day of year and seconds since the epoch, with leap seconds
     (`ccsds.leap_seconds` for a newer table); type any of them, or
-    insert the on-board time.
+    insert the on-board time. `ccsds.time_correlation` (an on-board time
+    and the UTC it matched) moves the epoch on-board times are read from,
+    everywhere, and the converter shows what they read uncorrelated.
+    `ccsds.clock` puts the time now, as the mission writes it on board,
+    in the modeline.
   - **Hex view** (`SPC f x`, and any file that isn't text): a file's
     bytes, view only, with the packet under the cursor outlined, `w`
     to the next packet, `]`/`[` to sync markers, search and goto.
@@ -1180,11 +1186,15 @@ Everything Fenix does, by area. For the keys, see
     its parity (the tail sequence, or a damaged block that cuts the CLTU
     short), then the TC frame's length and FECF, sequence gaps on Type-A
     frames (a retransmission isn't a gap), and the telecommands inside,
-    named by the MIB. Frames with a failed FECF and CLTUs cut short are
+    named by the MIB. The decoder corrects one wrong bit per code block
+    (`ccsds.tc_bch`: `correct`, or `detect` to turn the block away), and
+    a randomized uplink (`ccsds.tc_randomized`, or recognized by `guess`)
+    is de-randomized after it. Frames with a failed FECF and CLTUs cut short are
     listed as problems. `f` on a packet opens the CADU or CLTU it came
     in, taken apart layer by layer in the inspector. Tabs list them by
-    APID, follow a TM parameter through them (`t`, with a curve and
-    limits) and list problems; `/` filters (`apid:`, `spid:`,
+    APID, follow a TM parameter through them (`t`, with a curve, its limit
+    crossings -- `c` steps through them -- and `r` for raw values) and
+    list problems; on a live source a crossing is said in the modeline; `/` filters (`apid:`, `spid:`,
     `check:bad`...), `]`/`[` jump between sequence gaps, `w` writes the
     packets shown or a parameter's samples.
   - **Live sources** (`SPC k l`): the same page fed by a TCP or UDP
@@ -1196,7 +1206,14 @@ Everything Fenix does, by area. For the keys, see
     with the record header's size in its own field.
   - **Standards** (`SPC k ?`): the CCSDS and ECSS standards these tools
     refer to, opened from the folder `ccsds.library` names, or where to
-    get them.
+    get them. `/` searches every standard's text at once; `Enter` on a
+    match opens that standard at its page.
+  - **Scripts**: `]d`/`[d` step through a buffer's problems -- a
+    language server's, or telecommand calls checked against the MIB.
+  - **Mission projects**: the SCOS-2000 MIB template writes a `[ccsds]`
+    profile and a `recordings/` folder, and the doctor shows the profile
+    and checks the MIB against it (`PID_DFHSIZE` against the PUS header
+    and time format, `PID_CHECK` against the checksum) and the standards.
 
 ## Themes, terminals and tables
 
