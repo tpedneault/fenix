@@ -103,7 +103,8 @@ impl PageState {
             PageModel::Stream(p) => p.typing(),
             PageModel::MibDef(p) => p.typing(),
             PageModel::Packet(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => false,
+            PageModel::Standards(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
 
@@ -147,7 +148,8 @@ impl PageState {
             PageModel::Stream(p) => p.paste(text),
             PageModel::MibDef(p) => p.paste(text),
             PageModel::Packet(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => {}
+            PageModel::Standards(p) => p.query.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
     }

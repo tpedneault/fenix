@@ -5924,6 +5924,10 @@ pub struct App {
     stream_sources: HashMap<BufferId, stream_host::StreamSource>,
     /// The modeline's mission clock, with the quarter second it's for.
     mission_clock: Option<(i64, String)>,
+    /// A standards search's documents on the PDF worker: the page asking
+    /// and the standard each is; the query per page.
+    standards_search: HashMap<fenix_pdf::PdfDocKey, (BufferId, usize)>,
+    standards_query: HashMap<BufferId, String>,
     /// A stream page waiting for a parameter from the `MibDef` picker.
     mib_pick_for_stream: Option<BufferId>,
     /// Telecommand calls the MIB disagrees with, by file -- drawn with
@@ -6714,6 +6718,8 @@ impl App {
             mib_last: HashMap::new(),
             stream_sources: HashMap::new(),
             mission_clock: None,
+            standards_search: HashMap::new(),
+            standards_query: HashMap::new(),
             mib_pick_for_stream: None,
             mib_diagnostics: HashMap::new(),
             mib_checked: HashMap::new(),

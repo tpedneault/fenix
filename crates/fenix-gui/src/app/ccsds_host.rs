@@ -319,7 +319,82 @@ impl App {
             A::Open(path) => self.open_pdf_path(&path),
             A::Url(url) => self.open_url(url),
             A::Settings => self.open_settings_page(crate::settings_page::Scope::You, Some("ccsds.library")),
+            A::Search(query) => self.standards_search(id, query),
+            A::OpenAt(path, page) => {
+                self.open_pdf_path(&path);
+                self.pdf_goto_page(page + 1);
+            }
         }
+    }
+
+    /// Searches every standard the page's folder has, each document
+    /// opened, searched and closed on the PDF worker; what's found goes
+    /// to the page as each is read.
+    fn standards_search(&mut self, id: BufferId, query: String) {
+        // A search already under way for this page is dropped.
+        let old: Vec<fenix_pdf::PdfDocKey> = self.standards_search.iter().filter(|(_, (page, _))| *page == id).map(|(k, _)| *k).collect();
+        for key in old {
+            self.standards_search.remove(&key);
+            self.pdf_send(fenix_pdf::PdfRequest::Close { key });
+        }
+        let Some(PageModel::Standards(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let files = p.searchable();
+        if files.is_empty() {
+            self.set_error("no standards to search -- f sets the folder they're in (ccsds.library)");
+            return;
+        }
+        if let Some(PageModel::Standards(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+            p.search_started(&query, files.len());
+        }
+        self.pdf_worker_ready();
+        for (standard, path) in files {
+            let key = fenix_pdf::PdfDocKey::new();
+            self.standards_search.insert(key, (id, standard));
+            self.pdf_send(fenix_pdf::PdfRequest::Open { key, path });
+        }
+        self.standards_query.insert(id, query);
+    }
+
+    /// A PDF worker reply for a standards search; whether it was one.
+    pub(super) fn standards_search_reply(&mut self, response: &fenix_pdf::PdfResponse) -> bool {
+        use fenix_pdf::PdfResponse as R;
+        let key = match response {
+            R::Opened { key, .. } | R::OpenFailed { key, .. } | R::SearchResults { key, .. } => *key,
+            _ => return false,
+        };
+        let Some(&(page, standard)) = self.standards_search.get(&key) else { return false };
+        let query = self.standards_query.get(&page).cloned().unwrap_or_default();
+        let found = |app: &mut App, hits: Vec<(u32, String)>, done: bool| {
+            if let Some(PageModel::Standards(p)) = app.pages.get_mut(&page).map(|s| &mut s.model) {
+                p.found(standard, hits, done);
+            }
+            if let Some(state) = app.pages.get_mut(&page) {
+                state.stale = true;
+            }
+        };
+        match response {
+            R::Opened { .. } => {
+                // Smart case, as the reader's search.
+                let match_case = query.chars().any(char::is_uppercase);
+                self.pdf_send(fenix_pdf::PdfRequest::Search { key, request_id: 0, query, match_case, from_page: 0 });
+            }
+            R::OpenFailed { .. } => {
+                self.standards_search.remove(&key);
+                found(self, Vec::new(), true);
+            }
+            R::SearchResults { matches, done, .. } => {
+                found(self, matches.iter().map(|m| (m.page_index, m.context.clone())).collect(), *done);
+                if *done {
+                    self.standards_search.remove(&key);
+                    self.pdf_send(fenix_pdf::PdfRequest::Close { key });
+                }
+            }
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
     }
 }
 

@@ -232,7 +232,8 @@ impl App {
 
     /// A buffer for `path` and the worker's `Open` for it. The page sizes
     /// come later, through `apply_pdf_response`.
-    fn pdf_load(&mut self, path: &Path) -> BufferId {
+    /// The PDF worker, started the first time it's needed.
+    pub(super) fn pdf_worker_ready(&mut self) {
         if self.pdf_worker.is_none() {
             let worker = match self.event_proxy.clone() {
                 Some(proxy) => fenix_pdf::PdfWorker::spawn(move |response| {
@@ -245,6 +246,16 @@ impl App {
             };
             self.pdf_worker = Some(worker);
         }
+    }
+
+    pub(super) fn pdf_send(&self, request: fenix_pdf::PdfRequest) {
+        if let Some(worker) = &self.pdf_worker {
+            worker.send(request);
+        }
+    }
+
+    fn pdf_load(&mut self, path: &Path) -> BufferId {
+        self.pdf_worker_ready();
         // Where it was left last time, when `reader.remember` is on.
         let saved = if self.pdf_remembers() { self.pdf_places.get(path).cloned() } else { None };
         let last_place = saved.as_ref().map(|p| (p.page, p.zoom)).unwrap_or((0, self.pdf_default_zoom()));
@@ -592,6 +603,9 @@ impl App {
     /// A reply from the worker. Anything for a document or view since
     /// closed, or for a render or search since superseded, is dropped.
     pub(super) fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
+        if self.standards_search_reply(&response) {
+            return;
+        }
         match response {
             fenix_pdf::PdfResponse::Opened { key, pages } => {
                 let Some(buffer) = self.pdf_doc_by_key(key) else { return };
