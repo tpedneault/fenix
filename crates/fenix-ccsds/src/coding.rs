@@ -66,37 +66,90 @@ pub fn cltu_encode(frame: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How a code block reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    /// Its parity matches.
+    Good([u8; 7]),
+    /// One bit was wrong and is put right: the information, and which bit
+    /// (0 the first sent, 56-62 the parity's).
+    Corrected([u8; 7], usize),
+    /// More wrong than the decoder's mode handles.
+    Bad,
+}
+
+/// Checks a code block the way a spacecraft's CLTU decoder does (231.0-B):
+/// the filler bit isn't looked at, and in error-correcting mode
+/// (`correct`) a single wrong bit is put right. BCH(63,56) is at distance
+/// 4, so one wrong bit has one fix and two have none.
+pub fn bch_check(block: &[u8], correct: bool) -> Block {
+    let Some(info) = block.get(..7).and_then(|b| <[u8; 7]>::try_from(b).ok()) else { return Block::Bad };
+    let Some(&parity) = block.get(7) else { return Block::Bad };
+    let fits = |info: &[u8; 7], parity: u8| bch_parity(info) & 0xFE == parity & 0xFE;
+    if fits(&info, parity) {
+        return Block::Good(info);
+    }
+    if !correct {
+        return Block::Bad;
+    }
+    for bit in 0..63 {
+        let (mut i, mut p) = (info, parity);
+        if bit < 56 {
+            i[bit / 8] ^= 0x80 >> (bit % 8);
+        } else {
+            p ^= 0x80 >> (bit - 56);
+        }
+        if fits(&i, p) {
+            return Block::Corrected(i, bit);
+        }
+    }
+    Block::Bad
+}
+
 /// A CLTU's layers, and the frame bytes it carries (fill included --
-/// the frame's own length says where it ends).
-pub fn cltu_decode(bytes: &[u8]) -> Option<(Field, Vec<u8>)> {
+/// the frame's own length says where it ends). `correct`: the decoder's
+/// error-correcting mode.
+pub fn cltu_decode(bytes: &[u8], correct: bool) -> Option<(Field, Vec<u8>)> {
     let link = |h| Link::Standard(TC_STANDARD, h);
     let start = bytes.windows(2).position(|w| w == CLTU_START)?;
     let mut children = vec![Field::new("start sequence", start * 8, 16, "EB90", "").checked(Check::Ok("found".into())).linked(link("Start Sequence"))];
     let mut data = Vec::new();
     let mut at = start + 2;
-    let mut bad = 0;
+    let (mut bad, mut fixed) = (0, 0);
     let mut blocks = Vec::new();
     while at + 8 <= bytes.len() {
         let block = &bytes[at..at + 8];
         if block == CLTU_TAIL {
             break;
         }
-        let info: [u8; 7] = block[..7].try_into().ok()?;
-        let want = bch_parity(&info);
-        let ok = want == block[7];
-        if !ok {
-            bad += 1;
-        }
-        blocks.push(
-            Field::new(format!("code block {}", blocks.len() + 1), at * 8, 64, hex(block), "")
-                .checked(if ok { Check::Ok("parity ok".into()) } else { Check::Bad(format!("parity {:02X}, expected {want:02X}", block[7])) }),
-        );
+        let name = format!("code block {}", blocks.len() + 1);
+        let (info, field) = match bch_check(block, correct) {
+            Block::Good(info) => (info, Field::new(name, at * 8, 64, hex(block), "").checked(Check::Ok("parity ok".into()))),
+            Block::Corrected(info, bit) => {
+                fixed += 1;
+                let what = if bit < 56 { format!("octet {}, bit {} was wrong", bit / 8 + 1, bit % 8) } else { format!("parity bit {} was wrong", bit - 56) };
+                (info, Field::new(name, at * 8, 64, hex(block), what).checked(Check::Warn("1 bit corrected".into())))
+            }
+            Block::Bad => {
+                bad += 1;
+                let info: [u8; 7] = block[..7].try_into().ok()?;
+                let want = bch_parity(&info);
+                let more = if correct { " -- more than one bit wrong" } else { "" };
+                (info, Field::new(name, at * 8, 64, hex(block), "").checked(Check::Bad(format!("parity {:02X}, expected {want:02X}{more}", block[7]))))
+            }
+        };
+        blocks.push(field);
         data.extend_from_slice(&info);
         at += 8;
     }
     let n = blocks.len();
     let mut cb = Field::group(format!("{n} code blocks"), blocks);
-    cb.check = Some(if bad == 0 { Check::Ok("all parities match".into()) } else { Check::Bad(format!("{bad} bad")) });
+    cb.value = if correct { "error-correcting mode".into() } else { "error-detecting mode".into() };
+    cb.check = Some(match (bad, fixed) {
+        (0, 0) => Check::Ok("all parities match".into()),
+        (0, f) => Check::Warn(format!("{f} corrected")),
+        (b, _) => Check::Bad(format!("{b} bad")),
+    });
     cb.link = Some(link("BCH Codeblock"));
     children.push(cb);
     if bytes.get(at..at + 8) == Some(&CLTU_TAIL[..]) {
@@ -122,34 +175,44 @@ pub enum CltuEnd {
     BadBlock(usize),
 }
 
-/// A CLTU as the spacecraft's decoder reads it (231.0-B, detection
-/// mode): from the start sequence, block by block, until a block fails
-/// its parity -- the tail sequence is built to.
+/// A CLTU as the spacecraft's decoder reads it (231.0-B): from the start
+/// sequence, block by block, until a block fails -- the tail sequence is
+/// built to, in either mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CltuRead {
     /// Where the start sequence is.
     pub start: usize,
     /// Just after the block that ended it.
     pub end: usize,
-    /// The information octets of the blocks before that one.
+    /// The information octets of the blocks before that one, corrected.
     pub data: Vec<u8>,
     pub ended: CltuEnd,
+    /// The code blocks (from 1) that had a bit put right.
+    pub corrected: Vec<usize>,
 }
 
-/// The first CLTU in `bytes`; `None` when there's no start sequence, or
-/// the input ends before something ends the CLTU.
-pub fn cltu_read(bytes: &[u8]) -> Option<CltuRead> {
+/// The first CLTU in `bytes`, read in error-correcting mode when
+/// `correct`; `None` when there's no start sequence, or the input ends
+/// before something ends the CLTU.
+pub fn cltu_read(bytes: &[u8], correct: bool) -> Option<CltuRead> {
     let start = bytes.windows(2).position(|w| w == CLTU_START)?;
     let mut at = start + 2;
     let mut data = Vec::new();
+    let mut corrected = Vec::new();
     loop {
         let block = bytes.get(at..at + 8)?;
-        let info: [u8; 7] = block[..7].try_into().ok()?;
-        if bch_parity(&info) != block[7] {
-            let ended = if block == CLTU_TAIL { CltuEnd::Tail } else { CltuEnd::BadBlock((at - start - 2) / 8 + 1) };
-            return Some(CltuRead { start, end: at + 8, data, ended });
+        let n = (at - start - 2) / 8 + 1;
+        match bch_check(block, correct) {
+            Block::Good(info) => data.extend_from_slice(&info),
+            Block::Corrected(info, _) => {
+                data.extend_from_slice(&info);
+                corrected.push(n);
+            }
+            Block::Bad => {
+                let ended = if block == CLTU_TAIL { CltuEnd::Tail } else { CltuEnd::BadBlock(n) };
+                return Some(CltuRead { start, end: at + 8, data, ended, corrected });
+            }
         }
-        data.extend_from_slice(&info);
         at += 8;
     }
 }
@@ -176,14 +239,32 @@ mod tests {
         let cltu = cltu_encode(&frame);
         assert_eq!(cltu.len(), 2 + 3 * 8 + 8);
         assert_eq!(cltu[cltu.len() - 1], 0x79);
-        let (f, data) = cltu_decode(&cltu).unwrap();
+        let (f, data) = cltu_decode(&cltu, false).unwrap();
         assert!(!f.any_bad());
         assert_eq!(&data[..16], &frame[..]);
         let mut broken = cltu.clone();
         broken[5] ^= 0x04;
-        assert!(cltu_decode(&broken).unwrap().0.any_bad());
+        assert!(cltu_decode(&broken, false).unwrap().0.any_bad());
+        assert!(!cltu_decode(&broken, true).unwrap().0.any_bad(), "one bit: corrected");
         // Every parity octet ends in the filler bit 0.
         assert!(cltu[2..cltu.len() - 8].chunks(8).all(|b| b[7] & 1 == 0));
+    }
+
+    #[test]
+    fn the_tail_fails_in_either_mode_and_every_single_bit_is_put_right() {
+        assert_eq!(bch_check(&CLTU_TAIL, true), Block::Bad, "the tail is built never to decode");
+        let info = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE];
+        let mut block = info.to_vec();
+        block.push(bch_parity(&info));
+        for bit in 0..63 {
+            let mut b = block.clone();
+            b[bit / 8] ^= 0x80 >> (bit % 8);
+            assert_eq!(bch_check(&b, true), Block::Corrected(info, bit), "bit {bit}");
+            assert_eq!(bch_check(&b, false), Block::Bad);
+        }
+        let mut filler = block.clone();
+        filler[7] ^= 0x01;
+        assert_eq!(bch_check(&filler, false), Block::Good(info), "the filler bit isn't looked at");
     }
 
     #[test]
@@ -191,14 +272,21 @@ mod tests {
         let frame: Vec<u8> = (0..16).collect();
         let mut stream = vec![0x55, 0x55];
         stream.extend(cltu_encode(&frame));
-        let r = cltu_read(&stream).unwrap();
+        let r = cltu_read(&stream, false).unwrap();
         assert_eq!((r.start, r.end, r.ended), (2, stream.len(), CltuEnd::Tail));
         assert_eq!(&r.data[..16], &frame[..]);
         assert_eq!(stream[cltu_octet(2, 7)], 7, "the eighth octet opens the second block");
         let mut broken = stream.clone();
         broken[2 + 2 + 8 + 3] ^= 0x10;
-        let r = cltu_read(&broken).unwrap();
+        let r = cltu_read(&broken, false).unwrap();
         assert_eq!((r.ended, r.data.len()), (CltuEnd::BadBlock(2), 7), "the rest is abandoned");
-        assert!(cltu_read(&stream[..stream.len() - 1]).is_none(), "not ended yet");
+        assert!(cltu_read(&stream[..stream.len() - 1], false).is_none(), "not ended yet");
+        // In error-correcting mode the same flipped bit is put right.
+        let r = cltu_read(&broken, true).unwrap();
+        assert_eq!((r.ended, &r.data[..16], r.corrected.clone()), (CltuEnd::Tail, &frame[..], vec![2]));
+        // Two bits in one block are beyond it: the CLTU ends there.
+        let mut two = broken.clone();
+        two[2 + 2 + 8 + 5] ^= 0x01;
+        assert_eq!(cltu_read(&two, true).unwrap().ended, CltuEnd::BadBlock(2));
     }
 }

@@ -79,20 +79,28 @@ pub(crate) fn row_of(bytes: Vec<u8>, offset: usize, vc: Option<u8>, set: Option<
         verifies,
         bytes,
         unit: None,
+        unit_profile: None,
     }
 }
 
 /// Rows, lost frames and skipped bytes out of splitter items.
-fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Vec<(usize, u8, u64)>, Vec<(usize, usize, String)>) {
+fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission, framing: Option<&Framing>) -> (Vec<Row>, Vec<(usize, u8, u64)>, Vec<(usize, usize, String)>) {
     let mut rows = Vec::new();
     let mut lost = Vec::new();
     let mut junk = Vec::new();
-    // The unit the packets that follow a frame came in.
+    // The unit the packets that follow a frame came in, and how it was read.
     let mut unit: Option<Arc<Vec<u8>>> = None;
+    let profile = match framing {
+        Some(Framing::Frames(p) | Framing::Cltus(p)) => Some(p.clone()),
+        _ => None,
+    };
     for item in items {
         match item {
             Item::Packet { offset, bytes, vc } => {
                 let mut row = row_of(bytes, offset, vc, set, m);
+                if unit.is_some() {
+                    row.unit_profile = profile.clone();
+                }
                 row.unit = unit.clone();
                 rows.push(row);
             }
@@ -114,6 +122,30 @@ fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Ve
         }
     }
     (rows, lost, junk)
+}
+
+/// The samples of parameter `def` in `rows` from `from` on: calibrated,
+/// with their limit state.
+fn samples_of(rows: &[Row], from: usize, set: &MibSet, m: &Mission, def: DefRef) -> Vec<Sample> {
+    let name = set.get(def).name.clone();
+    let carriers: Vec<String> = set.used_by(def).iter().map(|d| set.get(*d).name.clone()).collect();
+    let mut samples = Vec::new();
+    for (i, r) in rows.iter().enumerate().skip(from) {
+        if !r.spid.as_ref().is_some_and(|s| carriers.contains(s)) {
+            continue;
+        }
+        let Some((root, _)) = fenix_mib::packets::decode_packet(Some(set), &r.bytes, &m.profile, m.base) else { continue };
+        let Some(f) = root.walk().into_iter().map(|(_, f)| f).find(|f| f.link == Some(fenix_ccsds::Link::Parameter(name.clone()))).cloned() else { continue };
+        let number = f.value.split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
+        let off = match &f.check {
+            Some(Check::Warn(m)) => Some((m.clone(), false)),
+            Some(Check::Bad(m)) => Some((m.clone(), true)),
+            _ => None,
+        };
+        let partial = matches!(&f.check, Some(Check::Ok(m)) if m.ends_with(fenix_mib::packets::NOT_HERE));
+        samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off, partial });
+    }
+    samples
 }
 
 /// A source's framing (one of `fenix_config::FRAMINGS`), `None` for
@@ -153,8 +185,8 @@ struct LiveSplitter {
 }
 
 impl LiveSplitter {
-    /// Enough to see three packets, three sync markers or a CLTU.
-    const ENOUGH: usize = 4096;
+    /// Too little to tell anything from; past it, every chunk is tried.
+    const ENOUGH: usize = 64;
     const GIVE_UP: usize = 16 * 1024;
 
     fn new(framing: Option<Framing>) -> Self {
@@ -171,7 +203,7 @@ impl LiveSplitter {
         if self.pending.len() < Self::ENOUGH {
             return (Vec::new(), None);
         }
-        let (framing, why) = match stream::recognize(&self.pending) {
+        let (framing, why) = match stream::recognize(&self.pending, true) {
             Some((f, why)) => reconciled(f, why, m),
             None if self.pending.len() >= Self::GIVE_UP => (Framing::Packets, "no framing recognized in 16 KB -- reading as packets".into()),
             None => return (Vec::new(), None),
@@ -196,7 +228,8 @@ fn reconciled(f: Framing, why: String, m: &Mission) -> (Framing, String) {
         Framing::Frames(g) if g.length == m.frames.length || g.rs_depth == m.frames.rs_depth && g.rs_depth > 0 => {
             (Framing::Frames(FrameProfileExt::merged(&m.frames, &g)), format!("{why}, the project's frames"))
         }
-        Framing::Cltus(_) => (Framing::Cltus(m.tc.clone()), format!("{why}, the project's TC frames")),
+        // The guess can see the randomizer; the project says the rest.
+        Framing::Cltus(g) => (Framing::Cltus(fenix_ccsds::frames::FrameProfile { randomized: g.randomized || m.tc.randomized, ..m.tc.clone() }), format!("{why}, the project's TC frames")),
         other => (other, why),
     }
 }
@@ -208,8 +241,8 @@ impl FrameProfileExt {
     }
 }
 
-fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&MibSet>, m: &Mission, done: bool) {
-    let (rows, lost, junk) = convert(items, set, m);
+fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&MibSet>, m: &Mission, framing: Option<&Framing>, done: bool) {
+    let (rows, lost, junk) = convert(items, set, m, framing);
     if !rows.is_empty() || !lost.is_empty() || !junk.is_empty() || done {
         send(PageEvent::StreamRows { buffer, rows, lost, junk, done });
     }
@@ -241,7 +274,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         let _ = (&mut file).take(TEXT_LIMIT).read_to_end(&mut text);
         if let Some(items) = stream::hex_lines(&String::from_utf8_lossy(&text)) {
             send(PageEvent::StreamInfo { buffer, framing: "hex lines · a text log with a packet in hex on a line".to_string() });
-            send_rows(&send, buffer, items, set.as_deref(), &m, true);
+            send_rows(&send, buffer, items, set.as_deref(), &m, None, true);
             return;
         }
     }
@@ -250,14 +283,14 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         None => guessed(&head, &m),
     };
     send(PageEvent::StreamInfo { buffer, framing: format!("{} · {why}", framing.label()) });
-    let mut splitter = Splitter::new(framing);
+    let mut splitter = Splitter::new(framing.clone());
     let set = set.as_deref();
     let mut items = splitter.feed(&head);
     let mut total = 0;
     let mut chunk = vec![0u8; 1024 * 1024];
     loop {
         total += items.iter().filter(|i| matches!(i, Item::Packet { .. })).count();
-        send_rows(&send, buffer, std::mem::take(&mut items), set, &m, false);
+        send_rows(&send, buffer, std::mem::take(&mut items), set, &m, Some(&framing), false);
         if stop.load(Ordering::Relaxed) || total >= MAX_ROWS {
             if total >= MAX_ROWS {
                 send(PageEvent::StreamStatus { buffer, text: format!("stopped at {MAX_ROWS} packets"), ok: false });
@@ -269,7 +302,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
             Ok(n) => items = splitter.feed(&chunk[..n]),
         }
     }
-    send_rows(&send, buffer, splitter.finish(), set, &m, true);
+    send_rows(&send, buffer, splitter.finish(), set, &m, Some(&framing), true);
 }
 
 /// Where a stream page's packets come from.
@@ -308,7 +341,7 @@ fn run_live(src: Source, set: Option<Arc<MibSet>>, m: Mission, buffer: BufferId,
         if let Some(label) = decided {
             info(label);
         }
-        send_rows(&send, buffer, items, set.as_deref(), &m, false);
+        send_rows(&send, buffer, items, set.as_deref(), &m, splitter.splitter.as_ref().map(Splitter::framing), false);
     };
     let (scheme, rest) = src.address.split_once("://").unwrap_or(("tcp", src.address.as_str()));
     while !stop.load(Ordering::Relaxed) {
@@ -533,16 +566,48 @@ impl App {
     pub(super) fn apply_stream_event(&mut self, event: PageEvent) {
         match event {
             PageEvent::StreamRows { buffer, rows, lost, junk, done } => {
+                // What the followed parameter needs, before the page is borrowed.
+                let follow = self.stream_page(buffer).and_then(|p| Some((p.key.clone(), p.param_def?)));
+                let follow = follow.and_then(|(key, def)| Some((self.mib_set_ready(&key)?, self.mission(key.project.as_deref()), def)));
                 let Some(p) = self.stream_page(buffer) else { return };
+                let from = p.rows.len();
                 p.rows.extend(rows);
+                let mut notice = None;
+                if let (Some((set, mission, def)), Some((name, samples))) = (&follow, &mut p.param) {
+                    let fresh = samples_of(&p.rows, from, set, mission, *def);
+                    // A live source says when the parameter crosses a limit.
+                    let mut was = samples.last().and_then(|s| s.off.clone());
+                    for s in fresh.iter().filter(|s| !(s.partial && s.off.is_none())) {
+                        if s.off != was && p.live {
+                            let at = s.time.clone().unwrap_or_default();
+                            notice = Some(match &s.off {
+                                Some((why, hard)) => (format!("{}: {name} {why} -- {} at {at}", p.title, s.value), *hard),
+                                None => (format!("{}: {name} back within limits -- {} at {at}", p.title, s.value), false),
+                            });
+                        }
+                        was = s.off.clone();
+                    }
+                    samples.extend(fresh);
+                }
                 if p.rows.len() > MAX_ROWS {
                     let drop = p.rows.len() - MAX_ROWS;
                     p.rows.drain(..drop);
+                    if let Some((_, samples)) = &mut p.param {
+                        samples.retain(|s| s.row >= drop);
+                        for s in samples.iter_mut() {
+                            s.row -= drop;
+                        }
+                    }
                 }
                 p.lost.extend(lost);
                 p.junk.extend(junk);
                 p.done |= done;
                 p.arrived();
+                match notice {
+                    Some((text, true)) => self.set_error(text),
+                    Some((text, false)) => self.set_message(text),
+                    None => {}
+                }
             }
             PageEvent::StreamInfo { buffer, framing } => {
                 if let Some(p) = self.stream_page(buffer) {
@@ -580,10 +645,11 @@ impl App {
             }
             A::Unit(row) => {
                 let Some(p) = self.stream_page(id) else { return };
-                let Some((unit, offset)) = p.rows.get(row).and_then(|r| Some((r.unit.clone()?, r.offset))) else { return };
+                let Some((unit, offset, profile)) = p.rows.get(row).and_then(|r| Some((r.unit.clone()?, r.offset, r.unit_profile.clone()))) else { return };
                 let kind = if unit.starts_with(&fenix_ccsds::coding::CLTU_START) { "CLTU" } else { "CADU" };
                 let source = format!("{} @0x{offset:X} · the {kind} it came in", p.title);
-                self.open_packet_page(unit.to_vec(), source);
+                // Read as the source read it, not only as the settings say.
+                self.open_packet_page_as(unit.to_vec(), source, profile);
             }
             A::Hex(offset) => {
                 if let Some(StreamSource::File(path, _)) = self.stream_sources.get(&id).cloned() {
@@ -641,23 +707,10 @@ impl App {
         let name = set.get(param).name.clone();
         let carriers: Vec<String> = set.used_by(param).iter().map(|d| set.get(*d).name.clone()).collect();
         let Some(p) = self.stream_page(id) else { return };
-        let mut samples = Vec::new();
-        for (i, r) in p.rows.iter().enumerate() {
-            if !r.spid.as_ref().is_some_and(|s| carriers.contains(s)) {
-                continue;
-            }
-            let Some((root, _)) = fenix_mib::packets::decode_packet(Some(&set), &r.bytes, &mission.profile, mission.base) else { continue };
-            let Some(f) = root.walk().into_iter().map(|(_, f)| f).find(|f| f.link == Some(fenix_ccsds::Link::Parameter(name.clone()))).cloned() else { continue };
-            let number = f.value.split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
-            let off = match &f.check {
-                Some(Check::Warn(m)) => Some((m.clone(), false)),
-                Some(Check::Bad(m)) => Some((m.clone(), true)),
-                _ => None,
-            };
-            samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off });
-        }
+        let samples = samples_of(&p.rows, 0, &set, &mission, param);
         let n = samples.len();
         p.param = Some((name.clone(), samples));
+        p.param_def = Some(param);
         p.note = Some((format!("{name}: {n} samples in {} packets carrying it", carriers.join(", ")), n == 0));
         if let Some(p) = self.stream_page(id) {
             p.key(crate::page::Key::Char('3'));
@@ -802,6 +855,26 @@ mod tests {
         app.stream_write(id, stream_page::Write::Csv);
         let csv = std::fs::read_to_string(dir.join("run-NTH00123.csv")).unwrap();
         assert!(csv.starts_with("time,raw,value,limits\n2026-09-27 14:32:05.500,3000,\"45.0 degC\""), "{csv}");
+
+        // Live: new rows add samples, and a crossing is said in the modeline.
+        let live = app.open_page(PageModel::Stream(Box::new(StreamPage::new(key, "bench".into(), true))));
+        app.stream_follow(live, param);
+        let m = app.mission(None);
+        let with_raw = |seq: u16, raw: u16| {
+            let mut b = tm(seq);
+            b.truncate(27);
+            b[22..24].copy_from_slice(&raw.to_be_bytes());
+            let crc = fenix_ccsds::crc::ccitt16(&b);
+            b.extend(crc.to_be_bytes());
+            row_of(b, 0, None, Some(&set), &m)
+        };
+        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(1, 2000), with_raw(2, 2100)], lost: Vec::new(), junk: Vec::new(), done: false });
+        assert_eq!(app.stream_page(live).unwrap().param.as_ref().unwrap().1.len(), 2, "samples follow the rows");
+        assert!(app.status_message.as_ref().is_none_or(|s| !s.text.starts_with("bench: ")), "within: nothing said");
+        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(3, 3000)], lost: Vec::new(), junk: Vec::new(), done: false });
+        let said = app.status_message.as_ref().map(|s| s.text.clone()).unwrap_or_default();
+        assert!(said.starts_with("bench: NTH00123") && said.contains("45.0 degC"), "{said}");
+        assert_eq!(app.stream_page(live).unwrap().crossings().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -822,7 +895,7 @@ mod tests {
         let m = app.mission(key.project.as_deref());
         let buffer = app.focused_buffer_id();
         let sources = app.ccsds_sources();
-        assert_eq!(sources.len(), 7, "{sources:?}");
+        assert_eq!(sources.len(), 8, "{sources:?}");
         for src in sources {
             let events: Arc<std::sync::Mutex<Vec<PageEvent>>> = Arc::default();
             let sink = events.clone();
@@ -830,7 +903,8 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let (set, m, name, stop2) = (set.clone(), m.clone(), src.name.clone(), stop.clone());
             let worker = std::thread::spawn(move || run_live(src, Some(set), m, buffer, send, stop2));
-            std::thread::sleep(Duration::from_secs(8));
+            // A telecommand goes up every 3 s: the uplink gets longer.
+            std::thread::sleep(Duration::from_secs(if name.contains("CLTU") { 15 } else { 8 }));
             stop.store(true, Ordering::Relaxed);
             worker.join().unwrap();
             let events = events.lock().unwrap();
@@ -846,11 +920,39 @@ mod tests {
                 // A CLTU every 3 s, some damaged on purpose and rightly
                 // turned away: count both.
                 let turned_away = problems.iter().filter(|p| p.starts_with("CLTU")).count();
-                assert!(tcs >= 1 && tcs + turned_away >= 2 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
+                assert!(tcs >= 1 && tcs + turned_away >= 3 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
             } else {
                 assert!(hk >= 10, "{line}");
             }
         }
+    }
+
+    #[test]
+    fn a_rows_unit_is_inspected_as_its_source_read_it() {
+        // A randomized uplink the project doesn't know is randomized:
+        // guess saw it, and f must read the CLTU the same way.
+        let m = App::with_file(None).mission(None);
+        assert!(!m.tc.randomized);
+        let tc = tm(5);
+        let len = 5 + 1 + tc.len() + 2;
+        let mut frame = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, 0, 0xC0];
+        frame.extend_from_slice(&tc);
+        let crc = fenix_ccsds::crc::ccitt16(&frame);
+        frame.extend_from_slice(&crc.to_be_bytes());
+        fenix_ccsds::coding::derandomize(&mut frame);
+        let mut bytes = vec![0x55; 8];
+        bytes.extend(fenix_ccsds::coding::cltu_encode(&frame));
+        let (framing, _) = stream::guess(&bytes);
+        let items = stream::split(&bytes, framing.clone());
+        let (rows, _, _) = convert(items, None, &m, Some(&framing));
+        let row = &rows[0];
+        assert!(row.unit_profile.as_ref().is_some_and(|p| p.randomized), "{:?}", row.unit_profile);
+        let mut as_read = m.clone();
+        as_read.tc = row.unit_profile.clone().unwrap();
+        let (root, _) = crate::app::ccsds_host::decode_bytes(row.unit.as_ref().unwrap(), crate::packet_page::DecodeAs::Cltu, None, &as_read);
+        assert!(!root.any_bad(), "{root:#?}");
+        let (root, _) = crate::app::ccsds_host::decode_bytes(row.unit.as_ref().unwrap(), crate::packet_page::DecodeAs::Cltu, None, &m);
+        assert!(root.any_bad(), "with the project's settings alone it doesn't read");
     }
 
     #[test]

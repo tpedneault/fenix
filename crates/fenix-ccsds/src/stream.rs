@@ -54,8 +54,14 @@ impl Framing {
             }
             Framing::Cltus(p) => {
                 let mut s = "CLTUs · TC frames".to_string();
+                if p.randomized {
+                    s.push_str(" · randomized");
+                }
                 if p.tc_segment_header {
                     s.push_str(" · segment headers");
+                }
+                if !p.bch_correct {
+                    s.push_str(" · BCH detecting only");
                 }
                 if p.fecf {
                     s.push_str(" · FECF");
@@ -323,7 +329,7 @@ impl Splitter {
             }
             let why = if std::mem::take(&mut self.abandoned) { "the rest of an abandoned CLTU" } else { "not a CLTU" };
             self.flush_junk(out, why);
-            let Some(r) = coding::cltu_read(&self.buf) else {
+            let Some(mut r) = coding::cltu_read(&self.buf, p.bch_correct) else {
                 if self.buf.len() > LONGEST {
                     self.skip(2, out, "");
                     self.flush_junk(out, "a start sequence with no CLTU after it");
@@ -333,6 +339,11 @@ impl Splitter {
             };
             let offset = self.base;
             let raw = self.take(r.end);
+            // The uplink's randomizer ran over the frame before it was
+            // coded, so it comes off after the code blocks.
+            if p.randomized {
+                coding::derandomize(&mut r.data);
+            }
             let cut = match r.ended {
                 coding::CltuEnd::Tail => None,
                 coding::CltuEnd::BadBlock(n) => Some(n),
@@ -446,12 +457,16 @@ pub fn split(bytes: &[u8], framing: Framing) -> Vec<Item> {
 /// A good guess at how `bytes` (the start of a recording) is framed, and
 /// why: what `recognize` finds, or packets.
 pub fn guess(bytes: &[u8]) -> (Framing, String) {
-    recognize(bytes).unwrap_or_else(|| (Framing::Packets, "no framing recognized -- reading as packets".into()))
+    recognize(bytes, false).unwrap_or_else(|| (Framing::Packets, "no framing recognized -- reading as packets".into()))
 }
 
 /// How `bytes` are framed, when they show it: sync markers at a steady
 /// stride, a CLTU, packet headers chaining, or chaining after records.
-pub fn recognize(bytes: &[u8]) -> Option<(Framing, String)> {
+///
+/// `sure`: only what can't be chance -- three packets chaining, not one
+/// that happens to fit a short file -- for a live source deciding on
+/// its first octets.
+pub fn recognize(bytes: &[u8], sure: bool) -> Option<(Framing, String)> {
     let asm = coding::find_asm(bytes);
     if asm.len() >= 3 {
         let stride = asm[1] - asm[0];
@@ -488,13 +503,23 @@ pub fn recognize(bytes: &[u8]) -> Option<(Framing, String)> {
         }
         n
     };
-    if let Some(r) = coding::cltu_read(bytes) {
+    if let Some(r) = coding::cltu_read(bytes, true) {
         if r.ended == coding::CltuEnd::Tail && bytes[..r.start].iter().all(|b| matches!(b, 0x55 | 0xAA)) {
-            let p = FrameProfile { kind: FrameKind::Tc, asm: false, ocf: false, fecf: true, tc_segment_header: true, ..Default::default() };
-            return Some((Framing::Cltus(p), "a CLTU start sequence, code blocks and a tail sequence".into()));
+            // Randomized when only the de-randomized header gives a TC
+            // frame whose length the CLTU carries.
+            let fits = |d: &[u8]| {
+                let len = crate::bits::get(d, 22, 10).map(|n| n as usize + 1);
+                d.first().is_some_and(|b| b >> 6 == 0) && len.is_some_and(|l| l <= d.len() && d.len() - l < 7)
+            };
+            let mut plain = r.data.clone();
+            coding::derandomize(&mut plain);
+            let randomized = !fits(&r.data) && fits(&plain);
+            let p = FrameProfile { kind: FrameKind::Tc, asm: false, ocf: false, fecf: true, tc_segment_header: true, randomized, ..Default::default() };
+            let why = if randomized { "a CLTU start sequence, code blocks and a tail sequence; a randomized TC frame" } else { "a CLTU start sequence, code blocks and a tail sequence" };
+            return Some((Framing::Cltus(p), why.into()));
         }
     }
-    if run(0, 0) >= 3 || (run(0, 0) >= 1 && bytes.len() < 4096) {
+    if run(0, 0) >= 3 || (!sure && run(0, 0) >= 1 && bytes.len() < 4096) {
         return Some((Framing::Packets, "packet headers chain from the first octet".into()));
     }
     for header in 1..=64 {
@@ -548,7 +573,7 @@ mod tests {
         };
         add(coding::cltu_encode(&tc_frame(0, &tc(1))));
         let mut flipped = coding::cltu_encode(&tc_frame(1, &tc(2)));
-        flipped[2 + 8 + 3] ^= 0x01; // in the second code block
+        flipped[2 + 8 + 3] ^= 0x03; // two bits in the second code block: beyond correction
         add(flipped);
         let mut fecf = tc_frame(2, &tc(3));
         let n = fecf.len();
@@ -578,6 +603,31 @@ mod tests {
         let items = split(&no_tail, Framing::Cltus(FrameProfile { kind: FrameKind::Tc, fecf: true, tc_segment_header: true, ..Default::default() }));
         assert!(!items.iter().any(|i| matches!(i, Item::Junk { .. })), "{items:?}");
         assert_eq!(packets_of(&items), vec![tc(9), tc(10)]);
+    }
+
+    #[test]
+    fn a_randomized_uplink_is_recognized_and_a_wrong_bit_put_right() {
+        let tc = |seq| Packet::build(PrimaryHeader { is_tc: true, secondary_header: true, apid: 0x3F2, seq_flags: 3, seq_count: seq, ..Default::default() }, &[0x29, 8, 1, 0, 0, 12, 3, 2]).bytes;
+        let mut stream = Vec::new();
+        for seq in 0..4u8 {
+            let mut frame = tc_frame(seq, &tc(u16::from(seq)));
+            coding::derandomize(&mut frame); // the randomizer is its own inverse
+            let mut cltu = coding::cltu_encode(&frame);
+            if seq == 2 {
+                cltu[2 + 8 + 4] ^= 0x20; // one bit: put right in correcting mode
+            }
+            stream.extend_from_slice(&[0x55; 8]);
+            stream.extend(cltu);
+        }
+        let (framing, why) = guess(&stream);
+        assert!(matches!(&framing, Framing::Cltus(p) if p.randomized && p.bch_correct), "{why}");
+        let items = split(&stream, framing.clone());
+        assert_eq!(packets_of(&items), (0..4).map(tc).collect::<Vec<_>>(), "{items:?}");
+        assert!(items.iter().all(|i| !matches!(i, Item::Frame { bad: Some(_), .. })));
+        // In detecting mode the same wrong bit cuts that CLTU short.
+        let Framing::Cltus(p) = framing else { unreachable!() };
+        let items = split(&stream, Framing::Cltus(FrameProfile { bch_correct: false, ..p }));
+        assert_eq!(packets_of(&items).len(), 3);
     }
 
     /// The packets found, idle ones left out.

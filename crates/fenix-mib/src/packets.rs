@@ -203,6 +203,8 @@ pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, ba
     let e = set.get(spid);
     let start = params_start(set, spid, profile, base);
     let mut children = Vec::new();
+    // (field, parameter, engineering value) of each limit to check.
+    let mut checks = Vec::new();
     for slot in detail::packet_slots(set, spid) {
         let Some(param) = slot.param else {
             children.push(Field::new(&slot.name, 0, 0, "", "not in the MIB").checked(Check::Warn("no PCF row".into())));
@@ -225,34 +227,52 @@ pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, ba
                 None => (raw.display(), raw.as_f64()),
             };
             let shown = if unit.is_empty() || eng.is_none() { value } else { format!("{value} {unit}") };
-            let mut f = Field::new(name, at, width, raw.display(), shown).linked(Link::Parameter(slot.name.clone()));
             if let Some(y) = eng {
-                for l in detail::limits(set, param) {
-                    let (Some(lo), Some(hi)) = (l.low.trim().parse::<f64>().ok(), l.high.trim().parse::<f64>().ok()) else { continue };
-                    if let Some((p, v)) = &l.when {
-                        // A limit that applies only while another parameter has a value:
-                        // skipped unless that parameter is in this packet with that value.
-                        let other = children.iter().find(|c: &&Field| &c.name == p).map(|c| c.raw.clone());
-                        if other.as_deref() != Some(v.trim()) {
-                            continue;
-                        }
-                    }
-                    if y < lo || y > hi {
-                        let c = format!("{} limit {lo}..{hi}", l.kind);
-                        f.check = Some(if l.kind == "hard" { Check::Bad(c) } else { Check::Warn(c) });
-                        break;
-                    }
-                    f.check.get_or_insert(Check::Ok(format!("within {} {lo}..{hi}", l.kind)));
+                checks.push((children.len(), param, y));
+            }
+            children.push(Field::new(name, at, width, raw.display(), shown).linked(Link::Parameter(slot.name.clone())));
+        }
+    }
+    // Limits, once every parameter is read: one that applies only while
+    // another parameter has a value needs that value, wherever it is in
+    // the packet.
+    for (i, param, y) in checks {
+        let mut check = None;
+        // Limits that couldn't be checked: their parameter isn't here.
+        let mut unknown: Vec<String> = Vec::new();
+        for l in detail::limits(set, param) {
+            let (Some(lo), Some(hi)) = (l.low.trim().parse::<f64>().ok(), l.high.trim().parse::<f64>().ok()) else { continue };
+            if let Some((p, v)) = &l.when {
+                // Skipped unless that parameter is in this packet with that value.
+                let other = children.iter().find(|c| &c.name == p).map(|c| c.raw.clone());
+                if other.is_none() && !unknown.contains(p) {
+                    unknown.push(p.clone());
+                }
+                if other.as_deref() != Some(v.trim()) {
+                    continue;
                 }
             }
-            children.push(f);
+            if y < lo || y > hi {
+                let c = format!("{} limit {lo}..{hi}", l.kind);
+                check = Some(if l.kind == "hard" { Check::Bad(c) } else { Check::Warn(c) });
+                break;
+            }
+            check.get_or_insert(Check::Ok(format!("within {} {lo}..{hi}", l.kind)));
         }
+        if let (Some(Check::Ok(m)), false) = (&mut check, unknown.is_empty()) {
+            m.push_str(&format!(" -- {} {NOT_HERE}", unknown.join(", ")));
+        }
+        children[i].check = check;
     }
     let mut g = Field::group(format!("SPID {} · {}", e.name, if e.alias.is_empty() { &e.description } else { &e.alias }), children);
     g.link = Some(Link::Spid(e.name.clone()));
     g.value = e.description.clone();
     g
 }
+
+/// Ends a limit check's message when a limit that depends on another
+/// parameter couldn't be checked: that parameter isn't in the packet.
+pub const NOT_HERE: &str = "isn't in this packet, so its limit isn't checked";
 
 /// Which telecommand a TC packet is: same type, subtype and APID, and
 /// every fixed argument where the packet has it.
@@ -532,6 +552,38 @@ pub(crate) mod tests {
         assert_eq!(f("NTH00123").bit, 22 * 8);
         assert!(root.find("user data").is_none());
         assert!(root.find("packet error control").unwrap().check == Some(Check::Ok("matches".into())));
+    }
+
+    #[test]
+    fn a_limit_that_depends_on_a_later_parameter_still_applies() {
+        // NTH00123's soft limit (-10..50) holds while NTH00201 is 2, and
+        // NTH00201 comes after it in the packet.
+        let ops = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        let set = MibSet::load(vec![crate::MibRoot { label: "OPS".into(), path: ops }], None);
+        let packet = |raw: u16, mode: u8| {
+            let mut b = vec![0x0B, 0xF2, 0xC1, 0x23, 0x00, 0x16, 0x20, 0x03, 0x19, 0x00, 0x42, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x01, 0x01];
+            b.extend(raw.to_be_bytes());
+            b.extend([0x0A, 0x28, mode]);
+            let crc = fenix_ccsds::crc::ccitt16(&b);
+            b.extend(crc.to_be_bytes());
+            b
+        };
+        let check = |raw, mode| {
+            let (root, _) = decode_packet(Some(&set), &packet(raw, mode), &Profile::default(), OffsetBase::AfterHeaders).unwrap();
+            root.find("NTH00123").unwrap().check.clone()
+        };
+        assert_eq!(check(3153, 2), Some(Check::Warn("soft limit -10..50".into())), "AUTO: the soft limit");
+        assert_eq!(check(3153, 1), Some(Check::Ok("within hard -20..60".into())), "ON: only the hard one");
+        assert_eq!(check(2000, 2), Some(Check::Ok("within soft -10..50".into())));
+        // The diagnostic packet (SID 2) doesn't carry NTH00201: its soft
+        // limit can't be checked there, and says so.
+        let mut diag = vec![0x0B, 0xF2, 0xC1, 0x24, 0x00, 0x1B, 0x20, 0x03, 0x19, 0x00, 0x43, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x02, 0x00];
+        diag.extend(3153u16.to_be_bytes());
+        diag.extend([0u8; 8]);
+        let crc = fenix_ccsds::crc::ccitt16(&diag);
+        diag.extend(crc.to_be_bytes());
+        let (root, _) = decode_packet(Some(&set), &diag, &Profile::default(), OffsetBase::AfterHeaders).unwrap();
+        assert_eq!(root.find("NTH00123").unwrap().check, Some(Check::Ok(format!("within hard -20..60 -- NTH00201 {NOT_HERE}"))));
     }
 
     #[test]

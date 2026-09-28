@@ -30,6 +30,48 @@ label = "Register"
 default = true
 hint = "add it as a [mib] root in config.ini"
 
+[[ask]]
+key = "pus"
+label = "PUS"
+choices = ["c", "a", "none"]
+default = "c"
+hint = "ECSS-E-ST-70-41C (c), 70-41A (a), or plain space packets"
+
+[[ask]]
+key = "tm_time"
+label = "TM time"
+default = "cuc 4.2"
+hint = "the time in a TM secondary header: cuc 4.2, cds 16, add p for a P-field"
+
+[[ask]]
+key = "recordings"
+label = "Recordings"
+default = true
+hint = "a recordings/ folder for dumps and captures (SPC k f opens one)"
+
+[[file]]
+path = ".fenix/settings.toml"
+content = """
+# How this mission's packets are laid out: SPC , -> CCSDS & PUS changes
+# it, and the doctor checks the MIB agrees.
+[ccsds]
+pus = "{{pus}}"
+tm_time = "{{tm_time}}"
+epoch = "1958-01-01 TAI"
+crc = "ccitt16"
+"""
+
+[[file]]
+path = "recordings/README.md"
+content = """
+# Recordings
+
+Telemetry dumps and captures of {{name}}. `SPC k f` opens one as a list
+of packets, and `SPC k l` follows a live source named in the project's
+settings (`ccsds.sources`).
+"""
+when = "recordings"
+
 [[file]]
 path = "vdf.dat"
 content = "{{label}}\t{{name}}\n"

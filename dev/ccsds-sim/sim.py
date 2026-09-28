@@ -14,10 +14,12 @@ every way Fenix can listen:
                 a code word beyond repair, and frames dropped
   tcp  :10013   the same CADUs with an FECF, one failing now and then
   tcp  :10012   the uplink: the MIB's telecommands in Type-A TC frames
-                (segment header, FECF) in CLTUs, with faults -- a flipped
-                bit in a code block, a bad FECF, a frame lost and sent
-                again, a missing tail sequence -- and TM(1,x) reports
-                answering the ones the spacecraft took
+                (segment header, FECF) in CLTUs, with faults -- one bit
+                wrong in a code block (corrected on board), two (turned
+                away), a bad FECF, a frame lost and sent again, a missing
+                tail sequence -- and TM(1,x) reports answering the ones the
+                spacecraft took
+  tcp  :10014   the same uplink with the TC frames randomized
   udp           one packet per datagram to SIM_UDP_TARGET
   nats          one packet per message on SIM_NATS_SUBJECT
   file          packets appended to SIM_FILE, cut back to empty when it
@@ -394,11 +396,27 @@ class Telecommander:
         s = self.seq[apid] = (self.seq.get(apid, -1) + 1) & 0x3FFF
         return pus_tc(apid, s, service, subtype, data(self.rng))
 
+    def up(self, frame, flips=(), tail=True):
+        """The frame as a stretch of uplink, plain and randomized: the
+        acquisition sequence, then its CLTU with `flips` (octet, mask)
+        applied to the coded octets and the tail sequence left off when
+        not `tail`. The randomizer runs over the frame before it's coded."""
+        out = []
+        for randomize in (False, True):
+            f = bytes(b ^ r for b, r in zip(frame, randomizer(len(frame)))) if randomize else bytes(frame)
+            unit = bytearray(cltu(f))
+            for at, mask in flips:
+                unit[at] ^= mask
+            if not tail:
+                unit = unit[:-8]
+            out.append(b"\x55" * 16 + bytes(unit))
+        return tuple(out)
+
     def next(self):
-        """The next stretch of uplink: acquisition sequence and a CLTU."""
+        """The next stretch of uplink: acquisition sequence and a CLTU,
+        plain and randomized (the same frames, the same faults)."""
         self.count += 1
         c, link = self.count, self.link
-        acquisition = b"\x55" * 16
         if link.retransmit and not self.queue:
             s = link.nr
             while s != self.vs:
@@ -411,13 +429,13 @@ class Telecommander:
             # A control command (Type-BC): Unlock. No segment header, no packet.
             self.note("BC Unlock")
             link.lockout = False
-            return acquisition + cltu(tc_frame(self.SCID, self.VC, 0, b"\x00", bypass=True, control=True))
+            return self.up(tc_frame(self.SCID, self.VC, 0, b"\x00", bypass=True, control=True))
         if c % 23 == 11 and not self.queue:
             # A Type-BD frame: taken without the sequence check.
             p = self.packet()
             self.craft.received(p)
             self.note("BD frame")
-            return acquisition + cltu(tc_frame(self.SCID, self.VC, 0, p, bypass=True))
+            return self.up(tc_frame(self.SCID, self.VC, 0, p, bypass=True))
         if c % 17 == 7 and not self.queue:
             # A frame lost on the way up: its N(S) is used, it never arrives.
             self.sent[self.vs] = self.packet()
@@ -432,12 +450,15 @@ class Telecommander:
         if c % 13 == 5 and not self.queue:
             frame[-1] ^= 0xFF
             fault = "FECF"
-        unit = bytearray(cltu(bytes(frame)))
-        if c % 11 == 3 and not self.queue and len(unit) > 2 + 8 * 3:
-            unit[2 + 8 + 2] ^= 0x08  # a bit flipped in code block 2
+        flips, tail = [], True
+        if c % 11 == 3 and not self.queue and len(frame) > 14:
+            flips = [(2 + 8 + 2, 0x18)]  # two bits in code block 2: beyond correction
             fault = "BCH"
+        elif c % 5 == 1 and fault is None:
+            flips = [(2 + 8 + 4, 0x04)]  # one bit: the decoder puts it right
+            self.note(f"N(S) {ns}: one bit wrong in code block 2, corrected on board")
         if c % 19 == 9 and fault is None:
-            unit = unit[:-8]  # no tail sequence: the idle after it ends the CLTU
+            tail = False  # no tail sequence: the idle after it ends the CLTU
             self.note("no tail sequence")
         if fault:
             self.note(f"N(S) {ns}: {fault} fails, turned away")
@@ -449,7 +470,7 @@ class Telecommander:
             link.nr = (link.nr + 1) & 0xFF
             link.retransmit = False
             self.craft.received(packet, fails=c % 7 == 2)
-        return acquisition + bytes(unit)
+        return self.up(frame, flips, tail)
 
     def note(self, what):
         self.log.append((self.count, what))
@@ -585,6 +606,8 @@ def selftest():
     tc = pus_tc(1010, 7, 8, 1, bytes([12, 3, 2]))
     assert tc.hex() == "1bf2c007000929080100000c03023fa3", tc.hex()
     unit = cltu(tc_frame(0x0A5, 0, 0, tc))
+    plain, randomized = Telecommander(random.Random(1), Spacecraft(random.Random(1)), Link()).next()
+    assert plain[16:18] == randomized[16:18] == CLTU_START and plain != randomized
     assert unit[:2] == CLTU_START and unit[-8:] == CLTU_TAIL and (len(unit) - 10) % 8 == 0
     assert bch_parity(bytes(7)) == 0xFE and bch_parity(bytes([0xC5] * 7)) != 0x79, "the tail fails its parity"
     link = Link()
@@ -602,6 +625,7 @@ def main():
     ap.add_argument("--capture", help="write CADUs to this file instead of serving")
     ap.add_argument("--fecf", help="with --capture: also write CADUs with an FECF to this file")
     ap.add_argument("--cltus", help="with --capture: also write the uplink's CLTUs to this file")
+    ap.add_argument("--cltus-randomized", help="with --capture: also write the randomized uplink to this file")
     ap.add_argument("--packets", help="with --capture: also write the TM packets to this file")
     ap.add_argument("--seconds", type=float, default=60, help="with --capture: how much time to simulate")
     ap.add_argument("--seed", type=int, default=int(os.environ.get("SIM_SEED", "0")) or None)
@@ -617,7 +641,7 @@ def main():
     if a.capture:
         start = datetime(2026, 9, 27, 14, 30, tzinfo=timezone.utc).timestamp()
         sink = lambda path: open(path or os.devnull, "wb")
-        with sink(a.capture) as out, sink(a.fecf) as out_fecf, sink(a.cltus) as up, sink(a.packets) as pk:
+        with sink(a.capture) as out, sink(a.fecf) as out_fecf, sink(a.cltus) as up, sink(a.cltus_randomized) as up_r, sink(a.packets) as pk:
             for i in range(int(a.seconds * 2)):
                 for p in craft.tick(start + i / 2):
                     framer.add(p)
@@ -628,7 +652,9 @@ def main():
                     if cadu:
                         o.write(cadu)
                 if i % 6 == 3:
-                    up.write(uplink.next())
+                    plain, randomized = uplink.next()
+                    up.write(plain)
+                    up_r.write(randomized)
         log(f"wrote {framer.frames} frames to {a.capture}, {uplink.count} CLTUs")
         for n, what in uplink.log:
             log(f"  CLTU {n}: {what}")
@@ -639,6 +665,7 @@ def main():
     cadus = Fanout("cadus", int(env("SIM_TCP_CADUS", "10011")))
     cltus = Fanout("cltus", int(env("SIM_TCP_CLTUS", "10012")))
     cadus_fecf = Fanout("cadus with FECF", int(env("SIM_TCP_CADUS_FECF", "10013")))
+    cltus_r = Fanout("cltus, randomized", int(env("SIM_TCP_CLTUS_RANDOMIZED", "10014")))
     sinks = [packets]
     if env("SIM_UDP_TARGET"):
         sinks.append(Udp(env("SIM_UDP_TARGET")))
@@ -661,7 +688,9 @@ def main():
             if cadu:
                 out.send(cadu)
         if craft.ticks % 6 == 3:
-            cltus.send(uplink.next())
+            plain, randomized = uplink.next()
+            cltus.send(plain)
+            cltus_r.send(randomized)
             for n, what in uplink.log:
                 log(f"uplink {n}: {what}")
             uplink.log.clear()

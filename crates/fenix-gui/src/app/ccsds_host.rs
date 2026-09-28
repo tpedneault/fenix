@@ -27,6 +27,8 @@ pub(crate) struct Mission {
     pub(crate) frames: FrameProfile,
     /// Telecommand frames, as CLTUs carry them.
     pub(crate) tc: FrameProfile,
+    /// The nominal epoch, when a time correlation moved the profile's.
+    pub(crate) nominal_epoch: Option<Epoch>,
     pub(crate) checks_off: Vec<String>,
     /// What didn't parse, to say once.
     pub(crate) problems: Vec<String>,
@@ -93,6 +95,18 @@ impl App {
             }),
             None => Epoch::default(),
         };
+        let tm_time_for_correlation = TimeFormat::parse(&text("ccsds.tm_time", &c.ccsds_tm_time).unwrap_or_else(|| "cuc 4.2".into())).unwrap_or(TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false });
+        // A correlation says where the on-board clock really counts from.
+        let (epoch, nominal_epoch) = match text("ccsds.time_correlation", &c.ccsds_time_correlation).filter(|t| !t.trim().is_empty()) {
+            Some(t) => match fenix_ccsds::time::correlate(&t, tm_time_for_correlation, &leap) {
+                Ok(correlated) => (correlated, Some(epoch)),
+                Err(why) => {
+                    problems.push(format!("ccsds.time_correlation: {why}"));
+                    (epoch, None)
+                }
+            },
+            None => (epoch, None),
+        };
         let pec = Pec::parse(&text("ccsds.crc", &c.ccsds_crc).unwrap_or_default()).unwrap_or(Pec::Ccitt16);
         let pec = if text("ccsds.crc", &c.ccsds_crc).is_none() { Pec::Ccitt16 } else { pec };
         let base = OffsetBase::parse(&text("ccsds.plf_offset", &c.ccsds_plf_offset).unwrap_or_default()).unwrap_or_default();
@@ -118,6 +132,8 @@ impl App {
             ocf: false,
             fecf: flag("ccsds.tc_fecf", c.ccsds_tc_fecf, true),
             tc_segment_header: flag("ccsds.tc_segment_header", c.ccsds_tc_segment_header, true),
+            randomized: flag("ccsds.tc_randomized", c.ccsds_tc_randomized, false),
+            bch_correct: text("ccsds.tc_bch", &c.ccsds_tc_bch).as_deref() != Some("detect"),
             vc_names: frames.vc_names.clone(),
             ..Default::default()
         };
@@ -125,7 +141,7 @@ impl App {
             Some(fenix_config::Value::List(l)) => l.clone(),
             _ => c.ccsds_checks_off.clone(),
         };
-        Mission { profile, base, frames, tc, checks_off, problems }
+        Mission { profile, base, frames, tc, nominal_epoch, checks_off, problems }
     }
 }
 
@@ -165,9 +181,16 @@ impl App {
 
     /// The inspector on `bytes`.
     pub(crate) fn open_packet_page(&mut self, bytes: Vec<u8>, source: String) {
+        self.open_packet_page_as(bytes, source, None);
+    }
+
+    /// The inspector on `bytes`, reading a CADU or CLTU with `profile`
+    /// when given (how the source that received it read it).
+    pub(crate) fn open_packet_page_as(&mut self, bytes: Vec<u8>, source: String, profile: Option<FrameProfile>) {
         let (key, _) = self.mib_key_here();
         let _ = self.mib_set(&key);
-        let page = PacketPage::new(key, bytes, source);
+        let mut page = PacketPage::new(key, bytes, source);
+        page.profile = profile;
         let id = self.open_page(PageModel::Packet(Box::new(page)));
         self.packet_redecode(id);
     }
@@ -175,9 +198,14 @@ impl App {
     /// Decodes the page's bytes again, as it reads them now.
     pub(super) fn packet_redecode(&mut self, id: BufferId) {
         let Some(PageModel::Packet(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let (key, bytes, reading) = (p.key.clone(), p.bytes.clone(), p.reading);
+        let (key, bytes, reading, profile) = (p.key.clone(), p.bytes.clone(), p.reading, p.profile.clone());
         let set = self.mib_set_ready(&key);
-        let mission = self.mission(key.project.as_deref());
+        let mut mission = self.mission(key.project.as_deref());
+        match profile {
+            Some(p) if p.kind == FrameKind::Tc => mission.tc = p,
+            Some(p) => mission.frames = p,
+            None => {}
+        }
         let (root, _) = decode_bytes(&bytes, reading, set.as_deref(), &mission);
         if let Some(state) = self.pages.get_mut(&id) {
             state.stale = true;
@@ -208,7 +236,23 @@ impl App {
             }
             A::Settings => self.ccsds_open_settings(),
             A::Follow(link) => self.follow_link(key, link),
+            A::FollowParameter(name) => match self.mib_set_ready(&key).and_then(|set| set.resolve(&name)) {
+                Some(def) => self.follow_on_stream(def),
+                None => self.set_error(format!("{name} isn't in the project's MIBs")),
+            },
         }
+    }
+
+    /// `t` on a TM parameter: follows it through the recording or live
+    /// source open most recently, shown on its Parameter tab.
+    pub(crate) fn follow_on_stream(&mut self, def: DefRef) {
+        let stream = self.buffers.mru().iter().copied().find(|b| matches!(self.pages.get(b).map(|s| &s.model), Some(PageModel::Stream(_))));
+        let Some(stream) = stream else {
+            self.set_error("no recording or live source open -- SPC k f or SPC k l, then t");
+            return;
+        };
+        self.show_page(stream);
+        self.stream_follow(stream, def);
     }
 
     /// The project's CCSDS settings.
@@ -242,13 +286,17 @@ impl App {
         }
         let (line, col) = self.open().buffer.line_col(&self.cursor());
         let text = self.open().buffer.line(line).to_string();
-        let (_, bytes) = fenix_ccsds::hex::around(text.trim_end_matches(['\n', '\r']), col)?;
+        let text = text.trim_end_matches(['\n', '\r']);
+        let (key, _) = self.mib_key_here();
+        let mission = self.mission(key.project.as_deref());
+        if let Some(hover) = time_hover(text, col, &mission) {
+            return Some(hover);
+        }
+        let (_, bytes) = fenix_ccsds::hex::around(text, col)?;
         if bytes.len() < 6 {
             return None;
         }
-        let (key, _) = self.mib_key_here();
         let set = if key.roots.is_empty() { None } else { self.mib_set(&key) };
-        let mission = self.mission(key.project.as_deref());
         let (root, def) = decode_bytes(&bytes, DecodeAs::Auto, set.as_deref(), &mission);
         let walk = root.walk();
         let bad: Vec<String> = walk
@@ -303,8 +351,125 @@ impl App {
             A::Open(path) => self.open_pdf_path(&path),
             A::Url(url) => self.open_url(url),
             A::Settings => self.open_settings_page(crate::settings_page::Scope::You, Some("ccsds.library")),
+            A::Search(query) => self.standards_search(id, query),
+            A::OpenAt(path, page) => {
+                self.open_pdf_path(&path);
+                self.pdf_goto_page(page + 1);
+            }
         }
     }
+
+    /// Searches every standard the page's folder has, each document
+    /// opened, searched and closed on the PDF worker; what's found goes
+    /// to the page as each is read.
+    fn standards_search(&mut self, id: BufferId, query: String) {
+        // A search already under way for this page is dropped.
+        let old: Vec<fenix_pdf::PdfDocKey> = self.standards_search.iter().filter(|(_, (page, _))| *page == id).map(|(k, _)| *k).collect();
+        for key in old {
+            self.standards_search.remove(&key);
+            self.pdf_send(fenix_pdf::PdfRequest::Close { key });
+        }
+        let Some(PageModel::Standards(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let files = p.searchable();
+        if files.is_empty() {
+            self.set_error("no standards to search -- f sets the folder they're in (ccsds.library)");
+            return;
+        }
+        if let Some(PageModel::Standards(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+            p.search_started(&query, files.len());
+        }
+        self.pdf_worker_ready();
+        for (standard, path) in files {
+            let key = fenix_pdf::PdfDocKey::new();
+            self.standards_search.insert(key, (id, standard));
+            self.pdf_send(fenix_pdf::PdfRequest::Open { key, path });
+        }
+        self.standards_query.insert(id, query);
+    }
+
+    /// A PDF worker reply for a standards search; whether it was one.
+    pub(super) fn standards_search_reply(&mut self, response: &fenix_pdf::PdfResponse) -> bool {
+        use fenix_pdf::PdfResponse as R;
+        let key = match response {
+            R::Opened { key, .. } | R::OpenFailed { key, .. } | R::SearchResults { key, .. } => *key,
+            _ => return false,
+        };
+        let Some(&(page, standard)) = self.standards_search.get(&key) else { return false };
+        let query = self.standards_query.get(&page).cloned().unwrap_or_default();
+        let found = |app: &mut App, hits: Vec<(u32, String)>, done: bool| {
+            if let Some(PageModel::Standards(p)) = app.pages.get_mut(&page).map(|s| &mut s.model) {
+                p.found(standard, hits, done);
+            }
+            if let Some(state) = app.pages.get_mut(&page) {
+                state.stale = true;
+            }
+        };
+        match response {
+            R::Opened { .. } => {
+                // Smart case, as the reader's search.
+                let match_case = query.chars().any(char::is_uppercase);
+                self.pdf_send(fenix_pdf::PdfRequest::Search { key, request_id: 0, query, match_case, from_page: 0 });
+            }
+            R::OpenFailed { .. } => {
+                self.standards_search.remove(&key);
+                found(self, Vec::new(), true);
+            }
+            R::SearchResults { matches, done, .. } => {
+                found(self, matches.iter().map(|m| (m.page_index, m.context.clone())).collect(), *done);
+                if *done {
+                    self.standards_search.remove(&key);
+                    self.pdf_send(fenix_pdf::PdfRequest::Close { key });
+                }
+            }
+            _ => {}
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
+    }
+}
+
+/// `K` on an on-board time: the word under the cursor, when it's the
+/// mission's time code -- `814B878A.8000` as the converter writes a CUC,
+/// or its octets in hex -- read from the mission's epoch.
+fn time_hover(line: &str, col: usize, m: &Mission) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let part = |c: char| c.is_ascii_hexdigit() || c == '.' || c == 'x' || c == 'X';
+    if !chars.get(col).is_some_and(|c| part(*c)) {
+        return None;
+    }
+    let (mut a, mut b) = (col, col);
+    while a > 0 && part(chars[a - 1]) {
+        a -= 1;
+    }
+    while b < chars.len() && part(chars[b]) {
+        b += 1;
+    }
+    let word: String = chars[a..b].iter().collect();
+    let word = word.trim_start_matches("0x").trim_start_matches("0X");
+    let hex = |s: &str| (s.len() % 2 == 0).then(|| fenix_ccsds::hex::parse(s)).flatten();
+    let bytes = match word.split_once('.') {
+        Some((c, f)) => {
+            let mut v = hex(c)?;
+            v.extend(hex(f)?);
+            v
+        }
+        None => hex(word)?,
+    };
+    let p = &m.profile;
+    if bytes.len() != p.tm_time.len() {
+        return None;
+    }
+    let d = fenix_ccsds::time::decode(&bytes, p.tm_time, p.epoch, &p.leap, 0)?;
+    let utc = fenix_ccsds::time::tai_to_utc(d.tai, &p.leap);
+    let correlated = if m.nominal_epoch.is_some() { " (correlated)" } else { "" };
+    Some(format!(
+        "{} · {}{correlated}\n{}\nSPC k T converts it",
+        p.tm_time.label(),
+        fenix_ccsds::time::format_utc(utc),
+        fenix_ccsds::time::format_doy(utc)
+    ))
 }
 
 /// Bytes decoded as `reading`, through the MIB when there is one: the
@@ -340,7 +505,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
             None => unreadable("shorter than a CFDP header"),
         },
         DecodeAs::Cltu => {
-            let Some((cltu, data)) = coding::cltu_decode(bytes) else { return unreadable("no CLTU start sequence (EB90)") };
+            let Some((cltu, sent)) = coding::cltu_decode(bytes, m.tc.bch_correct) else { return unreadable("no CLTU start sequence (EB90)") };
             let start = cltu.children.first().map(|f| f.bit / 8).unwrap_or(0);
             // Its layers side by side -- start sequence, TC frame, code
             // blocks, tail -- so the bytes take the frame's colour where
@@ -348,6 +513,13 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
             let mut coding = cltu.children;
             let tail = coding.pop();
             let mut children = coding;
+            // The randomizer ran over the frame before it was coded: it
+            // comes off after the code blocks (the fill was never on it).
+            let mut data = sent.clone();
+            if m.tc.randomized {
+                coding::derandomize(&mut data);
+                children.insert(1, Field::new("de-randomized", (start + 2) * 8, 0, "", "pseudo-randomizer removed from the frame").linked(Link::Standard(coding::TC_STANDARD, "Pseudo-Randomizer")));
+            }
             let mut def = None;
             if let Some((mut frame, info, bytes, problem)) = frames::tc_frame(&data, &m.tc) {
                 if let Some(why) = problem {
@@ -363,7 +535,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                 }
                 let fill = data.len() - bytes.len();
                 if fill > 0 {
-                    let all_fill = data[bytes.len()..].iter().all(|b| *b == 0x55);
+                    let all_fill = sent[bytes.len()..].iter().all(|b| *b == 0x55);
                     let f = Field::new("fill", bytes.len() * 8, fill * 8, format!("{fill} octets"), "after the frame, to fill the last code block")
                         .checked(if all_fill { Check::Ok("55".into()) } else { Check::Warn("not 0x55".into()) });
                     frame.children.push(f);
@@ -371,7 +543,8 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                 // The frame's octets are spread over the code blocks:
                 // seven to a block, each block followed by its parity.
                 frame.remap(&|o| coding::cltu_octet(start, o));
-                children.insert(1, frame);
+                let at = if m.tc.randomized { 2 } else { 1 };
+                children.insert(at, frame);
             }
             children.extend(tail);
             (Field::group("CLTU", children), def)
@@ -462,10 +635,36 @@ impl App {
             }
         }
         let origin = self.ccsds_origin();
-        let id = self.open_page(PageModel::Time(Box::new(TimePage::new(p, tai))));
+        let mut page = TimePage::new(p, tai);
+        page.nominal = mission.nominal_epoch;
+        let id = self.open_page(PageModel::Time(Box::new(page)));
         if let Some(o) = origin {
             self.mib_origins.insert(id, o);
         }
+    }
+
+    /// The time now as the mission writes it on board, for the modeline,
+    /// when the project turns `ccsds.clock` on. Worked out at most four
+    /// times a second.
+    pub(crate) fn mission_clock_text(&mut self) -> Option<String> {
+        let on = match self.project_settings.as_ref().and_then(|(_, p)| p.get("ccsds.clock")) {
+            Some(fenix_config::Value::Bool(b)) => *b,
+            _ => self.config.ccsds_clock.unwrap_or(false),
+        };
+        if !on {
+            return None;
+        }
+        let tick = chrono::Utc::now().timestamp_millis() / 250;
+        if let Some((at, text)) = &self.mission_clock {
+            if *at == tick {
+                return Some(text.clone());
+            }
+        }
+        let m = self.mission(None);
+        let tai = fenix_ccsds::time::utc_to_tai(chrono::Utc::now().naive_utc(), &m.profile.leap);
+        let text = format!("OBT {}", time_page::mission_code(tai, &m.profile));
+        self.mission_clock = Some((tick, text.clone()));
+        Some(text)
     }
 
     pub(super) fn time_page_action(&mut self, id: BufferId, action: time_page::Action) {
@@ -607,13 +806,81 @@ mod tests {
     /// ZTC08101 (line 3, AUTO, seq 7) in a Type-A TC frame with a segment
     /// header and an FECF, in a CLTU.
     fn cltu() -> Vec<u8> {
+        coding::cltu_encode(&frame())
+    }
+
+    fn frame() -> Vec<u8> {
         let tc = [0x1B, 0xF2, 0xC0, 0x07, 0x00, 0x09, 0x29, 0x08, 0x01, 0x00, 0x00, 0x0C, 0x03, 0x02, 0x3F, 0xA3];
         let len = 5 + 1 + tc.len() + 2;
         let mut f = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, 42, 0xC0];
         f.extend_from_slice(&tc);
         let crc = fenix_ccsds::crc::ccitt16(&f);
         f.extend_from_slice(&crc.to_be_bytes());
-        coding::cltu_encode(&f)
+        f
+    }
+
+    #[test]
+    fn k_on_an_on_board_time_says_when_it_was() {
+        let m = App::with_file(None).mission(None);
+        let line = "  at 814B878A.8000 the heater came on (814B878A8000, 0x814B878A8000)";
+        for word in ["814B878A.8000", "814B878A8000,", "0x814B878A8000"] {
+            let col = line.find(word).unwrap() + 3;
+            let hover = time_hover(line, col, &m).unwrap_or_else(|| panic!("{word}"));
+            assert!(hover.starts_with("CUC 4+2 · 2026-09-27 14:32:05.500") && hover.contains("2026-270T14:32:05.500Z"), "{hover}");
+        }
+        assert!(time_hover(line, line.find("heater").unwrap(), &m).is_none());
+        assert!(time_hover("0B F2 C1 23", 1, &m).is_none(), "not the time code's length");
+    }
+
+    #[test]
+    fn t_on_a_tm_parameter_follows_it_on_the_recording_open() {
+        let mut app = App::with_file(None);
+        let set = MibSet::load(vec![fenix_mib::MibRoot { label: "OPS".into(), path: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops") }], None);
+        let def = set.find(Kind::TmParam, 0, "NTH00123").unwrap();
+        app.follow_on_stream(def);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.starts_with("no recording or live source open")));
+    }
+
+    #[test]
+    fn a_time_correlation_moves_every_decode_and_the_clock_shows_on_board_time() {
+        let mut app = App::with_file(None);
+        assert!(app.mission(None).nominal_epoch.is_none());
+        assert!(app.mission_clock_text().is_none(), "off by default");
+        app.config.ccsds_time_correlation = Some("814B878A.8000 = 2026-09-27 14:31:55.5".into());
+        let m = app.mission(None);
+        assert!(m.nominal_epoch.is_some() && m.problems.is_empty(), "{:?}", m.problems);
+        // The example packet's time now reads 10 s earlier.
+        let tm = [0x0B, 0xF2, 0xC1, 0x23, 0x00, 0x16, 0x20, 0x03, 0x19, 0x00, 0x42, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x01, 0x01, 0x0B, 0xB8, 0x0A, 0x28, 0x02, 0x60, 0xE5];
+        let (root, _) = decode_bytes(&tm, DecodeAs::Packet, None, &m);
+        assert_eq!(root.find("time (CUC 4+2)").map(|f| f.value.clone()).as_deref(), Some("2026-09-27 14:31:55.500 UTC"));
+        app.config.ccsds_time_correlation = Some("soon = then".into());
+        assert!(app.mission(None).problems.iter().any(|p| p.starts_with("ccsds.time_correlation")));
+        app.config.ccsds_clock = Some(true);
+        let clock = app.mission_clock_text().unwrap();
+        assert!(clock.starts_with("OBT ") && clock.len() == "OBT 814B878A.8000".len(), "{clock}");
+    }
+
+    #[test]
+    fn a_randomized_cltu_with_a_wrong_bit_still_gives_its_telecommand() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        let set = MibSet::load(vec![fenix_mib::MibRoot { label: "OPS".into(), path: dir }], None);
+        let mut m = App::with_file(None).mission(None);
+        m.tc.randomized = true;
+        let mut f = frame();
+        coding::derandomize(&mut f); // randomizes: its own inverse
+        let mut bytes = coding::cltu_encode(&f);
+        bytes[2 + 8 + 3] ^= 0x10; // one bit in code block 2
+        let (root, def) = decode_bytes(&bytes, DecodeAs::Cltu, Some(&set), &m);
+        assert_eq!(def.map(|d| set.get(d).name.clone()).as_deref(), Some("ZTC08101"), "{root:#?}");
+        assert!(root.find("de-randomized").is_some());
+        let block = root.find("code block 2").unwrap();
+        assert_eq!(block.check, Some(Check::Warn("1 bit corrected".into())));
+        assert!(!root.any_bad(), "{root:#?}");
+        assert!(root.find("fill").and_then(|f| f.check.clone()) == Some(Check::Ok("55".into())), "fill is checked as sent");
+        // Detecting only: the same block fails.
+        m.tc.bch_correct = false;
+        let (root, _) = decode_bytes(&bytes, DecodeAs::Cltu, Some(&set), &m);
+        assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
     }
 
     #[test]
@@ -637,9 +904,9 @@ mod tests {
         let packet = root.walk().into_iter().map(|(_, x)| x).find(|x| x.name.starts_with("TC(8,1)") || x.name.contains("ZTC08101")).map(|x| x.bit / 8);
         assert_eq!(packet, Some(8), "{root:#?}");
         assert!(f("FECF").check == Some(Check::Ok("matches".into())));
-        // A flipped bit in the second code block: its parity fails.
+        // Two flipped bits in the second code block: beyond correction.
         let mut broken = bytes.clone();
-        broken[2 + 8 + 1] ^= 0x40;
+        broken[2 + 8 + 1] ^= 0x41;
         let (root, _) = decode_bytes(&broken, DecodeAs::Auto, Some(&set), &m);
         assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
     }

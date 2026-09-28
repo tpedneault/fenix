@@ -406,6 +406,81 @@ fn mib(d: &mut Doctor) {
     }
     if info.tables > 0 {
         d.push(Check::new(Section::Database, "browse", Health::Ok, "this project is its own MIB -- SPC k k lists what's in it"));
+        mission(d, &set);
+    }
+}
+
+/// The project's mission profile (`[ccsds]` in `.fenix/settings.toml`,
+/// Fenix's defaults where it says nothing), and whether the MIB agrees
+/// with it and with the standards; its recordings.
+fn mission(d: &mut Doctor, set: &fenix_mib::MibSet) {
+    use fenix_ccsds::pus::{Pec, Profile, PusEdition};
+    use fenix_ccsds::time::{Epoch, LeapTable, TimeFormat};
+    let root = d.root;
+    let file = root.join(".fenix").join("settings.toml");
+    let table: toml::Table = std::fs::read_to_string(&file).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
+    let ccsds = table.get("ccsds").and_then(|v| v.as_table());
+    let text = |key: &str| ccsds.and_then(|t| t.get(key)).and_then(|v| v.as_str()).map(str::to_string);
+    let mut wrong = Vec::new();
+    let pus = match text("pus").as_deref() {
+        Some("a") => PusEdition::A,
+        Some("none") => PusEdition::None,
+        _ => PusEdition::C,
+    };
+    let tm_time = match text("tm_time").map(|t| TimeFormat::parse(&t)) {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            wrong.push(format!("tm_time: {e}"));
+            TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false }
+        }
+        None => TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false },
+    };
+    let leap = LeapTable::default();
+    let epoch = match text("epoch").map(|e| Epoch::parse(&e, &leap)) {
+        Some(Ok(e)) => e,
+        Some(Err(e)) => {
+            wrong.push(format!("epoch: {e}"));
+            Epoch::default()
+        }
+        None => Epoch::default(),
+    };
+    let pec = text("crc").and_then(|c| Pec::parse(&c).ok()).unwrap_or(Pec::Ccitt16);
+    let base = text("plf_offset").and_then(|b| fenix_mib::packets::OffsetBase::parse(&b).ok()).unwrap_or_default();
+    let disabled: Vec<String> = ccsds.and_then(|t| t.get("checks_off")).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let profile = Profile { pus, tm_time, epoch, leap, pec, ..Default::default() };
+    let edition = match pus {
+        PusEdition::C => "PUS-C",
+        PusEdition::A => "PUS-A",
+        PusEdition::None => "no PUS",
+    };
+    let said = if ccsds.is_some() { "from .fenix/settings.toml" } else { "Fenix's defaults -- SPC , sets the project's (CCSDS & PUS)" };
+    let summary = format!("{edition} · {} · {said}", tm_time.label());
+    let health = if wrong.is_empty() { Health::Ok } else { Health::Bad };
+    let summary = if wrong.is_empty() { summary } else { format!("{} -- {summary}", wrong.join("; ")) };
+    let check = Check::new(Section::Database, "mission profile", health, summary);
+    d.push(if file.is_file() { check.at(file, 1) } else { check });
+    // The MIB read against the profile and the standards: the PUS
+    // headers, checksums and time fields it describes, sizes, overlaps.
+    let problems = fenix_mib::checks::run(set, &fenix_mib::checks::Options { disabled: &disabled, base, profile: &profile });
+    if problems.is_empty() {
+        d.push(Check::new(Section::Database, "agrees", Health::Ok, "the MIB agrees with the profile and the standards"));
+    }
+    let shown = problems.len().min(20);
+    for p in &problems[..shown] {
+        let name = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p.line.map(|l| format!("{name}:{l}")).unwrap_or(name);
+        d.push(Check::new(Section::Database, name, Health::Warn, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
+    }
+    if problems.len() > shown {
+        d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{} more against the standards -- ! on the MIB page lists them all", problems.len() - shown)));
+    }
+    let recordings = root.join("recordings");
+    if recordings.is_dir() {
+        let n = std::fs::read_dir(&recordings).into_iter().flatten().flatten().filter(|e| e.path().is_file() && e.path().extension().is_none_or(|x| !x.eq_ignore_ascii_case("md"))).count();
+        let what = if n == 0 { "none yet -- SPC k f opens one".to_string() } else { format!("{n} -- SPC k f opens one") };
+        d.push(Check::new(Section::Database, "recordings", Health::Ok, what));
+    } else {
+        d.push(Check::new(Section::Database, "recordings", Health::Info, "no recordings/ folder for dumps and captures"));
     }
 }
 
@@ -554,6 +629,28 @@ mod tests {
         let checks = diagnose(&dir.path().join("Lab"), ProjectKind::Arduino, &FakeProbe::default(), false);
         assert!(matches!(find(&checks, "board").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickBoard)));
         assert!(matches!(find(&checks, "port").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickPort)));
+    }
+
+    #[test]
+    fn a_missions_profile_is_checked_against_its_mib_and_its_recordings_counted() {
+        let dir = TempDir::new("doctor_mission");
+        let ops = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        for e in std::fs::read_dir(&ops).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            dir.write(&format!("mib/{name}"), &std::fs::read_to_string(e.path()).unwrap());
+        }
+        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"a\"\n");
+        dir.write("recordings/bench.bin", "x");
+        let probe = FakeProbe::default();
+        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
+        let profile = find(&checks, "mission profile");
+        assert!(profile.detail.starts_with("PUS-A · CUC 4+2 · from .fenix/settings.toml"), "{}", profile.detail);
+        assert!(checks.iter().any(|c| c.detail.contains("PID_DFHSIZE 13, but the project's PUS-A header with CUC 4+2 is 9 octets")), "{checks:#?}");
+        assert!(find(&checks, "recordings").detail.starts_with("1 --"));
+        // PUS-C, as the MIB describes: the headers agree.
+        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"c\"\n");
+        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
+        assert!(!checks.iter().any(|c| c.detail.contains("PID_DFHSIZE")), "{checks:#?}");
     }
 
     #[test]

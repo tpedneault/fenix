@@ -155,6 +155,32 @@ impl Epoch {
     }
 }
 
+/// A time correlation: the epoch on-board times really count from, found
+/// from one on-board time and the UTC it matched -- on-board clocks drift
+/// and are reset, so what they count from isn't the nominal epoch.
+/// `text` is `on-board = UTC`: the on-board time as the mission writes a
+/// CUC (`814B878A.8000`, hex) or in seconds since the nominal epoch
+/// (`2169210762.5`), then a UTC date and time.
+pub fn correlate(text: &str, fmt: TimeFormat, leap: &LeapTable) -> Result<Epoch, String> {
+    let (onboard, utc) = text.split_once('=').ok_or("an on-board time = the UTC it matched")?;
+    let utc = parse_utc(utc).ok_or_else(|| format!("{} isn't a date and time", utc.trim()))?;
+    let onboard = onboard.trim();
+    let hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    let secs = match (fmt, onboard.split_once('.')) {
+        // CUC as it's written: the coarse octets in hex, then the fine.
+        (TimeFormat::Cuc { coarse, .. }, Some((c, f))) if hex(c) && hex(f) && c.len() == 2 * coarse as usize => {
+            let c = u64::from_str_radix(c, 16).map_err(|e| e.to_string())? as f64;
+            let f = u64::from_str_radix(f, 16).map_err(|e| e.to_string())? as f64 / 16f64.powi(f.len() as i32);
+            c + f
+        }
+        (TimeFormat::Cuc { coarse, .. }, None) if hex(onboard) && onboard.len() == 2 * coarse as usize && onboard.chars().any(|c| c.is_ascii_alphabetic()) => {
+            u64::from_str_radix(onboard, 16).map_err(|e| e.to_string())? as f64
+        }
+        _ => onboard.parse::<f64>().map_err(|_| format!("{onboard} isn't an on-board time (hex as the mission writes it, or seconds)"))?,
+    };
+    Ok(Epoch { tai: Tai(utc_to_tai(utc, leap).0 - secs), level1: false })
+}
+
 /// A time code's layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeFormat {
@@ -368,6 +394,23 @@ pub fn encode(tai: Tai, format: TimeFormat, epoch: Epoch) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_correlation_moves_the_epoch_to_where_the_clock_really_counts_from() {
+        let leap = LeapTable::default();
+        let fmt = TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false };
+        // The example packet's time, which reads 14:32:05.500 from 1958:
+        // say the clock was 10 s fast.
+        let e = correlate("814B878A.8000 = 2026-09-27 14:31:55.5", fmt, &leap).unwrap();
+        let bytes = [0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00];
+        let d = decode(&bytes, fmt, e, &leap, 0).unwrap();
+        assert_eq!(format_utc(tai_to_utc(d.tai, &leap)), "2026-09-27 14:31:55.500");
+        assert!(!e.level1);
+        let by_seconds = correlate("2169210762.5 = 2026-09-27 14:31:55.5", fmt, &leap).unwrap();
+        assert!((by_seconds.tai.0 - e.tai.0).abs() < 1e-6);
+        assert!(correlate("814B878A.8000", fmt, &leap).is_err());
+        assert!(correlate("soon = 2026-09-27", fmt, &leap).is_err());
+    }
+
     use super::*;
 
     fn utc(s: &str) -> NaiveDateTime {

@@ -220,6 +220,8 @@ when it's out of date).
 | `ccsds.pus` | c / a / none | c | The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets. *A project can set it.* |
 | `ccsds.tm_time` | text | cuc 4.2 | The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none. *A project can set it.* |
 | `ccsds.epoch` | text | 1958-01-01 TAI | What on-board times count from: a date and time, then TAI, UTC or GPS. *A project can set it.* |
+| `ccsds.time_correlation` | text | – | An on-board time and the UTC it matched (814B878A.8000 = 2026-09-27 14:32:05.5): on-board times are read from the epoch this implies, everywhere, and the time converter shows them uncorrelated too. *A project can set it.* |
+| `ccsds.clock` | true / false | off | The modeline shows the time now as the mission writes it on board, beside the clock. *A project can set it.* |
 | `ccsds.crc` | ccitt16 / iso / none | ccitt16 | The check at the end of a packet, where the MIB doesn't say: CRC-16-CCITT, the ISO checksum, or none. *A project can set it.* |
 | `ccsds.tc_source_id` | 0–65535 | 0 | The source ID written into telecommand packets Fenix builds. *A project can set it.* |
 | `ccsds.plf_offset` | after-headers / packet-start | after-headers | Where the MIB's PLF_OFFBY counts from: after the packet's headers (PID_DFHSIZE), or its first octet. *A project can set it.* |
@@ -232,6 +234,8 @@ when it's out of date).
 | `ccsds.frame_fecf` | true / false | off | Frames end in a CRC-16 frame error control field. *A project can set it.* |
 | `ccsds.tc_fecf` | true / false | on | Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field. *A project can set it.* |
 | `ccsds.tc_segment_header` | true / false | on | Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags). *A project can set it.* |
+| `ccsds.tc_randomized` | true / false | off | Telecommand transfer frames went through the CCSDS pseudo-randomizer before their CLTU was coded (optional in 231.0-B). *A project can set it.* |
+| `ccsds.tc_bch` | correct / detect | correct | How CLTU code blocks are decoded, as the spacecraft does: correct puts one wrong bit per block right (error-correcting mode), detect turns the block away. *A project can set it.* |
 | `ccsds.vc_names` | vc = name | – | A name for each virtual channel, shown wherever its frames are. *A project can set it.* |
 | `ccsds.sources` | [[tables]] of name, address, subject, framing, header | – | Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing, picked: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records with the record header's size in octets. Fenix only receives. *A project can set it.* |
 | `ccsds.checks_off` | a list | – | Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time. *A project can set it.* |

@@ -75,11 +75,13 @@ pub(super) struct PageState {
     started: Option<Instant>,
     /// The minute it was last laid out in, for pages that show a clock.
     minute: i64,
+    /// The selected line when the page was last shown, to tell a move up.
+    last_focus: Option<usize>,
 }
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, minute: 0 }
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, minute: 0, last_focus: None }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -103,7 +105,8 @@ impl PageState {
             PageModel::Stream(p) => p.typing(),
             PageModel::MibDef(p) => p.typing(),
             PageModel::Packet(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => false,
+            PageModel::Standards(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
 
@@ -147,7 +150,8 @@ impl PageState {
             PageModel::Stream(p) => p.paste(text),
             PageModel::MibDef(p) => p.paste(text),
             PageModel::Packet(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => {}
+            PageModel::Standards(p) => p.query.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
     }
@@ -414,6 +418,23 @@ impl App {
 
     /// Lays page `id` out for a pane `cols` cells wide, if it changed or
     /// the pane did, and puts the cursor on its focused row.
+    /// A page's selection moved up into its first screenful: the page
+    /// shows from its top -- its title, tabs and whatever is above the
+    /// rows -- not just from the selected line. Only on a move, so the
+    /// wheel keeps where it put the page.
+    pub(super) fn page_scroll_to_top(&mut self, id: BufferId, pane: fenix_window::WindowId, visible: usize) {
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        let focus = state.page.focus.as_ref().map(|(line, _)| *line);
+        let was = std::mem::replace(&mut state.last_focus, focus);
+        if let (Some(before), Some(now)) = (was, focus) {
+            if now < before && now + 2 <= visible {
+                let ps = self.pane_state_mut(pane);
+                ps.scroll_line = 0;
+                ps.rendered_scroll = 0.0;
+            }
+        }
+    }
+
     pub(super) fn ensure_page_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize) {
         // What the agenda page reads besides the store, worked out before
         // the page is borrowed.
@@ -1566,6 +1587,28 @@ mod tests {
             Some(PageModel::Wizard(w)) => w,
             _ => panic!("no wizard"),
         }
+    }
+
+    #[test]
+    fn a_page_shows_from_its_top_when_its_selection_moves_back_up() {
+        let mut app = App::with_file(None);
+        app.cmd_ccsds_standards();
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        // Down the list, scrolled down by hand; then back up.
+        for _ in 0..5 {
+            app.page_key(KeyPress::char('j'));
+        }
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        app.pane_state_mut(pane).scroll_line = 3;
+        app.page_scroll_to_top(id, pane, 40);
+        assert_eq!(app.pane_state(pane).scroll_line, 3, "no move: the page stays where it was put");
+        app.page_key(KeyPress::char('k'));
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        assert_eq!(app.pane_state(pane).scroll_line, 0, "back up in the first screenful: the top");
     }
 
     #[test]

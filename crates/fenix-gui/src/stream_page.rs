@@ -70,6 +70,9 @@ pub struct Row {
     pub bytes: Vec<u8>,
     /// The CADU or CLTU it came in, as it arrived.
     pub unit: Option<std::sync::Arc<Vec<u8>>>,
+    /// How that unit was read -- randomized, an FECF -- as the source
+    /// read it, which can differ from the project's settings.
+    pub unit_profile: Option<fenix_ccsds::frames::FrameProfile>,
 }
 
 /// One sample of a parameter.
@@ -82,6 +85,9 @@ pub struct Sample {
     pub number: Option<f64>,
     /// `None` within limits, else the limit broken.
     pub off: Option<(String, bool)>,
+    /// Within the limits that could be checked; one that depends on a
+    /// parameter this packet doesn't carry couldn't be.
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +136,8 @@ pub struct StreamPage {
     /// A live source's state: text, and whether it's healthy.
     pub status: Option<(String, bool)>,
     pub param: Option<(String, Vec<Sample>)>,
+    /// The followed parameter's definition, so new rows add samples.
+    pub param_def: Option<fenix_mib::DefRef>,
     pub stop: Arc<AtomicBool>,
     tab: Tab,
     /// `/`: what every tab shows.
@@ -141,9 +149,29 @@ pub struct StreamPage {
     menu: Option<usize>,
     help: bool,
     pub note: Option<(String, bool)>,
+    /// The parameter's curve and figures from its raw values (`r`), not
+    /// its engineering ones.
+    pub raw_view: bool,
 }
 
-/// A line of the packets tab.
+/// Where a followed parameter crosses a limit, or comes back within.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Crossing {
+    /// Its sample, among those shown.
+    pub sample: usize,
+    pub text: String,
+    /// Out (a limit broken), and whether it's a hard one.
+    pub out: Option<bool>,
+}
+
+/// A sample's raw value as a number (`0x` hex too), for the raw view.
+fn raw_number(raw: &str) -> Option<f64> {
+    let t = raw.trim();
+    match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(h) => i64::from_str_radix(h, 16).ok().map(|n| n as f64),
+        None => t.parse().ok(),
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 enum Line {
     Row(usize),
@@ -183,6 +211,8 @@ impl StreamPage {
             follow: live,
             menu: None,
             help: false,
+            raw_view: false,
+            param_def: None,
             note: None,
         }
     }
@@ -287,6 +317,33 @@ impl StreamPage {
     }
 
     /// The followed parameter's samples the filter leaves.
+    /// The followed parameter's limit crossings among the samples shown:
+    /// out of limits, from soft to hard, back within.
+    pub fn crossings(&self) -> Vec<Crossing> {
+        let mut out = Vec::new();
+        let mut was: Option<bool> = None;
+        for (i, s) in self.samples_shown().iter().enumerate() {
+            // What a packet couldn't fully check says nothing new.
+            if s.partial && s.off.is_none() {
+                continue;
+            }
+            let now = s.off.as_ref().map(|(_, hard)| *hard);
+            if now != was {
+                let text = match (&s.off, was) {
+                    (Some((why, _)), _) => format!("▲ {why}"),
+                    (None, Some(_)) => "▼ back within limits".to_string(),
+                    (None, None) => continue,
+                };
+                // The first sample starting out within limits isn't one.
+                if !(i == 0 && now.is_none()) {
+                    out.push(Crossing { sample: i, text, out: now });
+                }
+                was = now;
+            }
+        }
+        out
+    }
+
     pub fn samples_shown(&self) -> Vec<&Sample> {
         self.param.as_ref().map(|(_, all)| all.iter().filter(|s| self.sample_matches(s)).collect()).unwrap_or_default()
     }
@@ -530,6 +587,25 @@ impl StreamPage {
                 }
             }
             Key::Char('t') => return Action::PickParameter,
+            Key::Char('c') if self.tab == Tab::Parameter => {
+                let at = self.sel[2];
+                let crossings = self.crossings();
+                match crossings.iter().find(|c| c.sample > at).or(crossings.first()) {
+                    Some(c) => {
+                        let wrapped = c.sample <= at;
+                        self.sel[2] = c.sample;
+                        self.follow = false;
+                        if wrapped {
+                            self.note = Some(("back to the first crossing".into(), false));
+                        }
+                    }
+                    None => self.note = Some(("no limit crossings".into(), false)),
+                }
+            }
+            Key::Char('r') if self.tab == Tab::Parameter => {
+                self.raw_view = !self.raw_view;
+                self.note = Some((if self.raw_view { "curve and figures from raw values" } else { "curve and figures from engineering values" }.into(), false));
+            }
             Key::Char('w') => self.menu = Some(0),
             Key::Char('F') if !self.live => return Action::Reframe,
             _ => {}
@@ -559,8 +635,7 @@ impl StreamPage {
 }
 
 /// Eight-level bars across the samples.
-fn curve(samples: &[&Sample], width: usize) -> String {
-    let values: Vec<f64> = samples.iter().filter_map(|s| s.number).collect();
+fn curve(values: &[f64], width: usize) -> String {
     if values.len() < 2 || width == 0 {
         return String::new();
     }
@@ -706,22 +781,49 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
             }
             Some((name, all)) => {
                 let samples = p.samples_shown();
-                let nums: Vec<f64> = samples.iter().filter_map(|s| s.number).collect();
+                let number = |s: &Sample| if p.raw_view { raw_number(&s.raw) } else { s.number };
+                let nums: Vec<f64> = samples.iter().filter_map(|s| number(s)).collect();
                 let count = if samples.len() == all.len() { format!("{} samples", samples.len()) } else { format!("{} of {} samples", samples.len(), all.len()) };
                 let summary = if nums.is_empty() {
                     format!("{name} · {count}")
                 } else {
                     let (lo, hi) = nums.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
                     let mean = nums.iter().sum::<f64>() / nums.len() as f64;
-                    format!("{name} · {count} · min {lo:.3} · max {hi:.3} · mean {mean:.3}")
+                    let unit = if p.raw_view { " (raw)" } else { "" };
+                    format!("{name} · {count} · min {lo:.3} · max {hi:.3} · mean {mean:.3}{unit}")
                 };
                 g.put(y, left, &summary, Role::Title);
                 y += 1;
-                let c = curve(&samples, width.saturating_sub(8));
+                let c = curve(&nums, width.saturating_sub(8));
                 if !c.is_empty() {
-                    g.put(y, left, "curve", Role::Muted);
+                    g.put(y, left, if p.raw_view { "raw" } else { "curve" }, Role::Muted);
                     g.put(y, left + 8, &c, Role::Good);
                     y += 1;
+                }
+                // Where it crossed a limit, each on its line.
+                let crossings = p.crossings();
+                if !crossings.is_empty() {
+                    y += 1;
+                    g.put(y, left, &format!("Crossings {}", crossings.len()), Role::Title);
+                    y += 1;
+                    for c in crossings.iter().take(8) {
+                        let s = samples[c.sample];
+                        let role = match c.out {
+                            Some(true) => Role::Bad,
+                            Some(false) => Role::Warn,
+                            None => Role::Good,
+                        };
+                        g.put(y, left + 2, &fit(&c.text, 30), role);
+                        g.put(y, left + 34, &fit(s.time.as_deref().unwrap_or("-"), 23), Role::Muted);
+                        g.put(y, left + 58, &fit(&s.value, 20), Role::Text);
+                        let r = &p.rows[s.row];
+                        g.put(y, left + 80, &fit(&format!("{} seq {}", r.spid.as_deref().unwrap_or(&r.label), r.seq), width.saturating_sub(80)), Role::Muted);
+                        y += 1;
+                    }
+                    if crossings.len() > 8 {
+                        g.put(y, left + 2, &format!("… {} more -- c steps through them", crossings.len() - 8), Role::Muted);
+                        y += 1;
+                    }
                 }
                 y += 1;
                 for (dx, h) in [(0, "TIME"), (24, "RAW"), (40, "VALUE"), (64, "LIMITS")] {
@@ -736,6 +838,7 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
                     g.put(y, left + 40, &fit(&s.value, 23), Role::Text);
                     match &s.off {
                         Some((why, hard)) => g.put(y, left + 64, &fit(why, width.saturating_sub(64)), if *hard { Role::Bad } else { Role::Warn }),
+                        None if s.partial => g.put(y, left + 64, "within -- not all checked here", Role::Muted),
                         None => g.put(y, left + 64, "within", Role::Good),
                     };
                     if i == sel {
@@ -782,6 +885,8 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
             ("Enter x", "inspect the packet, its bytes in hex"),
             ("f", "inspect the CADU or CLTU it came in"),
             ("t", "follow a TM parameter"),
+            ("c", "the parameter's next limit crossing"),
+            ("r", "the curve from raw or engineering values"),
             ("w", "write the packets shown, or the samples"),
             ("F", "read again with the next framing"),
             ("q", "close"),
@@ -814,6 +919,41 @@ mod tests {
         p.rows = vec![row(0x3F2, 289, false), row(0x3F2, 290, false), row(0x3F2, 291, false), row(0x3F2, 295, true), row(0x100, 7, false), Row { apid: 0x7FF, idle: true, label: "idle".into(), ..Default::default() }];
         p.done = true;
         p
+    }
+
+    #[test]
+    fn a_parameters_crossings_are_listed_and_stepped_through_raw_or_engineering() {
+        let mut p = page();
+        // 20 25 55 58 30 65 40: soft out at 55, hard at 65, back in between.
+        let values = [20.0, 25.0, 55.0, 58.0, 30.0, 65.0, 40.0];
+        let off = |v: f64| if v > 60.0 { Some(("hard high 60".to_string(), true)) } else if v > 50.0 { Some(("soft high 50".to_string(), false)) } else { None };
+        p.param = Some(("NTH00123".into(), values.iter().enumerate().map(|(i, &v)| Sample { row: i % 5, time: Some(format!("14:30:0{i}")), raw: format!("0x{:X}", (v * 10.0) as i64), value: format!("{v} degC"), number: Some(v), off: off(v), partial: false }).collect()));
+        p.key(Key::Char('3'));
+        let c = p.crossings();
+        assert_eq!(c.iter().map(|c| (c.sample, c.out)).collect::<Vec<_>>(), vec![(2, Some(false)), (4, None), (5, Some(true)), (6, None)]);
+        let text = layout(&p, 160).text;
+        assert!(text.contains("Crossings 4") && text.contains("▲ soft high 50") && text.contains("▼ back within limits") && text.contains("▲ hard high 60"), "{text}");
+        p.key(Key::Char('c'));
+        assert_eq!(p.sel[2], 2);
+        p.key(Key::Char('c'));
+        p.key(Key::Char('c'));
+        assert_eq!(p.sel[2], 5);
+        p.key(Key::Char('c'));
+        p.key(Key::Char('c'));
+        assert_eq!(p.sel[2], 2, "wraps to the first");
+        assert!(layout(&p, 160).text.contains("max 65.000 · mean"));
+        p.key(Key::Char('r'));
+        assert!(layout(&p, 160).text.contains("max 650.000 · mean 418.571 (raw)"), "{}", layout(&p, 160).text);
+        // A sample from a packet that couldn't check every limit doesn't
+        // end a crossing.
+        if let Some((_, samples)) = &mut p.param {
+            samples[3].off = None;
+            samples[3].partial = true;
+        }
+        let c = p.crossings();
+        assert_eq!(c.iter().map(|c| (c.sample, c.out)).collect::<Vec<_>>(), vec![(2, Some(false)), (4, None), (5, Some(true)), (6, None)], "58 unknown between 55 and 30");
+        p.key(Key::Char('r'));
+        assert!(layout(&p, 160).text.contains("within -- not all checked here"));
     }
 
     #[test]
@@ -886,7 +1026,7 @@ mod tests {
         filter(&mut p, "lost");
         assert!(p.problems().iter().any(|(t, _)| t.contains("frames lost on VC 1")));
         p.key(Key::Escape);
-        p.param = Some(("NTH00123".into(), (0..5).map(|i| Sample { row: i.min(4), time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 2).then(|| ("soft limit".to_string(), false)) }).collect()));
+        p.param = Some(("NTH00123".into(), (0..5).map(|i| Sample { row: i.min(4), time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 2).then(|| ("soft limit".to_string(), false)), partial: false }).collect()));
         p.key(Key::Char('3'));
         filter(&mut p, "limits:out -apid:0x100");
         assert_eq!(p.samples_shown().iter().map(|s| s.raw.as_str()).collect::<Vec<_>>(), ["3"], "out of limits, and not in APID 0x100's packet");
@@ -898,7 +1038,7 @@ mod tests {
         let mut p = page();
         p.param = Some((
             "NTH00123".into(),
-            (0..10).map(|i| Sample { row: 0, time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 8).then(|| ("soft limit -10..8".to_string(), false)) }).collect(),
+            (0..10).map(|i| Sample { row: 0, time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 8).then(|| ("soft limit -10..8".to_string(), false)), partial: false }).collect(),
         ));
         p.key(Key::Char('3'));
         let text = layout(&p, 160).text;

@@ -53,6 +53,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   TC frame's length and FECF, retransmissions, the telecommands inside)
   and check TM frames' FECF; `f` on a packet shows the CADU or CLTU it
   came in. Mission settings live in a new CCSDS & PUS category.
+- CLTUs are decoded in error-correcting mode (one wrong bit per code
+  block put right; `ccsds.tc_bch` for detecting only), and a randomized
+  uplink is de-randomized (`ccsds.tc_randomized`, or recognized from the
+  first CLTU).
+- A followed parameter lists its limit crossings (`c` steps through
+  them, `r` shows raw values); on a live source it keeps up with the
+  rows and a crossing is said in the modeline. `t` follows a parameter
+  from its MIB page or the inspector.
+- Time correlation (`ccsds.time_correlation`) moves the epoch on-board
+  times are read from, and the converter shows them uncorrelated too;
+  `ccsds.clock` shows the on-board time in the modeline; `K` on an
+  on-board time in a file says when it was.
+- `/` on the standards page searches every standard's text at once.
+- `]d`/`[d` step through a buffer's problems.
+- The SCOS-2000 MIB template writes a mission profile and a
+  `recordings/` folder, and the doctor checks the MIB against the
+  profile (header size, checksum) and the standards.
 - A field of a list setting that takes only certain values is picked
   from them in its form (`←`/`→`), not typed: a live source's framing is
   the first.

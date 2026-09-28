@@ -5922,6 +5922,12 @@ pub struct App {
     mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
     /// Where each stream page's packets come from.
     stream_sources: HashMap<BufferId, stream_host::StreamSource>,
+    /// The modeline's mission clock, with the quarter second it's for.
+    mission_clock: Option<(i64, String)>,
+    /// A standards search's documents on the PDF worker: the page asking
+    /// and the standard each is; the query per page.
+    standards_search: HashMap<fenix_pdf::PdfDocKey, (BufferId, usize)>,
+    standards_query: HashMap<BufferId, String>,
     /// A stream page waiting for a parameter from the `MibDef` picker.
     mib_pick_for_stream: Option<BufferId>,
     /// Telecommand calls the MIB disagrees with, by file -- drawn with
@@ -6711,6 +6717,9 @@ impl App {
             mib_origins: HashMap::new(),
             mib_last: HashMap::new(),
             stream_sources: HashMap::new(),
+            mission_clock: None,
+            standards_search: HashMap::new(),
+            standards_query: HashMap::new(),
             mib_pick_for_stream: None,
             mib_diagnostics: HashMap::new(),
             mib_checked: HashMap::new(),
@@ -7713,6 +7722,44 @@ impl App {
         let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
         all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
         all
+    }
+
+    /// `]d`/`[d`: moves to the `count`th problem after (or before) the
+    /// cursor -- a language server's, or a script's call checked against
+    /// the MIB -- and says what it is. Stops at the last one, as `]t` does.
+    pub(crate) fn jump_to_diagnostic(&mut self, forward: bool, count: u32) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.set_message("no problems in this buffer");
+            return;
+        };
+        let buffer = &self.open().buffer;
+        let at = |d: &lsp_types::Diagnostic| {
+            let line = (d.range.start.line as usize).min(buffer.line_count().saturating_sub(1));
+            buffer.line_start_char(line) + (d.range.start.character as usize).min(buffer.line_len(line))
+        };
+        let mut found: Vec<(usize, String)> = self.all_diagnostics(&path).iter().map(|d| (at(d), d.message.clone())).collect();
+        found.sort_by_key(|(c, _)| *c);
+        found.dedup_by_key(|(c, _)| *c);
+        let cursor_idx = self.cursor().char_idx;
+        let candidates: Vec<&(usize, String)> = if forward { found.iter().filter(|(c, _)| *c > cursor_idx).collect() } else { found.iter().rev().filter(|(c, _)| *c < cursor_idx).collect() };
+        let Some((target, message)) = candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1))).map(|(c, m)| (*c, m.clone())) else {
+            self.set_message(if found.is_empty() {
+                "no problems in this buffer"
+            } else if forward {
+                "no more problems below"
+            } else {
+                "no more problems above"
+            });
+            return;
+        };
+        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: cursor_idx };
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        cursor.char_idx = target;
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        self.record_jump(from);
+        self.wake_caret();
+        self.set_message(message);
     }
 
     fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
@@ -20496,6 +20543,7 @@ impl App {
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
             VimEvent::Tab(mv) => self.move_tab(mv),
             VimEvent::None => {}
         }
@@ -22977,6 +23025,8 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // The mission clock, worked out before the GPU is borrowed.
+        let mission_clock = self.mission_clock_text();
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");
@@ -23645,6 +23695,7 @@ impl App {
             let is_page = self.is_page_buffer(buffer_id);
             if is_page {
                 self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
+                self.page_scroll_to_top(buffer_id, pane, pane_visible_lines);
             }
             let is_dashboard = is_home || is_page;
             if is_focused {
@@ -24191,7 +24242,10 @@ impl App {
             [one] => format!("{one}   "),
             [first, rest @ ..] => format!("{first} +{}   ", rest.len()),
         };
-        let clock_text = modeline_clock_text();
+        let clock_text = match mission_clock {
+            Some(obt) => format!("{obt}   {}", modeline_clock_text()),
+            None => modeline_clock_text(),
+        };
         let clock_chars = clock_text.chars().count() + job_text.chars().count();
         let box_width = window_width - text::PAD_LEFT;
         // `modeline_char_width`, not the body `char_width`: both this
@@ -25650,6 +25704,7 @@ impl App {
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
             VimEvent::Tab(mv) => self.move_tab(mv),
             _ => {}
         }
@@ -39664,6 +39719,31 @@ name = \"orbit\"
         let mut app = app_on(&dir, "a.py", source);
         keys(&mut app, "2]t");
         assert_eq!(app.test_cursor().char_idx, source.find("TODO two").unwrap());
+    }
+
+    #[test]
+    fn bracket_d_steps_through_the_problems_of_every_source() {
+        let dir = TempDir::new("bracket_d");
+        let source = "tc::send ZTC0810 -X 1\nputs ok\ntc::send ZTC08101 -PTH00101 99\n";
+        let mut app = app_on(&dir, "a.tcl", source);
+        let path = app.open().buffer.path().unwrap().to_path_buf();
+        let diag = |line: u32, character: u32, message: &str| lsp_types::Diagnostic {
+            range: lsp_types::Range::new(lsp_types::Position::new(line, character), lsp_types::Position::new(line, character + 3)),
+            message: message.into(),
+            ..Default::default()
+        };
+        // One from the MIB script check, one from a language server.
+        app.mib_diagnostics.insert(path.clone(), vec![diag(2, 28, "PTH00101: 99 is outside 1..8")]);
+        app.diagnostics.insert(path, vec![diag(0, 9, "unknown mnemonic ZTC0810 -- ZTC08101?")]);
+        keys(&mut app, "]d");
+        assert_eq!(app.test_cursor().char_idx, 9);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("ZTC08101?")));
+        keys(&mut app, "]d");
+        assert_eq!(app.test_cursor().char_idx, source.find("99").unwrap());
+        keys(&mut app, "]d");
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text == "no more problems below"));
+        keys(&mut app, "2[d");
+        assert_eq!(app.test_cursor().char_idx, 9, "a count, stopping at the first");
     }
 
     #[test]

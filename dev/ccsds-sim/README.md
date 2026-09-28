@@ -19,7 +19,7 @@ docker logs -f fenix-ccsds-sim
 
 Then open `dev/ccsds-sim/mission/thermal_checkout.tcl` in Fenix. The
 project's settings (`mission/.fenix/settings.toml`) already name the MIB
-(`ops/`), the frame layout and the seven sources. Use `SPC k l` to pick
+(`ops/`), the frame layout and the eight sources. Use `SPC k l` to pick
 one:
 
 | Source | Address | What arrives |
@@ -28,6 +28,7 @@ one:
 | sim CADUs | `tcp://localhost:10011` | ASM + randomized TM frames of 1115 octets, RS(255,223) at depth 5, a CLCW |
 | sim CADUs + FECF | `tcp://localhost:10013` | The same, with an FECF at the end of each frame (framing `frames fecf`) |
 | sim CLTUs (uplink) | `tcp://localhost:10012` | The uplink: CLTUs carrying TC frames, which carry the MIB's telecommands |
+| sim CLTUs (randomized) | `tcp://localhost:10014` | The same uplink with the TC frames randomized (framing `guess`: Fenix recognizes it) |
 | sim UDP | `udp://:10015` | One packet per datagram (Fenix listens; the container sends to the host) |
 | sim NATS | `nats://localhost:4222`, `tm.ops` | One packet per message, through the `nats` container |
 | sim file | `file://recordings/live.bin` | Packets appended to a file, which is cut back to empty past 4 MB |
@@ -66,8 +67,11 @@ Faults on purpose, so there is something to find:
   - A frame dropped every 100 s, so the VC count jumps.
   - With an FECF, one that doesn't match every 90 s.
 - The uplink:
-  - A bit flipped in a code block: the CLTU is cut short there and the
-    frame turned away.
+  - One bit wrong in a code block: put right by the decoder, which
+    works in error-correcting mode (`ccsds.tc_bch = "correct"`, the
+    default), so the frame gets through.
+  - Two bits wrong in a code block: beyond correction, so the CLTU is
+    cut short there and the frame turned away.
   - An FECF that doesn't match.
   - A frame lost on the way up, then a retransmission.
   - A CLTU with no tail sequence. The idle after it ends it, and the
@@ -97,7 +101,7 @@ are listed in the page's Problems tab (`4`).
 
 ```bash
 python dev/ccsds-sim/sim.py --selftest
-python dev/ccsds-sim/sim.py --capture cadus.bin --fecf cadus-fecf.bin --cltus cltus.bin --packets packets.bin --seconds 300
+python dev/ccsds-sim/sim.py --capture cadus.bin --fecf cadus-fecf.bin --cltus cltus.bin --cltus-randomized cltus-r.bin --packets packets.bin --seconds 300
 ```
 
 `--capture` writes the streams to files instead of serving anything,
@@ -107,7 +111,7 @@ randomization and RS depth for CADUs, and CLTUs by their start and tail
 sequences. The one thing it can't guess is an FECF on TM frames:
 `cadus-fecf.bin` needs `ccsds.frame_fecf` on.
 
-Running the script without arguments serves the four TCP ports. The
+Running the script without arguments serves the five TCP ports. The
 `SIM_UDP_TARGET`, `SIM_NATS` (host:port), `SIM_NATS_SUBJECT`, `SIM_FILE`
 and `SIM_SEED` environment variables turn on the other outputs.
 
@@ -119,7 +123,7 @@ With the containers up:
 cargo test -p fenix-gui simulator -- --ignored --nocapture
 ```
 
-This follows each of the seven sources for 8 s through Fenix's own
+This follows each of the eight sources for 8 s through Fenix's own
 live code and prints what arrived. It fails if a downlink source
 delivers fewer than 10 housekeeping packets that the MIB identifies, or
 if the uplink gives fewer than 2 telecommands it names.

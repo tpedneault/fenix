@@ -52,6 +52,9 @@ pub struct FrameProfile {
     pub aos_insert: usize,
     /// TC: whether frames carry a segment header.
     pub tc_segment_header: bool,
+    /// TC: the CLTU decoder's error-correcting mode (one bit per code
+    /// block put right) rather than error-detecting.
+    pub bch_correct: bool,
     pub vc_names: Vec<(u8, String)>,
 }
 
@@ -69,6 +72,7 @@ impl Default for FrameProfile {
             aos_fhec: false,
             aos_insert: 0,
             tc_segment_header: true,
+            bch_correct: true,
             vc_names: Vec::new(),
         }
     }

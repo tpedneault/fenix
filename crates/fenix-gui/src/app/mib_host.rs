@@ -459,6 +459,7 @@ impl App {
             mib_def::Action::Copy(text) => self.mib_copy(text),
             mib_def::Action::OpenFile(path, line) => self.mib_open_file(path, line),
             mib_def::Action::MibPage => self.cmd_mib_page(),
+            mib_def::Action::Follow(def) => self.follow_on_stream(def),
         }
     }
 

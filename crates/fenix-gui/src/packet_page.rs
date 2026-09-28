@@ -53,10 +53,16 @@ pub enum Action {
     Copy(String, &'static str),
     /// The CCSDS settings.
     Settings,
+    /// Follow the selected TM parameter through the recording or live
+    /// source open.
+    FollowParameter(String),
 }
 
 pub struct PacketPage {
     pub key: MibKey,
+    /// The frame profile to read a CADU or CLTU with, when it came from a
+    /// source that read it otherwise than the project's settings.
+    pub profile: Option<fenix_ccsds::frames::FrameProfile>,
     pub bytes: Vec<u8>,
     /// Where the bytes came from.
     pub source: String,
@@ -127,7 +133,7 @@ pub fn tree_text(root: &Field) -> String {
 
 impl PacketPage {
     pub fn new(key: MibKey, bytes: Vec<u8>, source: String) -> Self {
-        PacketPage { key, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None, filter: Filter::default() }
+        PacketPage { key, profile: None, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None, filter: Filter::default() }
     }
 
     pub fn typing(&self) -> bool {
@@ -258,6 +264,10 @@ impl PacketPage {
                     return Action::Copy(v, "value");
                 }
             }
+            Key::Char('t') => match self.selected().and_then(|f| f.link) {
+                Some(Link::Parameter(name)) => return Action::FollowParameter(name),
+                _ => self.note = Some(("t follows a TM parameter -- select one".into(), true)),
+            },
             Key::Char('Y') => return Action::Copy(tree_text(&self.root), "decode"),
             Key::Char('b') => return Action::Copy(fenix_ccsds::field::hex(&self.bytes), "bytes"),
             Key::Char('a') => self.menu = Some(DecodeAs::ALL.iter().position(|d| *d == self.reading).unwrap_or(0)),
