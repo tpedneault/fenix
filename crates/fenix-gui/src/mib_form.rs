@@ -47,6 +47,10 @@ pub enum Action {
     Open(DefRef),
     /// Insert this text.
     Insert(String),
+    /// Copy the telecommand's packet, as a literal for the file.
+    CopyBytes,
+    /// Open the packet in the inspector.
+    DecodeBytes,
 }
 
 pub struct InsertForm {
@@ -70,7 +74,15 @@ pub struct InsertForm {
     pub note: Option<(String, bool)>,
     /// A line being edited: the call is put back in its place.
     pub replacing: bool,
+    /// The Bytes section is shown.
+    pub show_bytes: bool,
+    /// The sequence count built packets get.
+    pub seq: u16,
 }
+
+/// The most fields a form lays out: counters nested in counters multiply,
+/// and every key and frame goes through them all.
+const MAX_SLOTS: usize = 1000;
 
 /// How many parameters `slots` slots after `start` take up: a nested
 /// counter is one slot, plus everything its own group holds.
@@ -130,6 +142,8 @@ impl InsertForm {
             templates,
             note: None,
             replacing: false,
+            show_bytes: false,
+            seq: 0,
         };
         if let Some(r) = remembered {
             form.values = r.clone();
@@ -196,7 +210,7 @@ impl InsertForm {
 
     fn expand(&self, start: usize, end: usize, path: Vec<usize>, out: &mut Vec<Slot>) {
         let mut i = start;
-        while i < end {
+        while i < end && out.len() < MAX_SLOTS {
             let slot = Slot { param: i, path: path.clone() };
             let g = self.params[i].group;
             let count = if g > 0 { fenix_mib::types::parse_int(&self.value(&slot)).unwrap_or(0).clamp(0, 99) as usize } else { 0 };
@@ -383,6 +397,14 @@ impl InsertForm {
                 self.note = Some(("back to the MIB's defaults".into(), false));
             }
             Key::Char('d') => return Action::Open(self.tc),
+            Key::Char('b') => self.show_bytes = !self.show_bytes,
+            Key::Char('s') => {
+                self.seq = (self.seq + 1) & 0x3FFF;
+                self.show_bytes = true;
+            }
+            Key::Char('S') => self.seq = 0,
+            Key::Char('y') => return Action::CopyBytes,
+            Key::Char('D') => return Action::DecodeBytes,
             Key::Char('I') | Key::CtrlEnter => return Action::Insert(self.rendered()),
             _ => {}
         }
@@ -394,7 +416,9 @@ pub fn title(form: &InsertForm) -> String {
     format!("*insert: {}*", form.name)
 }
 
-pub fn layout(form: &InsertForm, cols: usize) -> Page {
+/// The form, with its packet's bytes when the Bytes section is shown
+/// (the host builds them from the MIB).
+pub fn layout(form: &InsertForm, bytes: Option<&Result<Vec<u8>, String>>, cols: usize) -> Page {
     let (left, width) = frame(cols, 150);
     let mut g = Grid::new();
     g.put(1, left, if form.replacing { "Edit a telecommand call" } else { "Insert a telecommand" }, Role::Muted);
@@ -480,6 +504,28 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
         y += 1;
     }
     y += 1;
+    if form.show_bytes {
+        y += 1;
+        match bytes {
+            Some(Ok(b)) => {
+                g.heading(y, left, width, &format!("Bytes · {} · sequence count {} · s next, S back to 0", b.len(), form.seq));
+                y += 1;
+                for (i, chunk) in b.chunks(16).enumerate() {
+                    g.put(y, left + 2, &format!("{:04X}", i * 16), Role::Muted);
+                    g.put(y, left + 8, &fenix_ccsds::field::hex(chunk), Role::Title);
+                    y += 1;
+                }
+            }
+            Some(Err(e)) => {
+                g.heading(y, left, width, "Bytes");
+                y += 1;
+                g.put(y, left + 2, &fit(&format!("can't build the packet: {e}"), width - 2), Role::Bad);
+                y += 1;
+            }
+            None => {}
+        }
+        y += 1;
+    }
     g.put(y, left, "Inserted as text where the form was opened -- nothing is sent anywhere.", Role::Muted);
 
     if let Some(at) = form.menu {
@@ -504,6 +550,8 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
             ("+ -", "one more, one fewer repetition"),
             ("R", "the MIB's defaults again"),
             ("d", "the telecommand's page"),
+            ("b s S", "the packet's bytes, next sequence count, back to 0"),
+            ("y D", "copy the bytes for this file, decode them"),
             ("Ctrl-Enter I", "insert"),
             ("q Esc", "leave without inserting"),
         ]
@@ -519,18 +567,26 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
     } else if form.menu.is_some() {
         &[("Enter", "pick"), ("Esc", "leave it")]
     } else {
-        &[("Enter", "edit"), ("h l", "change"), ("+ -", "repeat"), ("Ctrl-Enter", "insert"), ("R", "defaults"), ("d", "definition"), ("?", "all keys"), ("q", "cancel")]
+        &[("Enter", "edit"), ("h l", "change"), ("+ -", "repeat"), ("Ctrl-Enter", "insert"), ("b", "bytes"), ("y", "copy bytes"), ("D", "decode them"), ("R", "defaults"), ("d", "definition"), ("?", "all keys"), ("q", "cancel")]
     };
     g.keys(left, width, keys);
     g.finish()
 }
 
-/// A call `line` renders, read back into `(name, value)` arguments: each
-/// argument template with the name filled in is looked for, and its
-/// value runs to the template's text after `{value}`, else to the
-/// separator.
-pub fn read_arguments(line: &str, names: &[String], t: &Templates) -> Vec<(String, String)> {
+/// A call `line` renders, read back into `(name, value)` arguments.
+///
+/// When the argument template names the argument before its value
+/// (`{name}={value}`, `-{name} {value}`), each argument template with the
+/// name filled in is looked for, and its value runs to the template's text
+/// after `{value}`, else to the separator. Otherwise (`{value}`,
+/// `{value} /* {name} */`) the arguments are read by position: the text
+/// the command template puts them in, after `mnemo`, split at the
+/// separator, in the order of `names`.
+pub fn read_arguments(line: &str, mnemo: &str, names: &[String], t: &Templates) -> Vec<(String, String)> {
     let (before, after) = t.argument.split_once("{value}").unwrap_or((t.argument.as_str(), ""));
+    if !before.contains("{name}") {
+        return read_positional(line, mnemo, names, t, before, after);
+    }
     let sep = t.separator.trim();
     let mut found: Vec<(usize, String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -555,11 +611,76 @@ pub fn read_arguments(line: &str, names: &[String], t: &Templates) -> Vec<(Strin
             if let (true, Some(end)) = (ok_before, end) {
                 found.push((from + i, name.clone(), rest[..end].trim().to_string()));
             }
-            from = start;
+            // `prefix` holds the name, so it's never empty: this moves on.
+            from = start.max(from + 1);
+            if from > line.len() || !line.is_char_boundary(from) {
+                break;
+            }
         }
     }
     found.sort_by_key(|f| f.0);
     found.into_iter().map(|(_, n, v)| (n, v)).collect()
+}
+
+/// The fixed text right before `{placeholder}` in `template`, back to
+/// the placeholder before it, and right after it, up to the next one.
+fn around<'a>(template: &'a str, placeholder: &str) -> Option<(&'a str, &'a str)> {
+    let (head, tail) = template.split_once(placeholder)?;
+    let lead = head.rsplit_once('}').map(|(_, l)| l).unwrap_or(head);
+    let trail = tail.split_once('{').map(|(t, _)| t).unwrap_or(tail);
+    Some((lead, trail))
+}
+
+/// `read_arguments` for a template that doesn't name its arguments first.
+fn read_positional(line: &str, mnemo: &str, names: &[String], t: &Templates, before: &str, after: &str) -> Vec<(String, String)> {
+    let Some((lead, trail)) = around(&t.command, "{arguments}") else { return Vec::new() };
+    // Past the mnemonic, as a word of its own.
+    let mut start = 0;
+    if !mnemo.is_empty() {
+        let mut from = 0;
+        while let Some(i) = line[from..].find(mnemo) {
+            let at = from + i;
+            let end = at + mnemo.len();
+            let word = |c: char| c.is_alphanumeric() || c == '_';
+            if !line[..at].ends_with(word) && !line[end..].starts_with(word) {
+                start = end;
+                break;
+            }
+            from = end;
+        }
+    }
+    let lead = lead.trim();
+    if !lead.is_empty() {
+        match line[start..].find(lead) {
+            Some(i) => start += i + lead.len(),
+            None => return Vec::new(),
+        }
+    }
+    let trail = trail.trim();
+    let end = if trail.is_empty() { line.len() } else { line[start..].find(trail).map(|i| start + i).unwrap_or(line.len()) };
+    let region = line[start..end].trim();
+    if region.is_empty() {
+        return Vec::new();
+    }
+    let sep = t.separator.trim();
+    let pieces: Vec<&str> = if sep.is_empty() { region.split_whitespace().collect() } else { region.split(sep).map(str::trim).collect() };
+    // What the argument template writes around the value, but not a
+    // name, which a positional reading can't know.
+    let lead_text = before.trim();
+    let trail_text = after.split("{name}").next().unwrap_or("").trim();
+    names
+        .iter()
+        .zip(pieces)
+        .map(|(name, piece)| {
+            let mut v = piece.strip_prefix(lead_text).unwrap_or(piece);
+            if !trail_text.is_empty() {
+                if let Some(i) = v.find(trail_text) {
+                    v = &v[..i];
+                }
+            }
+            (name.clone(), v.trim().to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -604,7 +725,7 @@ mod tests {
         f.key(Key::Char('9'));
         f.key(Key::Escape);
         assert_eq!(f.warnings(), 1, "9 is outside 1..8");
-        let text = layout(&f, 160).text;
+        let text = layout(&f, None, 160).text;
         assert!(text.contains("outside"), "{text}");
         assert!(text.contains("1 FIXED, NOT ASKED"), "{text}");
         assert_eq!(f.key(Key::CtrlEnter), Action::Insert("tc::send ZTC08101 -PTH00101 9, -PTH00102 OFF".into()));
@@ -623,7 +744,7 @@ mod tests {
         f.key(Key::Char('+'));
         let names: Vec<String> = f.arguments().into_iter().map(|a| a.0).collect();
         assert_eq!(names, vec!["PN", "PT", "PW", "PT", "PW", "PA"]);
-        assert!(layout(&f, 160).text.contains("2 PW"), "the repetition is numbered");
+        assert!(layout(&f, None, 160).text.contains("2 PW"), "the repetition is numbered");
         f.fill(&[("PN".into(), "1".into()), ("PT".into(), "100".into()), ("PW".into(), "7".into()), ("PA".into(), "5".into())]);
         assert_eq!(f.arguments(), vec![("PN".into(), "1".into()), ("PT".into(), "100".into()), ("PW".into(), "7".into()), ("PA".into(), "5".into())]);
         std::fs::remove_dir_all(&root.path).ok();
@@ -633,10 +754,22 @@ mod tests {
     fn a_rendered_call_reads_back_into_its_arguments() {
         let t = templates();
         let names: Vec<String> = ["PTH00101", "PTH00102"].iter().map(|s| s.to_string()).collect();
-        let args = read_arguments("  tc::send ZTC08101 -PTH00101 3, -PTH00102 AUTO", &names, &t);
+        let args = read_arguments("  tc::send ZTC08101 -PTH00101 3, -PTH00102 AUTO", "ZTC08101", &names, &t);
         assert_eq!(args, vec![("PTH00101".into(), "3".into()), ("PTH00102".into(), "AUTO".into())]);
         let t = Templates { command: "x ARGUMENTS=[{arguments}]".into(), argument: "{name}={value}".into(), separator: ", ".into() };
-        let args = read_arguments("x ARGUMENTS=[PTH00101=3, XPTH00102=1, PTH00102=ON]", &names, &t);
+        let args = read_arguments("x ARGUMENTS=[PTH00101=3, XPTH00102=1, PTH00102=ON]", "", &names, &t);
         assert_eq!(args, vec![("PTH00101".into(), "3".into()), ("PTH00102".into(), "ON".into())]);
+    }
+
+    #[test]
+    fn a_template_that_doesnt_name_its_arguments_reads_them_by_position() {
+        // `{value}` alone used to look for an empty prefix forever.
+        let names: Vec<String> = ["PTH00101", "PTH00102"].iter().map(|s| s.to_string()).collect();
+        let t = Templates { command: "tc::send {mnemo} {arguments}".into(), argument: "{value}".into(), separator: " ".into() };
+        assert_eq!(read_arguments("    tc::send ZTC08101 3 AUTO", "ZTC08101", &names, &t), vec![("PTH00101".into(), "3".into()), ("PTH00102".into(), "AUTO".into())]);
+        let t = Templates { command: "send(\"{mnemo}\", [{arguments}])".into(), argument: "{value} /* {name} */".into(), separator: ", ".into() };
+        assert_eq!(read_arguments("send(\"ZTC08101\", [3 /* PTH00101 */, ON /* PTH00102 */])", "ZTC08101", &names, &t), vec![("PTH00101".into(), "3".into()), ("PTH00102".into(), "ON".into())]);
+        let t = Templates { command: "tc::send {mnemo} {arguments}".into(), argument: "{value}={name}".into(), separator: ", ".into() };
+        assert_eq!(read_arguments("tc::send ZTC08101", "ZTC08101", &names, &t), vec![]);
     }
 }

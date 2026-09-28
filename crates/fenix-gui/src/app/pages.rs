@@ -17,6 +17,11 @@ use crate::jira_page::{self, JiraPage};
 use crate::mib_def::{self, DefPage};
 use crate::mib_form::{self, InsertForm};
 use crate::mib_page::{self, MibPage};
+use crate::packet_page::{self, PacketPage};
+use crate::hex_page::{self, HexPage};
+use crate::time_page::{self, TimePage};
+use crate::stream_page::{self, StreamPage};
+use crate::standards_page::{self, StandardsPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::review_inbox::{self, Inbox};
@@ -50,6 +55,11 @@ pub(super) enum PageModel {
     Mib(Box<MibPage>),
     MibDef(Box<DefPage>),
     MibForm(Box<InsertForm>),
+    Packet(Box<PacketPage>),
+    Time(Box<TimePage>),
+    Hex(Box<HexPage>),
+    Stream(Box<StreamPage>),
+    Standards(Box<StandardsPage>),
 }
 
 pub(super) struct PageState {
@@ -88,7 +98,12 @@ impl PageState {
             PageModel::Jira(p) => p.typing(),
             PageModel::Mib(p) => p.typing(),
             PageModel::MibForm(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => false,
+            PageModel::Time(p) => p.typing(),
+            PageModel::Hex(p) => p.typing(),
+            PageModel::Stream(p) => p.typing(),
+            PageModel::MibDef(p) => p.typing(),
+            PageModel::Packet(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => false,
         }
     }
 
@@ -103,6 +118,9 @@ impl PageState {
                 PageModel::Jira(p) => p.claims_space(),
                 PageModel::Mib(p) => p.claims_space(),
                 PageModel::MibForm(p) => p.claims_space(),
+                PageModel::Time(p) => p.typing(),
+                PageModel::Hex(p) => p.typing(),
+                PageModel::Stream(p) => p.typing(),
                 _ => false,
             }
     }
@@ -124,7 +142,12 @@ impl PageState {
             PageModel::Jira(p) => p.paste(text),
             PageModel::Mib(p) => p.paste(text),
             PageModel::MibForm(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::MibDef(_) => {}
+            PageModel::Time(p) => p.paste(text),
+            PageModel::Hex(p) => p.paste(text),
+            PageModel::Stream(p) => p.paste(text),
+            PageModel::MibDef(p) => p.paste(text),
+            PageModel::Packet(p) => p.paste(text),
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Standards(_) => {}
         }
         self.stale = true;
     }
@@ -179,6 +202,10 @@ pub enum PageEvent {
     JiraDone { buffer: BufferId, key: String, result: Result<String, String> },
     /// A set of MIBs was read.
     MibLoaded { key: mib_page::MibKey, set: Arc<fenix_mib::MibSet> },
+    /// A stream page's next packets.
+    StreamRows { buffer: BufferId, rows: Vec<stream_page::Row>, lost: Vec<(usize, u8, u64)>, junk: Vec<(usize, usize, String)>, done: bool },
+    StreamInfo { buffer: BufferId, framing: String },
+    StreamStatus { buffer: BufferId, text: String, ok: bool },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -293,6 +320,11 @@ impl App {
             Some(PageModel::Mib(_)) => "*mib*".to_string(),
             Some(PageModel::MibDef(p)) => mib_def::title(self.mib_set_ready(&p.key).as_deref(), p),
             Some(PageModel::MibForm(f)) => mib_form::title(f),
+            Some(PageModel::Packet(p)) => packet_page::title(p),
+            Some(PageModel::Time(_)) => "*time*".to_string(),
+            Some(PageModel::Hex(p)) => hex_page::title(p),
+            Some(PageModel::Stream(p)) => stream_page::title(p),
+            Some(PageModel::Standards(_)) => "*standards*".to_string(),
         }
     }
 
@@ -327,6 +359,9 @@ impl App {
     /// Closes page `id` and its buffer; panes showing it go back to the
     /// buffer used before.
     pub(super) fn close_page(&mut self, id: BufferId) {
+        if let Some(PageModel::Stream(p)) = self.pages.get(&id).map(|s| &s.model) {
+            p.close();
+        }
         self.pages.remove(&id);
         self.buffers.close(id);
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
@@ -396,6 +431,10 @@ impl App {
             (set, loading, if here == key { source } else { String::new() })
         });
         let apid_hex = self.mib_apid_hex();
+        let form_bytes = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib_form_bytes(f)),
+            _ => None,
+        };
         let Some(state) = self.pages.get_mut(&id) else { return };
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
@@ -430,7 +469,12 @@ impl App {
                 let set = mib.clone().and_then(|m| m.0);
                 mib_def::layout(p, set.as_deref(), apid_hex, cols)
             }
-            PageModel::MibForm(f) => mib_form::layout(f, cols),
+            PageModel::MibForm(f) => mib_form::layout(f, form_bytes.as_ref(), cols),
+            PageModel::Packet(p) => packet_page::layout(p, cols),
+            PageModel::Time(p) => time_page::layout(p, cols),
+            PageModel::Hex(p) => hex_page::layout(p, cols),
+            PageModel::Stream(p) => stream_page::layout(p, cols),
+            PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -524,6 +568,11 @@ impl App {
             (KeyCode::Char('i'), true) if is_def => Key::CtrlI,
             (KeyCode::Named(FenixNamedKey::Enter), true) if is_form => Key::CtrlEnter,
             (KeyCode::Char('o'), true) if typing => Key::CtrlO,
+            // A field's caret, a word at a time.
+            (KeyCode::Named(FenixNamedKey::Left), true) if typing => Key::WordLeft,
+            (KeyCode::Named(FenixNamedKey::Right), true) if typing => Key::WordRight,
+            (KeyCode::Named(FenixNamedKey::Backspace), true) if typing => Key::DeleteWordBack,
+            (KeyCode::Char('w'), true) if typing => Key::DeleteWordBack,
             (_, true) => return false,
             (KeyCode::Char(' '), false) if claims_space => Key::Space,
             (KeyCode::Char(':'), false) if typing => Key::Char(':'),
@@ -539,6 +588,9 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Down), _) => Key::Down,
             (KeyCode::Named(FenixNamedKey::Left), _) => Key::Left,
             (KeyCode::Named(FenixNamedKey::Right), _) => Key::Right,
+            (KeyCode::Named(FenixNamedKey::Home), _) if typing => Key::Home,
+            (KeyCode::Named(FenixNamedKey::End), _) if typing => Key::End,
+            (KeyCode::Named(FenixNamedKey::Delete), _) if typing => Key::Delete,
             _ => return false,
         };
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
@@ -569,6 +621,26 @@ impl App {
             PageModel::MibForm(f) => {
                 let action = f.key(key);
                 self.mib_form_action(action);
+            }
+            PageModel::Packet(p) => {
+                let action = p.key(key);
+                self.packet_page_action(id, action);
+            }
+            PageModel::Time(p) => {
+                let action = p.key(key);
+                self.time_page_action(id, action);
+            }
+            PageModel::Hex(p) => {
+                let action = p.key(key);
+                self.hex_page_action(id, action);
+            }
+            PageModel::Stream(p) => {
+                let action = p.key(key);
+                self.stream_page_action(id, action);
+            }
+            PageModel::Standards(p) => {
+                let action = p.key(key);
+                self.standards_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
@@ -657,6 +729,7 @@ impl App {
             | PageEvent::JiraFields { .. }
             | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
             PageEvent::MibLoaded { key, set } => self.apply_mib_loaded(key, set),
+            event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
@@ -1412,6 +1485,7 @@ impl App {
                 self.save_project_meta();
             }
             Action::RunTask(name) => self.run_task(fenix_tasks::TaskDef { name, command: String::new(), args: Vec::new() }, root),
+            Action::Browse { start, folder } => self.settings_browse(start.or(Some(root)), folder),
             Action::OpenRaw => {
                 let path = root.join(".fenix").join("tools.json");
                 if !path.exists() {

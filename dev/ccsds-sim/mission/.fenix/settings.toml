@@ -1,0 +1,71 @@
+[mib]
+telecommand_template = "tc::send {mnemo} {arguments}"
+telecommand_argument_template = "-{name} {value}"
+
+[mib.roots]
+"OPS 7.2" = "ops"
+
+# What the simulator flies: PUS-C, CUC 4+2 from 1958 TAI, CRC-16-CCITT
+# (all Fenix's defaults), and CADUs of randomized TM frames with
+# Reed-Solomon at depth 5 and a CLCW.
+[ccsds]
+frame_type = "tm"
+frame_length = 1115
+frame_asm = true
+frame_randomized = true
+frame_rs_depth = 5
+frame_ocf = true
+frame_fecf = false
+# The uplink's TC frames: a segment header and an FECF (the defaults).
+tc_fecf = true
+tc_segment_header = true
+
+[ccsds.vc_names]
+0 = "HK"
+
+# The simulator's outputs (dev/ccsds-sim/docker-compose.yml).
+[[ccsds.sources]]
+name = "sim packets"
+address = "tcp://localhost:10010"
+subject = ""
+framing = "packets"
+
+[[ccsds.sources]]
+name = "sim CADUs"
+address = "tcp://localhost:10011"
+subject = ""
+# Left to Fenix to work out from the first octets.
+framing = "guess"
+
+[[ccsds.sources]]
+name = "sim CADUs + FECF"
+address = "tcp://localhost:10013"
+subject = ""
+framing = "frames fecf"
+
+[[ccsds.sources]]
+name = "sim CLTUs (uplink)"
+address = "tcp://localhost:10012"
+subject = ""
+framing = "cltus"
+
+[[ccsds.sources]]
+name = "sim UDP"
+address = "udp://:10015"
+subject = ""
+framing = "packets"
+
+[[ccsds.sources]]
+name = "sim NATS"
+address = "nats://localhost:4222"
+subject = "tm.ops"
+framing = "packets"
+
+[[ccsds.sources]]
+name = "sim file"
+address = "file://recordings/live.bin"
+subject = ""
+framing = "packets"
+
+[editor]
+indent_width = 3

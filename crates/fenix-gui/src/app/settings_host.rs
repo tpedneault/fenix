@@ -194,23 +194,7 @@ impl App {
                 let Some(Scope::Project { root, .. }) = self.settings_page(id).map(|p| p.scope.clone()) else { return };
                 self.project_page_action(root, action);
             }
-            SettingsAction::Browse { start, folder } => {
-                // Where it points now, or the nearest folder of it that
-                // exists; else the project, else home.
-                let start = start
-                    .and_then(|p| p.ancestors().find(|a| a.is_dir()).map(Path::to_path_buf))
-                    .or_else(|| self.project_root.clone())
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_default();
-                match ExplorerState::opened(&start) {
-                    Ok(explorer) => {
-                        self.explorer = Some(explorer);
-                        self.explorer_purpose = ExplorerPurpose::PickSettingPath { folder };
-                        self.main_view = MainView::Explorer;
-                    }
-                    Err(e) => self.set_error(format!("couldn't list {} ({e})", start.display())),
-                }
-            }
+            SettingsAction::Browse { start, folder } => self.settings_browse(start, folder),
             SettingsAction::Choose { key, choices, current } => {
                 if choices.is_empty() {
                     self.set_message("nothing to choose from");
@@ -239,6 +223,25 @@ impl App {
                     self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
                 }
             }
+        }
+    }
+
+    /// The explorer, to pick a path for the settings page: from where
+    /// the field points now, or the nearest folder of it that exists;
+    /// else the project, else home.
+    pub(super) fn settings_browse(&mut self, start: Option<PathBuf>, folder: bool) {
+        let start = start
+            .and_then(|p| p.ancestors().find(|a| a.is_dir()).map(Path::to_path_buf))
+            .or_else(|| self.project_root.clone())
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        match ExplorerState::opened(&start) {
+            Ok(explorer) => {
+                self.explorer = Some(explorer);
+                self.explorer_purpose = ExplorerPurpose::PickSettingPath { folder };
+                self.main_view = MainView::Explorer;
+            }
+            Err(e) => self.set_error(format!("couldn't list {} ({e})", start.display())),
         }
     }
 
@@ -515,6 +518,31 @@ mod tests {
         press(&mut app, "r");
         assert_eq!(app.config.indent_width, None);
         assert!(!std::fs::read_to_string(app.config.path()).unwrap().contains("indent_width"));
+    }
+
+    #[test]
+    fn a_field_takes_the_caret_keys_and_ctrl_o_browses_for_its_path() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("completion.symbols_file"));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert!(page(&mut app).typing());
+        for c in "/tmp/words.txt".chars() {
+            app.page_key(KeyPress::char(c));
+        }
+        // Ctrl-← twice lands on "words", Home and End still reach the page.
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left).with_ctrl()));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left).with_ctrl()));
+        app.page_key(KeyPress::char('x'));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Home)));
+        app.page_key(KeyPress::char('~'));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::End)));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left)));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Delete)));
+        let text = crate::settings_page::layout(page(&mut app), 160).text;
+        assert!(text.contains("~/tmp/xwords.tx▏"), "{text}");
+        assert!(app.page_key(KeyPress::char('o').with_ctrl()));
+        assert_eq!(app.main_view, MainView::Explorer, "Ctrl-O opens the explorer to pick it");
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickSettingPath { folder: false });
     }
 
     #[test]

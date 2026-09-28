@@ -128,8 +128,12 @@ impl App {
             return;
         }
         slot.loading = true;
+        let mission = self.mission(key.project.as_deref());
         self.page_spawn(move |send| {
-            let set = MibSet::load(key.roots.clone(), key.default.as_deref());
+            let mut set = MibSet::load(key.roots.clone(), key.default.as_deref());
+            let options = fenix_mib::checks::Options { disabled: &mission.checks_off, base: mission.base, profile: &mission.profile };
+            let found = fenix_mib::checks::run(&set, &options);
+            set.add_problems(found);
             send(PageEvent::MibLoaded { key, set: Arc::new(set) });
         });
     }
@@ -265,6 +269,7 @@ impl App {
         let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
         let candidates = self.mib_picker(&set, &Kind::ALL);
         self.mib_picker_key = key;
+        self.mib_pick_for_stream = None;
         self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -277,6 +282,7 @@ impl App {
             return;
         }
         self.mib_picker_key = key;
+        self.mib_pick_for_stream = None;
         self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -330,7 +336,7 @@ impl App {
         };
         let templates = self.mib_templates(&key);
         let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
-        let args = mib_form::read_arguments(&line_text, &names, &templates);
+        let args = mib_form::read_arguments(&line_text, &set.get(tc).name, &names, &templates);
         let indent = line_text.chars().take_while(|c| c.is_whitespace()).count();
         let range = line_start + indent..line_start + line_text.chars().count();
         let mut form = InsertForm::new(&set, key.clone(), tc, templates, None, self.mib_apid_hex());
@@ -467,6 +473,57 @@ impl App {
             }
             mib_form::Action::Open(def) => self.open_mib_def(key, def),
             mib_form::Action::Insert(text) => self.mib_form_insert(id, text),
+            mib_form::Action::CopyBytes | mib_form::Action::DecodeBytes => {
+                let Some(PageModel::MibForm(f)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let name = f.name().to_string();
+                let origin = self.mib_origins.get(&id).map(|o| o.buffer);
+                match self.mib_form_bytes(f) {
+                    Ok(bytes) if action == mib_form::Action::DecodeBytes => self.open_packet_page(bytes, format!("{name} from the form")),
+                    Ok(bytes) => self.mib_copy_literal(&bytes, origin, &name),
+                    Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
+                }
+            }
+        }
+    }
+
+    /// The form's telecommand as a packet, from its arguments.
+    pub(super) fn mib_form_bytes(&self, f: &InsertForm) -> Result<Vec<u8>, String> {
+        let set = self.mib_set_ready(&f.key).ok_or("the MIB isn't read yet")?;
+        let mission = self.mission(f.key.project.as_deref());
+        fenix_mib::packets::encode_tc(&set, f.tc, &f.arguments(), &mission.profile, f.seq).map(|p| p.bytes)
+    }
+
+    /// `bytes` on the clipboard, written the way `buffer`'s language
+    /// writes bytes.
+    fn mib_copy_literal(&mut self, bytes: &[u8], buffer: Option<BufferId>, what: &str) {
+        let ext = buffer.and_then(|b| self.buffers.get(b)).and_then(|ob| ob.buffer.path()).and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let text = fenix_ccsds::hex::literal(bytes, &ext);
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(text);
+        }
+        self.set_message(format!("copied {what}'s packet, {} bytes", bytes.len()));
+    }
+
+    /// `SPC k b`: the telecommand call on this line, as its packet's
+    /// bytes on the clipboard.
+    pub(crate) fn cmd_mib_copy_bytes(&mut self) {
+        let Some((key, set)) = self.mib_set_here(MibPending::EditCall) else { return };
+        let buffer = self.focused_buffer_id();
+        let (line, _) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        let text = text.trim_end_matches(['\n', '\r']);
+        let Some(tc) = words(text).into_iter().find_map(|(_, w)| set.resolve(w).filter(|d| d.kind == Kind::Telecommand)) else {
+            self.set_error("no telecommand from this project's MIBs on this line");
+            return;
+        };
+        let templates = self.mib_templates(&key);
+        let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
+        let args = mib_form::read_arguments(text, &set.get(tc).name, &names, &templates);
+        let mission = self.mission(key.project.as_deref());
+        let name = set.get(tc).name.clone();
+        match fenix_mib::packets::encode_tc(&set, tc, &args, &mission.profile, 0) {
+            Ok(p) => self.mib_copy_literal(&p.bytes, Some(buffer), &name),
+            Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
         }
     }
 
@@ -567,6 +624,85 @@ impl App {
         self.record_jump(from);
         self.open_mib_def(key, def);
         true
+    }
+
+    /// `SPC k g`: something to generate from the project's MIBs.
+    pub(crate) fn cmd_mib_generate(&mut self) {
+        let (key, _) = self.mib_key_here();
+        if key.roots.is_empty() {
+            self.set_error("no MIB for this project -- SPC k , lists one in its settings");
+            return;
+        }
+        let candidates = fenix_mib::generate::KINDS.iter().enumerate().map(|(i, (_, file, what))| fenix_picker::Candidate::new(format!("{file:<18} {what}"), i)).collect();
+        self.enter_picker(ActivePicker::MibGenerate(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Writes generated file `kind` into the project's `generated/` and
+    /// opens it.
+    pub(crate) fn mib_generate(&mut self, kind: usize) {
+        let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
+        let Some((name, file, _)) = fenix_mib::generate::KINDS.get(kind) else { return };
+        let mission = self.mission(key.project.as_deref());
+        let Some(text) = fenix_mib::generate::generate(name, &set, &mission.profile, mission.base) else { return };
+        let dir = key.project.clone().unwrap_or_else(|| PathBuf::from(".")).join("generated");
+        let path = dir.join(file);
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
+            Ok(()) => {
+                self.open_file_from_picker(&path);
+                self.set_message(format!("wrote {} -- regenerate it with SPC k g after the MIB changes", path.display()));
+            }
+            Err(e) => self.set_error(format!("couldn't write {}: {e}", path.display())),
+        }
+    }
+
+    /// Checks the telecommand calls of the focused file against the MIB,
+    /// when it changed since the last look.
+    pub(super) fn mib_check_scripts(&mut self) {
+        let id = self.focused_buffer_id();
+        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else { return };
+        let on = match self.mib_project_value("mib.check_scripts") {
+            Some(fenix_config::Value::Bool(b)) => *b,
+            _ => self.config.mib_check_scripts.unwrap_or(true),
+        };
+        if !on || !self.mib_in_this_file() {
+            self.mib_diagnostics.remove(&path);
+            return;
+        }
+        let edits = self.open().buffer.edit_count();
+        if self.mib_checked.get(&id) == Some(&edits) {
+            return;
+        }
+        let (key, _) = self.mib_key_here();
+        let Some(set) = self.mib_set_ready(&key) else { return };
+        self.mib_checked.insert(id, edits);
+        let text = self.open().buffer.text();
+        let templates = self.mib_templates(&key);
+        let found = crate::mib_check::check(&text, &set, &templates);
+        let diags: Vec<lsp_types::Diagnostic> = found
+            .into_iter()
+            .map(|f| lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line: f.line as u32, character: f.cols.start as u32 },
+                    end: lsp_types::Position { line: f.line as u32, character: f.cols.end as u32 },
+                },
+                severity: Some(match f.severity {
+                    crate::mib_check::Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
+                    crate::mib_check::Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+                    crate::mib_check::Severity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
+                }),
+                source: Some("MIB".into()),
+                message: f.message,
+                ..Default::default()
+            })
+            .collect();
+        if diags.is_empty() {
+            self.mib_diagnostics.remove(&path);
+        } else {
+            self.mib_diagnostics.insert(path, diags);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Completion's MIB names: telecommands and parameters, with what

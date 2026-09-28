@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::graph::GraphCommit;
+use crate::graph::{children_first, GraphCommit};
 use crate::process::{run_action, run_lines};
 
 const FORMAT: &str = "--format=%H\x1f%h\x1f%P\x1f%D\x1f%an\x1f%ar\x1f%s";
@@ -52,7 +52,9 @@ fn linear(mut commits: Vec<GraphCommit>) -> Vec<GraphCommit> {
 
 pub fn log(repo: &Path, query: &LogQuery) -> Vec<GraphCommit> {
     let limit = format!("-n{}", query.limit.max(1));
-    let mut args: Vec<String> = vec!["log".into(), "--date-order".into(), limit, FORMAT.into()];
+    // Git's own order, not `--date-order`, which reads the whole history
+    // before the first line (see `commit_graph`).
+    let mut args: Vec<String> = vec!["log".into(), limit, FORMAT.into()];
     if query.all && query.path.is_none() {
         args.push("--all".into());
     }
@@ -68,7 +70,7 @@ pub fn log(repo: &Path, query: &LogQuery) -> Vec<GraphCommit> {
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let commits: Vec<GraphCommit> = run_lines(repo, &refs).iter().filter_map(|l| parse(l)).collect();
     let filtered = query.path.is_some() || query.grep.is_some() || query.author.is_some();
-    if filtered { linear(commits) } else { commits }
+    if filtered { linear(commits) } else { children_first(commits) }
 }
 
 /// `git log -L start,end:path`: the commits that changed those lines, each

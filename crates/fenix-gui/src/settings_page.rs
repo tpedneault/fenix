@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 
-use crate::page::{fit, fit_tail, frame, wrap, Grid, Key, Page, Popup, Role};
+use crate::page::{edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
 /// Whose settings the page is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +139,9 @@ pub struct SettingsPage {
     /// The setting a path is being picked for in the explorer, when
     /// it's set straight from there rather than into a field being typed.
     browsing: Option<&'static str>,
+    /// Where the caret is in the text being typed, a char index; `None`
+    /// at its end, as each field starts.
+    caret: Option<usize>,
     /// In a project's scope, the project's own section: its kind, group,
     /// Jira key, tasks, language servers and debug launch.
     pub project_page: Option<crate::project_settings::Settings>,
@@ -167,6 +170,23 @@ fn field_labels(kind: &Kind) -> Vec<&'static str> {
     }
 }
 
+/// A new entry's fields: empty, but a field picked from choices starts
+/// at its default.
+fn blank_fields(kind: &Kind) -> Vec<String> {
+    match kind {
+        Kind::Records(fields) => fields.iter().map(|f| if f.choices.is_empty() { String::new() } else { f.default.unwrap_or(f.choices[0]).to_string() }).collect(),
+        _ => vec![String::new(); field_labels(kind).len()],
+    }
+}
+
+/// The choices of field `at` of an entry, when it's picked, not typed.
+fn field_choices(kind: &Kind, at: usize) -> &'static [&'static str] {
+    match kind {
+        Kind::Records(fields) => fields.get(at).map(|f| f.choices).unwrap_or(&[]),
+        _ => &[],
+    }
+}
+
 fn is_list(kind: &Kind) -> bool {
     matches!(kind, Kind::Map { .. } | Kind::Records(_))
 }
@@ -184,7 +204,7 @@ fn path_field(kind: &Kind, at: usize) -> Option<bool> {
 
 impl SettingsPage {
     pub fn new(scope: Scope, snap: Snapshot) -> Self {
-        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, browsing: None, project_page: None };
+        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, browsing: None, caret: None, project_page: None };
         page.set_scope(scope);
         page
     }
@@ -265,10 +285,30 @@ impl SettingsPage {
             }
             return;
         }
-        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        let caret = self.caret;
         if let Some(target) = self.typed() {
-            target.push_str(&text);
+            let mut at = caret.unwrap_or(usize::MAX);
+            insert_at(target, &mut at, text);
+            self.caret = Some(at);
         }
+    }
+
+    /// A key that moves the caret in, types into or deletes from the
+    /// text being typed. Whether it was one.
+    fn caret_key(&mut self, key: Key) -> bool {
+        let caret = self.caret;
+        let Some(target) = self.typed() else { return false };
+        let mut at = caret.unwrap_or(target.chars().count());
+        let done = edit_line(target, &mut at, key);
+        if done {
+            self.caret = Some(at);
+        }
+        done
+    }
+
+    /// The caret in the text being typed.
+    fn caret_at(&self, text: &str) -> usize {
+        self.caret.unwrap_or(usize::MAX).min(text.chars().count())
     }
 
     fn typed(&mut self) -> Option<&mut String> {
@@ -442,6 +482,10 @@ impl SettingsPage {
         if key != Key::Char('d') {
             self.armed_delete = false;
         }
+        if !self.searching && self.edit.is_none() {
+            // Whatever's typed next starts with the caret at its end.
+            self.caret = None;
+        }
         if self.in_project_page() {
             let editing = self.project_page.as_ref().is_some_and(|p| p.editing.is_some());
             match key {
@@ -471,14 +515,9 @@ impl SettingsPage {
                     self.focus = Focus::Settings;
                     self.cursor = 0;
                 }
-                Key::Backspace => {
-                    if let Some(s) = &mut self.search {
-                        s.pop();
-                    }
+                _ => {
+                    self.caret_key(key);
                 }
-                Key::Char(c) => self.search.get_or_insert_with(String::new).push(c),
-                Key::Space => self.search.get_or_insert_with(String::new).push(' '),
-                _ => {}
             }
             self.cursor = 0;
             return Action::None;
@@ -562,7 +601,7 @@ impl SettingsPage {
             }
             Key::Char('a') => {
                 if let Some(s) = s.filter(|s| is_list(&s.kind)) {
-                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: vec![String::new(); field_labels(&s.kind).len()], at: 0 });
+                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                 }
             }
             Key::Char('d') => {
@@ -598,7 +637,7 @@ impl SettingsPage {
                         return Action::Choose { key: s.key, choices: self.snap.fonts.clone(), current };
                     }
                     Kind::Map { .. } | Kind::Records(_) => {
-                        self.edit = Some(Edit::Entry { key: s.key, index: None, fields: vec![String::new(); field_labels(&s.kind).len()], at: 0 });
+                        self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                     }
                     _ => self.start_inline(s),
                 },
@@ -607,7 +646,7 @@ impl SettingsPage {
                     self.edit = Some(Edit::Entry { key: s.key, index: Some(i), fields, at: 0 });
                 }
                 Some(Row::Add(s)) => {
-                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: vec![String::new(); field_labels(&s.kind).len()], at: 0 });
+                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                 }
                 _ => {}
             },
@@ -632,7 +671,7 @@ impl SettingsPage {
         }
         let (index, fields) = match row {
             Row::Entry(_, i) => (Some(i), entries(&s.kind, self.snap.here.get(s.key)).get(i).cloned().unwrap_or_default()),
-            _ => (None, vec![String::new(); field_labels(&s.kind).len()]),
+            _ => (None, blank_fields(&s.kind)),
         };
         let start = Some(PathBuf::from(fields[1].trim())).filter(|p| !p.as_os_str().is_empty());
         self.edit = Some(Edit::Entry { key: s.key, index, fields, at: 1 });
@@ -643,9 +682,16 @@ impl SettingsPage {
     /// The path picked in the explorer: into the field being typed, or
     /// straight into the setting `b` was pressed on.
     pub fn browsed(&mut self, path: &std::path::Path) -> Action {
+        if self.in_project_page() {
+            if let Some(p) = self.project_page.as_mut().filter(|p| p.editing.is_some()) {
+                p.browsed(path);
+                return Action::None;
+            }
+        }
         let text = path.display().to_string();
         if let Some(target) = self.typed() {
             *target = text;
+            self.caret = None;
             return Action::None;
         }
         match self.browsing.take().and_then(fenix_config::setting) {
@@ -688,13 +734,52 @@ impl SettingsPage {
     }
 
     fn edit_key(&mut self, edit: Edit, key: Key) -> Action {
+        // A field with choices is picked: ← → (h l, Space) step through
+        // them, and typing doesn't change it.
+        if let Edit::Entry { key: k, at, .. } = &edit {
+            let choices = fenix_config::setting(k).map(|s| field_choices(&s.kind, *at)).unwrap_or(&[]);
+            if !choices.is_empty() {
+                let step: isize = match key {
+                    Key::Right | Key::Space | Key::Char('l') => 1,
+                    Key::Left | Key::Char('h') => -1,
+                    Key::Char(_) | Key::Backspace => 0,
+                    _ => 2,
+                };
+                if step != 2 {
+                    if let Some(t) = self.typed() {
+                        let n = choices.len() as isize;
+                        let now = choices.iter().position(|c| *c == t.trim()).map(|i| i as isize).unwrap_or(-1);
+                        let next = if step == 0 { now.max(0) } else { (now + step).rem_euclid(n) };
+                        *t = choices[next as usize].to_string();
+                    }
+                    return Action::None;
+                }
+            }
+        }
         match key {
             Key::CtrlO => {
-                let (k, at, text) = match &edit {
-                    Edit::Inline { key, text } => (*key, 0, text.clone()),
-                    Edit::Entry { key, fields, at, .. } => (*key, *at, fields[*at].clone()),
+                let kind = match &edit {
+                    Edit::Inline { key, .. } | Edit::Entry { key, .. } => fenix_config::setting(key).map(|s| &s.kind),
                 };
-                let Some(folder) = fenix_config::setting(k).and_then(|s| path_field(&s.kind, at)) else { return Action::None };
+                let (at, text) = match &edit {
+                    Edit::Inline { text, .. } => (0, text.clone()),
+                    Edit::Entry { fields, at, .. } => {
+                        // From another field of an entry that has a path:
+                        // onto the path, and browse for it.
+                        let at = if kind.is_some_and(|k| path_field(k, *at).is_none() && path_field(k, 1).is_some()) { 1 } else { *at };
+                        (at, fields.get(at).cloned().unwrap_or_default())
+                    }
+                };
+                let Some(folder) = kind.and_then(|k| path_field(k, at)) else {
+                    self.note = Some(("Ctrl-O browses for a path -- this field isn't one".into(), true));
+                    return Action::None;
+                };
+                if let Some(Edit::Entry { at: now, .. }) = &mut self.edit {
+                    if *now != at {
+                        *now = at;
+                        self.caret = None;
+                    }
+                }
                 self.browsing = None;
                 return Action::Browse { start: Some(PathBuf::from(text.trim())).filter(|p| !p.as_os_str().is_empty()), folder };
             }
@@ -703,25 +788,12 @@ impl SettingsPage {
                 self.refused = None;
                 return Action::None;
             }
-            Key::Backspace => {
-                if let Some(t) = self.typed() {
-                    t.pop();
+            Key::Up | Key::Down | Key::Tab | Key::BackTab | Key::Enter => self.caret = None,
+            _ => {
+                if self.caret_key(key) {
+                    return Action::None;
                 }
-                return Action::None;
             }
-            Key::Char(c) => {
-                if let Some(t) = self.typed() {
-                    t.push(c);
-                }
-                return Action::None;
-            }
-            Key::Space => {
-                if let Some(t) = self.typed() {
-                    t.push(' ');
-                }
-                return Action::None;
-            }
-            _ => {}
         }
         match edit {
             Edit::Inline { key: k, text } => {
@@ -866,7 +938,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let mut y = 2;
     // The search field.
     let search_label = match (&page.search, page.searching) {
-        (Some(s), true) => format!("/ {s}▏"),
+        (Some(s), true) => format!("/ {}", with_caret(s, page.caret_at(s), width.saturating_sub(2))),
         (Some(s), false) if !s.is_empty() => format!("/ {s}  (Esc clears)"),
         _ => format!("/ search {} settings", settings().iter().filter(|s| page.visible(s)).count()),
     };
@@ -952,7 +1024,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 if editing {
                     let Some(Edit::Inline { text, .. }) = &page.edit else { unreachable!() };
                     let shown = if matches!(s.kind, Kind::Secret(_)) { "•".repeat(text.chars().count()) } else { text.clone() };
-                    let end = g.put(y, vx, &fit_tail(&format!("{shown}▏"), room.max(10)), Role::Title);
+                    let end = g.put(y, vx, &with_caret(&shown, page.caret_at(text), room.max(10)), Role::Title);
                     g.panels.push((y, vx.saturating_sub(1)..(end + 1).max(vx + 24).min(sx + sw)));
                 } else {
                     let (text, role) = shown(page, s);
@@ -1029,7 +1101,12 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
             let mut rows = vec![vec![(format!("{} · {}", s.label, if index.is_some() { "edit" } else { "new" }), Role::Title)], Vec::new()];
             for (i, (label, value)) in labels.iter().zip(fields).enumerate() {
                 let on = i == *at;
-                let shown = if on { fit_tail(&format!("{value}▏"), FORM_FIELD_WIDTH) } else { fit(value, FORM_FIELD_WIDTH) };
+                let picked = !field_choices(&s.kind, i).is_empty();
+                let shown = match (on, picked) {
+                    (true, true) => format!("‹ {value} ›"),
+                    (true, false) => with_caret(value, page.caret_at(value), FORM_FIELD_WIDTH),
+                    (false, _) => fit(value, FORM_FIELD_WIDTH),
+                };
                 rows.push(vec![(format!("{label:<label_w$}"), if on { Role::Accent } else { Role::Muted }), (format!("{shown:<40}"), if on { Role::Title } else { Role::Text })]);
             }
             if let Some((k, why)) = &page.refused {
@@ -1039,8 +1116,21 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 }
             }
             rows.push(Vec::new());
+            let choices = field_choices(&s.kind, *at);
+            if !choices.is_empty() {
+                // Every choice, the one picked stood out.
+                let mut line = vec![(String::new(), Role::Muted)];
+                for (i, c) in choices.iter().enumerate() {
+                    let sep = if i == 0 { "" } else { " · " };
+                    line.push((sep.to_string(), Role::Muted));
+                    line.push((c.to_string(), if fields.get(*at).is_some_and(|v| v.trim() == *c) { Role::Accent } else { Role::Muted }));
+                }
+                rows.push(Vec::new());
+                rows.push(line);
+            }
             let browse = if path_field(&s.kind, *at).is_some() { " · Ctrl-O browse" } else { "" };
-            rows.push(vec![(format!("Tab next field · Enter saves · Esc cancels{browse}"), Role::Muted)]);
+            let pick = if choices.is_empty() { "" } else { " · ← → choose" };
+            rows.push(vec![(format!("Tab next field{pick} · Enter saves · Esc cancels{browse}"), Role::Muted)]);
             g.popup = Some(Popup { line, col: vx, rows });
         }
     }
@@ -1057,6 +1147,12 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
             keys.push(("Ctrl-O", "browse"));
         }
         keys
+    } else if let Some(Edit::Entry { key, at, .. }) = &page.edit {
+        if fenix_config::setting(key).is_some_and(|s| !field_choices(&s.kind, *at).is_empty()) {
+            vec![("← →", "choose"), ("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
+        } else {
+            vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
+        }
     } else if page.edit.is_some() {
         vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
     } else {
@@ -1209,6 +1305,43 @@ mod tests {
     }
 
     #[test]
+    fn a_live_sources_framing_is_picked_not_typed() {
+        let mut p = page();
+        goto(&mut p, "ccsds.sources");
+        p.key(Key::Enter);
+        for (i, text) in ["bench", "tcp://bench:10011"].iter().enumerate() {
+            for c in text.chars() {
+                p.key(Key::Char(c));
+            }
+            p.key(if i == 0 { Key::Enter } else { Key::Tab });
+        }
+        p.key(Key::Tab); // past the NATS subject, onto the framing
+        let text = layout(&p, 130).popup.unwrap().text();
+        assert!(text.contains("‹ guess ›") && text.contains("frames fecf · frames no-fecf · cltus") && text.contains("← → choose"), "{text}");
+        for c in "xyz".chars() {
+            p.key(Key::Char(c));
+        }
+        p.key(Key::Right);
+        p.key(Key::Right);
+        p.key(Key::Right);
+        assert!(layout(&p, 130).popup.unwrap().text().contains("‹ frames fecf ›"), "typing doesn't change it; → steps");
+        p.key(Key::Left);
+        p.key(Key::Char('h'));
+        p.key(Key::Char('h'));
+        p.key(Key::Char('h'));
+        assert!(layout(&p, 130).popup.unwrap().text().contains("‹ records ›"), "← wraps around");
+        p.key(Key::Tab);
+        for c in "12".chars() {
+            p.key(Key::Char(c));
+        }
+        let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Enter) else { panic!() };
+        assert_eq!(rows.last().unwrap(), &["bench", "tcp://bench:10011", "", "records", "12"]);
+        // A framing that isn't one of them -- a hand-edited file -- is refused.
+        let bad = Value::Records(vec![vec!["x".into(), "tcp://x:1".into(), "".into(), "cadus please".into(), "0".into()]]);
+        assert!(fenix_config::setting("ccsds.sources").unwrap().kind.check(&bad).is_err_and(|e| e.contains("Framing: one of guess")));
+    }
+
+    #[test]
     fn list_entries_are_rows_that_are_added_edited_moved_and_deleted() {
         let mut p = page();
         goto(&mut p, "vnc.hosts");
@@ -1312,6 +1445,37 @@ mod tests {
         p.key(Key::Enter);
         let Action::Set { value: Some(Value::Map(m)), .. } = p.key(Key::Enter) else { panic!() };
         assert_eq!(m, [("manual".to_string(), "C:/docs/manual.pdf".to_string())]);
+    }
+
+    #[test]
+    fn ctrl_o_on_an_entrys_name_browses_for_its_path() {
+        let mut p = page();
+        goto(&mut p, "mib.roots");
+        p.key(Key::Char('a'));
+        assert!(p.typing(), "the new entry's form, on its name");
+        p.paste("mission");
+        assert_eq!(p.key(Key::CtrlO), Action::Browse { start: None, folder: true });
+        p.browsed(std::path::Path::new("C:/mib"));
+        let Action::Set { value: Some(Value::Map(m)), .. } = p.key(Key::Enter) else { panic!() };
+        assert_eq!(m, [("mission".to_string(), "C:/mib".to_string())]);
+    }
+
+    #[test]
+    fn the_caret_moves_through_a_value_being_typed() {
+        let mut p = page();
+        goto(&mut p, "git.base_branch");
+        p.key(Key::Enter);
+        p.paste("release/2.0");
+        p.key(Key::WordLeft);
+        p.key(Key::WordLeft);
+        p.key(Key::DeleteWordBack);
+        p.paste("hotfix/");
+        p.key(Key::End);
+        p.key(Key::Backspace);
+        p.key(Key::Char('1'));
+        assert!(layout(&p, 130).text.contains("hotfix/2.1▏"));
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "git.base_branch", value: Some(Value::Text("hotfix/2.1".into())) });
+        assert_eq!(p.caret, None, "the next field starts with the caret at its end");
     }
 
     #[test]

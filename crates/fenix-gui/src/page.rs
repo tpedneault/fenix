@@ -32,6 +32,16 @@ pub enum Key {
     CtrlI,
     /// Done: insert what the form built.
     CtrlEnter,
+    /// While a field is typed: the caret to the start, the end.
+    Home,
+    End,
+    /// While a field is typed: the character after the caret.
+    Delete,
+    /// While a field is typed (`Ctrl-←`, `Ctrl-→`): a word back, forward.
+    WordLeft,
+    WordRight,
+    /// While a field is typed (`Ctrl-Backspace`): the word before the caret.
+    DeleteWordBack,
 }
 
 /// A colour role, resolved against the theme by `App`.
@@ -149,6 +159,191 @@ pub fn fit_tail(s: &str, max: usize) -> String {
     let mut out = String::from('…');
     out.extend(s.chars().skip(n - (max - 1)));
     out
+}
+
+/// A page's `/` filter: what's typed, whether it has the keyboard, and
+/// its caret. Every word typed must appear, in any case.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filter {
+    pub text: String,
+    pub typing: bool,
+    caret: Option<usize>,
+}
+
+impl Filter {
+    /// `/`: the keyboard to the filter, the caret at the end of it.
+    pub fn start(&mut self) {
+        self.typing = true;
+        self.caret = None;
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.typing = false;
+        self.caret = None;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+
+    /// A key while typing: `Esc` clears it, `Enter` (or `Down`) keeps it
+    /// and hands the keyboard back, the rest edit it. Whether what it
+    /// matches may have changed.
+    pub fn key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Escape => {
+                self.clear();
+                true
+            }
+            Key::Enter | Key::Down | Key::Tab => {
+                self.typing = false;
+                false
+            }
+            _ => {
+                let mut at = self.caret.unwrap_or(self.text.chars().count());
+                let changed = edit_line(&mut self.text, &mut at, key);
+                self.caret = Some(at);
+                changed
+            }
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        if self.typing {
+            let mut at = self.caret.unwrap_or(usize::MAX);
+            insert_at(&mut self.text, &mut at, text);
+            self.caret = Some(at);
+        }
+    }
+
+    /// The words typed, lowercased.
+    pub fn words(&self) -> Vec<String> {
+        self.text.split_whitespace().map(str::to_lowercase).collect()
+    }
+
+    /// Whether `hay` has every word typed.
+    pub fn matches(&self, hay: &str) -> bool {
+        let hay = hay.to_lowercase();
+        self.words().iter().all(|w| hay.contains(w.as_str()))
+    }
+
+    /// The filter's line: being typed, set, or a `hint` of what it does.
+    pub fn line(&self, hint: &str, width: usize) -> (String, Role) {
+        if self.typing {
+            let caret = self.caret.unwrap_or(usize::MAX).min(self.text.chars().count());
+            (format!("/ {}", with_caret(&self.text, caret, width.saturating_sub(2))), Role::Title)
+        } else if self.is_empty() {
+            (fit(&format!("/ {hint}"), width), Role::Muted)
+        } else {
+            (fit_tail(&format!("/ {}  (/ changes it, Esc clears)", self.text), width), Role::Accent)
+        }
+    }
+}
+
+/// A one-line field's caret: `key` applied to `text` with the caret at
+/// char `caret` -- moving it (arrows, `Ctrl` a word at a time, `Home`,
+/// `End`) or typing and deleting there. Whether the key was one of those.
+pub fn edit_line(text: &mut String, caret: &mut usize, key: Key) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let at = (*caret).min(n);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    // The start of the word before `at`, the end of the one after.
+    let back = || {
+        let mut i = at;
+        while i > 0 && !word(chars[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && word(chars[i - 1]) {
+            i -= 1;
+        }
+        i
+    };
+    let forward = || {
+        let mut i = at;
+        while i < n && !word(chars[i]) {
+            i += 1;
+        }
+        while i < n && word(chars[i]) {
+            i += 1;
+        }
+        i
+    };
+    let byte = |i: usize| chars[..i].iter().map(|c| c.len_utf8()).sum::<usize>();
+    match key {
+        Key::Left => *caret = at.saturating_sub(1),
+        Key::Right => *caret = (at + 1).min(n),
+        Key::Home => *caret = 0,
+        Key::End => *caret = n,
+        Key::WordLeft => *caret = back(),
+        Key::WordRight => *caret = forward(),
+        Key::Backspace => {
+            if at > 0 {
+                text.remove(byte(at - 1));
+                *caret = at - 1;
+            } else {
+                *caret = 0;
+            }
+        }
+        Key::DeleteWordBack => {
+            let from = back();
+            text.replace_range(byte(from)..byte(at), "");
+            *caret = from;
+        }
+        Key::Delete => {
+            if at < n {
+                text.remove(byte(at));
+            }
+            *caret = at;
+        }
+        Key::Char(c) => {
+            text.insert(byte(at), c);
+            *caret = at + 1;
+        }
+        Key::Space => {
+            text.insert(byte(at), ' ');
+            *caret = at + 1;
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// `more` typed (pasted) into `text` at `caret`, the caret after it.
+pub fn insert_at(text: &mut String, caret: &mut usize, more: &str) {
+    let at = (*caret).min(text.chars().count());
+    let byte: usize = text.chars().take(at).map(|c| c.len_utf8()).sum();
+    let more: String = more.chars().filter(|c| !c.is_control()).collect();
+    text.insert_str(byte, &more);
+    *caret = at + more.chars().count();
+}
+
+/// A field being typed, in at most `max` columns: `text` with `▏` at
+/// char `caret`, cut down around the caret when it doesn't fit, `…`
+/// marking what's cut.
+pub fn with_caret(text: &str, caret: usize, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let at = caret.min(chars.len());
+    let mut all: Vec<char> = chars[..at].to_vec();
+    all.push('▏');
+    all.extend_from_slice(&chars[at..]);
+    let n = all.len();
+    if n <= max {
+        return all.into_iter().collect();
+    }
+    if max < 3 {
+        return fit_tail(&all.into_iter().collect::<String>(), max);
+    }
+    // The caret near the end: the end, as `fit_tail` shows it.
+    if n - at <= max - 1 {
+        return std::iter::once('…').chain(all[n - (max - 1)..].iter().copied()).collect();
+    }
+    let start = at.saturating_sub(max / 2);
+    if start == 0 {
+        return all[..max - 1].iter().copied().chain(std::iter::once('…')).collect();
+    }
+    std::iter::once('…').chain(all[start + 1..start + max - 1].iter().copied()).chain(std::iter::once('…')).collect()
 }
 
 /// `text` wrapped at word boundaries to lines of at most `width`; a
@@ -329,5 +524,39 @@ mod tests {
         assert_eq!(fit_tail("abc", 3), "abc");
         assert_eq!(fit_tail("abcd", 3), "…cd");
         assert_eq!(fit_tail("abcd", 0), "");
+    }
+
+    #[test]
+    fn a_field_moves_its_caret_by_character_and_word_and_types_there() {
+        let mut text = "cargo build --release".to_string();
+        let mut caret = text.chars().count();
+        assert!(edit_line(&mut text, &mut caret, Key::WordLeft));
+        assert_eq!(caret, 14, "to the start of release");
+        edit_line(&mut text, &mut caret, Key::WordLeft);
+        assert_eq!(caret, 6, "past the dashes, to build");
+        edit_line(&mut text, &mut caret, Key::Char('x'));
+        assert_eq!(text, "cargo xbuild --release");
+        edit_line(&mut text, &mut caret, Key::Backspace);
+        edit_line(&mut text, &mut caret, Key::WordRight);
+        assert_eq!(caret, 11);
+        edit_line(&mut text, &mut caret, Key::DeleteWordBack);
+        assert_eq!(text, "cargo  --release");
+        edit_line(&mut text, &mut caret, Key::Home);
+        edit_line(&mut text, &mut caret, Key::Delete);
+        assert_eq!((text.as_str(), caret), ("argo  --release", 0));
+        edit_line(&mut text, &mut caret, Key::End);
+        edit_line(&mut text, &mut caret, Key::Left);
+        insert_at(&mut text, &mut caret, "é\nz");
+        assert_eq!((text.as_str(), caret), ("argo  --releaséze", 16));
+        assert!(!edit_line(&mut text, &mut caret, Key::Enter));
+    }
+
+    #[test]
+    fn a_long_field_keeps_its_caret_in_view() {
+        assert_eq!(with_caret("abc", 1, 10), "a▏bc");
+        assert_eq!(with_caret("abcdefghij", 10, 6), "…ghij▏");
+        assert_eq!(with_caret("abcdefghij", 0, 6), "▏abcd…");
+        let mid = with_caret("abcdefghij", 5, 6);
+        assert!(mid.starts_with('…') && mid.ends_with('…') && mid.contains('▏') && mid.chars().count() == 6, "{mid}");
     }
 }

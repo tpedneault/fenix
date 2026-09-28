@@ -28,6 +28,8 @@ mod motion_host;
 mod polish;
 mod which_key;
 mod mib_host;
+mod ccsds_host;
+mod stream_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -518,6 +520,31 @@ struct HistorySession {
     /// Staleness guard for that fetch -- mirrors `GitSession::
     /// main_request_id`.
     detail_request_id: u64,
+    /// The same, for re-reading the graph and the refs.
+    refresh_request_id: u64,
+}
+
+/// What the History view shows, read off the UI thread: on a large
+/// repository the log and the refs' ahead/behind counts take a while.
+#[derive(Debug)]
+pub struct HistoryData {
+    commits: Vec<fenix_git::GraphCommit>,
+    branches: Vec<fenix_git::Branch>,
+    remotes: Vec<String>,
+    tags: Vec<String>,
+    fetch_age: Option<u64>,
+}
+
+impl HistoryData {
+    fn read(repo_root: &Path, limit: usize) -> Self {
+        HistoryData {
+            commits: fenix_git::commit_graph(repo_root, limit),
+            branches: fenix_git::list_branches(repo_root),
+            remotes: fenix_git::list_remote_branches(repo_root),
+            tags: fenix_git::list_tags(repo_root),
+            fetch_age: fenix_git::seconds_since_fetch(repo_root),
+        }
+    }
 }
 
 /// The Compare view's session (`SPC g c`) -- two refs, the commits
@@ -1879,6 +1906,8 @@ pub enum FenixUserEvent {
     /// same request_id-guarded shape as `GitMainReady`, for the other
     /// view. `None` when the commit couldn't be read at all.
     GitHistoryDetailReady { request_id: u64, buffer: BufferId, diff: Option<CommitDetail> },
+    /// The History view's graph and refs, read again.
+    GitHistoryReady { request_id: u64, data: Box<HistoryData> },
     /// A `SPC g f` fetch finished. Carries git's own message so a
     /// failure (no remote, auth, offline) surfaces verbatim rather than
     /// as a generic "fetch failed".
@@ -2083,7 +2112,7 @@ enum ExplorerPurpose {
     /// The new-project wizard's "In" folder: `S` hands it back.
     PickWizardParent,
     /// A path for the settings page (`b`, `Ctrl-O`): `Enter` on a file
-    /// hands it back, or `S` the folder when a folder's wanted.
+    /// hands it back (unless a folder's wanted), `S` the folder.
     PickSettingPath { folder: bool },
 }
 
@@ -2232,6 +2261,11 @@ enum ActivePicker {
     MibDef(fenix_picker::PickerState<fenix_mib::DefRef>),
     /// `SPC k i`: a telecommand; confirming opens the insert form.
     MibInsert(fenix_picker::PickerState<fenix_mib::DefRef>),
+    /// `SPC k l`: a live source, by its index in `ccsds_sources`.
+    CcsdsSource(fenix_picker::PickerState<usize>),
+    /// `SPC k g`: what to generate from the MIB, by its index in
+    /// `fenix_mib::generate::KINDS`.
+    MibGenerate(fenix_picker::PickerState<usize>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
     /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
@@ -2314,6 +2348,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibDef(s) => s.push_char(c),
         ActivePicker::MibInsert(s) => s.push_char(c),
+        ActivePicker::CcsdsSource(s) => s.push_char(c),
+        ActivePicker::MibGenerate(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2351,6 +2387,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibDef(s) => s.backspace(),
         ActivePicker::MibInsert(s) => s.backspace(),
+        ActivePicker::CcsdsSource(s) => s.backspace(),
+        ActivePicker::MibGenerate(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2388,6 +2426,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibDef(s) => s.move_selection(delta),
         ActivePicker::MibInsert(s) => s.move_selection(delta),
+        ActivePicker::CcsdsSource(s) => s.move_selection(delta),
+        ActivePicker::MibGenerate(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2428,6 +2468,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::MibDef(s) => s.toggle_mark(),
         ActivePicker::MibInsert(s) => s.toggle_mark(),
+        ActivePicker::CcsdsSource(s) => s.toggle_mark(),
+        ActivePicker::MibGenerate(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2465,6 +2507,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibDef(s) => s.query(),
         ActivePicker::MibInsert(s) => s.query(),
+        ActivePicker::CcsdsSource(s) => s.query(),
+        ActivePicker::MibGenerate(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2502,6 +2546,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibDef(s) => s.len(),
         ActivePicker::MibInsert(s) => s.len(),
+        ActivePicker::CcsdsSource(s) => s.len(),
+        ActivePicker::MibGenerate(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2539,6 +2585,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibDef(s) => s.selected_row(),
         ActivePicker::MibInsert(s) => s.selected_row(),
+        ActivePicker::CcsdsSource(s) => s.selected_row(),
+        ActivePicker::MibGenerate(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2580,6 +2628,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibDef(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CcsdsSource(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibGenerate(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5870,6 +5920,15 @@ pub struct App {
     /// The values last inserted for a telecommand, per project, for the
     /// form to open with next time.
     mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
+    /// Where each stream page's packets come from.
+    stream_sources: HashMap<BufferId, stream_host::StreamSource>,
+    /// A stream page waiting for a parameter from the `MibDef` picker.
+    mib_pick_for_stream: Option<BufferId>,
+    /// Telecommand calls the MIB disagrees with, by file -- drawn with
+    /// the language servers' diagnostics.
+    mib_diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Each buffer's edit count when its calls were last checked.
+    mib_checked: HashMap<BufferId, u64>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6651,6 +6710,10 @@ impl App {
             mib_picker_key: Default::default(),
             mib_origins: HashMap::new(),
             mib_last: HashMap::new(),
+            stream_sources: HashMap::new(),
+            mib_pick_for_stream: None,
+            mib_diagnostics: HashMap::new(),
+            mib_checked: HashMap::new(),
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -7355,7 +7418,10 @@ impl App {
     }
 
     fn refresh_project_root(&mut self) {
-        self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        let path = self.open().buffer.path().map(Path::to_path_buf).or_else(|| self.page_file());
+        // A page with no file of its own (a live source, a decode) keeps
+        // the project it was opened in.
+        self.project_root = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.page_project());
         self.refresh_project_settings(false);
         self.mib_preload();
         self.refresh_embedded_indicator();
@@ -7642,6 +7708,13 @@ impl App {
     /// server's way of saying "no more diagnostics here," not "nothing
     /// changed," so it's stored as an actual removal rather than an
     /// empty `Vec` left behind.
+    /// A file's problems: its language server's, and the MIB's.
+    fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
+        all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
+        all
+    }
+
     fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
         let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
         if params.diagnostics.is_empty() {
@@ -7828,7 +7901,7 @@ impl App {
     /// message; this fires on every `K` press, including ones with
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
-        if let Some(card) = self.mib_hover() {
+        if let Some(card) = self.mib_hover().or_else(|| self.ccsds_hex_hover()) {
             self.lsp_hover = Some(card);
             return;
         }
@@ -10181,6 +10254,10 @@ impl App {
         }
         if Self::looks_like_pdf(path) {
             self.open_pdf_path(path);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);
@@ -14381,6 +14458,7 @@ impl App {
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
         self.mib_poll();
+        self.mib_check_scripts();
         self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
@@ -15974,34 +16052,55 @@ impl App {
             commits: Vec::new(),
             last_detail_commit: None,
             detail_request_id: 0,
+            refresh_request_id: 0,
         });
         self.history_refresh();
         self.wake_caret();
     }
 
-    /// Re-reads the graph and the refs tree from disk. Synchronous: a
-    /// `git log`/`for-each-ref` pair against a local repo is fast, and
-    /// unlike a fetch it never touches the network -- the same reasoning
-    /// `open_git_panel` already applies to its own listings.
+    /// Re-reads the graph and the refs tree from disk, off the UI
+    /// thread: on a large repository `git log --all` and the refs'
+    /// ahead/behind counts take long enough to stall typing. Synchronous
+    /// only without an `event_proxy` (every test), like the detail pane.
     fn history_refresh(&mut self) {
-        let Some(session) = self.history_session.as_ref() else { return };
-        let (repo_root, graph_buffer, refs_buffer) = (session.repo_root.clone(), session.graph_buffer, session.refs_buffer);
+        let limit = self.config.git_graph_limit.unwrap_or(200);
+        let Some(session) = self.history_session.as_mut() else { return };
+        session.refresh_request_id += 1;
+        let (request_id, repo_root, graph_buffer, first) = (session.refresh_request_id, session.repo_root.clone(), session.graph_buffer, session.commits.is_empty());
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                if first {
+                    self.replace_buffer_text(graph_buffer, "    reading the history…\n");
+                }
+                std::thread::spawn(move || {
+                    let data = HistoryData::read(&repo_root, limit);
+                    let _ = proxy.send_event(FenixUserEvent::GitHistoryReady { request_id, data: Box::new(data) });
+                });
+            }
+            None => {
+                let data = HistoryData::read(&repo_root, limit);
+                self.apply_history(request_id, data);
+            }
+        }
+    }
 
-        let commits = fenix_git::commit_graph(&repo_root, self.config.git_graph_limit.unwrap_or(200));
-        let rows = fenix_git::assign_lanes(&commits);
+    /// `FenixUserEvent::GitHistoryReady` handling: the graph and the refs
+    /// drawn, unless a newer read has been asked for since.
+    fn apply_history(&mut self, request_id: u64, data: HistoryData) {
+        let Some(session) = self.history_session.as_ref() else { return };
+        if session.refresh_request_id != request_id {
+            return;
+        }
+        let (graph_buffer, refs_buffer) = (session.graph_buffer, session.refs_buffer);
+        let rows = fenix_git::assign_lanes(&data.commits);
         let style = graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
-        let panel = graph_view::render_graph(&commits, &rows, style);
+        let panel = graph_view::render_graph(&data.commits, &rows, style);
         self.graph_lines.insert(graph_buffer, panel.lines);
         self.replace_buffer_text(graph_buffer, &panel.text);
-
-        let branches = fenix_git::list_branches(&repo_root);
-        let remotes = fenix_git::list_remote_branches(&repo_root);
-        let tags = fenix_git::list_tags(&repo_root);
-        let age = fenix_git::seconds_since_fetch(&repo_root);
-        self.set_git_buffer(refs_buffer, graph_view::render_refs(&branches, &remotes, &tags, age));
+        self.set_git_buffer(refs_buffer, graph_view::render_refs(&data.branches, &data.remotes, &data.tags, data.fetch_age));
 
         if let Some(session) = self.history_session.as_mut() {
-            session.commits = commits;
+            session.commits = data.commits;
             session.last_detail_commit = None; // force the detail pane to re-fetch
         }
         self.history_sync_detail();
@@ -16840,8 +16939,28 @@ impl App {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let key = self.mib_picker_key.clone();
-                self.open_mib_def(key, def);
+                match self.mib_pick_for_stream.take() {
+                    Some(page) => {
+                        self.show_page(page);
+                        self.stream_follow(page, def);
+                    }
+                    None => {
+                        let key = self.mib_picker_key.clone();
+                        self.open_mib_def(key, def);
+                    }
+                }
+            }
+            Some(ActivePicker::MibGenerate(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.mib_generate(i);
+            }
+            Some(ActivePicker::CcsdsSource(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_live(i);
             }
             Some(ActivePicker::MibInsert(state)) => {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
@@ -16951,6 +17070,10 @@ impl App {
     fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
             self.open_pdf_path_as(path, preview);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);
@@ -17554,7 +17677,8 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.wizard_parent_picked(&cwd);
-                } else if self.main_view == MainView::Explorer && self.explorer_purpose == (ExplorerPurpose::PickSettingPath { folder: true }) {
+                } else if self.main_view == MainView::Explorer && matches!(self.explorer_purpose, ExplorerPurpose::PickSettingPath { .. }) {
+                    // A path setting takes a folder as readily as a file.
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.settings_path_picked(&cwd);
                 }
@@ -19067,6 +19191,7 @@ impl App {
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
             }
+            FenixUserEvent::GitHistoryReady { request_id, data } => self.apply_history(request_id, *data),
             FenixUserEvent::GitFetched { result } => self.apply_git_fetched(result),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
@@ -20736,7 +20861,7 @@ impl App {
                             format!("{}   S to pick this folder, q to go back ", explorer.cwd.display())
                         }
                         ExplorerPurpose::PickSettingPath { folder: false } => {
-                            format!("{}   Enter to pick a file, q to go back ", explorer.cwd.display())
+                            format!("{}   Enter to pick a file, S this folder, q to go back ", explorer.cwd.display())
                         }
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
@@ -20771,6 +20896,8 @@ impl App {
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
                 Some(picker @ ActivePicker::MibInsert(_)) => ("INSERT TC", picker_len(picker)),
+                Some(picker @ ActivePicker::CcsdsSource(_)) => ("SOURCE", picker_len(picker)),
+                Some(picker @ ActivePicker::MibGenerate(_)) => ("GENERATE", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
@@ -20878,7 +21005,7 @@ impl App {
             .buffer
             .path()
             .map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())))
-            .and_then(|p| self.diagnostics.get(&p))
+            .map(|p| self.all_diagnostics(&p))
             .filter(|diags| !diags.is_empty())
             .map(|diags| {
                 let errors = diags.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();
@@ -21355,18 +21482,6 @@ impl App {
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
-        // Cloned out ahead of the `self.buffers.get_mut` borrow below --
-        // `dashboard_lines` is a different field, but going through a
-        // `&self` method call for it while `ob` (from `self.buffers`) is
-        // still borrowed would look like a whole-`self` borrow to the
-        // compiler. The cloned `Vec` is small (a few dozen entries at
-        // most), so this is cheap.
-        let docker_lines = self.docker_lines.get(&id).cloned();
-        let git_lines = self.git_lines.get(&id).cloned();
-        let diff_lines = self.diff_lines.get(&id).cloned();
-        let graph_lines = self.graph_lines.get(&id).cloned();
-        let merge_lines = self.merge_lines.get(&id).cloned();
-        let dired_lines = self.dired_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -21408,22 +21523,25 @@ impl App {
             return self.page_highlights(id, render_base_line, rows);
         }
         if ob.kind == BufferKind::Docker {
-            return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
+            // Borrowed, not cloned: every frame, and a graph or a diff can
+            // run to thousands of lines. The fields are apart from
+            // `self.buffers`, so the borrows don't meet.
+            return docker_highlights_for_visible_range(ob, self.docker_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Git {
-            return git_highlights_for_visible_range(ob, git_lines.as_deref(), render_base_line, rows, theme);
+            return git_highlights_for_visible_range(ob, self.git_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Diff {
-            return diff_highlights_for_visible_range(ob, diff_lines.as_deref(), render_base_line, rows, theme);
+            return diff_highlights_for_visible_range(ob, self.diff_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Graph {
-            return graph_highlights_for_visible_range(ob, graph_lines.as_deref(), render_base_line, rows, theme);
+            return graph_highlights_for_visible_range(ob, self.graph_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Merge {
-            return merge_highlights_for_visible_range(ob, merge_lines.as_deref(), render_base_line, rows, theme);
+            return merge_highlights_for_visible_range(ob, self.merge_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Explorer {
-            return explorer_highlights_for_visible_range(ob, dired_lines.as_deref(), render_base_line, rows, theme);
+            return explorer_highlights_for_visible_range(ob, self.dired_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
 
         // Conflict markers, in an ordinary file. A conflicted file opens

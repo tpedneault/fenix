@@ -135,6 +135,13 @@ popup shows what keys continue it.
 | `SPC k e` | Edit the telecommand call on this line in the form |
 | `SPC k r` | Read the project's MIBs again |
 | `SPC k ,` | The project's MIB settings |
+| `SPC k d` | Decode the hex under the cursor (packet inspector) |
+| `SPC k b` | Copy a telecommand's packet bytes |
+| `SPC k T` | Time converter |
+| `SPC k f` / `SPC k l` | Open a recording / a live source |
+| `SPC k g` | Generate from the MIB (XTCE, Wireshark, C, Python, ICD, test vectors) |
+| `SPC k ?` | The standards library |
+| `SPC f x` | Show a file as hex |
 | `SPC v v` | Open (or switch to) a configured VNC session by name |
 | `SPC v q` | Close the focused VNC session |
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
@@ -372,15 +379,28 @@ is already Fenix's global leader-key trigger -- Files uses separate
 `s`/`S` keys instead, the same distinct-keys-per-action convention the
 Docker panel's own `s`/`S`/`R` already established.
 
+## A field being typed on a page (settings, filters, forms)
+
+| Keys | |
+|---|---|
+| `←` `→` / `Ctrl-←` `Ctrl-→` | Move the caret a character / a word |
+| `Home` `End` | To the start, the end |
+| `Backspace` `Delete` / `Ctrl-Backspace` `Ctrl-W` | Delete a character / the word before the caret |
+| `Ctrl-O` | Browse for the path being typed (a path setting, a list of paths, the project's program and cwd) |
+| `Ctrl-V` | Paste at the caret |
+
+In the explorer a setting opens, `Enter` picks a file and `S` the folder shown.
+
 ## MIB (`SPC k k`)
 
 | Keys | MIB page |
 |---|---|
 | `1`-`5`, `Tab` | Telecommands, TC parameters, TM packets, TM parameters, calibrations |
-| `/` | Search: words, and `field:value` filters (`Tab` completes a field) |
+| `/` | Search: words, and `field:value` filters (`Tab` completes a field); it narrows the services and the problems too |
 | `Enter` / `i` / `y` | A definition's page / insert the telecommand / copy the name |
 | `o` / `m` / `p` | Sort by the next column / one MIB of several / preview on and off |
 | `!` / `R` / `a` `A` | Problems in the files / read again / the project's MIB settings, yours |
+| `6` | Services: telecommands and packets by PUS service |
 
 | Keys | A definition's page |
 |---|---|
@@ -388,6 +408,7 @@ Docker panel's own `s`/`S`/`R` already established.
 | `Enter` | Follow the link |
 | `Ctrl-o` `Ctrl-i` (`H` `L`) | Back / forward |
 | `u` / `i` / `y` | What uses it / insert the telecommand / copy the name |
+| `/` / `Esc` | Only the rows with these words (parameters, points, what uses it) / every row again |
 | `gf` / `r` / `m` | Its `.dat` line / raw fields / the MIB page |
 
 | Keys | Insert form |
@@ -396,7 +417,50 @@ Docker panel's own `s`/`S`/`R` already established.
 | `Enter` / `c` | Type a value (or pick a status text) / clear and type |
 | `h` `l` / `+` `-` | Previous, next status text / one more, one fewer repetition |
 | `R` / `d` | The MIB's defaults / the telecommand's page |
+| `b` / `s` `S` | Show the packet bytes / next sequence count, back to 0 |
+| `y` / `D` | Copy the packet bytes / decode them in the inspector |
 | `Ctrl-Enter` (`I`) / `q` | Insert / leave |
+
+## CCSDS (`SPC k d`, `SPC k f`, `SPC k T`, `SPC f x`)
+
+| Keys | Packet inspector |
+|---|---|
+| `j` `k` / `g` `G` | Fields |
+| `Tab` / `za` | Fold |
+| `/` / `n` `N` | Find fields by name, bytes, value or check / the next, previous one |
+| `Enter` | Open the field's MIB definition or standard |
+| `y` / `Y` / `b` | Copy the value / the whole decode / the bytes |
+| `a` / `p` | Read as a packet, frame, CLTU, CFDP PDU, CLCW or time / the mission settings |
+
+| Keys | Recording or live source |
+|---|---|
+| `1`-`4`, `Tab` | Packets, by APID, a parameter, problems |
+| `/` / `i` | Filter every tab / idle packets shown or hidden |
+| `]` `[` | Next, previous sequence gap |
+| `Enter` / `x` | Inspect the packet / show it in the hex view |
+| `f` | Inspect the CADU or CLTU it came in |
+| `t` / `w` / `F` | Follow a TM parameter / write what's shown / read with another framing |
+
+The filter takes words (found in a packet's name, SPID, time, APID,
+service and check) and terms: `apid:` `type:` `stype:` `vc:` `seq:`
+`len:` (a number, or a range like `apid:0x100..0x1FF`), `spid:` `name:`
+`time:` `verifies:`, `dir:tc` or `dir:tm`, `check:bad` or `check:ok`,
+and for the followed parameter `value:` `raw:` `limits:out` (`in`,
+`soft`, `hard`). A `-` in front leaves out what a term matches.
+
+| Keys | Hex view |
+|---|---|
+| `h` `j` `k` `l` / `d` `u` / `0` `$` / `gg` `G` | Move |
+| `w` | The next packet |
+| `]` `[` | The next, previous sync marker |
+| `/` `n` `N` / `o` | Search hex or text / go to an offset |
+| `x` `Enter` | Decode here |
+
+| Keys | Time converter |
+|---|---|
+| `j` `k` | The formats |
+| `Enter` `c` / `e` | Type a time / edit this one |
+| `n` / `y` / `i` | Now / copy / insert the on-board time |
 
 ## Agenda (`SPC a a`) and Jira (`SPC j j`)
 
