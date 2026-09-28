@@ -883,6 +883,7 @@ name = "fenix-project"
 version = "1.0.0"
 dependencies = [
  "dirs",
+ "fenix-ccsds",
  "fenix-mib",
  "fenix-picker",
  "fenix-storage",

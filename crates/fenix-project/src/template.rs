@@ -1372,13 +1372,24 @@ mod tests {
     }
 
     #[test]
-    fn the_mib_plan_writes_only_the_chosen_tables_and_nothing_else() {
+    fn the_mib_plan_writes_the_chosen_tables_a_profile_and_a_recordings_folder() {
         let template = builtin_templates().into_iter().find(|t| t.id == "scos-mib").unwrap();
         let mut answers = template.default_answers("mission-c");
         answers.insert("tables".into(), Answer::Many(vec!["telecommands".into()]));
         let plan = template.plan("mission-c", Path::new("p"), &answers).unwrap();
         let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
-        assert!(paths.iter().all(|p| p.ends_with(".dat") && !p.contains('/')), "only tables, at the top: {paths:?}");
+        let tables: Vec<&&str> = paths.iter().filter(|p| !p.starts_with(".fenix/") && !p.starts_with("recordings/")).collect();
+        assert!(tables.iter().all(|p| p.ends_with(".dat") && !p.contains('/')), "tables at the top: {paths:?}");
+        let profile = &plan.files.iter().find(|f| f.path == ".fenix/settings.toml").unwrap().contents;
+        assert!(profile.contains("[ccsds]
+pus = \"c\"
+tm_time = \"cuc 4.2\""), "{profile}");
+        assert!(paths.contains(&"recordings/README.md"));
+        answers.insert("recordings".into(), Answer::Bool(false));
+        answers.insert("pus".into(), Answer::Text("a".into()));
+        let plan = template.plan("mission-c", Path::new("p"), &answers).unwrap();
+        assert!(!plan.files.iter().any(|f| f.path.starts_with("recordings/")));
+        assert!(plan.files.iter().any(|f| f.contents.contains("pus = \"a\"")));
         assert!(paths.contains(&"ccf.dat") && !paths.contains(&"pcf.dat"));
         assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
         assert!(plan.steps.is_empty());

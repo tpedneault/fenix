@@ -157,6 +157,28 @@ pub fn run(set: &MibSet, o: &Options) -> Vec<Problem> {
                 }
             }
         }
+        // What the MIB says of a packet against the project's profile:
+        // the data field header's size, and whether there's a checksum.
+        let header = pus::tm_header_len(o.profile);
+        let (edition, time) = (
+            match o.profile.pus {
+                pus::PusEdition::C => "PUS-C",
+                pus::PusEdition::A => "PUS-A",
+                pus::PusEdition::None => "no PUS",
+            },
+            o.profile.tm_time.label(),
+        );
+        for e in pkts.iter() {
+            let r = &e.row;
+            if let Some(size) = parse_int(r.clean("PID_DFHSIZE")).filter(|s| *s > 0) {
+                if o.profile.pus != pus::PusEdition::None && size as usize != header {
+                    out.push(at(r, format!("SPID {}: PID_DFHSIZE {size}, but the project's {edition} header with {time} is {header} octets (ccsds.pus, ccsds.tm_time)", e.name)));
+                }
+            }
+            if parse_int(r.clean("PID_CHECK")) == Some(1) && o.profile.pec == pus::Pec::None {
+                out.push(at(r, format!("SPID {}: PID_CHECK says the packet ends in a checksum, but the project's is none (ccsds.crc)", e.name)));
+            }
+        }
     }
 
     if on("checksum") {
