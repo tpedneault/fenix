@@ -174,6 +174,11 @@ impl Stamp {
     pub fn of(roots: &[MibRoot]) -> Stamp {
         let mut files = Vec::new();
         for root in roots {
+            if root.path.is_file() {
+                let meta = std::fs::metadata(&root.path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+                files.push((root.path.clone(), meta));
+                continue;
+            }
             for table in schema::all_tables() {
                 let path = root.path.join(format!("{table}.dat"));
                 let meta = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
@@ -524,6 +529,14 @@ impl MibSet {
 
     pub fn problems(&self) -> &[Problem] {
         &self.problems
+    }
+
+    /// More problems, found by checks that need more than the MIB
+    /// (`checks::run` with the project's profile), kept in order.
+    pub fn add_problems(&mut self, more: Vec<Problem>) {
+        self.problems.extend(more);
+        self.problems.sort_by(|a, b| (a.root, &a.file, a.line).cmp(&(b.root, &b.file, b.line)));
+        self.problems.dedup();
     }
 
     pub fn stamp(&self) -> &Stamp {

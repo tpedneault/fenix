@@ -70,6 +70,9 @@ pub struct MibPage {
     only: Option<usize>,
     preview: bool,
     help: bool,
+    /// The services view (tab 6), and its selected definition.
+    pub services: bool,
+    svc_sel: usize,
     /// The problems list, and its selected row.
     problems: Option<usize>,
     pub note: Option<(String, bool)>,
@@ -104,6 +107,8 @@ impl MibPage {
             only: None,
             preview: true,
             help: false,
+            services: false,
+            svc_sel: 0,
             problems: None,
             note: None,
         }
@@ -213,11 +218,60 @@ impl MibPage {
             }
             return Action::None;
         }
+        if self.services {
+            let defs: Vec<DefRef> = services(set, self.only).into_iter().flat_map(|(_, d)| d).collect();
+            match key {
+                Key::Char('q') | Key::Escape => return Action::Close,
+                Key::Char(c @ '1'..='5') => {
+                    self.services = false;
+                    self.tab = Kind::ALL[c as usize - '1' as usize];
+                }
+                Key::Tab => {
+                    self.services = false;
+                    self.tab = Kind::Telecommand;
+                }
+                Key::BackTab => {
+                    self.services = false;
+                    self.tab = Kind::Calibration;
+                }
+                Key::Down | Key::Char('j') => self.svc_sel = (self.svc_sel + 1).min(defs.len().saturating_sub(1)),
+                Key::Up | Key::Char('k') => self.svc_sel = self.svc_sel.saturating_sub(1),
+                Key::Char('g') => self.svc_sel = 0,
+                Key::Char('G') => self.svc_sel = defs.len().saturating_sub(1),
+                Key::Enter | Key::Char('l') => {
+                    if let Some(d) = defs.get(self.svc_sel) {
+                        return Action::Open(*d);
+                    }
+                }
+                Key::Char('i') => match defs.get(self.svc_sel) {
+                    Some(d) if d.kind == Kind::Telecommand => return Action::Insert(*d),
+                    _ => {}
+                },
+                Key::Char('m') => {
+                    let n = set.roots().len();
+                    self.only = match self.only {
+                        _ if n < 2 => None,
+                        None => Some(0),
+                        Some(i) if i + 1 < n => Some(i + 1),
+                        Some(_) => None,
+                    };
+                    self.svc_sel = 0;
+                }
+                Key::Char('?') => self.help = true,
+                _ => {}
+            }
+            return Action::None;
+        }
         let row = self.sel[slot(self.tab)] as isize;
         match key {
             Key::Char('q') | Key::Escape => return Action::Close,
             Key::Char('?') => self.help = true,
             Key::Char(c @ '1'..='5') => self.tab = Kind::ALL[c as usize - '1' as usize],
+            Key::Char('6') => {
+                self.services = true;
+                self.problems = None;
+            }
+            Key::Tab if self.tab == Kind::Calibration => self.services = true,
             Key::Tab => self.tab = Kind::ALL[(slot(self.tab) + 1) % 5],
             Key::BackTab => self.tab = Kind::ALL[(slot(self.tab) + 4) % 5],
             Key::Char('/') => {
@@ -295,6 +349,32 @@ impl MibPage {
     }
 }
 
+/// The MIB by PUS service: each service type used, with its
+/// telecommands, then its TM packets, by subtype.
+pub fn services(set: &MibSet, only: Option<usize>) -> Vec<(u8, Vec<DefRef>)> {
+    let mut by: std::collections::BTreeMap<u8, Vec<(u8, u8, String, DefRef)>> = std::collections::BTreeMap::new();
+    for kind in [Kind::Telecommand, Kind::TmPacket] {
+        let (tf, sf) = if kind == Kind::Telecommand { ("CCF_TYPE", "CCF_STYPE") } else { ("PID_TYPE", "PID_STYPE") };
+        for (index, e) in set.entries(kind).iter().enumerate() {
+            if only.is_some_and(|o| o != e.root) {
+                continue;
+            }
+            let (Some(t), Some(st)) = (fenix_mib::types::parse_int(e.row.clean(tf)), fenix_mib::types::parse_int(e.row.clean(sf))) else { continue };
+            if !(0..=255).contains(&t) || !(0..=255).contains(&st) {
+                continue;
+            }
+            let order = if kind == Kind::Telecommand { 0 } else { 1 };
+            by.entry(t as u8).or_default().push((order, st as u8, e.name.clone(), DefRef { kind, index }));
+        }
+    }
+    by.into_iter()
+        .map(|(s, mut v)| {
+            v.sort();
+            (s, v.into_iter().map(|x| x.3).collect())
+        })
+        .collect()
+}
+
 /// Compares numbers as numbers and the rest as text.
 fn natural(a: &str, b: &str) -> std::cmp::Ordering {
     match (fenix_mib::types::parse_int(a), fenix_mib::types::parse_int(b)) {
@@ -366,7 +446,7 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     }
     let mut x = left;
     for (i, kind) in Kind::ALL.iter().enumerate() {
-        let on = *kind == page.tab;
+        let on = *kind == page.tab && !page.services;
         x = g.put(4, x, &(i + 1).to_string(), Role::Accent) + 1;
         let end = g.put(4, x, kind.plural(), if on { Role::Title } else { Role::Muted });
         if on {
@@ -374,6 +454,13 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
         }
         x = g.put(4, end + 1, &thousands(counts[i]), Role::Muted) + 3;
     }
+    let svc = services(set, page.only);
+    x = g.put(4, x, "6", Role::Accent) + 1;
+    let end = g.put(4, x, "Services", if page.services { Role::Title } else { Role::Muted });
+    if page.services {
+        g.panels.push((4, x..end));
+    }
+    g.put(4, end + 1, &svc.len().to_string(), Role::Muted);
     let sort = match page.sort {
         None if page.query.is_empty() => "by name".to_string(),
         None => "best match first".to_string(),
@@ -388,6 +475,54 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     }
     g.rule(y, left..left + width);
     y += 1;
+
+    if page.services {
+        let mut k = 0;
+        let mut anchor = y;
+        for (service, defs) in &svc {
+            let name = fenix_ccsds::pus::service_name(*service).unwrap_or(if *service >= 128 { "mission specific" } else { "not a standard service" });
+            let tcs = defs.iter().filter(|d| d.kind == Kind::Telecommand).count();
+            g.heading(y, left, width, &format!("{service} · {name} · {tcs} TC · {} TM", defs.len() - tcs));
+            y += 1;
+            for d in defs {
+                let e = set.get(*d);
+                let r = &e.row;
+                let (t, st) = if d.kind == Kind::Telecommand { (r.clean("CCF_TYPE"), r.clean("CCF_STYPE")) } else { (r.clean("PID_TYPE"), r.clean("PID_STYPE")) };
+                let sub = fenix_mib::types::parse_int(st).and_then(|n| fenix_ccsds::pus::subtype_name(*service, n as u8)).unwrap_or("");
+                let mut x = g.put(y, left + 1, if d.kind == Kind::Telecommand { "TC " } else { "TM " }, kind_role()) + 1;
+                x = g.put(y, x, &format!("{:<10}", e.name), Role::Title) + 1;
+                x = g.put(y, x, &format!("{t},{st:<4}"), Role::Muted) + 1;
+                let right = if d.kind == Kind::Telecommand {
+                    let ack = fenix_mib::types::parse_int(r.clean("CCF_ACK")).unwrap_or(0) as u8;
+                    let v: Vec<String> = fenix_ccsds::pus::verification_reports(ack).iter().map(|(s, _)| format!("1,{s}")).collect();
+                    if v.is_empty() { String::new() } else { format!("verified by {}", v.join(" ")) }
+                } else {
+                    match r.clean("PID_PI1_VAL") {
+                        "" | "0" => String::new(),
+                        v => format!("PI1 {v}"),
+                    }
+                };
+                let desc = if sub.is_empty() { e.description.clone() } else { format!("{sub} -- {}", e.description) };
+                g.put(y, x, &fit(&desc, (left + width).saturating_sub(x + right.chars().count() + 2)), Role::Text);
+                g.put(y, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
+                if k == page.svc_sel {
+                    g.focus(y, left..left + width);
+                    anchor = y;
+                }
+                k += 1;
+                y += 1;
+            }
+            y += 1;
+        }
+        if svc.is_empty() {
+            g.put(y, left, "No telecommands or packets with a service type.", Role::Muted);
+        }
+        if page.help {
+            help(&mut g, anchor, left);
+        }
+        g.keys(left, width, &[("1-6", "tabs"), ("j k", "move"), ("Enter", "open"), ("i", "insert"), ("m", "one MIB"), ("q", "close")]);
+        return g.finish();
+    }
 
     if let Some(at) = page.problems {
         problems(&mut g, set, at, left, width, y);
@@ -538,7 +673,7 @@ fn help(g: &mut Grid, line: usize, left: usize) {
     let groups: [(&str, &[(&str, &str)]); 3] = [
         ("Move", &[("1-5 Tab", "tabs"), ("j k g G", "rows"), ("d u", "20 rows down, up"), ("/", "search: words, field:value"), ("o", "sort by the next column"), ("m", "one MIB, all MIBs"), ("q", "close")]),
         ("A row", &[("Enter", "open its page"), ("i", "insert the telecommand"), ("y", "copy its name"), ("p", "preview on, off")]),
-        ("The MIBs", &[("!", "problems in their files"), ("R", "read them again"), ("a A", "this project's MIB settings, yours")]),
+        ("The MIBs", &[("6", "by PUS service"), ("!", "problems in their files and against the standards"), ("R", "read them again"), ("a A", "this project's MIB settings, yours")]),
     ];
     let mut rows = vec![vec![("Keys".to_string(), Role::Title)]];
     for (title, keys) in groups {
@@ -652,6 +787,25 @@ pub(crate) mod tests {
         assert!(layout(&page, &c, 160).text.contains("APID ↓"));
         let names: Vec<String> = page.hits(&set, Kind::Telecommand).iter().map(|h| set.get(h.def).name.clone()).collect();
         assert_eq!(names, vec!["ZTC17001", "ZTC08101"], "by APID, as numbers");
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn the_services_tab_groups_by_pus_service() {
+        let root = fixture();
+        let set = MibSet::load(vec![root.clone()], None);
+        let mut page = MibPage::new(MibKey { roots: vec![root.clone()], ..Default::default() });
+        let c = ctx(&set);
+        page.key(Key::Char('6'), &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.contains("8 · FUNCTION MANAGEMENT · 1 TC · 0 TM"), "{text}");
+        assert!(text.contains("17 · TEST · 1 TC · 0 TM"), "{text}");
+        assert!(text.contains("perform a function -- Set heater control mode"), "{text}");
+        page.key(Key::Char('j'), &c);
+        let Action::Open(def) = page.key(Key::Enter, &c) else { panic!() };
+        assert_eq!(set.get(def).name, "ZTC17001");
+        page.key(Key::Char('1'), &c);
+        assert!(!page.services);
         std::fs::remove_dir_all(&root.path).ok();
     }
 

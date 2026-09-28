@@ -47,6 +47,10 @@ pub enum Action {
     Open(DefRef),
     /// Insert this text.
     Insert(String),
+    /// Copy the telecommand's packet, as a literal for the file.
+    CopyBytes,
+    /// Open the packet in the inspector.
+    DecodeBytes,
 }
 
 pub struct InsertForm {
@@ -70,6 +74,10 @@ pub struct InsertForm {
     pub note: Option<(String, bool)>,
     /// A line being edited: the call is put back in its place.
     pub replacing: bool,
+    /// The Bytes section is shown.
+    pub show_bytes: bool,
+    /// The sequence count built packets get.
+    pub seq: u16,
 }
 
 /// How many parameters `slots` slots after `start` take up: a nested
@@ -130,6 +138,8 @@ impl InsertForm {
             templates,
             note: None,
             replacing: false,
+            show_bytes: false,
+            seq: 0,
         };
         if let Some(r) = remembered {
             form.values = r.clone();
@@ -383,6 +393,14 @@ impl InsertForm {
                 self.note = Some(("back to the MIB's defaults".into(), false));
             }
             Key::Char('d') => return Action::Open(self.tc),
+            Key::Char('b') => self.show_bytes = !self.show_bytes,
+            Key::Char('s') => {
+                self.seq = (self.seq + 1) & 0x3FFF;
+                self.show_bytes = true;
+            }
+            Key::Char('S') => self.seq = 0,
+            Key::Char('y') => return Action::CopyBytes,
+            Key::Char('D') => return Action::DecodeBytes,
             Key::Char('I') | Key::CtrlEnter => return Action::Insert(self.rendered()),
             _ => {}
         }
@@ -394,7 +412,9 @@ pub fn title(form: &InsertForm) -> String {
     format!("*insert: {}*", form.name)
 }
 
-pub fn layout(form: &InsertForm, cols: usize) -> Page {
+/// The form, with its packet's bytes when the Bytes section is shown
+/// (the host builds them from the MIB).
+pub fn layout(form: &InsertForm, bytes: Option<&Result<Vec<u8>, String>>, cols: usize) -> Page {
     let (left, width) = frame(cols, 150);
     let mut g = Grid::new();
     g.put(1, left, if form.replacing { "Edit a telecommand call" } else { "Insert a telecommand" }, Role::Muted);
@@ -480,6 +500,28 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
         y += 1;
     }
     y += 1;
+    if form.show_bytes {
+        y += 1;
+        match bytes {
+            Some(Ok(b)) => {
+                g.heading(y, left, width, &format!("Bytes · {} · sequence count {} · s next, S back to 0", b.len(), form.seq));
+                y += 1;
+                for (i, chunk) in b.chunks(16).enumerate() {
+                    g.put(y, left + 2, &format!("{:04X}", i * 16), Role::Muted);
+                    g.put(y, left + 8, &fenix_ccsds::field::hex(chunk), Role::Title);
+                    y += 1;
+                }
+            }
+            Some(Err(e)) => {
+                g.heading(y, left, width, "Bytes");
+                y += 1;
+                g.put(y, left + 2, &fit(&format!("can't build the packet: {e}"), width - 2), Role::Bad);
+                y += 1;
+            }
+            None => {}
+        }
+        y += 1;
+    }
     g.put(y, left, "Inserted as text where the form was opened -- nothing is sent anywhere.", Role::Muted);
 
     if let Some(at) = form.menu {
@@ -504,6 +546,8 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
             ("+ -", "one more, one fewer repetition"),
             ("R", "the MIB's defaults again"),
             ("d", "the telecommand's page"),
+            ("b s S", "the packet's bytes, next sequence count, back to 0"),
+            ("y D", "copy the bytes for this file, decode them"),
             ("Ctrl-Enter I", "insert"),
             ("q Esc", "leave without inserting"),
         ]
@@ -519,7 +563,7 @@ pub fn layout(form: &InsertForm, cols: usize) -> Page {
     } else if form.menu.is_some() {
         &[("Enter", "pick"), ("Esc", "leave it")]
     } else {
-        &[("Enter", "edit"), ("h l", "change"), ("+ -", "repeat"), ("Ctrl-Enter", "insert"), ("R", "defaults"), ("d", "definition"), ("?", "all keys"), ("q", "cancel")]
+        &[("Enter", "edit"), ("h l", "change"), ("+ -", "repeat"), ("Ctrl-Enter", "insert"), ("b", "bytes"), ("y", "copy bytes"), ("D", "decode them"), ("R", "defaults"), ("d", "definition"), ("?", "all keys"), ("q", "cancel")]
     };
     g.keys(left, width, keys);
     g.finish()
@@ -604,7 +648,7 @@ mod tests {
         f.key(Key::Char('9'));
         f.key(Key::Escape);
         assert_eq!(f.warnings(), 1, "9 is outside 1..8");
-        let text = layout(&f, 160).text;
+        let text = layout(&f, None, 160).text;
         assert!(text.contains("outside"), "{text}");
         assert!(text.contains("1 FIXED, NOT ASKED"), "{text}");
         assert_eq!(f.key(Key::CtrlEnter), Action::Insert("tc::send ZTC08101 -PTH00101 9, -PTH00102 OFF".into()));
@@ -623,7 +667,7 @@ mod tests {
         f.key(Key::Char('+'));
         let names: Vec<String> = f.arguments().into_iter().map(|a| a.0).collect();
         assert_eq!(names, vec!["PN", "PT", "PW", "PT", "PW", "PA"]);
-        assert!(layout(&f, 160).text.contains("2 PW"), "the repetition is numbered");
+        assert!(layout(&f, None, 160).text.contains("2 PW"), "the repetition is numbered");
         f.fill(&[("PN".into(), "1".into()), ("PT".into(), "100".into()), ("PW".into(), "7".into()), ("PA".into(), "5".into())]);
         assert_eq!(f.arguments(), vec![("PN".into(), "1".into()), ("PT".into(), "100".into()), ("PW".into(), "7".into()), ("PA".into(), "5".into())]);
         std::fs::remove_dir_all(&root.path).ok();

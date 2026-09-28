@@ -188,6 +188,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
+        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('x')], "hex view", "ccsds.hex");
         // Global rather than under `SPC m`: `SPC m` only has the Arduino
         // menu inside a sketch, and your first sketch has to come from
         // somewhere.
@@ -402,7 +403,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
 
         // SCOS-2000 MIBs: the MIB page, a definition by kind, inserting
         // or editing a telecommand call. The project's MIBs are used.
-        t.label_group(&[spc, KeyPress::char('k')], "mib");
+        t.label_group(&[spc, KeyPress::char('k')], "mission");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('k')], "MIB page", "mib.page");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('/')], "search every kind", "mib.search");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('t')], "telecommand", "mib.telecommand");
@@ -414,6 +415,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('e')], "edit the call on this line", "mib.edit_call");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('r')], "read the MIBs again", "mib.reload");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char(',')], "this project's MIBs", "mib.settings");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('d')], "decode the hex here", "ccsds.decode");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('b')], "copy this call as bytes", "mib.copy_bytes");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('T')], "time converter", "ccsds.time");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('f')], "open a recording", "ccsds.recording");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('l')], "follow a live source", "ccsds.live");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('g')], "generate from the MIB", "mib.generate");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('?')], "the standards library", "ccsds.standards");
 
         // The agenda: the page and its tabs, and what you reach for from
         // a file -- a new task, a task from here, the clock. A task's own

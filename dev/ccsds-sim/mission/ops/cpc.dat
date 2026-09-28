@@ -1,0 +1,11 @@
+PTC00001	Function id	3	4													
+PTH00101	Heater line	3	4		D			PRF00017								
+PTH00102	Heater control mode	2	8							PAF00042		AUTO				
+PTH00110	Thermostat low limit	4	12		D	degC		PRF00020				-5				
+PTH00111	Thermostat high limit	4	12		D	degC		PRF00020				45				
+PTC00020	Number of reports	3	4									1				
+PTC00021	Report SID	3	12													
+PTC00030	Number of activities	3	4									1				
+PTC00031	Release time	9	17													
+PTC00032	Activity id	3	12													
+PTC00040	Parameter id	3	12													

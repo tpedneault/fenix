@@ -65,7 +65,7 @@ impl App {
         let Some(path) = self.buffers.get(buffer).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else {
             return Vec::new();
         };
-        let current = self.diagnostics.get(&path).cloned().unwrap_or_default();
+        let current = self.all_diagnostics(&path);
         let delay = Duration::from_millis(self.config.polish.diagnostics_delay_ms.unwrap_or(400));
         let typing = self.vim.mode() == Mode::Insert
             && self.focused_buffer_id() == buffer
