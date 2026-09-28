@@ -1,0 +1,4 @@
+NTH00123	Heater 3 temperature		degC	3	12		NTH00100		N	R	CAF00310					TCS							
+NTH00124	Heater 4 temperature		degC	3	12				N	R	CAF00310					TCS							
+NTH00100	Thermistor bank powered			3	4				S	R	TXF00006					TCS							
+NTH00201	Heater 1 mode			3	4				S	R	TXF00005					TCS							

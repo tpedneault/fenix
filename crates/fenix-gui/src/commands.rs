@@ -313,6 +313,14 @@ impl CommandRegistry {
         registry.register("mib.edit_call", "Edit the telecommand call on this line in the insert form", cmd_mib_edit_call);
         registry.register("mib.reload", "Read the project's MIBs again", cmd_mib_reload);
         registry.register("mib.settings", "This project's MIB settings", cmd_mib_settings);
+        registry.register("mib.copy_bytes", "Copy the telecommand call on this line as its packet's bytes", cmd_mib_copy_bytes);
+        registry.register("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", cmd_ccsds_time);
+        registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
+        registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", cmd_ccsds_recording);
+        registry.register("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", cmd_ccsds_live);
+        registry.register("mib.generate", "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", cmd_mib_generate);
+        registry.register("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", cmd_ccsds_standards);
+        registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -1023,6 +1031,38 @@ fn cmd_mib_reload(ctx: &mut CommandCtx) {
 
 fn cmd_mib_settings(ctx: &mut CommandCtx) {
     ctx.app.cmd_mib_settings();
+}
+
+fn cmd_mib_copy_bytes(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_copy_bytes();
+}
+
+fn cmd_ccsds_time(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_time();
+}
+
+fn cmd_ccsds_hex(ctx: &mut CommandCtx) {
+    ctx.app.cmd_hex_view();
+}
+
+fn cmd_ccsds_recording(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_recording();
+}
+
+fn cmd_ccsds_live(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_live();
+}
+
+fn cmd_mib_generate(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_generate();
+}
+
+fn cmd_ccsds_standards(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_standards();
+}
+
+fn cmd_ccsds_decode(ctx: &mut CommandCtx) {
+    ctx.app.cmd_ccsds_decode();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {

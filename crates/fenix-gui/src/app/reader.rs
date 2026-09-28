@@ -54,10 +54,12 @@ pub(super) type ViewKey = (fenix_window::WindowId, BufferId);
 pub(super) type Place = (u32, f32);
 
 /// What a fetched outline is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OutlineFor {
     Sidebar,
     Picker,
+    /// To go to the heading whose title holds this text.
+    Find(String),
 }
 
 /// One open document -- `pdf_docs[buffer]`.
@@ -632,6 +634,7 @@ impl App {
                 doc.outline = Some(entries);
                 match doc.outline_for.take() {
                     Some(OutlineFor::Picker) => self.pdf_open_heading_picker(buffer),
+                    Some(OutlineFor::Find(heading)) => self.pdf_find_heading(buffer, &heading),
                     Some(OutlineFor::Sidebar) if empty => self.set_message("this PDF has no bookmarks"),
                     _ => {}
                 }
@@ -1054,7 +1057,7 @@ impl App {
             return;
         }
         let asked = d.outline_for.is_some();
-        if !asked || what == OutlineFor::Picker {
+        if !asked || what != OutlineFor::Sidebar {
             d.outline_for = Some(what);
         }
         if !asked {
@@ -1259,6 +1262,37 @@ impl App {
             .map(|e| fenix_picker::Candidate::new(format!("{}{}   p.{}", "  ".repeat(e.depth as usize), e.title, e.page_index + 1), e.page_index))
             .collect();
         self.enter_picker(ActivePicker::PdfHeading(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Opens `path` and goes to the heading whose title holds `heading`
+    /// -- a field's clause in a standard. Found through the outline, else
+    /// through the reader's search.
+    pub(crate) fn pdf_open_at_heading(&mut self, path: &Path, heading: &str) {
+        self.open_pdf_path(path);
+        let Some((_, doc)) = self.pdf_target() else { return };
+        if self.pdf_docs.get(&doc).is_some_and(|d| d.outline.is_some()) {
+            self.pdf_find_heading(doc, heading);
+        } else {
+            self.pdf_want_outline(doc, OutlineFor::Find(heading.to_string()));
+        }
+    }
+
+    fn pdf_find_heading(&mut self, doc: BufferId, heading: &str) {
+        let want = heading.to_lowercase();
+        let page = self.pdf_docs.get(&doc).and_then(|d| d.outline.as_ref()).and_then(|o| o.iter().find(|e| e.title.to_lowercase().contains(&want)).map(|e| e.page_index));
+        match page {
+            Some(page) => {
+                if let Some(key) = self.pdf_target() {
+                    self.pdf_jump(key, (page, 0.0));
+                }
+                self.set_message(format!("{heading} -- p. {}", page + 1));
+            }
+            None => {
+                self.pdf_dispatch_search(heading.to_string());
+                self.pdf_accept_search();
+                self.set_message(format!("no heading named \"{heading}\" -- searching for it"));
+            }
+        }
     }
 
     /// The heading picked: the document read to its page.

@@ -668,6 +668,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-ccsds"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "fenix-completion"
 version = "1.0.0"
 
@@ -783,6 +790,7 @@ dependencies = [
  "fenix-agenda",
  "fenix-brand",
  "fenix-buffers",
+ "fenix-ccsds",
  "fenix-completion",
  "fenix-config",
  "fenix-core",
@@ -854,6 +862,10 @@ dependencies = [
 [[package]]
 name = "fenix-mib"
 version = "1.0.0"
+dependencies = [
+ "fenix-ccsds",
+ "roxmltree",
+]
 
 [[package]]
 name = "fenix-pdf"

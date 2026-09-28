@@ -19,6 +19,7 @@ chrono = "0.4"
 dirs = "6"
 fenix-agenda = { path = "../fenix-agenda" }
 fenix-buffers = { path = "../fenix-buffers" }
+fenix-ccsds = { path = "../fenix-ccsds" }
 fenix-completion = { path = "../fenix-completion" }
 fenix-config = { path = "../fenix-config" }
 fenix-core = { path = "../fenix-core" }

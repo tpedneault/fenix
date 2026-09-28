@@ -28,6 +28,8 @@ mod motion_host;
 mod polish;
 mod which_key;
 mod mib_host;
+mod ccsds_host;
+mod stream_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2232,6 +2234,11 @@ enum ActivePicker {
     MibDef(fenix_picker::PickerState<fenix_mib::DefRef>),
     /// `SPC k i`: a telecommand; confirming opens the insert form.
     MibInsert(fenix_picker::PickerState<fenix_mib::DefRef>),
+    /// `SPC k l`: a live source, by its index in `ccsds_sources`.
+    CcsdsSource(fenix_picker::PickerState<usize>),
+    /// `SPC k g`: what to generate from the MIB, by its index in
+    /// `fenix_mib::generate::KINDS`.
+    MibGenerate(fenix_picker::PickerState<usize>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
     /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
@@ -2314,6 +2321,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::MibDef(s) => s.push_char(c),
         ActivePicker::MibInsert(s) => s.push_char(c),
+        ActivePicker::CcsdsSource(s) => s.push_char(c),
+        ActivePicker::MibGenerate(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2351,6 +2360,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::MibDef(s) => s.backspace(),
         ActivePicker::MibInsert(s) => s.backspace(),
+        ActivePicker::CcsdsSource(s) => s.backspace(),
+        ActivePicker::MibGenerate(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2388,6 +2399,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::MibDef(s) => s.move_selection(delta),
         ActivePicker::MibInsert(s) => s.move_selection(delta),
+        ActivePicker::CcsdsSource(s) => s.move_selection(delta),
+        ActivePicker::MibGenerate(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2428,6 +2441,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::MibDef(s) => s.toggle_mark(),
         ActivePicker::MibInsert(s) => s.toggle_mark(),
+        ActivePicker::CcsdsSource(s) => s.toggle_mark(),
+        ActivePicker::MibGenerate(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2465,6 +2480,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::MibDef(s) => s.query(),
         ActivePicker::MibInsert(s) => s.query(),
+        ActivePicker::CcsdsSource(s) => s.query(),
+        ActivePicker::MibGenerate(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2502,6 +2519,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::MibDef(s) => s.len(),
         ActivePicker::MibInsert(s) => s.len(),
+        ActivePicker::CcsdsSource(s) => s.len(),
+        ActivePicker::MibGenerate(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2539,6 +2558,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::MibDef(s) => s.selected_row(),
         ActivePicker::MibInsert(s) => s.selected_row(),
+        ActivePicker::CcsdsSource(s) => s.selected_row(),
+        ActivePicker::MibGenerate(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2580,6 +2601,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibDef(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MibInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CcsdsSource(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibGenerate(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5870,6 +5893,15 @@ pub struct App {
     /// The values last inserted for a telecommand, per project, for the
     /// form to open with next time.
     mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
+    /// Where each stream page's packets come from.
+    stream_sources: HashMap<BufferId, stream_host::StreamSource>,
+    /// A stream page waiting for a parameter from the `MibDef` picker.
+    mib_pick_for_stream: Option<BufferId>,
+    /// Telecommand calls the MIB disagrees with, by file -- drawn with
+    /// the language servers' diagnostics.
+    mib_diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Each buffer's edit count when its calls were last checked.
+    mib_checked: HashMap<BufferId, u64>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6651,6 +6683,10 @@ impl App {
             mib_picker_key: Default::default(),
             mib_origins: HashMap::new(),
             mib_last: HashMap::new(),
+            stream_sources: HashMap::new(),
+            mib_pick_for_stream: None,
+            mib_diagnostics: HashMap::new(),
+            mib_checked: HashMap::new(),
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -7355,7 +7391,10 @@ impl App {
     }
 
     fn refresh_project_root(&mut self) {
-        self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
+        let path = self.open().buffer.path().map(Path::to_path_buf).or_else(|| self.page_file());
+        // A page with no file of its own (a live source, a decode) keeps
+        // the project it was opened in.
+        self.project_root = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.page_project());
         self.refresh_project_settings(false);
         self.mib_preload();
         self.refresh_embedded_indicator();
@@ -7642,6 +7681,13 @@ impl App {
     /// server's way of saying "no more diagnostics here," not "nothing
     /// changed," so it's stored as an actual removal rather than an
     /// empty `Vec` left behind.
+    /// A file's problems: its language server's, and the MIB's.
+    fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
+        all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
+        all
+    }
+
     fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
         let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
         if params.diagnostics.is_empty() {
@@ -7828,7 +7874,7 @@ impl App {
     /// message; this fires on every `K` press, including ones with
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
-        if let Some(card) = self.mib_hover() {
+        if let Some(card) = self.mib_hover().or_else(|| self.ccsds_hex_hover()) {
             self.lsp_hover = Some(card);
             return;
         }
@@ -10181,6 +10227,10 @@ impl App {
         }
         if Self::looks_like_pdf(path) {
             self.open_pdf_path(path);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);
@@ -14381,6 +14431,7 @@ impl App {
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
         self.mib_poll();
+        self.mib_check_scripts();
         self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
@@ -16840,8 +16891,28 @@ impl App {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let key = self.mib_picker_key.clone();
-                self.open_mib_def(key, def);
+                match self.mib_pick_for_stream.take() {
+                    Some(page) => {
+                        self.show_page(page);
+                        self.stream_follow(page, def);
+                    }
+                    None => {
+                        let key = self.mib_picker_key.clone();
+                        self.open_mib_def(key, def);
+                    }
+                }
+            }
+            Some(ActivePicker::MibGenerate(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.mib_generate(i);
+            }
+            Some(ActivePicker::CcsdsSource(state)) => {
+                let Some(i) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_live(i);
             }
             Some(ActivePicker::MibInsert(state)) => {
                 let Some(def) = state.selected().map(|c| c.payload) else { return };
@@ -16951,6 +17022,10 @@ impl App {
     fn open_file_as(&mut self, path: &Path, preview: bool) {
         if Self::looks_like_pdf(path) {
             self.open_pdf_path_as(path, preview);
+            return;
+        }
+        if Self::looks_binary(path) {
+            self.open_hex_view(path.to_path_buf());
             return;
         }
         let id = self.buffers.open_path(path);
@@ -20771,6 +20846,8 @@ impl App {
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
                 Some(picker @ ActivePicker::MibInsert(_)) => ("INSERT TC", picker_len(picker)),
+                Some(picker @ ActivePicker::CcsdsSource(_)) => ("SOURCE", picker_len(picker)),
+                Some(picker @ ActivePicker::MibGenerate(_)) => ("GENERATE", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
@@ -20878,7 +20955,7 @@ impl App {
             .buffer
             .path()
             .map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())))
-            .and_then(|p| self.diagnostics.get(&p))
+            .map(|p| self.all_diagnostics(&p))
             .filter(|diags| !diags.is_empty())
             .map(|diags| {
                 let errors = diags.iter().filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)).count();

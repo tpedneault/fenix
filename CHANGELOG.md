@@ -40,6 +40,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.fenix/settings.toml`; they take the place of yours in that project,
   and a project that is a MIB uses itself. MIBs load in the background
   and reload when their files change.
+- CCSDS and PUS tools (`SPC k`): a packet inspector decodes hex in any
+  spelling layer by layer (space packet, PUS-C or PUS-A, time codes,
+  the MIB's parameters with calibrations and limits, CRC), and reads
+  TM, TC, AOS and USLP frames with Reed-Solomon decoding, CLTUs, CFDP
+  PDUs and CLCWs; a time converter (CUC, CDS, UTC, TAI, GPS, leap
+  seconds); a view-only hex view, where files that aren't text now
+  open; recordings and live sources (TCP, UDP, a file being written,
+  NATS) as a packet list with gaps, problems and a parameter followed
+  through time; a standards library linking fields to their PDFs.
+  Recordings and live sources also read CLTUs (BCH, tail sequence, the
+  TC frame's length and FECF, retransmissions, the telecommands inside)
+  and check TM frames' FECF; `f` on a packet shows the CADU or CLTU it
+  came in. Mission settings live in a new CCSDS & PUS category.
+- A field of a list setting that takes only certain values is picked
+  from them in its form (`←`/`→`), not typed: a live source's framing is
+  the first.
+- `dev/ccsds-sim`: a simulated spacecraft in Docker (TM over TCP, UDP,
+  NATS and a file; CADUs with and without an FECF; the uplink's CLTUs)
+  with a ready mission project, to try the CCSDS tools against.
+- The MIB is checked against the standards, telecommand calls in
+  scripts are checked against it, the MIB page gains a services tab,
+  and `SPC k g` generates XTCE, a Wireshark dissector, a C header, a
+  Python module, an ICD or test vectors from it. XTCE files can be
+  listed as MIBs.
 - A tab keeps its cursor when you switch away and back.
 
 ### Changed
