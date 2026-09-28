@@ -51,7 +51,6 @@ impl Section {
 pub enum EditorFix {
     PickBoard,
     PickPort,
-    RegisterMibRoot { path: PathBuf, label: String },
     /// Point this project's `tools.json` at a language server Fenix can't
     /// find on PATH.
     UseLanguageServer { language: String, executable: PathBuf, args: Vec<String> },
@@ -118,8 +117,6 @@ pub trait Probe {
     /// Runs `program` in `dir`: whether it succeeded, and everything it
     /// printed (both streams). Only called on a deep pass.
     fn run(&self, program: &Path, args: &[&str], dir: &Path) -> Option<(bool, String)>;
-    /// Whether `dir` is a configured `[mib]` root.
-    fn mib_registered(&self, dir: &Path) -> bool;
     /// Where tool installers put programs that may not be on PATH --
     /// `uv tool install`'s bin folder, for one.
     fn tool_dirs(&self) -> Vec<PathBuf> {
@@ -372,51 +369,43 @@ fn arduino(d: &mut Doctor) {
 fn mib(d: &mut Doctor) {
     let root = d.root;
     let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.to_path_buf() };
-    let known: Vec<&str> = fenix_mib::schema::all_tables().collect();
-    let mut tables = 0;
-    let mut rows = 0;
-    let mut problems = Vec::new();
-    let mut unknown = Vec::new();
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat"))).collect();
-    entries.sort();
-    for path in entries {
-        let table = path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let Some(columns) = fenix_mib::schema::columns(&table) else {
-            unknown.push(table);
-            continue;
-        };
-        if !known.contains(&table.as_str()) {
-            continue;
-        }
-        tables += 1;
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            problems.push(Check::new(Section::Database, format!("{table}.dat"), Health::Bad, "can't be read as text").at(path.clone(), 1));
-            continue;
-        };
-        for (i, line) in text.lines().enumerate().filter(|(_, l)| !l.is_empty()) {
-            rows += 1;
-            let fields = line.split('\t').count();
-            if fields > columns.len() {
-                problems.push(Check::new(Section::Database, format!("{table}.dat:{}", i + 1), Health::Warn, format!("{fields} fields, the ICD has {}", columns.len())).at(path.clone(), i + 1));
-            }
-        }
+    let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let set = fenix_mib::MibSet::load(vec![fenix_mib::MibRoot { label, path: dir.clone() }], None);
+    let info = set.root_info(0);
+    let health = if info.tables == 0 { Health::Warn } else { Health::Ok };
+    let (tables, rows) = (info.tables, info.rows);
+    let mut summary = format!("{tables} table{}, {rows} row{}", if tables == 1 { "" } else { "s" }, if rows == 1 { "" } else { "s" });
+    if let Some(v) = &info.version {
+        summary = format!("{v} -- {summary}");
     }
-    let health = if tables == 0 { Health::Warn } else { Health::Ok };
-    d.push(Check::new(Section::Database, "tables", health, format!("{tables} table{}, {rows} row{}", if tables == 1 { "" } else { "s" }, if rows == 1 { "" } else { "s" })));
+    d.push(Check::new(Section::Database, "tables", health, summary));
+    let problems = set.problems();
     let shown = problems.len().min(20);
-    let more = problems.len() - shown;
-    d.checks.extend(problems.into_iter().take(shown));
-    if more > 0 {
-        d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{more} more rows with too many fields")));
+    for p in &problems[..shown] {
+        let file = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p.line.map(|l| format!("{file}:{l}")).unwrap_or(file);
+        let health = if p.line.is_none() { Health::Bad } else { Health::Warn };
+        d.push(Check::new(Section::Database, name, health, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
     }
+    if problems.len() > shown {
+        d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{} more -- ! on the MIB page lists them all", problems.len() - shown)));
+    }
+    let known: Vec<&str> = fenix_mib::schema::all_tables().collect();
+    let mut unknown: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat")))
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default())
+        .filter(|t| !known.contains(&t.as_str()))
+        .collect();
+    unknown.sort();
     if !unknown.is_empty() {
         d.push(Check::new(Section::Database, "not ICD 7.2", Health::Info, format!("{}.dat -- ignored", unknown.join(".dat, "))));
     }
-    if d.probe.mib_registered(&dir) {
-        d.push(Check::new(Section::Database, "registered", Health::Ok, "a [mib] root -- SPC m t finds it"));
-    } else {
-        let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        d.push(Check::new(Section::Database, "registered", Health::Warn, "not a [mib] root -- SPC m t won't see it").fix("register it", FixAction::Editor(EditorFix::RegisterMibRoot { path: dir, label }), true));
+    if info.tables > 0 {
+        d.push(Check::new(Section::Database, "browse", Health::Ok, "this project is its own MIB -- SPC k k lists what's in it"));
     }
 }
 
@@ -460,7 +449,6 @@ mod tests {
     struct FakeProbe {
         programs: Vec<&'static str>,
         outputs: HashMap<String, (bool, String)>,
-        mib_roots: Vec<PathBuf>,
         tool_dirs: Vec<PathBuf>,
     }
 
@@ -471,9 +459,6 @@ mod tests {
         fn run(&self, program: &Path, args: &[&str], _dir: &Path) -> Option<(bool, String)> {
             let name = program.file_name()?.to_string_lossy().into_owned();
             self.outputs.get(&format!("{name} {}", args.join(" "))).cloned().or_else(|| args.first().filter(|a| ["--version", "version"].contains(*a)).map(|_| (true, format!("{name} 1.2.3"))))
-        }
-        fn mib_registered(&self, dir: &Path) -> bool {
-            self.mib_roots.iter().any(|r| r == dir)
         }
         fn tool_dirs(&self) -> Vec<PathBuf> {
             self.tool_dirs.clone()
@@ -572,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mib_is_counted_its_bad_rows_located_and_its_registration_checked() {
+    fn a_mib_is_counted_and_its_bad_rows_located() {
         let dir = TempDir::new("doctor_mib");
         dir.write("mib/ccf.dat", "TC1\tFirst\n\nTC2\tSecond\n");
         let too_many = vec!["x"; 30].join("\t");
@@ -584,10 +569,7 @@ mod tests {
         let bad = find(&checks, "pcf.dat:2");
         assert_eq!(bad.location, Some((dir.path().join("mib/pcf.dat"), 2)));
         assert_eq!(find(&checks, "not ICD 7.2").detail, "zzz.dat -- ignored");
-        let registered = find(&checks, "registered");
-        assert!(matches!(&registered.fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::RegisterMibRoot { path, .. }) if path == &dir.path().join("mib")));
-        let probe = FakeProbe { mib_roots: vec![dir.path().join("mib")], ..Default::default() };
-        assert_eq!(find(&diagnose(dir.path(), ProjectKind::Mib, &probe, false), "registered").health, Health::Ok);
+        assert_eq!(find(&checks, "browse").health, Health::Ok);
     }
 
     #[test]

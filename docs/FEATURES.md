@@ -299,7 +299,7 @@ Everything Fenix does, by area. For the keys, see
     all TypeScript).
   - *Embedded*: an Arduino sketch, or an Arduino library with an example.
   - *Mission*: an SCOS-2000 MIB -- only the chosen `.dat` tables,
-    registered as a `[mib]` root.
+    listed as the project's MIB in its settings.
   - *Scripting*: a Tcl package with a tcltest suite.
   - *Start from*: a monorepo (optionally a Cargo, uv and/or npm
     workspace at its root) or an empty folder.
@@ -332,7 +332,7 @@ Everything Fenix does, by area. For the keys, see
   uv and whether the venv matches `uv.lock`, the language server (found
   even when installed off PATH), debugpy; `arduino-cli`, the board's
   core and whether its port is connected; a MIB's tables, over-long rows
-  and whether it's registered -- each with its fix. `f` runs the fix
+  and references that point nowhere -- each with its fix. `f` runs the fix
   under the cursor, `F` every fix that's safe to run unasked (syncing a
   venv, `git init`; never an install), `Enter` opens a check's file, `y`
   copies a report.
@@ -1089,28 +1089,51 @@ Everything Fenix does, by area. For the keys, see
   one can't -- AVR boards (Uno, Nano, Mega) have no debug interface.
   Built behind a platform interface (`fenix-embedded`), so another
   family such as STM32 can be added with the same keys and panes.
-- **SCOS-2000 MIB** (`SPC m ...` in a Tcl file): fuzzy-find and inspect telecommands
-  (`SPC m t`), TM packets (`SPC m k`), TM parameters (`SPC m p`), and
-  calibration definitions (`SPC m c`, numeric curves/status
-  enumerations/range checks) from one or more configured MIB directories
-  (see [Configuration](CONFIGURATION.md)) -- each opens a real, Vim-
-  navigable buffer with the definition's summary, related rows (a
-  telecommand's parameters with their calibration references, a TM
-  packet's parameters, a TM parameter's packet occurrences), and raw
-  fields. `SPC m i` builds and inserts a telecommand: pick one, build or
-  skip its variable arguments (an argument with known engineering
-  aliases offers a picker of them; one with a known numeric range warns,
-  without blocking, if the typed value falls outside it), review the
-  rendered command, confirm to insert at wherever the wizard started.
-  `SPC m r` reparses the configured MIB directories from disk. `SPC m
-  a` registers a new MIB directory without leaving the editor: browse
-  to it in the file explorer, `S` to select it, then type a label --
-  saved to `settings.toml` at once, same as everything else here.
-  `SPC m d` fuzzy-finds a configured directory to remove the same way.
-  Ported from an ICD 7.2 SCOS-2000 MIB workflow in the author's previous
-  (Emacs) config -- see that config's own
-  [MIB module](https://github.com/tpedneault/orbit-emacs/blob/master/modules/mod-mib.el)
-  for the original.
+- **SCOS-2000 MIB** (`SPC k`): a project lists its MIB folders in its
+  own settings (`mib.roots` in `.fenix/settings.toml`, paths relative to
+  it), and everything MIB-related uses the MIBs of the project the
+  focused file is in -- a project that is a MIB (`.dat` tables at its
+  root or in `mib/`) needs nothing, and your own `mib.roots` apply
+  outside a project or in one without its own (`mib.include_yours` adds
+  them to a project's). MIBs are read in the background and again when
+  a `.dat` file changes.
+  - **The MIB page** (`SPC k k`): a tab per kind -- `1` telecommands,
+    `2` TC parameters, `3` TM packets, `4` TM parameters, `5`
+    calibrations -- each a list with its own columns (PUS type,
+    APID, decoded type, unit, calibration...) and a preview of the
+    selected row. `/` narrows every tab at once: words match names and
+    descriptions (and status texts, units), `field:value` filters a
+    column (`type:8`, `apid:0x3F2`, `unit:degC`, `cal:status`, `mib:SIM`,
+    or any raw column like `ccf_critical:Y`; `Tab` completes a field
+    name). `o` sorts by the next column, `m` shows one MIB of several,
+    `!` lists problems -- unreadable files, extra columns, references
+    that point nowhere -- each opening its `.dat` line.
+  - **Definition pages** (`Enter`, `SPC k t`/`p`/`m`/`n`/`c` by kind,
+    `SPC k /` any kind): a telecommand's application data as a bit
+    layout and its parameters with type, allowed values and calibration;
+    a TC parameter's calibration and the telecommands using it; a
+    packet's parameters by byte and bit; a TM parameter's calibration
+    (curve, texts, polynomial), limits and the packets carrying it; a
+    calibration's content and what uses it. Codes are decoded (`PTC
+    3/12` reads `uint16`). Every name is a link: `Enter` follows it,
+    `Ctrl-o`/`Ctrl-i` go back and forward, `u` jumps to what uses it,
+    `gf` opens the `.dat` line, `y` copies the name.
+  - **Inserting a telecommand** (`SPC k i`, or `i` on one): a form with
+    every variable argument at once, defaults filled in (or the values
+    you used last time), status values cycled with `h`/`l`, repeated
+    groups grown with `+`/`-`, each value checked against the MIB (a
+    warning never blocks), and the command rendered underneath from the
+    project's templates. `Ctrl-Enter` inserts it where the cursor was.
+    `SPC k e` reads the call on the cursor's line back into the form and
+    puts the edited one in its place. It only writes text; nothing is
+    sent anywhere.
+  - **In the editor**: `K` on a telecommand, parameter or packet name
+    shows its card, `gd` opens its page, and completion offers the
+    MIB's names with what they are (`mib.editor_files` limits this to
+    some file types).
+  - In a Tcl file, `SPC m` keeps its letters: `i` insert, `e` edit the
+    call, `t` telecommand, `k` TM packet, `p` TM parameter, `c`
+    calibration, `m` the MIB page, `r` read again.
 
 ## Themes, terminals and tables
 

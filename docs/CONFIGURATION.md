@@ -86,6 +86,21 @@ the rest of what's the project's own: its kind, group, pin and Jira key,
 and its tasks, language servers and debug launch (`.fenix/tools.json`).
 `p` switches the page between yours and the project's.
 
+A project's MIBs and how it writes a telecommand are its own too; they
+take the place of yours there (`mib.include_yours` adds yours back), and
+a folder is relative to the project:
+
+```toml
+[mib]
+default = "OPS 7.2"
+telecommand_template = "tc::send {mnemo} {arguments}"
+telecommand_argument_template = "-{name} {value}"
+
+[mib.roots]
+"OPS 7.2" = "mib/ops"
+SIM = "../simulator/mib"
+```
+
 A project from before `.fenix/settings.toml` kept these in
 `.fenix/project.ini`; the first time it's opened, that file moves over
 -- kind, Jira key, reviewers and serial monitor speed into
@@ -186,14 +201,20 @@ when it's out of date).
 | `agenda.categories` | a list | – | Categories offered when you file a task. |
 | `agenda.worklog_round` | minutes | 15 | Time logged to Jira is rounded to this many minutes. |
 | `agenda.idle_minutes` | minutes | 60 | With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks. |
-| **Embedded & MIB** | | | |
+| **Embedded** | | | |
 | `embedded.arduino_cli` | a path | found on PATH | Where arduino-cli is, when it isn't found by itself. |
 | `embedded.clangd` | a path | found on PATH | Where clangd is, when it isn't found by itself. |
 | `embedded.arduino_language_server` | a path | downloaded when needed | Where arduino-language-server is, when it isn't found by itself. |
-| `mib.roots` | name = folder | – | Folders holding a MIB database. |
-| `mib.telecommand_template` | text | – | How a telecommand is written; {name} and {args} are filled in. |
-| `mib.telecommand_argument_template` | text | – | How each argument is written; {name} and {value} are filled in. |
-| `mib.telecommand_argument_separator` | text | – | What goes between arguments. |
+| **SCOS-2000 MIB** | | | |
+| `mib.roots` | name = folder | – | The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it. *A project can set it.* |
+| `mib.default` | text | the first | The MIB whose definition is used when several define the same name. *A project can set it.* |
+| `mib.include_yours` | true / false | off | In a project with MIBs of its own, use yours too. *A project can set it.* |
+| `mib.telecommand_template` | text | telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}] | How an inserted telecommand is written: {mnemo}, {type}, {stype}, {apid}, {description}, {mib} and {arguments} are filled in. *A project can set it.* |
+| `mib.telecommand_argument_template` | text | {name}={value} | How each argument is written: {name} and {value} are filled in. *A project can set it.* |
+| `mib.telecommand_argument_separator` | text | ", " | What goes between arguments. *A project can set it.* |
+| `mib.editor_files` | a list | every file | Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file. *A project can set it.* |
+| `mib.apid_format` | hex / decimal | hex | How APIDs are shown. |
+| `mib.watch` | true / false | on | Reload a MIB when one of its .dat files changes on disk. |
 | **VNC** | | | |
 | `vnc.hosts` | [[tables]] of name, host, port | – | Machines SPC v connects to. No passwords: every host is taken to be on a trusted network. |
 | **Workspaces** | | | |

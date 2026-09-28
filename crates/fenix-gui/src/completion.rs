@@ -18,6 +18,8 @@ pub enum Source {
     Buffer,
     Lsp,
     Snippet,
+    /// A name from the project's MIBs.
+    Mib,
 }
 
 impl Source {
@@ -28,6 +30,7 @@ impl Source {
             Self::Buffer => "word",
             Self::Lsp => "LSP",
             Self::Snippet => "snippet",
+            Self::Mib => "MIB",
         }
     }
 }

@@ -1058,7 +1058,8 @@ fn quote_for_display(arg: &str) -> String {
 /// Something only the editor can do once the files exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hook {
-    /// Register `path` (relative to the project) as a `[mib]` root.
+    /// List `path` (relative to the project) as one of the project's
+    /// MIBs, in its `.fenix/settings.toml`.
     MibRoot { path: String, label: String },
 }
 

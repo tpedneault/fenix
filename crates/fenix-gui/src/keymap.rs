@@ -129,14 +129,14 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
             }
             LocalContext::Tcl => {
-                t.insert(&[KeyPress::char('i')], "insert telecommand", "mib.insert_telecommand");
-                t.insert(&[KeyPress::char('t')], "lookup telecommand", "mib.lookup_telecommand");
-                t.insert(&[KeyPress::char('k')], "lookup TM packet", "mib.lookup_tm_packet");
-                t.insert(&[KeyPress::char('p')], "lookup TM parameter", "mib.lookup_tm_parameter");
-                t.insert(&[KeyPress::char('c')], "lookup calibration", "mib.lookup_calibration");
-                t.insert(&[KeyPress::char('r')], "refresh MIB index", "mib.refresh_index");
-                t.insert(&[KeyPress::char('a')], "add MIB root", "mib.add_root");
-                t.insert(&[KeyPress::char('d')], "delete MIB root", "mib.delete_root");
+                t.insert(&[KeyPress::char('i')], "insert a telecommand", "mib.insert");
+                t.insert(&[KeyPress::char('e')], "edit the telecommand call", "mib.edit_call");
+                t.insert(&[KeyPress::char('t')], "telecommand", "mib.telecommand");
+                t.insert(&[KeyPress::char('k')], "TM packet", "mib.tm_packet");
+                t.insert(&[KeyPress::char('p')], "TM parameter", "mib.tm_parameter");
+                t.insert(&[KeyPress::char('c')], "calibration", "mib.calibration");
+                t.insert(&[KeyPress::char('m')], "MIB page", "mib.page");
+                t.insert(&[KeyPress::char('r')], "read the MIBs again", "mib.reload");
                 t.insert(&[KeyPress::char('s')], "symbols", "code.symbols");
                 t.insert(&[KeyPress::char('T')], "refresh tags", "completion.refresh_tags");
             }
@@ -399,6 +399,21 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('g')], "go to issue", "jira.goto_issue");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('/')], "search jira", "jira.search");
         t.insert(&[spc, KeyPress::char('j'), KeyPress::char('n')], "new issue", "jira.create_issue");
+
+        // SCOS-2000 MIBs: the MIB page, a definition by kind, inserting
+        // or editing a telecommand call. The project's MIBs are used.
+        t.label_group(&[spc, KeyPress::char('k')], "mib");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('k')], "MIB page", "mib.page");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('/')], "search every kind", "mib.search");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('t')], "telecommand", "mib.telecommand");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('p')], "TC parameter", "mib.tc_parameter");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('m')], "TM packet", "mib.tm_packet");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('n')], "TM parameter", "mib.tm_parameter");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('c')], "calibration", "mib.calibration");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('i')], "insert a telecommand", "mib.insert");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('e')], "edit the call on this line", "mib.edit_call");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('r')], "read the MIBs again", "mib.reload");
+        t.insert(&[spc, KeyPress::char('k'), KeyPress::char(',')], "this project's MIBs", "mib.settings");
 
         // The agenda: the page and its tabs, and what you reach for from
         // a file -- a new task, a task from here, the clock. A task's own
@@ -1004,7 +1019,7 @@ mod tests {
         assert!(matches!(arduino_first.matcher().feed(KeyPress::char('i')), fenix_keymap::Step::Matched(&"embedded.info")));
         assert!(matches!(arduino_first.matcher().feed(KeyPress::char('T')), fenix_keymap::Step::Matched(&"completion.refresh_tags")));
         let tcl_first = local_trie(&[LocalContext::Tcl, LocalContext::Arduino]);
-        assert!(matches!(tcl_first.matcher().feed(KeyPress::char('i')), fenix_keymap::Step::Matched(&"mib.insert_telecommand")));
+        assert!(matches!(tcl_first.matcher().feed(KeyPress::char('i')), fenix_keymap::Step::Matched(&"mib.insert")));
         assert!(std::ptr::eq(arduino_first, local_trie(&[LocalContext::Arduino, LocalContext::Tcl])), "built once per combination");
     }
 
@@ -1014,20 +1029,49 @@ mod tests {
         let cases: &[(char, &str)] = &[
             ('s', "code.symbols"),
             ('T', "completion.refresh_tags"),
-            ('i', "mib.insert_telecommand"),
-            ('t', "mib.lookup_telecommand"),
-            ('k', "mib.lookup_tm_packet"),
-            ('p', "mib.lookup_tm_parameter"),
-            ('c', "mib.lookup_calibration"),
-            ('r', "mib.refresh_index"),
-            ('a', "mib.add_root"),
-            ('d', "mib.delete_root"),
+            ('i', "mib.insert"),
+            ('e', "mib.edit_call"),
+            ('t', "mib.telecommand"),
+            ('k', "mib.tm_packet"),
+            ('p', "mib.tm_parameter"),
+            ('c', "mib.calibration"),
+            ('m', "mib.page"),
+            ('r', "mib.reload"),
         ];
         for &(key, expected) in cases {
             match trie.matcher().feed(KeyPress::char(key)) {
                 fenix_keymap::Step::Matched(&id) if id == expected => {}
                 _ => panic!("expected SPC m {key} in a Tcl file to resolve to {expected}"),
             }
+        }
+    }
+
+    #[test]
+    fn spc_k_holds_the_mib_commands() {
+        let trie = leader_trie();
+        let cases: &[(char, &str)] = &[
+            ('k', "mib.page"),
+            ('/', "mib.search"),
+            ('t', "mib.telecommand"),
+            ('p', "mib.tc_parameter"),
+            ('m', "mib.tm_packet"),
+            ('n', "mib.tm_parameter"),
+            ('c', "mib.calibration"),
+            ('i', "mib.insert"),
+            ('e', "mib.edit_call"),
+            ('r', "mib.reload"),
+            (',', "mib.settings"),
+        ];
+        let commands = crate::commands::CommandRegistry::with_builtins();
+        for &(key, expected) in cases {
+            let mut m = trie.matcher();
+            m.feed(KeyPress::char(' '));
+            m.feed(KeyPress::char('k'));
+            match m.feed(KeyPress::char(key)) {
+                fenix_keymap::Step::Matched(&id) if id == expected => {}
+                _ => panic!("expected SPC k {key} to resolve to {expected}"),
+            }
+            assert!(commands.iter().any(|c| c.id == expected), "{expected} is a command");
         }
     }
 

@@ -27,6 +27,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gf` opens the file named under the cursor; `spec.pdf#page=38` opens
   the PDF at that page, and `yp` in a PDF copies such a link.
 - Enter on the Font setting lists the installed fonts to pick from.
+- SCOS-2000 MIBs, reworked (`SPC k`): the MIB page lists telecommands,
+  TC parameters, TM packets, TM parameters and calibrations, with search
+  and `field:value` filters; each definition has a page where every
+  name is a link (back and forward with `Ctrl-o`/`Ctrl-i`), with bit
+  layouts, decoded types, calibrations, limits and what uses it;
+  telecommands are inserted from a form showing every argument, checked
+  against the MIB, and `SPC k e` edits a call already written; `K`, `gd`
+  and completion know MIB names in scripts. MIB problems (unreadable
+  files, broken references) are listed with their line.
+- A project lists its own MIBs and telecommand templates in
+  `.fenix/settings.toml`; they take the place of yours in that project,
+  and a project that is a MIB uses itself. MIBs load in the background
+  and reload when their files change.
+- A tab keeps its cursor when you switch away and back.
 
 ### Changed
 
@@ -39,6 +53,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The PDF reader's settings (`documents` among them) have a category of
   their own in `SPC ,`; "Documents & workspaces" is now "Workspaces".
   Setting keys are unchanged.
+- **Breaking:** the MIB lookups moved from `SPC m` in Tcl files to `SPC
+  k` everywhere (Tcl's `SPC m` keeps its letters); the plain-text detail
+  buffers and the one-argument-at-a-time insert prompts are gone, and so
+  are `SPC m a`/`SPC m d` -- MIBs are listed in the settings (`SPC k ,`).
+  The MIB settings have a category of their own in `SPC ,`; their keys
+  are unchanged.
 
 ## [1.0.0] - 2026-09-26
 

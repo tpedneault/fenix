@@ -27,6 +27,7 @@ mod review_host;
 mod motion_host;
 mod polish;
 mod which_key;
+mod mib_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2066,9 +2067,6 @@ enum MainView {
 /// `Open`/`Enter`/`l` on a *file* doing nothing instead of opening it
 /// into the editor (there's nothing sensible to do with a file when
 /// what's being picked is a directory). See `picker_add_project_prompt`.
-/// `PickMibRootDir` is the same idea for `SPC m a`, except `S` starts
-/// `mib_root_prompt` (a label to go with the browsed directory) instead
-/// of registering anything directly -- see `start_mib_root_label_prompt`.
 /// `FindFrom` is for `SPC f e`: browsing starts at the home directory
 /// (not the project root -- the whole point is reaching files *outside*
 /// any project without typing their absolute path) and opening a file
@@ -2081,7 +2079,6 @@ enum MainView {
 enum ExplorerPurpose {
     Browse,
     PickProjectDir,
-    PickMibRootDir,
     FindFrom,
     /// The new-project wizard's "In" folder: `S` hands it back.
     PickWizardParent,
@@ -2126,106 +2123,11 @@ enum QuickfixEntry {
     Task(fenix_project::GrepMatch),
 }
 
-/// One active `CDF_GRPSIZE` repeating group -- the SCOS-2000 MIB's own
-/// way of saying "the next `group_width` parameters repeat, however
-/// many times the value typed for *this* parameter says." Pushed onto
-/// `MibInsertState.repeat_stack` by `next_argument_cursor` the moment
-/// a counter parameter's own value is collected, popped once every
-/// repetition's been walked. See `next_argument_cursor`'s own doc
-/// comment for the full state machine, including how nesting works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GroupRepeat {
-    /// Index into `variable_params` where the group's rows begin
-    /// (right after the counter parameter itself).
-    group_start: usize,
-    /// `CDF_GRPSIZE`'s own value -- slots per repetition. A nested
-    /// group's own counter row counts as exactly one slot here, not
-    /// however many rows that nested group itself expands into (see
-    /// `next_argument_cursor`'s doc comment).
-    group_width: usize,
-    /// `N` -- the counter parameter's own typed value.
-    total: usize,
-    /// 1-based: which repetition is being filled right now.
-    current: usize,
-    /// 0-based: position within the current repetition.
-    offset: usize,
-}
-
-/// The active `SPC m i` telecommand-insert wizard: build (or skip)
-/// engineering values for a telecommand's variable parameters, preview
-/// the rendered command plus any validation warnings, then insert it at
-/// wherever the wizard was started from. Entered once a telecommand's
-/// been picked from `ActivePicker::MibTelecommandInsert`; `App::
-/// mib_insert_key` (mirroring `git_prompt_key`/`explorer_prompt_key`'s
-/// "next keystrokes are special" shape) drives everything from there.
-struct MibInsertState {
-    ccf: fenix_mib::Row,
-    /// Buffer + char index to insert the finished command into --
-    /// captured *before* the telecommand picker took over (which
-    /// changes `main_view`/focus), the same "remember where this
-    /// started" role `JumpEntry` already plays for the jumplist.
-    origin: JumpEntry,
-    /// This telecommand's non-fixed (`CDF_VALUE` empty) parameters, in
-    /// order.
-    variable_params: Vec<fenix_mib::telecommand::TcParameter>,
-    /// Index into `variable_params` of whichever one is currently being
-    /// prompted for -- *not* always `collected.len()`: a `CDF_GRPSIZE`
-    /// repeating group re-visits the same span of `variable_params`
-    /// `N` times (`N` being the value typed for the group's own counter
-    /// parameter), so more values can be collected than there are
-    /// distinct indices. See `next_argument_cursor`/`repeat_stack`.
-    cursor: usize,
-    /// Every `CDF_GRPSIZE` repeating group currently being walked
-    /// through, outermost first -- empty outside any group, more than
-    /// one entry only when one group is nested inside another. See
-    /// `next_argument_cursor`'s own doc comment for the exact state
-    /// machine and the assumption it makes about nested groups.
-    repeat_stack: Vec<GroupRepeat>,
-    collected: Vec<(String, String)>,
-    stage: MibInsertStage,
-    /// The current parameter's mnemonic + description, e.g. `"GAIN --
-    /// Gain setting"` -- set by `mib_prompt_next_argument` right
-    /// alongside `stage`'s own `ArgumentText.prompt` (which already
-    /// carries this for the free-text case), so `ActivePicker::
-    /// MibArgumentAlias` -- an aliased parameter's own value picker,
-    /// which otherwise shows nothing but a bare list of alias strings
-    /// with no indication of *which parameter* they're for -- has
-    /// something to show too. Read from `modeline_pieces` (`&self`,
-    /// can't call `mib_index`/`parameter_domain` itself) rather than
-    /// recomputed there.
-    current_argument_context: String,
-}
-
-#[derive(Debug)]
-enum MibInsertStage {
-    /// Only entered when `variable_params` isn't empty -- `y` walks
-    /// them one at a time, `n` (or anything else) skips straight to
-    /// `Confirm` with `collected` left empty (`{arguments}` renders
-    /// empty, matching a telecommand with only fixed parameters).
-    ChooseArgumentMode,
-    /// Free-text capture for `variable_params[collected.len()]`, char by
-    /// char like `ExplorerPrompt`'s own text fields -- only reached for
-    /// a parameter with no `PAF`/`PAS`-enumerated aliases; one that has
-    /// some is delegated to `ActivePicker::MibArgumentAlias` instead.
-    /// `prompt` (description/unit/default/range, ported from the
-    /// reference elisp implementation's own `mod-mib--tc-argument-
-    /// prompt`) is precomputed once when this stage is entered
-    /// (`mib_prompt_next_argument`, which already needs `&mut self` to
-    /// reach the MIB index) rather than at modeline-render time
-    /// (`mib_insert_text`, `&self` only, called every frame).
-    ArgumentText { input: String, prompt: String },
-    /// All arguments collected (or skipped) -- `y`/`Y` inserts `rendered`
-    /// at `origin` and closes the wizard; anything else cancels without
-    /// touching the buffer.
-    Confirm { rendered: String, warnings: Vec<String> },
-}
-
 /// The active `SPC s r`/`SPC s p` search-and-replace wizard -- pattern,
 /// then replacement, then (scope-dependent) either an immediate y/n
 /// confirm (`Buffer`) or a hand-off to the real, navigable `App::
 /// project_replace` review buffer (`Project`, see its own doc comment).
-/// Mirrors `MibInsertState`'s own "one `Option<XxxState>`, a `stage`
-/// enum, a `*_key` dispatcher" shape.
+/// One `Option<XxxState>`, a `stage` enum, a `*_key` dispatcher.
 struct ReplaceWizard {
     scope: ReplaceScope,
     stage: ReplaceWizardStage,
@@ -2286,11 +2188,6 @@ enum ActivePicker {
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
-    /// `SPC m d`: same "list what's configured, confirming removes it"
-    /// shape as `DeleteProject`, for `config.mib_roots` instead of
-    /// `known_projects` -- payload is the full `(label, path)` pair,
-    /// see `mib_root_candidates`.
-    DeleteMibRoot(fenix_picker::PickerState<(String, PathBuf)>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -2329,37 +2226,14 @@ enum ActivePicker {
     /// The Git status page's `b b`: a branch to switch to -- local ones
     /// first, then remote branches with no local counterpart.
     SwitchBranch(fenix_picker::PickerState<String>),
-    /// `SPC m t`: fuzzy-find a telecommand by name/type/subtype/APID/
-    /// subsystem, confirming opens its detail view (`mib_show_
-    /// telecommand`). Same candidate list as `MibTelecommandInsert`,
-    /// just a different picker variant so `picker_confirm` can dispatch
-    /// differently -- exact precedent `SwitchProject`/`DeleteProject`
-    /// already set for "one candidate list, two possible actions."
-    MibTelecommandLookup(fenix_picker::PickerState<fenix_mib::Row>),
-    /// `SPC m i`'s first step: same candidates as `MibTelecommandLookup`,
-    /// but confirming starts the insert wizard (`mib_start_insert`)
-    /// instead of opening a detail view.
-    MibTelecommandInsert(fenix_picker::PickerState<fenix_mib::Row>),
-    /// `SPC m k`: fuzzy-find a TM packet (`pid` table) by SPID/type/
-    /// subtype/APID, confirming opens its detail view.
-    MibTmPacket(fenix_picker::PickerState<fenix_mib::Row>),
-    /// `SPC m p`: fuzzy-find a TM parameter (`pcf` table) by name,
-    /// confirming opens its detail view.
-    MibTmParameter(fenix_picker::PickerState<fenix_mib::Row>),
-    /// `SPC m c`: fuzzy-find a calibration definition -- `caf` (numeric
-    /// curves), `paf` (status/enumeration), or `prf` (range checks) rows
-    /// merged into one candidate list, confirming opens a detail view
-    /// showing that definition's own points/aliases/range (`cap`/`pas`/
-    /// `prv` respectively).
-    MibCalibration(fenix_picker::PickerState<fenix_mib::Row>),
-    /// Mid-`SPC m i` wizard: the current variable parameter has `PAF`/
-    /// `PAS`-enumerated engineering aliases, so its value is picked
-    /// from this list instead of typed -- confirming feeds the chosen
-    /// alias back into `mib_insert` and advances to the next parameter
-    /// (`mib_resume_insert`).
-    MibArgumentAlias(fenix_picker::PickerState<String>),
+    /// `SPC k t`/`p`/`m`/`n`/`c` and `SPC k /`: a MIB definition by name
+    /// (of the MIBs `App::mib_picker_key` names); confirming opens its
+    /// page.
+    MibDef(fenix_picker::PickerState<fenix_mib::DefRef>),
+    /// `SPC k i`: a telecommand; confirming opens the insert form.
+    MibInsert(fenix_picker::PickerState<fenix_mib::DefRef>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
-    /// `String`-identity shape as `MibArgumentAlias` -- confirming calls
+    /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
     /// first time it's been opened this run, otherwise just switches to
     /// the already-live session).
@@ -2435,16 +2309,11 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Recovery(s) => s.push_char(c),
         ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
-        ActivePicker::DeleteMibRoot(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
-        ActivePicker::MibTelecommandLookup(s) => s.push_char(c),
-        ActivePicker::MibTelecommandInsert(s) => s.push_char(c),
-        ActivePicker::MibTmPacket(s) => s.push_char(c),
-        ActivePicker::MibTmParameter(s) => s.push_char(c),
-        ActivePicker::MibCalibration(s) => s.push_char(c),
-        ActivePicker::MibArgumentAlias(s) => s.push_char(c),
+        ActivePicker::MibDef(s) => s.push_char(c),
+        ActivePicker::MibInsert(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2477,16 +2346,11 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Recovery(s) => s.backspace(),
         ActivePicker::Places(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
-        ActivePicker::DeleteMibRoot(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
-        ActivePicker::MibTelecommandLookup(s) => s.backspace(),
-        ActivePicker::MibTelecommandInsert(s) => s.backspace(),
-        ActivePicker::MibTmPacket(s) => s.backspace(),
-        ActivePicker::MibTmParameter(s) => s.backspace(),
-        ActivePicker::MibCalibration(s) => s.backspace(),
-        ActivePicker::MibArgumentAlias(s) => s.backspace(),
+        ActivePicker::MibDef(s) => s.backspace(),
+        ActivePicker::MibInsert(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2519,16 +2383,11 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Recovery(s) => s.move_selection(delta),
         ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
-        ActivePicker::DeleteMibRoot(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
-        ActivePicker::MibTelecommandLookup(s) => s.move_selection(delta),
-        ActivePicker::MibTelecommandInsert(s) => s.move_selection(delta),
-        ActivePicker::MibTmPacket(s) => s.move_selection(delta),
-        ActivePicker::MibTmParameter(s) => s.move_selection(delta),
-        ActivePicker::MibCalibration(s) => s.move_selection(delta),
-        ActivePicker::MibArgumentAlias(s) => s.move_selection(delta),
+        ActivePicker::MibDef(s) => s.move_selection(delta),
+        ActivePicker::MibInsert(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2564,16 +2423,11 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Recovery(s) => s.toggle_mark(),
         ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
-        ActivePicker::DeleteMibRoot(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
-        ActivePicker::MibTelecommandLookup(s) => s.toggle_mark(),
-        ActivePicker::MibTelecommandInsert(s) => s.toggle_mark(),
-        ActivePicker::MibTmPacket(s) => s.toggle_mark(),
-        ActivePicker::MibTmParameter(s) => s.toggle_mark(),
-        ActivePicker::MibCalibration(s) => s.toggle_mark(),
-        ActivePicker::MibArgumentAlias(s) => s.toggle_mark(),
+        ActivePicker::MibDef(s) => s.toggle_mark(),
+        ActivePicker::MibInsert(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2606,16 +2460,11 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Recovery(s) => s.query(),
         ActivePicker::Places(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
-        ActivePicker::DeleteMibRoot(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
-        ActivePicker::MibTelecommandLookup(s) => s.query(),
-        ActivePicker::MibTelecommandInsert(s) => s.query(),
-        ActivePicker::MibTmPacket(s) => s.query(),
-        ActivePicker::MibTmParameter(s) => s.query(),
-        ActivePicker::MibCalibration(s) => s.query(),
-        ActivePicker::MibArgumentAlias(s) => s.query(),
+        ActivePicker::MibDef(s) => s.query(),
+        ActivePicker::MibInsert(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2648,16 +2497,11 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Recovery(s) => s.len(),
         ActivePicker::Places(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
-        ActivePicker::DeleteMibRoot(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
-        ActivePicker::MibTelecommandLookup(s) => s.len(),
-        ActivePicker::MibTelecommandInsert(s) => s.len(),
-        ActivePicker::MibTmPacket(s) => s.len(),
-        ActivePicker::MibTmParameter(s) => s.len(),
-        ActivePicker::MibCalibration(s) => s.len(),
-        ActivePicker::MibArgumentAlias(s) => s.len(),
+        ActivePicker::MibDef(s) => s.len(),
+        ActivePicker::MibInsert(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2690,16 +2534,11 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Recovery(s) => s.selected_row(),
         ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
-        ActivePicker::DeleteMibRoot(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
-        ActivePicker::MibTelecommandLookup(s) => s.selected_row(),
-        ActivePicker::MibTelecommandInsert(s) => s.selected_row(),
-        ActivePicker::MibTmPacket(s) => s.selected_row(),
-        ActivePicker::MibTmParameter(s) => s.selected_row(),
-        ActivePicker::MibCalibration(s) => s.selected_row(),
-        ActivePicker::MibArgumentAlias(s) => s.selected_row(),
+        ActivePicker::MibDef(s) => s.selected_row(),
+        ActivePicker::MibInsert(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2736,16 +2575,11 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Recovery(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::DeleteMibRoot(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibTelecommandLookup(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibTelecommandInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibTmPacket(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibTmParameter(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibCalibration(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::MibArgumentAlias(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibDef(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::MibInsert(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -4029,228 +3863,6 @@ fn line_first_non_blank_char(buffer: &Buffer, line: usize) -> usize {
         }
     }
     start
-}
-
-/// `SPC m t`/`SPC m i` candidate label -- name plus `type=`/`sub=`/
-/// `apid=`/`subsys=` field tokens (so a query like `type=8 sub=1`
-/// narrows correctly, ported from the reference elisp implementation's
-/// own field-tokened labels) and the description.
-fn mib_tc_label(row: &fenix_mib::Row) -> String {
-    format!(
-        "{}  type={} sub={} apid={} subsys={}  [{}]  {}",
-        row.clean("CCF_CNAME"),
-        row.clean("CCF_TYPE"),
-        row.clean("CCF_STYPE"),
-        row.clean("CCF_APID"),
-        row.clean("CCF_SUBSYS"),
-        row.source.root_label,
-        row.clean("CCF_DESCR"),
-    )
-}
-
-fn mib_tm_packet_label(row: &fenix_mib::Row) -> String {
-    format!(
-        "SPID:{}  type={} sub={} apid={}  [{}]  {}",
-        row.clean("PID_SPID"),
-        row.clean("PID_TYPE"),
-        row.clean("PID_STYPE"),
-        row.clean("PID_APID"),
-        row.source.root_label,
-        row.clean("PID_DESCR"),
-    )
-}
-
-fn mib_tm_parameter_label(row: &fenix_mib::Row) -> String {
-    format!("{}  [{}]  {}", row.clean("PCF_NAME"), row.source.root_label, row.clean("PCF_DESCR"))
-}
-
-/// `SPC m c` candidate label -- works across `caf`/`paf`/`prf` uniformly
-/// since all three follow the same `{TABLE}_NUMBR`/`{TABLE}_DESCR`
-/// column-naming convention.
-fn mib_calibration_label(row: &fenix_mib::Row) -> String {
-    let kind = match row.table.as_str() {
-        "caf" => "numeric",
-        "paf" => "status",
-        "prf" => "range",
-        other => other,
-    };
-    let numbr = row.clean(&format!("{}_NUMBR", row.table.to_uppercase())).to_string();
-    let descr = row.clean(&format!("{}_DESCR", row.table.to_uppercase())).to_string();
-    format!("{numbr}  {kind}  [{}]  {descr}", row.source.root_label)
-}
-
-fn mib_source_text(source: &fenix_mib::RowSource) -> String {
-    format!("- MIB: {}\n- Table: {}.dat\n- Row: {}\n- File: {}\n", source.root_label, source.table, source.line, source.file.display())
-}
-
-fn mib_field_list_text(row: &fenix_mib::Row, fields: &[&str]) -> String {
-    let mut text = String::new();
-    for field in fields {
-        let value = row.clean(field);
-        if !value.is_empty() {
-            text.push_str(&format!("- {field}: {value}\n"));
-        }
-    }
-    text
-}
-
-fn mib_raw_fields_text(row: &fenix_mib::Row, title: &str) -> String {
-    let mut text = format!("\n* {title}\n");
-    for (name, value) in &row.fields {
-        text.push_str(&format!("- {name}: {value}\n"));
-    }
-    text
-}
-
-fn mib_row_fields_inline(row: &fenix_mib::Row) -> String {
-    row.fields.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
-}
-
-/// A helpful modeline prompt for one telecommand argument -- name plus,
-/// in parens, whatever's known about it (description, allowed engineering
-/// aliases or numeric range, unit, default, and -- if `group` is
-/// non-empty, e.g. `"group 2 of 3"` from `mib_group_suffix` -- which
-/// repetition of a `CDF_GRPSIZE` group this is), ported from the
-/// reference elisp implementation's own `mod-mib--tc-argument-prompt`
-/// (the group part is new, `mib_group_suffix`'s own doc comment
-/// explains why). Takes `group` as a plain string rather than
-/// `&[GroupRepeat]` so this stays unaware of that type -- one more
-/// optional "part" like all the others here, not a special case.
-fn mib_argument_prompt(name: &str, domain: &fenix_mib::telecommand::ParamDomain, group: &str) -> String {
-    let mut parts = Vec::new();
-    if !domain.description.is_empty() {
-        parts.push(domain.description.clone());
-    }
-    if !domain.aliases.is_empty() {
-        parts.push(format!("values {}", domain.aliases.join(", ")));
-    } else if !domain.ranges.is_empty() {
-        let ranges = domain.ranges.iter().map(|(lo, hi)| format!("{lo}..{hi}")).collect::<Vec<_>>().join(", ");
-        parts.push(format!("range {ranges}"));
-    }
-    if !domain.unit.is_empty() {
-        parts.push(format!("unit {}", domain.unit));
-    }
-    if !domain.default.is_empty() {
-        parts.push(format!("default {}", domain.default));
-    }
-    if !group.is_empty() {
-        parts.push(group.to_string());
-    }
-    if parts.is_empty() {
-        format!("{name}: ")
-    } else {
-        format!("{name} ({}): ", parts.join("; "))
-    }
-}
-
-/// A short "which parameter is this" label for `ActivePicker::
-/// MibArgumentAlias`'s modeline suffix -- mnemonic plus description
-/// (`CDF_DESCR`, falling back to `CPC_DESCR` -- see `parameter_domain`;
-/// SCOS-2000's `PCF_DESCR` is the *TM* parameter table's description
-/// field, not joined here at all, since telecommand arguments are
-/// `CDF`/`CPC` rows) and, if `group` is non-empty, which repetition of
-/// a `CDF_GRPSIZE` group this is. Deliberately not the full `mib_
-/// argument_prompt` (which also lists allowed values/range/unit/
-/// default): the picker's own candidate list already *is* the
-/// allowed-values list, so repeating it here would just be noise.
-fn mib_argument_context(name: &str, domain: &fenix_mib::telecommand::ParamDomain, group: &str) -> String {
-    let parts: Vec<&str> = [domain.description.as_str(), group].into_iter().filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} -- {}", parts.join("; "))
-    }
-}
-
-/// Given the index just finished (`cursor`) and the value just typed
-/// for it, decides which `variable_params` index comes next and what
-/// repeat stack that leaves behind. Reaching `variable_params.len()`
-/// itself means "on to Confirm."
-///
-/// A `CDF_GRPSIZE` row is a counter: its own typed value (`N`) is how
-/// many times the next `CDF_GRPSIZE` parameters repeat. Detected fresh
-/// every call (not cached anywhere) by reading `cursor`'s own CDF row
-/// -- cheap, and keeps this function the single source of truth for
-/// "does this parameter start a group," with no separate bookkeeping
-/// to keep in sync.
-///
-/// Groups can nest: a repeating group's own block can contain another
-/// `CDF_GRPSIZE` counter starting a sub-group, tracked as one more
-/// `GroupRepeat` pushed onto `stack` (last = innermost). The key
-/// assumption, unverifiable without real MIB data: a nested group's
-/// own counter row occupies exactly *one* slot of its parent's
-/// `CDF_GRPSIZE` width -- the parent's width counts that counter row
-/// itself, not however many rows the nested group itself expands into.
-fn next_argument_cursor(
-    variable_params: &[fenix_mib::telecommand::TcParameter],
-    cursor: usize,
-    just_typed_value: &str,
-    mut stack: Vec<GroupRepeat>,
-) -> (usize, Vec<GroupRepeat>) {
-    let grpsize = variable_params.get(cursor).and_then(|p| p.cdf.clean("CDF_GRPSIZE").parse::<usize>().ok()).filter(|w| *w > 0);
-    if let Some(width) = grpsize {
-        let total = just_typed_value.trim().parse::<usize>().ok().filter(|n| *n > 0);
-        if let Some(total) = total {
-            if cursor + 1 + width <= variable_params.len() {
-                stack.push(GroupRepeat { group_start: cursor + 1, group_width: width, total, current: 1, offset: 0 });
-                return (cursor + 1, stack); // dive straight into the new (possibly nested) group
-            }
-        }
-        // 0 reps, non-numeric, or the group would run past the end of
-        // variable_params (malformed data) -- skip this group's own
-        // listing rather than guessing. Still counts as one slot
-        // consumed in whatever frame (if any) governs `cursor` itself.
-        eprintln!("fenix: couldn't resolve a repeat count for a CDF_GRPSIZE row (typed {just_typed_value:?}) -- skipping its group");
-        return mib_advance_group_stack(stack, cursor + 1 + width);
-    }
-    mib_advance_group_stack(stack, cursor + 1)
-}
-
-/// Registers that one slot of whichever frame governs the current
-/// position was just consumed, cascading through any frames that
-/// finish as a result.
-///
-/// `fallback` is the caller's own already-correct "natural next
-/// position" (`cursor + 1`, ordinarily) -- returned as-is whenever
-/// nothing needs restarting, at *any* depth of the cascade, not just
-/// once the stack goes empty. It has to stay a passed-in value rather
-/// than a formula like `group_start + group_width`: once a slot
-/// earlier in the same repetition was itself a nested group, that
-/// group can have expanded into any number of physical rows, so
-/// there's no fixed arithmetic relationship between a slot count and a
-/// `variable_params` index any more. But this also means a fully-
-/// finished frame doesn't need to compute anything special for its
-/// parent either -- "the row right after whatever was just answered"
-/// is exactly as true for the parent as it was for the frame that just
-/// popped, so the same `fallback` just keeps propagating unchanged.
-fn mib_advance_group_stack(mut stack: Vec<GroupRepeat>, fallback: usize) -> (usize, Vec<GroupRepeat>) {
-    let Some(top) = stack.last_mut() else { return (fallback, stack) };
-    top.offset += 1;
-    if top.offset < top.group_width {
-        return (fallback, stack); // mid-repetition -- the caller's own next position is already correct
-    }
-    top.current += 1;
-    top.offset = 0;
-    if top.current <= top.total {
-        return (top.group_start, stack); // start this frame's next repetition
-    }
-    stack.pop();
-    mib_advance_group_stack(stack, fallback)
-}
-
-/// `"group 2 of 3"`, or `"group 2 of 3 > 1 of 4"` for a nested group
-/// (outermost first) -- empty once `stack` is empty. Bare text, no
-/// surrounding parens/space: `mib_argument_prompt`/`mib_argument_
-/// context` fold this in as one more optional "part" alongside
-/// description/range/unit/default, so it lands *inside* their own
-/// parenthetical rather than after the trailing `": "` a typed value
-/// gets appended to.
-fn mib_group_suffix(stack: &[GroupRepeat]) -> String {
-    if stack.is_empty() {
-        return String::new();
-    }
-    let levels = stack.iter().map(|r| format!("{} of {}", r.current, r.total)).collect::<Vec<_>>().join(" > ");
-    format!("group {levels}")
 }
 
 fn docker_highlights_for_visible_range(
@@ -6245,32 +5857,19 @@ pub struct App {
     /// The project the snippets page is showing, while it's in front.
     snippets_project: Option<PathBuf>,
 
-    /// Configured SCOS-2000 MIB roots (`config.mib_roots`), rebuilt
-    /// (`persist_mib_roots`) whenever `SPC m a`/`SPC m d` changes the
-    /// underlying config, not just once at startup -- re-deriving on
-    /// every access would still be pointless, but this list can now
-    /// change during a running session, not just via a hand-edit to
-    /// `config.ini`'s `[mib]` section between runs.
-    mib_roots: Vec<fenix_mib::MibRoot>,
-    /// The parsed MIB data, lazily built (and `refresh()`'d) the first
-    /// time any `SPC m ...` command needs it -- same "expensive work
-    /// only on real state changes" deferral `tcl_tags`'s own cache
-    /// already uses for `ctags`, just gated on first-use instead of
-    /// project-root-change. `None` until then, or if `mib_roots` is
-    /// empty (nothing configured -- see `mib_index`), or right after
-    /// `persist_mib_roots` invalidates it so the next command rebuilds
-    /// against the new root set instead of a stale one.
-    mib_index: Option<fenix_mib::MibIndex>,
-    /// `SPC m a`'s in-progress label prompt: the already-browsed-to
-    /// directory (picked via the explorer, see `start_mib_root_label_
-    /// prompt`) paired with the label text typed so far. `Some` from
-    /// `S` on that explorer until Enter (registers it, see `add_mib_
-    /// root`) or Escape (cancels).
-    mib_root_prompt: Option<(PathBuf, String)>,
-    /// The active `SPC m i` telecommand-insert wizard, if any -- `Some`
-    /// from the moment a telecommand's picked until it's inserted or
-    /// cancelled. See `MibInsertState`'s own doc comment.
-    mib_insert: Option<MibInsertState>,
+    /// The MIBs read so far, by which MIBs and default: one set per
+    /// project's MIBs, shared by its pages, `K`, `gd` and completion.
+    mib_sets: HashMap<crate::mib_page::MibKey, mib_host::MibSlot>,
+    /// What to do once a set being read is ready: the command that
+    /// asked for it.
+    mib_pending: Option<(crate::mib_page::MibKey, mib_host::MibPending)>,
+    /// The MIBs a `MibDef`/`MibInsert` picker's definitions are from.
+    mib_picker_key: crate::mib_page::MibKey,
+    /// Each insert form's origin: where its command goes.
+    mib_origins: HashMap<BufferId, mib_host::MibOrigin>,
+    /// The values last inserted for a telecommand, per project, for the
+    /// form to open with next time.
+    mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6849,12 +6448,6 @@ impl App {
         vim.set_iskeyword_extra(
             config.iskeyword_extra.as_deref().map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec()),
         );
-        let mib_roots = config
-            .mib_roots
-            .iter()
-            .map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() })
-            .collect();
-
         Self {
             // One frame, and it's the active one -- so its state is the
             // live set of fields right here rather than a parked
@@ -7053,10 +6646,11 @@ impl App {
             snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
             snippets_origin: None,
             snippets_project: None,
-            mib_roots,
-            mib_index: None,
-            mib_root_prompt: None,
-            mib_insert: None,
+            mib_sets: HashMap::new(),
+            mib_pending: None,
+            mib_picker_key: Default::default(),
+            mib_origins: HashMap::new(),
+            mib_last: HashMap::new(),
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -7587,6 +7181,13 @@ impl App {
         let before = self.windows().content(pane).copied();
         if let Some(before) = before.filter(|&b| b != buffer_id) {
             self.workspaces.active_workspace_mut().last_tab.insert(pane, before);
+            // The tab being left keeps its cursor, for coming back to it
+            // (and for an insert form aimed at it).
+            if let Some(cursor) = self.workspaces.active_pane_states().get(&pane).map(|s| s.cursor) {
+                if let Some(ob) = self.buffers.get_mut(before) {
+                    ob.cursor = cursor;
+                }
+            }
         }
         self.windows_mut().set_content(pane, buffer_id);
         let cursor = self.buffers.get(buffer_id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
@@ -7756,6 +7357,7 @@ impl App {
     fn refresh_project_root(&mut self) {
         self.project_root = self.open().buffer.path().and_then(fenix_project::find_project_root);
         self.refresh_project_settings(false);
+        self.mib_preload();
         self.refresh_embedded_indicator();
         self.sync_lsp_for_focused_buffer();
     }
@@ -8226,6 +7828,10 @@ impl App {
     /// message; this fires on every `K` press, including ones with
     /// genuinely nothing to say).
     pub(crate) fn request_hover(&mut self) {
+        if let Some(card) = self.mib_hover() {
+            self.lsp_hover = Some(card);
+            return;
+        }
         let Some((language, text_document, position)) = self.focused_lsp_context() else {
             self.lsp_hover = self.tcl_builtin_hover();
             return;
@@ -8262,6 +7868,9 @@ impl App {
 
     /// `gd` -- requests `textDocument/definition`.
     pub(crate) fn request_goto_definition(&mut self) {
+        if self.mib_goto_definition() {
+            return;
+        }
         let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
         let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
@@ -8866,6 +8475,11 @@ impl App {
         let catalog = self.snippet_catalog();
         for snippet in catalog.available(&self.snippet_scope()) {
             candidates.push(fenix_picker::Candidate::new(snippet.trigger.clone(), completion::Item::snippet(snippet)));
+        }
+        for item in self.mib_completion_items() {
+            if seen.insert(item.label.clone()) {
+                candidates.push(item);
+            }
         }
         candidates
     }
@@ -11470,674 +11084,6 @@ impl App {
         self.quickfix_index = Some(target);
     }
 
-    // -- SCOS-2000 MIB (`SPC m ...`) --------------------------------
-
-    /// Lazily builds (and `refresh()`'s once) the MIB index the first
-    /// time any `SPC m ...` command needs it -- same "expensive work
-    /// only when it's actually needed" deferral `tcl_tags`'s own cache
-    /// already uses for `ctags`, just gated on first-use instead of
-    /// project-root-change (MIB roots don't change while Fenix is
-    /// running). `None` (with a message) if no roots are configured at
-    /// all -- there'd be nothing to index.
-    fn mib_index(&mut self) -> Option<&mut fenix_mib::MibIndex> {
-        if self.mib_roots.is_empty() {
-            self.set_error("no MIB roots yet -- add one in SPC , (Embedded & MIB)");
-            return None;
-        }
-        if self.mib_index.is_none() {
-            let mut index = fenix_mib::MibIndex::new(self.mib_roots.clone());
-            index.refresh();
-            self.mib_index = Some(index);
-        }
-        self.mib_index.as_mut()
-    }
-
-    /// `SPC m r` -- clears and reparses the MIB index from disk (picks
-    /// up edits to the `.dat` files made outside Fenix since the last
-    /// load/refresh).
-    pub(crate) fn mib_refresh_index(&mut self) {
-        if let Some(index) = self.mib_index() {
-            index.refresh();
-        }
-    }
-
-    /// Rebuilds `self.mib_roots` from `self.config.mib_roots` and drops
-    /// the parsed index so the next `SPC m ...` command rebuilds it
-    /// against the new root set (same lazy-rebuild the index already
-    /// gets from `mib_refresh_index`) -- called after `SPC m a`/`SPC m
-    /// d` mutate `config.mib_roots`, right before saving it, so a save
-    /// failure still leaves in-memory state consistent with what's
-    /// configured even if the file on disk didn't catch up.
-    fn persist_mib_roots(&mut self) {
-        if let Err(err) = self.config.save() {
-            eprintln!("fenix: couldn't save config: {err}");
-        }
-        self.mib_roots =
-            self.config.mib_roots.iter().map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() }).collect();
-        self.mib_index = None;
-    }
-
-    /// `SPC m a`: opens the full-buffer file explorer, in "pick a
-    /// directory" mode, to browse to and register a new MIB root --
-    /// same flow as `picker_add_project_prompt`, just landing in `S` on
-    /// `start_mib_root_label_prompt` instead of registering directly
-    /// (a MIB root needs a label, a project root doesn't).
-    pub(crate) fn picker_add_mib_root_prompt(&mut self) {
-        let start = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let explorer = match ExplorerState::opened(&start) {
-            Ok(e) => e,
-            Err(err) => {
-                eprintln!("fenix: couldn't list {} ({err})", start.display());
-                return;
-            }
-        };
-        self.explorer = Some(explorer);
-        self.explorer_purpose = ExplorerPurpose::PickMibRootDir;
-        self.main_view = MainView::Explorer;
-        self.wake_caret();
-    }
-
-    /// `S` on the add-MIB-root explorer (`ExplorerAction::SelectCwd`):
-    /// closes the explorer and starts `mib_root_prompt` for the browsed
-    /// directory, mirroring `register_project_dir`'s own canonicalize-
-    /// before-persisting step, but not registering anything until the
-    /// label prompt resolves.
-    fn start_mib_root_label_prompt(&mut self, dir: &Path) {
-        let root = std::fs::canonicalize(dir).map(fenix_lsp::normalize).unwrap_or_else(|_| dir.to_path_buf());
-        self.mib_root_prompt = Some((root, String::new()));
-        self.main_view = MainView::Editor;
-        self.explorer = None;
-        self.explorer_purpose = ExplorerPurpose::Browse;
-    }
-
-    /// Routes one keypress to the in-progress `mib_root_prompt` -- same
-    /// shape as `find_file_prompt_key`, including its `Ctrl-V` paste
-    /// handling.
-    fn mib_root_prompt_key(&mut self, key: KeyPress) {
-        if key == KeyPress::char('v').with_ctrl() {
-            let pasted = self.clipboard_text();
-            if let (Some((_, label)), Some(text)) = (&mut self.mib_root_prompt, pasted) {
-                label.push_str(&text);
-            }
-            self.wake_caret();
-            return;
-        }
-        let Some((_, label)) = &mut self.mib_root_prompt else { return };
-        match key.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.mib_root_prompt = None,
-            KeyCode::Named(FenixNamedKey::Enter) => {
-                let (path, label) = self.mib_root_prompt.take().unwrap();
-                let label = label.trim();
-                if !label.is_empty() {
-                    self.add_mib_root(path, label.to_string());
-                }
-            }
-            KeyCode::Named(FenixNamedKey::Backspace) => {
-                label.pop();
-            }
-            KeyCode::Char(c) if key.mods == Mods::default() => label.push(c),
-            _ => {}
-        }
-        self.wake_caret();
-    }
-
-    /// What to show in place of the modeline while `mib_root_prompt` is
-    /// active -- mirrors `find_file_prompt_text`.
-    fn mib_root_prompt_text(&self) -> Option<String> {
-        self.mib_root_prompt.as_ref().map(|(path, label)| format!("MIB label for {}: {label}", path.display()))
-    }
-
-    /// `Enter` on `mib_root_prompt` with a non-empty label: registers
-    /// `(label, path)` as a new `[mib]` root, persists it, and rebuilds
-    /// `mib_roots`/invalidates the parsed index (`persist_mib_roots`)
-    /// so it's usable by `SPC m t`/etc. immediately, not just after the
-    /// next restart.
-    fn add_mib_root(&mut self, path: PathBuf, label: String) {
-        self.config.mib_roots.push((label, path));
-        self.persist_mib_roots();
-    }
-
-    /// Candidates for `SPC m d` -- one per configured `[mib]` root,
-    /// keyed by the full `(label, path)` pair (not a list position, so
-    /// a fuzzy-filtered/reordered selection still removes the right
-    /// entry -- same reasoning `known_project_candidates`'/`DeleteProject`'s
-    /// own `PathBuf` keying already uses).
-    fn mib_root_candidates(&self) -> Vec<fenix_picker::Candidate<(String, PathBuf)>> {
-        self.config
-            .mib_roots
-            .iter()
-            .map(|(label, path)| fenix_picker::Candidate::new(format!("{label}  {}", path.display()), (label.clone(), path.clone())))
-            .collect()
-    }
-
-    /// `SPC m d`: same candidate list as the roots currently configured,
-    /// but confirming a selection removes it instead of doing anything
-    /// else -- mirrors `picker_delete_project` exactly.
-    pub(crate) fn picker_delete_mib_root(&mut self) {
-        let candidates = self.mib_root_candidates();
-        self.enter_picker(ActivePicker::DeleteMibRoot(fenix_picker::PickerState::new(candidates)));
-    }
-
-    fn mib_tc_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
-        let index = self.mib_index()?;
-        Some(index.rows("ccf").iter().map(|row| fenix_picker::Candidate::new(mib_tc_label(row), row.clone())).collect())
-    }
-
-    fn mib_tm_packet_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
-        let index = self.mib_index()?;
-        Some(index.rows("pid").iter().map(|row| fenix_picker::Candidate::new(mib_tm_packet_label(row), row.clone())).collect())
-    }
-
-    fn mib_tm_parameter_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
-        let index = self.mib_index()?;
-        Some(
-            index.rows("pcf").iter().map(|row| fenix_picker::Candidate::new(mib_tm_parameter_label(row), row.clone())).collect(),
-        )
-    }
-
-    /// `caf` (numeric curves), `paf` (status/enumeration), and `prf`
-    /// (range checks) rows merged into one candidate list -- the three
-    /// SCOS-2000 calibration "kinds," each keyed by its own `_NUMBR`.
-    fn mib_calibration_candidates(&mut self) -> Option<Vec<fenix_picker::Candidate<fenix_mib::Row>>> {
-        let index = self.mib_index()?;
-        let mut candidates = Vec::new();
-        for table in ["caf", "paf", "prf"] {
-            for row in index.rows(table) {
-                candidates.push(fenix_picker::Candidate::new(mib_calibration_label(row), row.clone()));
-            }
-        }
-        Some(candidates)
-    }
-
-    /// `SPC m t` -- fuzzy-find a telecommand, confirming opens its detail view.
-    pub(crate) fn mib_lookup_telecommand(&mut self) {
-        if let Some(candidates) = self.mib_tc_candidates() {
-            self.enter_picker(ActivePicker::MibTelecommandLookup(fenix_picker::PickerState::new(candidates)));
-        }
-    }
-
-    /// `SPC m i` -- fuzzy-find a telecommand, confirming starts the
-    /// insert wizard (`mib_start_insert`).
-    pub(crate) fn mib_insert_telecommand(&mut self) {
-        if let Some(candidates) = self.mib_tc_candidates() {
-            self.enter_picker(ActivePicker::MibTelecommandInsert(fenix_picker::PickerState::new(candidates)));
-        }
-    }
-
-    /// `SPC m k` -- fuzzy-find a TM packet, confirming opens its detail view.
-    pub(crate) fn mib_lookup_tm_packet(&mut self) {
-        if let Some(candidates) = self.mib_tm_packet_candidates() {
-            self.enter_picker(ActivePicker::MibTmPacket(fenix_picker::PickerState::new(candidates)));
-        }
-    }
-
-    /// `SPC m p` -- fuzzy-find a TM parameter, confirming opens its detail view.
-    pub(crate) fn mib_lookup_tm_parameter(&mut self) {
-        if let Some(candidates) = self.mib_tm_parameter_candidates() {
-            self.enter_picker(ActivePicker::MibTmParameter(fenix_picker::PickerState::new(candidates)));
-        }
-    }
-
-    /// `SPC m c` -- fuzzy-find a calibration definition, confirming opens
-    /// its detail view. Not in the reference elisp implementation --
-    /// added per the user's own explicit ask, alongside the ported
-    /// telecommand/TM-packet/TM-parameter lookups.
-    pub(crate) fn mib_lookup_calibration(&mut self) {
-        if let Some(candidates) = self.mib_calibration_candidates() {
-            self.enter_picker(ActivePicker::MibCalibration(fenix_picker::PickerState::new(candidates)));
-        }
-    }
-
-    /// Renders `text` into a fresh read-only-ish scratch buffer and
-    /// shows it in the focused pane -- `BufferList::open_text_view`,
-    /// "viewing generated content needs nothing beyond what an ordinary
-    /// buffer already gives for free," reused here for every MIB detail
-    /// view exactly as it was built for.
-    fn mib_open_detail(&mut self, text: &str) {
-        let id = self.buffers.open_text_view(text);
-        self.open_buffer_in_focused_pane(id);
-        self.main_view = MainView::Editor;
-        self.wake_caret();
-    }
-
-    /// `SPC m t` confirm -- a telecommand's summary, every `CDF`
-    /// parameter (with its `CPC` definition and calibration/reference
-    /// rows inlined), and its raw fields.
-    fn mib_show_telecommand(&mut self, row: &fenix_mib::Row) {
-        const SUMMARY: &[&str] =
-            &["CCF_CNAME", "CCF_TYPE", "CCF_STYPE", "CCF_APID", "CCF_DESCR", "CCF_DESCR2", "CCF_NPARS", "CCF_PKTID", "CCF_SUBSYS"];
-        let name = row.clean("CCF_CNAME").to_string();
-        let mut text =
-            format!("* Telecommand {name}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
-        let Some(index) = self.mib_index() else {
-            self.mib_open_detail(&text);
-            return;
-        };
-        let params = fenix_mib::telecommand::tc_parameters(index, row);
-        text.push_str("\n* Parameters\n");
-        if params.is_empty() {
-            text.push_str("- No CDF parameters found\n");
-        } else {
-            for param in &params {
-                text.push_str(&format!(
-                    "- {}  {}  bit:{}  len:{}  value:{}\n",
-                    param.name,
-                    param.cdf.clean("CDF_DESCR"),
-                    param.cdf.clean("CDF_BIT"),
-                    param.cdf.clean("CDF_ELLEN"),
-                    param.cdf.clean("CDF_VALUE"),
-                ));
-                if let Some(cpc) = &param.cpc {
-                    text.push_str(&format!(
-                        "  CPC: {}, PTC/PFC {}/{}, unit {}, default {}\n",
-                        cpc.clean("CPC_DESCR"),
-                        cpc.clean("CPC_PTC"),
-                        cpc.clean("CPC_PFC"),
-                        cpc.clean("CPC_UNIT"),
-                        cpc.clean("CPC_DEFVAL"),
-                    ));
-                    let cal_rows = fenix_mib::telecommand::calibration_rows(index, cpc);
-                    if !cal_rows.is_empty() {
-                        text.push_str("  Calibration / references:\n");
-                        for cal in &cal_rows {
-                            text.push_str(&format!(
-                                "  - {}:{}:{}  {}\n",
-                                cal.source.root_label,
-                                cal.table,
-                                cal.source.line,
-                                mib_row_fields_inline(cal)
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        text.push_str(&mib_raw_fields_text(row, "Raw CCF Fields"));
-        self.mib_open_detail(&text);
-    }
-
-    /// `SPC m k` confirm -- a TM packet's summary, every `PLF` occurrence
-    /// (with its `PCF` definition inlined), and its raw fields.
-    fn mib_show_tm_packet(&mut self, row: &fenix_mib::Row) {
-        const SUMMARY: &[&str] = &["PID_SPID", "PID_TYPE", "PID_STYPE", "PID_APID", "PID_DESCR", "PID_UNIT", "PID_TPSD", "PID_DFHSIZE"];
-        let spid = row.clean("PID_SPID").to_string();
-        let mut text =
-            format!("* TM Packet SPID {spid}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
-        let Some(index) = self.mib_index() else {
-            self.mib_open_detail(&text);
-            return;
-        };
-        let root = Some(row.source.root_index);
-        let params = index.rows_by_field("plf", "PLF_SPID", &spid, root);
-        text.push_str("\n* Parameters\n");
-        if params.is_empty() {
-            text.push_str("- No PLF parameters found\n");
-        } else {
-            for param in &params {
-                let pname = param.clean("PLF_NAME");
-                text.push_str(&format!(
-                    "- {pname}  off:{}.{}  occ:{}\n",
-                    param.clean("PLF_OFFBY"),
-                    param.clean("PLF_OFFBI"),
-                    param.clean("PLF_NBOCC")
-                ));
-                if let Some(pcf) = index.first_row_by_field("pcf", "PCF_NAME", pname, root) {
-                    text.push_str(&format!(
-                        "  PCF: {}, PTC/PFC {}/{}, unit {}, width {}\n",
-                        pcf.clean("PCF_DESCR"),
-                        pcf.clean("PCF_PTC"),
-                        pcf.clean("PCF_PFC"),
-                        pcf.clean("PCF_UNIT"),
-                        pcf.clean("PCF_WIDTH")
-                    ));
-                }
-            }
-        }
-        text.push_str(&mib_raw_fields_text(row, "Raw PID Fields"));
-        self.mib_open_detail(&text);
-    }
-
-    /// `SPC m p` confirm -- a TM parameter's summary, every `PLF` packet
-    /// occurrence it appears in, and its raw fields.
-    fn mib_show_tm_parameter(&mut self, row: &fenix_mib::Row) {
-        const SUMMARY: &[&str] =
-            &["PCF_NAME", "PCF_DESCR", "PCF_PID", "PCF_UNIT", "PCF_PTC", "PCF_PFC", "PCF_WIDTH", "PCF_CATEG", "PCF_INTER", "PCF_VALPAR", "PCF_DESCR2"];
-        let name = row.clean("PCF_NAME").to_string();
-        let mut text =
-            format!("* TM Parameter {name}\n\n* Source\n{}\n* Summary\n{}", mib_source_text(&row.source), mib_field_list_text(row, SUMMARY));
-        let Some(index) = self.mib_index() else {
-            self.mib_open_detail(&text);
-            return;
-        };
-        let root = Some(row.source.root_index);
-        let occurrences = index.rows_by_field("plf", "PLF_NAME", &name, root);
-        text.push_str("\n* Packet Occurrences\n");
-        if occurrences.is_empty() {
-            text.push_str("- No PLF packet occurrences found\n");
-        } else {
-            for occ in &occurrences {
-                let spid = occ.clean("PLF_SPID");
-                let pid = index.first_row_by_field("pid", "PID_SPID", spid, root);
-                let (ptype, pstype, descr) =
-                    pid.map(|p| (p.clean("PID_TYPE"), p.clean("PID_STYPE"), p.clean("PID_DESCR"))).unwrap_or(("", "", ""));
-                text.push_str(&format!(
-                    "- SPID {spid}  type:{ptype}  stype:{pstype}  off:{}.{}  {descr}\n",
-                    occ.clean("PLF_OFFBY"),
-                    occ.clean("PLF_OFFBI")
-                ));
-            }
-        }
-        text.push_str(&mib_raw_fields_text(row, "Raw PCF Fields"));
-        self.mib_open_detail(&text);
-    }
-
-    /// `SPC m c` confirm -- a calibration definition's summary plus its
-    /// own points: `CAP` x/y pairs for a `caf` (numeric curve), `PAS`
-    /// raw/text aliases for a `paf` (status), or `PRV` min/max pairs for
-    /// a `prf` (range check).
-    fn mib_show_calibration(&mut self, row: &fenix_mib::Row) {
-        let numbr_field = format!("{}_NUMBR", row.table.to_uppercase());
-        let descr_field = format!("{}_DESCR", row.table.to_uppercase());
-        let number = row.clean(&numbr_field).to_string();
-        let mut text = format!(
-            "* Calibration {number} ({})\n\n* Source\n{}\n* Summary\n- {numbr_field}: {number}\n- {descr_field}: {}\n",
-            row.table.to_uppercase(),
-            mib_source_text(&row.source),
-            row.clean(&descr_field)
-        );
-        let Some(index) = self.mib_index() else {
-            self.mib_open_detail(&text);
-            return;
-        };
-        let root = Some(row.source.root_index);
-        text.push_str("\n* Points\n");
-        match row.table.as_str() {
-            "caf" => {
-                let points = index.rows_by_field("cap", "CAP_NUMBR", &number, root);
-                if points.is_empty() {
-                    text.push_str("- No CAP curve points found\n");
-                } else {
-                    for p in &points {
-                        text.push_str(&format!("- x={}  y={}\n", p.clean("CAP_XVALS"), p.clean("CAP_YVALS")));
-                    }
-                }
-            }
-            "paf" => {
-                let aliases = index.rows_by_field("pas", "PAS_NUMBR", &number, root);
-                if aliases.is_empty() {
-                    text.push_str("- No PAS aliases found\n");
-                } else {
-                    for a in &aliases {
-                        text.push_str(&format!("- raw={}  text={}\n", a.clean("PAS_ALVAL"), a.clean("PAS_ALTXT")));
-                    }
-                }
-            }
-            "prf" => {
-                let ranges = index.rows_by_field("prv", "PRV_NUMBR", &number, root);
-                if ranges.is_empty() {
-                    text.push_str("- No PRV ranges found\n");
-                } else {
-                    for r in &ranges {
-                        text.push_str(&format!("- min={}  max={}\n", r.clean("PRV_MINVAL"), r.clean("PRV_MAXVAL")));
-                    }
-                }
-            }
-            _ => {}
-        }
-        text.push_str(&mib_raw_fields_text(row, "Raw Fields"));
-        self.mib_open_detail(&text);
-    }
-
-    /// `SPC m i` picker confirm -- starts the insert wizard for `ccf`:
-    /// straight to `Confirm` if it has no variable parameters, else
-    /// `ChooseArgumentMode`.
-    fn mib_start_insert(&mut self, ccf: fenix_mib::Row) {
-        let Some(index) = self.mib_index() else { return };
-        let variable_params: Vec<_> = fenix_mib::telecommand::tc_parameters(index, &ccf).into_iter().filter(|p| !p.fixed).collect();
-        let origin = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-        let has_variable_params = !variable_params.is_empty();
-        self.mib_insert = Some(MibInsertState {
-            ccf,
-            origin,
-            variable_params,
-            cursor: 0,
-            repeat_stack: Vec::new(),
-            collected: Vec::new(),
-            stage: MibInsertStage::ChooseArgumentMode,
-            current_argument_context: String::new(),
-        });
-        self.main_view = MainView::Editor;
-        if !has_variable_params {
-            self.mib_enter_confirm_stage();
-        }
-        self.wake_caret();
-    }
-
-    /// Advances the wizard to whichever variable parameter comes next --
-    /// a picker (`ActivePicker::MibArgumentAlias`) if it has `PAF`/`PAS`
-    /// aliases, otherwise a free-text capture stage -- or to `Confirm`
-    /// once every parameter's been collected.
-    fn mib_prompt_next_argument(&mut self) {
-        let Some(insert) = &self.mib_insert else { return };
-        if insert.cursor >= insert.variable_params.len() {
-            self.mib_enter_confirm_stage();
-            return;
-        }
-        let param = insert.variable_params[insert.cursor].clone();
-        let group_suffix = mib_group_suffix(&insert.repeat_stack);
-        let Some(index) = self.mib_index() else { return };
-        let domain = fenix_mib::telecommand::parameter_domain(index, &param);
-        if let Some(insert) = &mut self.mib_insert {
-            insert.current_argument_context = mib_argument_context(&param.name, &domain, &group_suffix);
-        }
-        if domain.aliases.is_empty() {
-            let prompt = mib_argument_prompt(&param.name, &domain, &group_suffix);
-            if let Some(insert) = &mut self.mib_insert {
-                insert.stage = MibInsertStage::ArgumentText { input: String::new(), prompt };
-            }
-        } else {
-            let candidates = domain.aliases.iter().map(|alias| fenix_picker::Candidate::new(alias.clone(), alias.clone())).collect();
-            self.enter_picker(ActivePicker::MibArgumentAlias(fenix_picker::PickerState::new(candidates)));
-        }
-        self.wake_caret();
-    }
-
-    /// `ActivePicker::MibArgumentAlias` confirm -- records `alias` as the
-    /// current parameter's value and advances to the next one. Resets
-    /// `main_view` back to `Editor` (picking a candidate left it on
-    /// `Picker`) the same way every other picker-confirm path already
-    /// does, whether inline (`Theme`/`TableColumn`) or via whatever it
-    /// hands off to (`mib_start_insert`/`mib_open_detail`) -- missing
-    /// here left the wizard's remaining stages (and the eventual insert
-    /// itself) rendering behind a stale, now-buffer-less picker view
-    /// until the user manually backed out of it.
-    fn mib_resume_insert(&mut self, alias: String) {
-        self.main_view = MainView::Editor;
-        let Some(insert) = &self.mib_insert else { return };
-        let idx = insert.cursor;
-        let Some(param) = insert.variable_params.get(idx) else { return };
-        let name = param.name.clone();
-        if let Some(insert) = &mut self.mib_insert {
-            insert.collected.push((name, alias.clone()));
-            let (cursor, stack) =
-                next_argument_cursor(&insert.variable_params, idx, &alias, std::mem::take(&mut insert.repeat_stack));
-            insert.cursor = cursor;
-            insert.repeat_stack = stack;
-        }
-        self.mib_prompt_next_argument();
-    }
-
-    /// Every variable parameter's collected (or skipped) -- renders the
-    /// final command and re-validates every collected argument against
-    /// its own engineering domain (aliases/ranges), moving the wizard to
-    /// `Confirm`.
-    fn mib_enter_confirm_stage(&mut self) {
-        let Some(insert) = self.mib_insert.take() else { return };
-        let Some(index) = self.mib_index() else {
-            self.mib_insert = Some(insert);
-            return;
-        };
-        let mut warnings = Vec::new();
-        for (name, value) in &insert.collected {
-            if let Some(param) = insert.variable_params.iter().find(|p| &p.name == name) {
-                let domain = fenix_mib::telecommand::parameter_domain(index, param);
-                warnings.extend(fenix_mib::telecommand::validate_argument(param, value, &domain));
-            }
-        }
-        let rendered = fenix_mib::telecommand::render_telecommand(
-            self.config.mib_telecommand_template.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_TEMPLATE),
-            self.config.mib_telecommand_argument_template.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
-            self.config.mib_telecommand_argument_separator.as_deref().unwrap_or(fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
-            &insert.ccf,
-            &insert.ccf.source.root_label.clone(),
-            &insert.collected,
-        );
-        let mut insert = insert;
-        insert.stage = MibInsertStage::Confirm { rendered, warnings };
-        self.mib_insert = Some(insert);
-        self.wake_caret();
-    }
-
-    /// `y` on the `Confirm` stage -- inserts the rendered command at
-    /// wherever the wizard started (`MibInsertState::origin`) and closes
-    /// the wizard.
-    fn mib_commit_insert(&mut self) {
-        let Some(insert) = self.mib_insert.take() else { return };
-        let MibInsertStage::Confirm { rendered, .. } = insert.stage else { return };
-        let Some(ob) = self.buffers.get_mut(insert.origin.buffer) else { return };
-        let mut cursor = Cursor { char_idx: insert.origin.char_idx, sticky_col: 0 };
-        ob.buffer.insert_str(&mut cursor, &rendered);
-        if insert.origin.buffer == self.focused_buffer_id() {
-            let pane = self.focused_pane_id();
-            if let Some(pane_state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
-                pane_state.cursor = cursor;
-            }
-        }
-        self.wake_caret();
-    }
-
-    /// Routes one keystroke to the active `SPC m i` wizard -- only ever
-    /// called while `mib_insert` is `Some` and its stage isn't delegated
-    /// to a picker (`ChooseArgumentMode`/`ArgumentText`/`Confirm`; see
-    /// `MibInsertStage`'s own doc comment). Computes what to do first
-    /// (borrowing `self.mib_insert` immutably) and only then applies it
-    /// (mutating `self`) -- the two can't overlap, since deciding what a
-    /// `ChooseArgumentMode`/`Confirm` keystroke means can itself call
-    /// `&mut self` methods (`mib_prompt_next_argument`/`mib_enter_
-    /// confirm_stage`/`mib_commit_insert`).
-    fn mib_insert_key(&mut self, key: KeyPress) {
-        enum Action {
-            Cancel,
-            PromptNext,
-            EnterConfirm,
-            PushArgument(String),
-            Backspace,
-            PushChar(char),
-            PushString(String),
-            Commit,
-            Ignore,
-        }
-        // Fetched before borrowing `self.mib_insert` below -- `clipboard_
-        // text` takes `&mut self`, so it can't run while that borrow is
-        // still live (same reasoning `find_file_prompt_key`'s own paste
-        // handling documents).
-        let pasted = if key == KeyPress::char('v').with_ctrl() { self.clipboard_text() } else { None };
-        let Some(insert) = &self.mib_insert else { return };
-        let action = match &insert.stage {
-            MibInsertStage::ChooseArgumentMode => match key.code {
-                KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
-                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::PromptNext,
-                _ => Action::EnterConfirm,
-            },
-            MibInsertStage::ArgumentText { input, .. } => {
-                if let Some(text) = pasted {
-                    Action::PushString(text)
-                } else {
-                    match key.code {
-                        KeyCode::Named(FenixNamedKey::Escape) => Action::Cancel,
-                        KeyCode::Named(FenixNamedKey::Enter) => Action::PushArgument(input.clone()),
-                        KeyCode::Named(FenixNamedKey::Backspace) => Action::Backspace,
-                        KeyCode::Char(c) if key.mods == Mods::default() => Action::PushChar(c),
-                        _ => Action::Ignore,
-                    }
-                }
-            }
-            MibInsertStage::Confirm { .. } => match key.code {
-                KeyCode::Char(c) if c.eq_ignore_ascii_case(&'y') => Action::Commit,
-                _ => Action::Cancel,
-            },
-        };
-        match action {
-            Action::Cancel => self.mib_insert = None,
-            Action::PromptNext => self.mib_prompt_next_argument(),
-            Action::EnterConfirm => self.mib_enter_confirm_stage(),
-            Action::PushArgument(value) => {
-                if let Some(insert) = &mut self.mib_insert {
-                    let idx = insert.cursor;
-                    if let Some(param) = insert.variable_params.get(idx) {
-                        let name = param.name.clone();
-                        insert.collected.push((name, value.clone()));
-                        let (cursor, stack) =
-                            next_argument_cursor(&insert.variable_params, idx, &value, std::mem::take(&mut insert.repeat_stack));
-                        insert.cursor = cursor;
-                        insert.repeat_stack = stack;
-                    }
-                }
-                self.mib_prompt_next_argument();
-            }
-            Action::Backspace => {
-                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
-                    input.pop();
-                }
-            }
-            Action::PushChar(c) => {
-                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
-                    input.push(c);
-                }
-            }
-            Action::PushString(text) => {
-                if let Some(MibInsertStage::ArgumentText { input, .. }) = self.mib_insert.as_mut().map(|i| &mut i.stage) {
-                    input.push_str(&text);
-                }
-            }
-            Action::Commit => self.mib_commit_insert(),
-            Action::Ignore => {}
-        }
-        self.wake_caret();
-    }
-
-    /// What to show in place of the modeline while `mib_insert` is active
-    /// -- mirrors `explorer_prompt_text`/`git_prompt_text`. Takes
-    /// priority over `modeline_pieces`'s own picker-badge/count display
-    /// (`mib_insert.is_some()` is one of that function's own early-
-    /// return conditions), so while `ActivePicker::MibArgumentAlias` is
-    /// open (`mib_prompt_next_argument`'s alias branch enters it without
-    /// changing `insert.stage`, which just stays whatever the *previous*
-    /// parameter left it as -- there's no dedicated stage for "a picker
-    /// is choosing this one's value") this needs its own check first,
-    /// or the modeline would show stale wizard-stage text instead of
-    /// anything about the picker actually on screen.
-    fn mib_insert_text(&self) -> Option<String> {
-        let insert = self.mib_insert.as_ref()?;
-        if matches!(self.active_picker, Some(ActivePicker::MibArgumentAlias(_))) {
-            return Some(format!("{} -- choose a value", insert.current_argument_context));
-        }
-        Some(match &insert.stage {
-            MibInsertStage::ChooseArgumentMode => {
-                let n = insert.variable_params.len();
-                format!("Build {n} variable argument{}? (y/n)", if n == 1 { "" } else { "s" })
-            }
-            MibInsertStage::ArgumentText { input, prompt } => format!("{prompt}{input}"),
-            MibInsertStage::Confirm { rendered, warnings } => {
-                if warnings.is_empty() {
-                    format!("Insert `{rendered}`? (y/n)")
-                } else {
-                    format!("{} warning(s) ({}) -- insert `{rendered}` anyway? (y/n)", warnings.len(), warnings.join("; "))
-                }
-            }
-        })
-    }
-
     /// `SPC s r`: starts the buffer-local search & replace wizard.
     /// Scoped to the current Visual selection's lines if invoked from
     /// Visual mode (mirroring real Vim's own `:'<,'>s` convention for a
@@ -12178,7 +11124,7 @@ impl App {
 
     /// Routes one keypress to the in-progress `replace_wizard` -- same
     /// "compute an `Action` enum immutably, apply mutably" two-phase
-    /// shape `mib_insert_key` already uses.
+    /// shape the other prompts use.
     fn replace_wizard_key(&mut self, key: KeyPress) {
         enum Action {
             Cancel,
@@ -12190,7 +11136,7 @@ impl App {
             Apply,
         }
         // Fetched before borrowing `self.replace_wizard` below -- same
-        // reasoning as `mib_insert_key`'s own paste handling.
+        // reasoning as the other prompts' paste handling.
         let pasted = if key == KeyPress::char('v').with_ctrl() { self.clipboard_text() } else { None };
         let Some(wizard) = &self.replace_wizard else { return };
         let action = match &wizard.stage {
@@ -12311,7 +11257,7 @@ impl App {
     }
 
     /// What to show in place of the modeline while `replace_wizard` is
-    /// active -- mirrors `mib_insert_text`/`explorer_prompt_text`.
+    /// active -- mirrors `explorer_prompt_text`.
     fn replace_wizard_text(&self) -> Option<String> {
         let wizard = self.replace_wizard.as_ref()?;
         Some(match &wizard.stage {
@@ -12441,7 +11387,7 @@ impl App {
     /// directly. A file that no longer matches (changed since the
     /// search that found it) is silently skipped, not an error. Closes
     /// the review buffer and refocuses whatever was open before `SPC s
-    /// p`, matching `mib_commit_insert`'s own "return to where this
+    /// p`, "returning to where this
     /// started" behavior.
     fn project_replace_apply(&mut self) {
         let Some(session) = self.project_replace.take() else { return };
@@ -15434,6 +14380,7 @@ impl App {
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
         self.refresh_project_settings(true);
+        self.mib_poll();
         self.pdf_save_places();
         if !self.config.watch_files.unwrap_or(true) {
             return;
@@ -17816,13 +16763,6 @@ impl App {
                     eprintln!("fenix: couldn't save project history: {err}");
                 }
             }
-            Some(ActivePicker::DeleteMibRoot(state)) => {
-                let Some(target) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.config.mib_roots.retain(|entry| entry != &target);
-                self.persist_mib_roots();
-            }
             Some(ActivePicker::Snippet(state)) => {
                 let Some(choice) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -17896,35 +16836,19 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.git_switch_to(&branch);
             }
-            Some(ActivePicker::MibTelecommandLookup(state)) => {
-                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+            Some(ActivePicker::MibDef(state)) => {
+                let Some(def) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
-                self.mib_show_telecommand(&row);
+                self.main_view = MainView::Editor;
+                let key = self.mib_picker_key.clone();
+                self.open_mib_def(key, def);
             }
-            Some(ActivePicker::MibTelecommandInsert(state)) => {
-                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
+            Some(ActivePicker::MibInsert(state)) => {
+                let Some(def) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
-                self.mib_start_insert(row);
-            }
-            Some(ActivePicker::MibTmPacket(state)) => {
-                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.mib_show_tm_packet(&row);
-            }
-            Some(ActivePicker::MibTmParameter(state)) => {
-                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.mib_show_tm_parameter(&row);
-            }
-            Some(ActivePicker::MibCalibration(state)) => {
-                let Some(row) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.mib_show_calibration(&row);
-            }
-            Some(ActivePicker::MibArgumentAlias(state)) => {
-                let Some(alias) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.mib_resume_insert(alias);
+                self.main_view = MainView::Editor;
+                let key = self.mib_picker_key.clone();
+                self.open_mib_form(key, def);
             }
             Some(ActivePicker::VncHost(state)) => {
                 let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -18624,9 +17548,6 @@ impl App {
                 if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickProjectDir {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.register_project_dir(&cwd);
-                } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickMibRootDir {
-                    let cwd = self.active_explorer().unwrap().cwd.clone();
-                    self.start_mib_root_label_prompt(&cwd);
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::FindFrom {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.start_find_from_here(&cwd);
@@ -18663,7 +17584,7 @@ impl App {
 
         if !is_dir
             && self.main_view == MainView::Explorer
-            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickMibRootDir | ExplorerPurpose::PickWizardParent | ExplorerPurpose::PickSettingPath { folder: true })
+            && matches!(self.explorer_purpose, ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickWizardParent | ExplorerPurpose::PickSettingPath { folder: true })
         {
             return;
         }
@@ -20447,11 +19368,6 @@ impl App {
             self.workspace_rename_prompt_key(keypress);
             return;
         }
-        // `SPC m a`'s label step -- same capturing-prompt tier.
-        if self.mib_root_prompt.is_some() {
-            self.mib_root_prompt_key(keypress);
-            return;
-        }
         if self.delete_file_confirm {
             self.delete_file_confirm_key(keypress);
             return;
@@ -20470,15 +19386,6 @@ impl App {
         }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
-            return;
-        }
-        // The `SPC m i` wizard's own text-entry/y-n stages -- checked
-        // after `active_picker` so its `ArgumentAlias` sub-step (where
-        // `mib_insert` is *also* still `Some`) is routed there instead;
-        // this only ever fires for `ChooseArgumentMode`/`ArgumentText`/
-        // `Confirm`, none of which go through a picker.
-        if self.mib_insert.is_some() {
-            self.mib_insert_key(keypress);
             return;
         }
         // `SPC s r`/`SPC s p`'s pattern/replacement text entry -- same
@@ -21822,9 +20729,6 @@ impl App {
                         ExplorerPurpose::PickProjectDir => {
                             format!("{}   S to add as a project, q to cancel ", explorer.cwd.display())
                         }
-                        ExplorerPurpose::PickMibRootDir => {
-                            format!("{}   S to add as a MIB root, q to cancel ", explorer.cwd.display())
-                        }
                         ExplorerPurpose::PickWizardParent => {
                             format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
                         }
@@ -21844,7 +20748,6 @@ impl App {
             let badge = match self.explorer_purpose {
                 ExplorerPurpose::Browse => "EXPLORE",
                 ExplorerPurpose::PickProjectDir => "ADDPROJ",
-                ExplorerPurpose::PickMibRootDir => "ADDMIB",
                 ExplorerPurpose::PickWizardParent => "NEWIN",
                 ExplorerPurpose::PickSettingPath { .. } => "PICK",
                 ExplorerPurpose::FindFrom => "FINDFROM",
@@ -21861,18 +20764,13 @@ impl App {
                 Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
                 Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
-                Some(picker @ ActivePicker::DeleteMibRoot(_)) => ("DELMIB", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
-                Some(picker @ ActivePicker::MibTelecommandLookup(_)) => ("MIB-TC", picker_len(picker)),
-                Some(picker @ ActivePicker::MibTelecommandInsert(_)) => ("MIB-TC", picker_len(picker)),
-                Some(picker @ ActivePicker::MibTmPacket(_)) => ("MIB-PKT", picker_len(picker)),
-                Some(picker @ ActivePicker::MibTmParameter(_)) => ("MIB-PARAM", picker_len(picker)),
-                Some(picker @ ActivePicker::MibCalibration(_)) => ("MIB-CAL", picker_len(picker)),
-                Some(picker @ ActivePicker::MibArgumentAlias(_)) => ("MIB-ARG", picker_len(picker)),
+                Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
+                Some(picker @ ActivePicker::MibInsert(_)) => ("INSERT TC", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
@@ -22031,7 +20929,6 @@ impl App {
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.agenda_prompt_text())
             .or_else(|| self.embedded_prompt_text())
-            .or_else(|| self.mib_insert_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())
@@ -22040,7 +20937,6 @@ impl App {
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.lsp_rename_prompt_text())
             .or_else(|| self.workspace_rename_prompt_text())
-            .or_else(|| self.mib_root_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
     }
 
@@ -29993,590 +28889,6 @@ configure_board stm32
         assert!(app.marks.contains_key(&'a')); // left untouched, not dropped either
     }
 
-    /// A minimal synthetic `TcParameter` for `next_argument_cursor`
-    /// tests -- just enough (`CDF_PNAME`/`CDF_GRPSIZE`) to exercise the
-    /// group state machine without a real MIB fixture. `grpsize` is the
-    /// raw field text (`""` for a plain, non-counter parameter).
-    fn tc_param(name: &str, grpsize: &str) -> fenix_mib::telecommand::TcParameter {
-        let cdf = fenix_mib::Row {
-            table: "cdf".to_string(),
-            fields: vec![("CDF_PNAME".to_string(), name.to_string()), ("CDF_GRPSIZE".to_string(), grpsize.to_string())],
-            source: fenix_mib::RowSource {
-                root_index: 0,
-                root_label: "TEST".to_string(),
-                table: "cdf".to_string(),
-                file: PathBuf::from("cdf.dat"),
-                line: 1,
-            },
-        };
-        fenix_mib::telecommand::TcParameter { name: name.to_string(), cdf, cpc: None, fixed: false }
-    }
-
-    #[test]
-    fn next_argument_cursor_with_no_grpsize_just_advances() {
-        let params = vec![tc_param("A", ""), tc_param("B", "")];
-        let (next, stack) = next_argument_cursor(&params, 0, "5", Vec::new());
-        assert_eq!(next, 1);
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_walks_a_flat_repeating_group() {
-        // N1 (GRPSIZE=2, typed "3") repeats {A, B} 3 times, then C.
-        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
-        let mut stack = Vec::new();
-        let mut cursor = 0;
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "3", stack); // typed N1=3
-        assert_eq!(cursor, 1); // A, repetition 1
-        assert_eq!(stack, vec![GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 1, offset: 0 }]);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "10", stack); // A=10
-        assert_eq!(cursor, 2); // B, repetition 1
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "20", stack); // B=20
-        assert_eq!(cursor, 1); // A, repetition 2
-        assert_eq!(stack[0].current, 2);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "11", stack); // A=11
-        (cursor, stack) = next_argument_cursor(&params, cursor, "21", stack); // B=21
-        assert_eq!(cursor, 1); // A, repetition 3
-        assert_eq!(stack[0].current, 3);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "12", stack); // A=12
-        (cursor, stack) = next_argument_cursor(&params, cursor, "22", stack); // B=22 -- group done
-        assert_eq!(cursor, 3); // C, right after the group's own listing
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_with_zero_repeats_skips_the_group_entirely() {
-        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
-        let (next, stack) = next_argument_cursor(&params, 0, "0", Vec::new());
-        assert_eq!(next, 3); // straight to C
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_with_a_non_numeric_count_skips_the_group() {
-        let params = vec![tc_param("N1", "2"), tc_param("A", ""), tc_param("B", ""), tc_param("C", "")];
-        let (next, stack) = next_argument_cursor(&params, 0, "not a number", Vec::new());
-        assert_eq!(next, 3);
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_with_grpsize_overflowing_the_list_skips_the_group() {
-        // GRPSIZE=5 but only 1 param follows -- malformed data.
-        let params = vec![tc_param("N1", "5"), tc_param("A", "")];
-        let (next, stack) = next_argument_cursor(&params, 0, "2", Vec::new());
-        assert_eq!(next, 6); // 0 + 1 + 5 -- past the whole list, on to Confirm
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_handles_two_independent_sequential_groups() {
-        // N1 (GRPSIZE=1, typed "1") repeats {A} once, then N2 (GRPSIZE=1, typed "2") repeats {B} twice.
-        let params = vec![tc_param("N1", "1"), tc_param("A", ""), tc_param("N2", "1"), tc_param("B", "")];
-        let mut stack = Vec::new();
-        let mut cursor = 0;
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "1", stack); // N1=1
-        assert_eq!(cursor, 1); // A
-        (cursor, stack) = next_argument_cursor(&params, cursor, "10", stack); // A=10 -- N1's single rep done
-        assert_eq!(cursor, 2); // N2
-        assert!(stack.is_empty());
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N2=2
-        assert_eq!(cursor, 3); // B, rep 1
-        (cursor, stack) = next_argument_cursor(&params, cursor, "20", stack); // B=20
-        assert_eq!(cursor, 3); // B, rep 2 (group_start == group's only slot)
-        assert_eq!(stack[0].current, 2);
-        (cursor, stack) = next_argument_cursor(&params, cursor, "21", stack); // B=21 -- N2 done
-        assert_eq!(cursor, 4); // past the end -- Confirm
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn next_argument_cursor_handles_a_nested_group() {
-        // Outer: N1 (GRPSIZE=2, typed "2") repeats {N2, X} twice.
-        // Inner: N2 (GRPSIZE=1, typed varies) repeats {Y} that many times.
-        let params = vec![
-            tc_param("N1", "2"), // 0
-            tc_param("N2", "1"), // 1
-            tc_param("Y", ""),   // 2
-            tc_param("X", ""),   // 3
-        ];
-        let mut stack = Vec::new();
-        let mut cursor = 0;
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N1=2 (outer: 2 reps)
-        assert_eq!(cursor, 1); // N2, outer rep 1
-        assert_eq!(stack.len(), 1);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "2", stack); // N2=2 (inner: 2 reps)
-        assert_eq!(cursor, 2); // Y, inner rep 1
-        assert_eq!(stack.len(), 2);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "100", stack); // Y=100
-        assert_eq!(cursor, 2); // Y, inner rep 2
-        assert_eq!(stack[1].current, 2);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "101", stack); // Y=101 -- inner group done
-        assert_eq!(cursor, 3); // X, outer rep 1 (inner's counter row was one outer slot)
-        assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].current, 1);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "200", stack); // X=200 -- outer rep 1 done
-        assert_eq!(cursor, 1); // N2 again, outer rep 2
-        assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].current, 2);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "1", stack); // N2=1 (inner: 1 rep)
-        assert_eq!(cursor, 2); // Y, inner rep 1
-        assert_eq!(stack.len(), 2);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "102", stack); // Y=102 -- inner done (only 1 rep)
-        assert_eq!(cursor, 3); // X, outer rep 2
-        assert_eq!(stack.len(), 1);
-
-        (cursor, stack) = next_argument_cursor(&params, cursor, "201", stack); // X=201 -- outer done (2 reps)
-        assert_eq!(cursor, 4); // past the end -- Confirm
-        assert!(stack.is_empty());
-    }
-
-    #[test]
-    fn mib_group_suffix_formats_flat_and_nested_stacks() {
-        assert_eq!(mib_group_suffix(&[]), "");
-        assert_eq!(
-            mib_group_suffix(&[GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 2, offset: 0 }]),
-            "group 2 of 3"
-        );
-        assert_eq!(
-            mib_group_suffix(&[
-                GroupRepeat { group_start: 1, group_width: 2, total: 3, current: 2, offset: 0 },
-                GroupRepeat { group_start: 2, group_width: 1, total: 4, current: 1, offset: 0 },
-            ]),
-            "group 2 of 3 > 1 of 4"
-        );
-    }
-
-    /// A small, realistic SCOS-2000 MIB: two telecommands (`AAA001` with
-    /// a fixed subtype, an aliased `MODE` argument, and a ranged `GAIN`
-    /// argument; `AAA002` with no parameters at all), one TM packet
-    /// (`SPID 1001`) carrying one TM parameter (`PARAM_A`), and one
-    /// numeric calibration curve (`CAF1`). Field positions here are the
-    /// same ones already hand-verified against the schema in `fenix-
-    /// mib`'s own `telecommand::tests::build_fixture`.
-    fn mib_fixture_root(dir: &TempDir, label: &str) -> fenix_mib::MibRoot {
-        dir.write(
-            "ccf.dat",
-            "AAA001\tSwitch mode\t\tA\t0\t1\t8\t1\t100\t3\t\t\t\t\tAOCS\nAAA002\tPing\t\tA\t0\t2\t8\t2\t100\t0\t\t\t\t\tAOCS\n",
-        );
-        dir.write(
-            "cdf.dat",
-            "AAA001\tA\tsubtype\t8\t0\t0\tSTYPE\t\t1\t\nAAA001\tA\tmode\t8\t8\t0\tMODE\t\t\t\nAAA001\tA\tgain\t16\t16\t0\tGAIN\t\t\t\n",
-        );
-        dir.write(
-            "cpc.dat",
-            "MODE\tOperating mode\t7\t1\tA\t\t\tS\t\t\tPAF1\t\t\t\tOFF\t\tno\nGAIN\tLoop gain\t3\t1\tA\t\t\tS\tPRF1\t\t\t\t\t\t5\t\tno\n",
-        );
-        dir.write("paf.dat", "PAF1\tMode select\tU\t2\n");
-        dir.write("pas.dat", "PAF1\tOFF\t0\nPAF1\tON\t1\n");
-        dir.write("prf.dat", "PRF1\tGain range\tno\t\t\t1\t\n");
-        dir.write("prv.dat", "PRF1\t0\t100\n");
-        dir.write("caf.dat", "CAF1\tTemp curve\n");
-        dir.write("cap.dat", "CAF1\t0\t0\nCAF1\t10\t100\n");
-        dir.write("pid.dat", "3\t25\t100\t\t\t1001\tHousekeeping\n");
-        dir.write("plf.dat", "PARAM_A\t1001\t0\t0\t1\n");
-        dir.write("pcf.dat", "PARAM_A\tSome telemetry param\t\tV\t3\t1\t16\n");
-        fenix_mib::MibRoot { label: label.to_string(), path: dir.path().to_path_buf() }
-    }
-
-    #[test]
-    fn mib_lookup_telecommand_lists_field_tokened_candidates_and_opens_a_detail_view() {
-        let dir = TempDir::new("mib_lookup_tc");
-        let mut app = App::with_file(None);
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        app.mib_lookup_telecommand();
-        match &app.active_picker {
-            Some(ActivePicker::MibTelecommandLookup(state)) => {
-                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
-                assert!(labels.iter().any(|l| l.contains("AAA001") && l.contains("type=8") && l.contains("sub=1")));
-            }
-            other => panic!("expected an open MibTelecommandLookup picker, got is_some={}", other.is_some()),
-        }
-
-        app.picker_confirm();
-
-        assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.active_picker.is_none());
-        let text = app.open().buffer.text();
-        assert!(text.contains("Telecommand AAA001"));
-        assert!(text.contains("MODE")); // a CDF parameter
-        assert!(text.contains("Calibration")); // MODE's PAF/PAS references inlined
-    }
-
-    #[test]
-    fn mib_lookup_tm_packet_opens_a_detail_view_with_its_parameters() {
-        let dir = TempDir::new("mib_lookup_packet");
-        let mut app = App::with_file(None);
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        app.mib_lookup_tm_packet();
-        app.picker_confirm();
-
-        let text = app.open().buffer.text();
-        assert!(text.contains("SPID 1001"));
-        assert!(text.contains("PARAM_A"));
-    }
-
-    #[test]
-    fn mib_lookup_tm_parameter_opens_a_detail_view_with_its_packet_occurrences() {
-        let dir = TempDir::new("mib_lookup_param");
-        let mut app = App::with_file(None);
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        app.mib_lookup_tm_parameter();
-        app.picker_confirm();
-
-        let text = app.open().buffer.text();
-        assert!(text.contains("TM Parameter PARAM_A"));
-        assert!(text.contains("SPID 1001"));
-    }
-
-    #[test]
-    fn mib_lookup_calibration_merges_caf_paf_prf_and_opens_a_detail_view() {
-        let dir = TempDir::new("mib_lookup_cal");
-        let mut app = App::with_file(None);
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        app.mib_lookup_calibration();
-        match &app.active_picker {
-            Some(ActivePicker::MibCalibration(state)) => {
-                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
-                assert!(labels.iter().any(|l| l.starts_with("CAF1") && l.contains("numeric")));
-                assert!(labels.iter().any(|l| l.starts_with("PAF1") && l.contains("status")));
-                assert!(labels.iter().any(|l| l.starts_with("PRF1") && l.contains("range")));
-            }
-            other => panic!("expected an open MibCalibration picker, got is_some={}", other.is_some()),
-        }
-
-        app.picker_confirm(); // whichever's selected first (sorted by insertion: caf, paf, prf)
-        let text = app.open().buffer.text();
-        assert!(text.contains("Calibration CAF1"));
-        assert!(text.contains("x=0")); // a CAP curve point
-    }
-
-    #[test]
-    fn mib_insert_telecommand_with_no_variable_params_goes_straight_to_confirm() {
-        let dir = TempDir::new("mib_insert_no_params");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        // Pick AAA002, which has CCF_NPARS=0 and no CDF rows.
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA002")).unwrap().payload;
-        app.mib_start_insert(ccf);
-
-        match &app.mib_insert.as_ref().unwrap().stage {
-            MibInsertStage::Confirm { rendered, warnings } => {
-                assert!(rendered.contains("MNEMO=AAA002"));
-                assert!(rendered.ends_with("ARGUMENTS=[]"));
-                assert!(warnings.is_empty());
-            }
-            other => panic!("expected the wizard to go straight to Confirm, got a different stage: {other:?}"),
-        }
-    }
-
-    /// A minimal, purpose-built MIB with exactly one telecommand,
-    /// `GRP001`: `N1` (a `CDF_GRPSIZE=2` counter) repeating `{A, B}`
-    /// however many times `N1` is typed as. Kept separate from
-    /// `mib_fixture_root` (which several other tests already share)
-    /// rather than extending it, to keep this test's own fixture
-    /// isolated and easy to reason about.
-    fn mib_fixture_root_with_group(dir: &TempDir, label: &str) -> fenix_mib::MibRoot {
-        dir.write("ccf.dat", "GRP001\tRepeat test\t\tA\t0\t3\t8\t3\t100\t3\t\t\t\t\tTEST\n");
-        dir.write(
-            "cdf.dat",
-            "GRP001\tA\tRepeat count\t8\t0\t2\tN1\t\t\t\n\
-             GRP001\tA\tParam A\t8\t8\t0\tA\t\t\t\n\
-             GRP001\tA\tParam B\t8\t16\t0\tB\t\t\t\n",
-        );
-        fenix_mib::MibRoot { label: label.to_string(), path: dir.path().to_path_buf() }
-    }
-
-    #[test]
-    fn mib_insert_walks_a_real_repeating_group_end_to_end() {
-        let dir = TempDir::new("mib_insert_group_e2e");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root_with_group(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("GRP001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::char('y')); // build arguments -- lands on N1
-
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "N1 -- Repeat count");
-        for ch in "2".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter)); // N1 = 2
-
-        // A, repetition 1.
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "A -- Param A; group 1 of 2");
-        for ch in "10".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        // B, repetition 1.
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "B -- Param B; group 1 of 2");
-        for ch in "20".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        // A, repetition 2.
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "A -- Param A; group 2 of 2");
-        for ch in "11".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        // B, repetition 2.
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "B -- Param B; group 2 of 2");
-        for ch in "21".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        // Both repetitions done -- straight to Confirm.
-        let MibInsertStage::Confirm { rendered, warnings } = &app.mib_insert.as_ref().unwrap().stage else {
-            panic!("expected Confirm, got {:?}", app.mib_insert.as_ref().unwrap().stage);
-        };
-        assert!(warnings.is_empty());
-        assert!(rendered.contains("N1=2"));
-        assert!(rendered.contains("A=10"));
-        assert!(rendered.contains("B=20"));
-        assert!(rendered.contains("A=11"));
-        assert!(rendered.contains("B=21"));
-        assert_eq!(
-            app.mib_insert.as_ref().unwrap().collected,
-            vec![
-                ("N1".to_string(), "2".to_string()),
-                ("A".to_string(), "10".to_string()),
-                ("B".to_string(), "20".to_string()),
-                ("A".to_string(), "11".to_string()),
-                ("B".to_string(), "21".to_string()),
-            ]
-        );
-
-        app.mib_insert_key(KeyPress::char('y')); // commit
-        assert!(app.mib_insert.is_none());
-        let text = app.open().buffer.text();
-        assert!(text.contains("A=10"));
-        assert!(text.contains("A=11"));
-    }
-
-    #[test]
-    fn mib_insert_shows_the_mnemonic_and_description_while_picking_an_aliased_value() {
-        let dir = TempDir::new("mib_insert_alias_context");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::char('y')); // build arguments -- lands on MODE, which is aliased
-
-        assert!(matches!(app.active_picker, Some(ActivePicker::MibArgumentAlias(_))));
-        assert_eq!(app.mib_insert.as_ref().unwrap().current_argument_context, "MODE -- mode");
-        assert_eq!(app.mib_insert_text(), Some("MODE -- mode -- choose a value".to_string()));
-    }
-
-    #[test]
-    fn mib_insert_telecommand_walks_a_free_text_and_an_aliased_argument() {
-        let dir = TempDir::new("mib_insert_walk");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        assert!(matches!(app.mib_insert.as_ref().unwrap().stage, MibInsertStage::ChooseArgumentMode));
-
-        app.mib_insert_key(KeyPress::char('y')); // build arguments
-
-        // First variable parameter is MODE, which has PAF/PAS aliases --
-        // routed to a picker, not free text.
-        match &app.active_picker {
-            Some(ActivePicker::MibArgumentAlias(state)) => {
-                let labels: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
-                assert_eq!(labels, vec!["OFF".to_string(), "ON".to_string()]);
-            }
-            other => panic!("expected an open MibArgumentAlias picker, got is_some={}", other.is_some()),
-        }
-        app.picker_confirm(); // picks "OFF" (the first/only-selected row)
-        assert_eq!(app.main_view, MainView::Editor, "confirming the alias picker must not leave main_view stuck on Picker");
-
-        // Second variable parameter is GAIN, ranged but not aliased --
-        // free-text capture.
-        assert!(matches!(app.mib_insert.as_ref().unwrap().stage, MibInsertStage::ArgumentText { .. }));
-        for ch in "50".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        match &app.mib_insert.as_ref().unwrap().stage {
-            MibInsertStage::Confirm { rendered, warnings } => {
-                assert!(rendered.contains("MODE=OFF"));
-                assert!(rendered.contains("GAIN=50"));
-                assert!(warnings.is_empty()); // 50 is inside GAIN's known 0..100 range
-            }
-            other => panic!("expected Confirm after both arguments, got a different stage: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mib_insert_telecommand_with_an_aliased_argument_returns_to_the_editor_after_committing() {
-        let dir = TempDir::new("mib_insert_aliased_commit");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::char('y'));
-        app.picker_confirm(); // MODE = OFF, via the aliased-argument picker
-        for ch in "50".chars() {
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter)); // GAIN = 50, into Confirm
-        app.mib_insert_key(KeyPress::char('y')); // confirm the insert
-
-        assert!(app.mib_insert.is_none());
-        assert!(app.active_picker.is_none());
-        assert_eq!(
-            app.main_view,
-            MainView::Editor,
-            "should land back on the text buffer, not a stale picker view, once the insert commits"
-        );
-        assert!(app.open().buffer.text().contains("MODE=OFF"));
-        assert!(app.open().buffer.text().contains("GAIN=50"));
-    }
-
-    #[test]
-    fn mib_insert_telecommand_flags_a_value_outside_the_known_range() {
-        let dir = TempDir::new("mib_insert_warning");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::char('y'));
-        app.picker_confirm(); // MODE = OFF
-        for ch in "500".chars() {
-            // GAIN way outside 0..100
-            app.mib_insert_key(KeyPress::char(ch));
-        }
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Enter));
-
-        let MibInsertStage::Confirm { warnings, .. } = &app.mib_insert.as_ref().unwrap().stage else {
-            panic!("expected Confirm stage");
-        };
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("GAIN"));
-        assert!(warnings[0].contains("outside"));
-    }
-
-    #[test]
-    fn mib_insert_telecommand_skip_mode_renders_with_empty_arguments() {
-        let dir = TempDir::new("mib_insert_skip");
-        let file = dir.write("main.tcl", "");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::char('n')); // skip
-
-        let MibInsertStage::Confirm { rendered, .. } = &app.mib_insert.as_ref().unwrap().stage else {
-            panic!("expected Confirm stage");
-        };
-        assert!(rendered.ends_with("ARGUMENTS=[]"));
-    }
-
-    #[test]
-    fn mib_insert_telecommand_commits_at_the_original_cursor_position() {
-        let dir = TempDir::new("mib_insert_commit");
-        let file = dir.write("main.tcl", "puts start\n");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-        app.test_vim_key(KeyPress::char('l')); // char_idx 1 -- the insert point
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA002")).unwrap().payload; // no params
-        app.mib_start_insert(ccf); // straight to Confirm
-
-        app.mib_insert_key(KeyPress::char('y'));
-
-        assert!(app.mib_insert.is_none());
-        let text = app.open().buffer.text();
-        assert!(text.contains("MNEMO=AAA002"));
-        assert!(text.starts_with('p')); // the "p" of "puts" the cursor was already past
-        assert_eq!(text.find("telecommand_send"), Some(1)); // inserted right after that "p"
-        assert!(text.contains("uts start")); // the rest of the original line, untouched
-    }
-
-    #[test]
-    fn mib_insert_telecommand_escape_cancels_without_touching_the_buffer() {
-        let dir = TempDir::new("mib_insert_escape");
-        let file = dir.write("main.tcl", "original text\n");
-        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-
-        let candidates = app.mib_tc_candidates().unwrap();
-        let ccf = candidates.into_iter().find(|c| c.label.starts_with("AAA001")).unwrap().payload;
-        app.mib_start_insert(ccf);
-        app.mib_insert_key(KeyPress::named(FenixNamedKey::Escape));
-
-        assert!(app.mib_insert.is_none());
-        assert_eq!(app.open().buffer.text(), "original text\n");
-    }
-
-    #[test]
-    fn mib_commands_are_a_noop_without_configured_roots() {
-        let mut app = App::with_file(None);
-        assert!(app.mib_roots.is_empty());
-
-        app.mib_lookup_telecommand();
-
-        assert!(app.active_picker.is_none());
-        assert!(app.mib_index.is_none());
-    }
-
-    #[test]
-    fn mib_refresh_index_picks_up_a_changed_dat_file() {
-        let dir = TempDir::new("mib_refresh");
-        let mut app = App::with_file(None);
-        app.mib_roots = vec![mib_fixture_root(&dir, "TEST-MIB")];
-        let before = app.mib_tc_candidates().unwrap().len();
-
-        dir.write("ccf.dat", "AAA001\tSwitch mode\t\tA\t0\t1\t8\t1\t100\t3\t\t\t\t\tAOCS\nAAA002\tPing\t\tA\t0\t2\t8\t2\t100\t0\t\t\t\t\tAOCS\nAAA003\tNew\t\tA\t0\t3\t8\t3\t100\t0\t\t\t\t\tAOCS\n");
-        app.mib_refresh_index();
-
-        assert_eq!(app.mib_tc_candidates().unwrap().len(), before + 1);
-    }
 
     // -- Renaming by editing the listing ---------------------------------
 
@@ -34441,39 +32753,6 @@ configure_board stm32
     }
 
     #[test]
-    fn picker_add_mib_root_prompt_opens_the_explorer_at_the_current_project_root() {
-        let root_dir = TempDir::new("add_mib_root_prompt_root");
-        let mut app = App::with_file(None);
-        app.project_root = Some(root_dir.path().to_path_buf());
-
-        app.picker_add_mib_root_prompt();
-
-        assert_eq!(app.main_view, MainView::Explorer);
-        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickMibRootDir);
-        assert_eq!(app.explorer.as_ref().map(|e| e.cwd.as_path()), Some(root_dir.path()));
-    }
-
-    #[test]
-    fn select_cwd_starts_the_mib_root_label_prompt_instead_of_registering_directly() {
-        let mib_dir = TempDir::new("select_cwd_mib_target");
-        let config_dir = TempDir::new("select_cwd_mib_config");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
-
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-
-        assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.explorer.is_none());
-        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
-        let canonical = fenix_lsp::normalize(std::fs::canonicalize(mib_dir.path()).unwrap());
-        assert_eq!(app.mib_root_prompt, Some((canonical, String::new())));
-        // Nothing registered yet -- only the label prompt started.
-        assert!(app.config.mib_roots.is_empty());
-    }
-
-    #[test]
     fn start_explore_from_home_opens_the_explorer_at_the_home_directory() {
         let mut app = App::with_file(None);
         // Something other than the home dir, so a bug that reuses
@@ -34525,205 +32804,6 @@ configure_board stm32
 
         assert_eq!(app.main_view, MainView::Explorer, "browsing should be untouched by a stray S");
         assert!(app.active_picker.is_none());
-    }
-
-    #[test]
-    fn mib_root_prompt_enter_with_a_label_registers_and_persists_the_root() {
-        let mib_dir = TempDir::new("mib_root_prompt_enter_target");
-        let config_dir = TempDir::new("mib_root_prompt_enter_config");
-        let mut app = App::with_file(None);
-        let config_path = config_dir.path().join("settings.toml");
-        app.config = fenix_config::Config::load_or_default(config_path.clone());
-        app.project_root = Some(mib_dir.path().to_path_buf());
-
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        for ch in "TEST-MIB".chars() {
-            app.mib_root_prompt_key(KeyPress::char(ch));
-        }
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        assert!(app.mib_root_prompt.is_none());
-        let canonical = fenix_lsp::normalize(std::fs::canonicalize(mib_dir.path()).unwrap());
-        assert_eq!(app.config.mib_roots, vec![("TEST-MIB".to_string(), canonical.clone())]);
-        assert_eq!(app.mib_roots, vec![fenix_mib::MibRoot { label: "TEST-MIB".to_string(), path: canonical.clone() }]);
-        assert!(app.mib_index.is_none(), "the stale index should be invalidated, not just left as-is");
-
-        // Persisted, not just held in memory.
-        let reloaded = fenix_config::Config::load_or_default(config_path);
-        assert_eq!(reloaded.mib_roots, vec![("TEST-MIB".to_string(), canonical)]);
-    }
-
-    #[test]
-    fn adding_a_second_mib_root_keeps_the_first_one_after_a_simulated_restart() {
-        let mib_dir_a = TempDir::new("mib_two_roots_a");
-        let mib_dir_b = TempDir::new("mib_two_roots_b");
-        let config_dir = TempDir::new("mib_two_roots_config");
-        let config_path = config_dir.path().join("settings.toml");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_path.clone());
-
-        app.project_root = Some(mib_dir_a.path().to_path_buf());
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        for ch in "MIB-A".chars() {
-            app.mib_root_prompt_key(KeyPress::char(ch));
-        }
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        app.project_root = Some(mib_dir_b.path().to_path_buf());
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        for ch in "MIB-B".chars() {
-            app.mib_root_prompt_key(KeyPress::char(ch));
-        }
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        assert_eq!(app.config.mib_roots.len(), 2, "both roots should be in memory right after adding them");
-
-        // Simulate a restart: a brand new `Config` loaded fresh from the
-        // same path, the same way `App::with_file` does at startup.
-        let reloaded = fenix_config::Config::load_or_default(config_path);
-        assert_eq!(reloaded.mib_roots.len(), 2, "both roots should survive a reload, not just the most recently added one");
-        let labels: Vec<&str> = reloaded.mib_roots.iter().map(|(label, _)| label.as_str()).collect();
-        assert_eq!(labels, vec!["MIB-A", "MIB-B"]);
-    }
-
-    #[test]
-    fn adding_a_mib_root_alongside_one_already_on_disk_keeps_both_after_a_restart() {
-        // Closer to the real reported scenario than the sequential-add
-        // test above: one root already persisted (from a previous
-        // session, or hand-edited into config.ini) *before* this App
-        // ever loads its config, then a second one added via `SPC m a`
-        // in this session.
-        let mib_dir_a = TempDir::new("mib_preexisting_a");
-        let mib_dir_b = TempDir::new("mib_preexisting_b");
-        let config_dir = TempDir::new("mib_preexisting_config");
-        let config_path = config_dir.path().join("settings.toml");
-
-        let mut seed = fenix_config::Config::load_or_default(config_path.clone());
-        let canonical_a = std::fs::canonicalize(mib_dir_a.path()).unwrap();
-        seed.mib_roots = vec![("MIB-A".to_string(), canonical_a.clone())];
-        seed.save().unwrap();
-
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_path.clone());
-        app.mib_roots = app
-            .config
-            .mib_roots
-            .iter()
-            .map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() })
-            .collect();
-        assert_eq!(app.config.mib_roots.len(), 1, "sanity check: the pre-existing root loaded correctly");
-
-        app.project_root = Some(mib_dir_b.path().to_path_buf());
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        for ch in "MIB-B".chars() {
-            app.mib_root_prompt_key(KeyPress::char(ch));
-        }
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter));
-
-        assert_eq!(app.config.mib_roots.len(), 2, "the pre-existing root must survive add_mib_root, not get dropped");
-
-        let reloaded = fenix_config::Config::load_or_default(config_path);
-        assert_eq!(reloaded.mib_roots.len(), 2, "both roots should survive a reload");
-        let labels: Vec<&str> = reloaded.mib_roots.iter().map(|(label, _)| label.as_str()).collect();
-        assert_eq!(labels, vec!["MIB-A", "MIB-B"]);
-    }
-
-    #[test]
-    fn mib_root_prompt_enter_with_an_empty_label_registers_nothing() {
-        let mib_dir = TempDir::new("mib_root_prompt_empty_target");
-        let config_dir = TempDir::new("mib_root_prompt_empty_config");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
-
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Enter)); // never typed a label
-
-        assert!(app.mib_root_prompt.is_none());
-        assert!(app.config.mib_roots.is_empty());
-    }
-
-    #[test]
-    fn mib_root_prompt_escape_cancels_without_changing_config() {
-        let mib_dir = TempDir::new("mib_root_prompt_escape_target");
-        let config_dir = TempDir::new("mib_root_prompt_escape_config");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
-
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-        app.mib_root_prompt_key(KeyPress::char('x'));
-        app.mib_root_prompt_key(KeyPress::named(FenixNamedKey::Escape));
-
-        assert!(app.mib_root_prompt.is_none());
-        assert!(app.config.mib_roots.is_empty());
-    }
-
-    #[test]
-    fn mib_root_prompt_ctrl_v_pastes_the_clipboard() {
-        let mib_dir = TempDir::new("mib_root_prompt_paste_target");
-        let config_dir = TempDir::new("mib_root_prompt_paste_config");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
-        app.project_root = Some(mib_dir.path().to_path_buf());
-        app.picker_add_mib_root_prompt();
-        app.explorer_handle_action(ExplorerAction::SelectCwd);
-
-        if let Some(_guard) = test_set_clipboard(&mut app, "PASTED-LABEL") {
-            app.mib_root_prompt_key(KeyPress::char('v').with_ctrl());
-            assert_eq!(app.mib_root_prompt.as_ref().map(|(_, label)| label.as_str()), Some("PASTED-LABEL"));
-        }
-    }
-
-    #[test]
-    fn picker_delete_mib_root_lists_configured_roots() {
-        let config_dir = TempDir::new("delete_mib_root_list_config");
-        let mut app = App::with_file(None);
-        app.config = fenix_config::Config::load_or_default(config_dir.path().join("settings.toml"));
-        app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
-
-        app.picker_delete_mib_root();
-
-        match &app.active_picker {
-            Some(ActivePicker::DeleteMibRoot(state)) => assert_eq!(state.len(), 2),
-            other => panic!("expected an open DeleteMibRoot picker, got is_some={}", other.is_some()),
-        }
-    }
-
-    #[test]
-    fn picker_confirm_on_delete_mib_root_removes_it_and_persists() {
-        let config_dir = TempDir::new("delete_mib_root_confirm_config");
-        let mut app = App::with_file(None);
-        let config_path = config_dir.path().join("settings.toml");
-        app.config = fenix_config::Config::load_or_default(config_path.clone());
-        app.config.mib_roots = vec![("A".to_string(), PathBuf::from("/mib/a")), ("B".to_string(), PathBuf::from("/mib/b"))];
-        app.mib_roots =
-            app.config.mib_roots.iter().map(|(label, path)| fenix_mib::MibRoot { label: label.clone(), path: path.clone() }).collect();
-
-        app.picker_delete_mib_root();
-        // Pick a specific entry rather than relying on whatever the
-        // picker's own default selection happens to be.
-        if let Some(ActivePicker::DeleteMibRoot(state)) = &mut app.active_picker {
-            while state.selected().map(|c| &c.payload.0) != Some(&"A".to_string()) {
-                state.move_selection(1);
-            }
-        }
-        app.picker_confirm();
-
-        assert_eq!(app.config.mib_roots, vec![("B".to_string(), PathBuf::from("/mib/b"))]);
-        assert_eq!(app.mib_roots, vec![fenix_mib::MibRoot { label: "B".to_string(), path: PathBuf::from("/mib/b") }]);
-        assert!(app.mib_index.is_none());
-        assert_eq!(app.main_view, MainView::Editor);
-        assert!(app.active_picker.is_none());
-
-        let reloaded = fenix_config::Config::load_or_default(config_path);
-        assert_eq!(reloaded.mib_roots, vec![("B".to_string(), PathBuf::from("/mib/b"))]);
     }
 
     #[test]

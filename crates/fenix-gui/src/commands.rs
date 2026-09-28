@@ -302,14 +302,17 @@ impl CommandRegistry {
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
-        registry.register("mib.lookup_telecommand", "Fuzzy-find a MIB telecommand and view its details", cmd_mib_lookup_telecommand);
-        registry.register("mib.insert_telecommand", "Build and insert a telecommand from the MIB", cmd_mib_insert_telecommand);
-        registry.register("mib.lookup_tm_packet", "Fuzzy-find a MIB TM packet and view its details", cmd_mib_lookup_tm_packet);
-        registry.register("mib.lookup_tm_parameter", "Fuzzy-find a MIB TM parameter and view its details", cmd_mib_lookup_tm_parameter);
-        registry.register("mib.lookup_calibration", "Fuzzy-find a MIB calibration definition and view its details", cmd_mib_lookup_calibration);
-        registry.register("mib.refresh_index", "Reparse the configured MIB roots from disk", cmd_mib_refresh_index);
-        registry.register("mib.add_root", "Browse to and register a new MIB root directory", cmd_mib_add_root);
-        registry.register("mib.delete_root", "Fuzzy-find and remove a configured MIB root", cmd_mib_delete_root);
+        registry.register("mib.page", "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", cmd_mib_page);
+        registry.register("mib.search", "Search every kind of MIB definition", cmd_mib_search);
+        registry.register("mib.telecommand", "Open a MIB telecommand by name", cmd_mib_telecommand);
+        registry.register("mib.tc_parameter", "Open a MIB TC parameter by name", cmd_mib_tc_parameter);
+        registry.register("mib.tm_packet", "Open a MIB TM packet by SPID or name", cmd_mib_tm_packet);
+        registry.register("mib.tm_parameter", "Open a MIB TM parameter by name", cmd_mib_tm_parameter);
+        registry.register("mib.calibration", "Open a MIB calibration by id", cmd_mib_calibration);
+        registry.register("mib.insert", "Insert a telecommand from the MIB, with a form for its arguments", cmd_mib_insert);
+        registry.register("mib.edit_call", "Edit the telecommand call on this line in the insert form", cmd_mib_edit_call);
+        registry.register("mib.reload", "Read the project's MIBs again", cmd_mib_reload);
+        registry.register("mib.settings", "This project's MIB settings", cmd_mib_settings);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -978,36 +981,48 @@ fn cmd_jump_forward(ctx: &mut CommandCtx) {
     ctx.app.jump_forward();
 }
 
-fn cmd_mib_lookup_telecommand(ctx: &mut CommandCtx) {
-    ctx.app.mib_lookup_telecommand();
+fn cmd_mib_page(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_page();
 }
 
-fn cmd_mib_insert_telecommand(ctx: &mut CommandCtx) {
-    ctx.app.mib_insert_telecommand();
+fn cmd_mib_search(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_search();
 }
 
-fn cmd_mib_lookup_tm_packet(ctx: &mut CommandCtx) {
-    ctx.app.mib_lookup_tm_packet();
+fn cmd_mib_telecommand(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_pick(fenix_mib::Kind::Telecommand);
 }
 
-fn cmd_mib_lookup_tm_parameter(ctx: &mut CommandCtx) {
-    ctx.app.mib_lookup_tm_parameter();
+fn cmd_mib_tc_parameter(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_pick(fenix_mib::Kind::TcParam);
 }
 
-fn cmd_mib_lookup_calibration(ctx: &mut CommandCtx) {
-    ctx.app.mib_lookup_calibration();
+fn cmd_mib_tm_packet(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_pick(fenix_mib::Kind::TmPacket);
 }
 
-fn cmd_mib_refresh_index(ctx: &mut CommandCtx) {
-    ctx.app.mib_refresh_index();
+fn cmd_mib_tm_parameter(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_pick(fenix_mib::Kind::TmParam);
 }
 
-fn cmd_mib_add_root(ctx: &mut CommandCtx) {
-    ctx.app.picker_add_mib_root_prompt();
+fn cmd_mib_calibration(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_pick(fenix_mib::Kind::Calibration);
 }
 
-fn cmd_mib_delete_root(ctx: &mut CommandCtx) {
-    ctx.app.picker_delete_mib_root();
+fn cmd_mib_insert(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_insert();
+}
+
+fn cmd_mib_edit_call(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_edit_call();
+}
+
+fn cmd_mib_reload(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_reload();
+}
+
+fn cmd_mib_settings(ctx: &mut CommandCtx) {
+    ctx.app.cmd_mib_settings();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {

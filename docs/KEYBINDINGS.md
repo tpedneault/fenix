@@ -128,6 +128,13 @@ popup shows what keys continue it.
 | `SPC j g` | Open an issue by key |
 | `SPC j n` | Create an issue |
 | `SPC j r` | Run the Jira page's search again |
+| `SPC k k` | The MIB page: the project's telecommands, TC and TM parameters, TM packets, calibrations |
+| `SPC k /` | Open any MIB definition by name or description |
+| `SPC k t` / `p` / `m` / `n` / `c` | Open a telecommand / TC parameter / TM packet / TM parameter / calibration |
+| `SPC k i` | Insert a telecommand, from a form with every argument |
+| `SPC k e` | Edit the telecommand call on this line in the form |
+| `SPC k r` | Read the project's MIBs again |
+| `SPC k ,` | The project's MIB settings |
 | `SPC v v` | Open (or switch to) a configured VNC session by name |
 | `SPC v q` | Close the focused VNC session |
 | `SPC v s` | Save the focused VNC session's current frame as a PNG |
@@ -167,14 +174,14 @@ popup shows what keys continue it.
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
 | `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
 | `SPC m` (PDF) | The reader's commands: pages, zoom, outline, search, the document index |
-| `SPC m i` (Tcl) | Build and insert a telecommand from the MIB |
-| `SPC m t` (Tcl) | Fuzzy-find a MIB telecommand and view its details |
-| `SPC m k` (Tcl) | Fuzzy-find a MIB TM packet and view its details |
-| `SPC m p` (Tcl) | Fuzzy-find a MIB TM parameter and view its details |
-| `SPC m c` (Tcl) | Fuzzy-find a MIB calibration definition and view its details |
-| `SPC m r` (Tcl) | Reparse the configured MIB directories from disk |
-| `SPC m a` (Tcl) | Browse to and register a new MIB root directory |
-| `SPC m d` (Tcl) | Fuzzy-find and remove a configured MIB root |
+| `SPC m i` (Tcl) | Insert a telecommand from the MIB (`SPC k i`) |
+| `SPC m e` (Tcl) | Edit the telecommand call on this line (`SPC k e`) |
+| `SPC m t` (Tcl) | Open a MIB telecommand (`SPC k t`) |
+| `SPC m k` (Tcl) | Open a MIB TM packet (`SPC k m`) |
+| `SPC m p` (Tcl) | Open a MIB TM parameter (`SPC k n`) |
+| `SPC m c` (Tcl) | Open a MIB calibration (`SPC k c`) |
+| `SPC m m` (Tcl) | The MIB page (`SPC k k`) |
+| `SPC m r` (Tcl) | Read the project's MIBs again (`SPC k r`) |
 | `SPC m s` (Tcl) | Fuzzy-find a Tcl symbol by its fully-qualified name and jump to its definition |
 | `SPC m T` (Tcl) | Refresh completion tags (re-scans with ctags, re-reads the symbols file) |
 | `SPC m b` (Arduino) | Build (verify) the sketch |
@@ -364,6 +371,32 @@ Real lazygit's own `<space>` stage-toggle isn't used here, since `SPC`
 is already Fenix's global leader-key trigger -- Files uses separate
 `s`/`S` keys instead, the same distinct-keys-per-action convention the
 Docker panel's own `s`/`S`/`R` already established.
+
+## MIB (`SPC k k`)
+
+| Keys | MIB page |
+|---|---|
+| `1`-`5`, `Tab` | Telecommands, TC parameters, TM packets, TM parameters, calibrations |
+| `/` | Search: words, and `field:value` filters (`Tab` completes a field) |
+| `Enter` / `i` / `y` | A definition's page / insert the telecommand / copy the name |
+| `o` / `m` / `p` | Sort by the next column / one MIB of several / preview on and off |
+| `!` / `R` / `a` `A` | Problems in the files / read again / the project's MIB settings, yours |
+
+| Keys | A definition's page |
+|---|---|
+| `j` `k` / `h` `l` | The next, previous line with a link / link on the line |
+| `Enter` | Follow the link |
+| `Ctrl-o` `Ctrl-i` (`H` `L`) | Back / forward |
+| `u` / `i` / `y` | What uses it / insert the telecommand / copy the name |
+| `gf` / `r` / `m` | Its `.dat` line / raw fields / the MIB page |
+
+| Keys | Insert form |
+|---|---|
+| `j` `k` `Tab` | Move between arguments |
+| `Enter` / `c` | Type a value (or pick a status text) / clear and type |
+| `h` `l` / `+` `-` | Previous, next status text / one more, one fewer repetition |
+| `R` / `d` | The MIB's defaults / the telecommand's page |
+| `Ctrl-Enter` (`I`) / `q` | Insert / leave |
 
 ## Agenda (`SPC a a`) and Jira (`SPC j j`)
 

@@ -274,9 +274,6 @@ mod tests {
         fn run(&self, _: &Path, _: &[&str], _: &Path) -> Option<(bool, String)> {
             None
         }
-        fn mib_registered(&self, _: &Path) -> bool {
-            false
-        }
         fn tool_dirs(&self) -> Vec<PathBuf> {
             Vec::new()
         }
