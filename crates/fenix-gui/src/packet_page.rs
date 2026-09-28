@@ -60,6 +60,9 @@ pub enum Action {
 
 pub struct PacketPage {
     pub key: MibKey,
+    /// The frame profile to read a CADU or CLTU with, when it came from a
+    /// source that read it otherwise than the project's settings.
+    pub profile: Option<fenix_ccsds::frames::FrameProfile>,
     pub bytes: Vec<u8>,
     /// Where the bytes came from.
     pub source: String,
@@ -130,7 +133,7 @@ pub fn tree_text(root: &Field) -> String {
 
 impl PacketPage {
     pub fn new(key: MibKey, bytes: Vec<u8>, source: String) -> Self {
-        PacketPage { key, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None, filter: Filter::default() }
+        PacketPage { key, profile: None, bytes, source, reading: DecodeAs::Auto, root: Field::default(), sel: 0, folded: HashSet::new(), menu: None, pending_z: false, help: false, note: None, filter: Filter::default() }
     }
 
     pub fn typing(&self) -> bool {

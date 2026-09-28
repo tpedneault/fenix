@@ -181,9 +181,16 @@ impl App {
 
     /// The inspector on `bytes`.
     pub(crate) fn open_packet_page(&mut self, bytes: Vec<u8>, source: String) {
+        self.open_packet_page_as(bytes, source, None);
+    }
+
+    /// The inspector on `bytes`, reading a CADU or CLTU with `profile`
+    /// when given (how the source that received it read it).
+    pub(crate) fn open_packet_page_as(&mut self, bytes: Vec<u8>, source: String, profile: Option<FrameProfile>) {
         let (key, _) = self.mib_key_here();
         let _ = self.mib_set(&key);
-        let page = PacketPage::new(key, bytes, source);
+        let mut page = PacketPage::new(key, bytes, source);
+        page.profile = profile;
         let id = self.open_page(PageModel::Packet(Box::new(page)));
         self.packet_redecode(id);
     }
@@ -191,9 +198,14 @@ impl App {
     /// Decodes the page's bytes again, as it reads them now.
     pub(super) fn packet_redecode(&mut self, id: BufferId) {
         let Some(PageModel::Packet(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let (key, bytes, reading) = (p.key.clone(), p.bytes.clone(), p.reading);
+        let (key, bytes, reading, profile) = (p.key.clone(), p.bytes.clone(), p.reading, p.profile.clone());
         let set = self.mib_set_ready(&key);
-        let mission = self.mission(key.project.as_deref());
+        let mut mission = self.mission(key.project.as_deref());
+        match profile {
+            Some(p) if p.kind == FrameKind::Tc => mission.tc = p,
+            Some(p) => mission.frames = p,
+            None => {}
+        }
         let (root, _) = decode_bytes(&bytes, reading, set.as_deref(), &mission);
         if let Some(state) = self.pages.get_mut(&id) {
             state.stale = true;

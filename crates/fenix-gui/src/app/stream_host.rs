@@ -79,20 +79,28 @@ pub(crate) fn row_of(bytes: Vec<u8>, offset: usize, vc: Option<u8>, set: Option<
         verifies,
         bytes,
         unit: None,
+        unit_profile: None,
     }
 }
 
 /// Rows, lost frames and skipped bytes out of splitter items.
-fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Vec<(usize, u8, u64)>, Vec<(usize, usize, String)>) {
+fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission, framing: Option<&Framing>) -> (Vec<Row>, Vec<(usize, u8, u64)>, Vec<(usize, usize, String)>) {
     let mut rows = Vec::new();
     let mut lost = Vec::new();
     let mut junk = Vec::new();
-    // The unit the packets that follow a frame came in.
+    // The unit the packets that follow a frame came in, and how it was read.
     let mut unit: Option<Arc<Vec<u8>>> = None;
+    let profile = match framing {
+        Some(Framing::Frames(p) | Framing::Cltus(p)) => Some(p.clone()),
+        _ => None,
+    };
     for item in items {
         match item {
             Item::Packet { offset, bytes, vc } => {
                 let mut row = row_of(bytes, offset, vc, set, m);
+                if unit.is_some() {
+                    row.unit_profile = profile.clone();
+                }
                 row.unit = unit.clone();
                 rows.push(row);
             }
@@ -232,8 +240,8 @@ impl FrameProfileExt {
     }
 }
 
-fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&MibSet>, m: &Mission, done: bool) {
-    let (rows, lost, junk) = convert(items, set, m);
+fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&MibSet>, m: &Mission, framing: Option<&Framing>, done: bool) {
+    let (rows, lost, junk) = convert(items, set, m, framing);
     if !rows.is_empty() || !lost.is_empty() || !junk.is_empty() || done {
         send(PageEvent::StreamRows { buffer, rows, lost, junk, done });
     }
@@ -265,7 +273,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         let _ = (&mut file).take(TEXT_LIMIT).read_to_end(&mut text);
         if let Some(items) = stream::hex_lines(&String::from_utf8_lossy(&text)) {
             send(PageEvent::StreamInfo { buffer, framing: "hex lines · a text log with a packet in hex on a line".to_string() });
-            send_rows(&send, buffer, items, set.as_deref(), &m, true);
+            send_rows(&send, buffer, items, set.as_deref(), &m, None, true);
             return;
         }
     }
@@ -274,14 +282,14 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         None => guessed(&head, &m),
     };
     send(PageEvent::StreamInfo { buffer, framing: format!("{} · {why}", framing.label()) });
-    let mut splitter = Splitter::new(framing);
+    let mut splitter = Splitter::new(framing.clone());
     let set = set.as_deref();
     let mut items = splitter.feed(&head);
     let mut total = 0;
     let mut chunk = vec![0u8; 1024 * 1024];
     loop {
         total += items.iter().filter(|i| matches!(i, Item::Packet { .. })).count();
-        send_rows(&send, buffer, std::mem::take(&mut items), set, &m, false);
+        send_rows(&send, buffer, std::mem::take(&mut items), set, &m, Some(&framing), false);
         if stop.load(Ordering::Relaxed) || total >= MAX_ROWS {
             if total >= MAX_ROWS {
                 send(PageEvent::StreamStatus { buffer, text: format!("stopped at {MAX_ROWS} packets"), ok: false });
@@ -293,7 +301,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
             Ok(n) => items = splitter.feed(&chunk[..n]),
         }
     }
-    send_rows(&send, buffer, splitter.finish(), set, &m, true);
+    send_rows(&send, buffer, splitter.finish(), set, &m, Some(&framing), true);
 }
 
 /// Where a stream page's packets come from.
@@ -332,7 +340,7 @@ fn run_live(src: Source, set: Option<Arc<MibSet>>, m: Mission, buffer: BufferId,
         if let Some(label) = decided {
             info(label);
         }
-        send_rows(&send, buffer, items, set.as_deref(), &m, false);
+        send_rows(&send, buffer, items, set.as_deref(), &m, splitter.splitter.as_ref().map(Splitter::framing), false);
     };
     let (scheme, rest) = src.address.split_once("://").unwrap_or(("tcp", src.address.as_str()));
     while !stop.load(Ordering::Relaxed) {
@@ -636,10 +644,11 @@ impl App {
             }
             A::Unit(row) => {
                 let Some(p) = self.stream_page(id) else { return };
-                let Some((unit, offset)) = p.rows.get(row).and_then(|r| Some((r.unit.clone()?, r.offset))) else { return };
+                let Some((unit, offset, profile)) = p.rows.get(row).and_then(|r| Some((r.unit.clone()?, r.offset, r.unit_profile.clone()))) else { return };
                 let kind = if unit.starts_with(&fenix_ccsds::coding::CLTU_START) { "CLTU" } else { "CADU" };
                 let source = format!("{} @0x{offset:X} · the {kind} it came in", p.title);
-                self.open_packet_page(unit.to_vec(), source);
+                // Read as the source read it, not only as the settings say.
+                self.open_packet_page_as(unit.to_vec(), source, profile);
             }
             A::Hex(offset) => {
                 if let Some(StreamSource::File(path, _)) = self.stream_sources.get(&id).cloned() {
@@ -915,6 +924,34 @@ mod tests {
                 assert!(hk >= 10, "{line}");
             }
         }
+    }
+
+    #[test]
+    fn a_rows_unit_is_inspected_as_its_source_read_it() {
+        // A randomized uplink the project doesn't know is randomized:
+        // guess saw it, and f must read the CLTU the same way.
+        let m = App::with_file(None).mission(None);
+        assert!(!m.tc.randomized);
+        let tc = tm(5);
+        let len = 5 + 1 + tc.len() + 2;
+        let mut frame = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, 0, 0xC0];
+        frame.extend_from_slice(&tc);
+        let crc = fenix_ccsds::crc::ccitt16(&frame);
+        frame.extend_from_slice(&crc.to_be_bytes());
+        fenix_ccsds::coding::derandomize(&mut frame);
+        let mut bytes = vec![0x55; 8];
+        bytes.extend(fenix_ccsds::coding::cltu_encode(&frame));
+        let (framing, _) = stream::guess(&bytes);
+        let items = stream::split(&bytes, framing.clone());
+        let (rows, _, _) = convert(items, None, &m, Some(&framing));
+        let row = &rows[0];
+        assert!(row.unit_profile.as_ref().is_some_and(|p| p.randomized), "{:?}", row.unit_profile);
+        let mut as_read = m.clone();
+        as_read.tc = row.unit_profile.clone().unwrap();
+        let (root, _) = crate::app::ccsds_host::decode_bytes(row.unit.as_ref().unwrap(), crate::packet_page::DecodeAs::Cltu, None, &as_read);
+        assert!(!root.any_bad(), "{root:#?}");
+        let (root, _) = crate::app::ccsds_host::decode_bytes(row.unit.as_ref().unwrap(), crate::packet_page::DecodeAs::Cltu, None, &m);
+        assert!(root.any_bad(), "with the project's settings alone it doesn't read");
     }
 
     #[test]

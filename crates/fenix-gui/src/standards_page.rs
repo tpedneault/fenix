@@ -194,7 +194,9 @@ pub fn layout(p: &StandardsPage, cols: usize) -> Page {
         Some(f) => format!("{} · {found} of {} found", f.display(), STANDARDS.len()),
         None => "no folder yet -- f sets ccsds.library".to_string(),
     };
-    g.put(1, (left + width).saturating_sub(right.chars().count()), &fit(&right, width.saturating_sub(12)), if p.folder.is_some() { Role::Muted } else { Role::Warn });
+    // A long folder keeps its end (where the PDFs are) and leaves the title be.
+    let right = crate::page::fit_tail(&right, width.saturating_sub(12));
+    g.put(1, (left + width).saturating_sub(right.chars().count()), &right, if p.folder.is_some() { Role::Muted } else { Role::Warn });
     let (line, role) = p.query.line("search every standard's text", width);
     g.put(2, left, &line, role);
     g.rule(3, left..left + width);
@@ -258,7 +260,12 @@ mod tests {
         assert!(file_for(&STANDARDS[1], &pdfs).is_none());
         let mut p = StandardsPage::new(None);
         p.folder = Some(PathBuf::from("C:/docs"));
-        p.pdfs = pdfs;
+        p.pdfs = pdfs.clone();
+        let mut long = StandardsPage::new(None);
+        long.folder = Some(PathBuf::from(format!("C:/{}/standards", "deep/".repeat(40))));
+        long.pdfs = pdfs;
+        let head = layout(&long, 160).text.lines().nth(1).unwrap_or_default().to_string();
+        assert!(head.contains("Standards") && head.contains("standards · 2 of 13 found"), "{head}");
         let text = layout(&p, 160).text;
         assert!(text.contains("2 of 13 found") && text.contains("133x0b2e2.pdf"), "{text}");
         assert_eq!(p.key(Key::Enter), Action::Open(PathBuf::from("133x0b2e2.pdf")));

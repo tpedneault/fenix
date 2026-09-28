@@ -70,6 +70,9 @@ pub struct Row {
     pub bytes: Vec<u8>,
     /// The CADU or CLTU it came in, as it arrived.
     pub unit: Option<std::sync::Arc<Vec<u8>>>,
+    /// How that unit was read -- randomized, an FECF -- as the source
+    /// read it, which can differ from the project's settings.
+    pub unit_profile: Option<fenix_ccsds::frames::FrameProfile>,
 }
 
 /// One sample of a parameter.
