@@ -182,6 +182,9 @@ pub enum BracketTarget {
     Todo,
     /// `]h`/`[h`: a changed hunk, from the git gutter.
     Hunk,
+    /// `]d`/`[d`: a diagnostic -- a language server's, or a script
+    /// checked against the MIB.
+    Diagnostic,
 }
 
 /// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::

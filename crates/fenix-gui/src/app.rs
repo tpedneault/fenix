@@ -7715,6 +7715,44 @@ impl App {
         all
     }
 
+    /// `]d`/`[d`: moves to the `count`th problem after (or before) the
+    /// cursor -- a language server's, or a script's call checked against
+    /// the MIB -- and says what it is. Stops at the last one, as `]t` does.
+    pub(crate) fn jump_to_diagnostic(&mut self, forward: bool, count: u32) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.set_message("no problems in this buffer");
+            return;
+        };
+        let buffer = &self.open().buffer;
+        let at = |d: &lsp_types::Diagnostic| {
+            let line = (d.range.start.line as usize).min(buffer.line_count().saturating_sub(1));
+            buffer.line_start_char(line) + (d.range.start.character as usize).min(buffer.line_len(line))
+        };
+        let mut found: Vec<(usize, String)> = self.all_diagnostics(&path).iter().map(|d| (at(d), d.message.clone())).collect();
+        found.sort_by_key(|(c, _)| *c);
+        found.dedup_by_key(|(c, _)| *c);
+        let cursor_idx = self.cursor().char_idx;
+        let candidates: Vec<&(usize, String)> = if forward { found.iter().filter(|(c, _)| *c > cursor_idx).collect() } else { found.iter().rev().filter(|(c, _)| *c < cursor_idx).collect() };
+        let Some((target, message)) = candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1))).map(|(c, m)| (*c, m.clone())) else {
+            self.set_message(if found.is_empty() {
+                "no problems in this buffer"
+            } else if forward {
+                "no more problems below"
+            } else {
+                "no more problems above"
+            });
+            return;
+        };
+        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: cursor_idx };
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        cursor.char_idx = target;
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+        self.record_jump(from);
+        self.wake_caret();
+        self.set_message(message);
+    }
+
     fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
         let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
         if params.diagnostics.is_empty() {
@@ -20496,6 +20534,7 @@ impl App {
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
             VimEvent::Tab(mv) => self.move_tab(mv),
             VimEvent::None => {}
         }
@@ -25650,6 +25689,7 @@ impl App {
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
             VimEvent::Tab(mv) => self.move_tab(mv),
             _ => {}
         }
@@ -39664,6 +39704,31 @@ name = \"orbit\"
         let mut app = app_on(&dir, "a.py", source);
         keys(&mut app, "2]t");
         assert_eq!(app.test_cursor().char_idx, source.find("TODO two").unwrap());
+    }
+
+    #[test]
+    fn bracket_d_steps_through_the_problems_of_every_source() {
+        let dir = TempDir::new("bracket_d");
+        let source = "tc::send ZTC0810 -X 1\nputs ok\ntc::send ZTC08101 -PTH00101 99\n";
+        let mut app = app_on(&dir, "a.tcl", source);
+        let path = app.open().buffer.path().unwrap().to_path_buf();
+        let diag = |line: u32, character: u32, message: &str| lsp_types::Diagnostic {
+            range: lsp_types::Range::new(lsp_types::Position::new(line, character), lsp_types::Position::new(line, character + 3)),
+            message: message.into(),
+            ..Default::default()
+        };
+        // One from the MIB script check, one from a language server.
+        app.mib_diagnostics.insert(path.clone(), vec![diag(2, 28, "PTH00101: 99 is outside 1..8")]);
+        app.diagnostics.insert(path, vec![diag(0, 9, "unknown mnemonic ZTC0810 -- ZTC08101?")]);
+        keys(&mut app, "]d");
+        assert_eq!(app.test_cursor().char_idx, 9);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("ZTC08101?")));
+        keys(&mut app, "]d");
+        assert_eq!(app.test_cursor().char_idx, source.find("99").unwrap());
+        keys(&mut app, "]d");
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text == "no more problems below"));
+        keys(&mut app, "2[d");
+        assert_eq!(app.test_cursor().char_idx, 9, "a count, stopping at the first");
     }
 
     #[test]
