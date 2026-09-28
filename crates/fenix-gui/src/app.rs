@@ -520,6 +520,31 @@ struct HistorySession {
     /// Staleness guard for that fetch -- mirrors `GitSession::
     /// main_request_id`.
     detail_request_id: u64,
+    /// The same, for re-reading the graph and the refs.
+    refresh_request_id: u64,
+}
+
+/// What the History view shows, read off the UI thread: on a large
+/// repository the log and the refs' ahead/behind counts take a while.
+#[derive(Debug)]
+pub struct HistoryData {
+    commits: Vec<fenix_git::GraphCommit>,
+    branches: Vec<fenix_git::Branch>,
+    remotes: Vec<String>,
+    tags: Vec<String>,
+    fetch_age: Option<u64>,
+}
+
+impl HistoryData {
+    fn read(repo_root: &Path, limit: usize) -> Self {
+        HistoryData {
+            commits: fenix_git::commit_graph(repo_root, limit),
+            branches: fenix_git::list_branches(repo_root),
+            remotes: fenix_git::list_remote_branches(repo_root),
+            tags: fenix_git::list_tags(repo_root),
+            fetch_age: fenix_git::seconds_since_fetch(repo_root),
+        }
+    }
 }
 
 /// The Compare view's session (`SPC g c`) -- two refs, the commits
@@ -1881,6 +1906,8 @@ pub enum FenixUserEvent {
     /// same request_id-guarded shape as `GitMainReady`, for the other
     /// view. `None` when the commit couldn't be read at all.
     GitHistoryDetailReady { request_id: u64, buffer: BufferId, diff: Option<CommitDetail> },
+    /// The History view's graph and refs, read again.
+    GitHistoryReady { request_id: u64, data: Box<HistoryData> },
     /// A `SPC g f` fetch finished. Carries git's own message so a
     /// failure (no remote, auth, offline) surfaces verbatim rather than
     /// as a generic "fetch failed".
@@ -16025,34 +16052,55 @@ impl App {
             commits: Vec::new(),
             last_detail_commit: None,
             detail_request_id: 0,
+            refresh_request_id: 0,
         });
         self.history_refresh();
         self.wake_caret();
     }
 
-    /// Re-reads the graph and the refs tree from disk. Synchronous: a
-    /// `git log`/`for-each-ref` pair against a local repo is fast, and
-    /// unlike a fetch it never touches the network -- the same reasoning
-    /// `open_git_panel` already applies to its own listings.
+    /// Re-reads the graph and the refs tree from disk, off the UI
+    /// thread: on a large repository `git log --all` and the refs'
+    /// ahead/behind counts take long enough to stall typing. Synchronous
+    /// only without an `event_proxy` (every test), like the detail pane.
     fn history_refresh(&mut self) {
-        let Some(session) = self.history_session.as_ref() else { return };
-        let (repo_root, graph_buffer, refs_buffer) = (session.repo_root.clone(), session.graph_buffer, session.refs_buffer);
+        let limit = self.config.git_graph_limit.unwrap_or(200);
+        let Some(session) = self.history_session.as_mut() else { return };
+        session.refresh_request_id += 1;
+        let (request_id, repo_root, graph_buffer, first) = (session.refresh_request_id, session.repo_root.clone(), session.graph_buffer, session.commits.is_empty());
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                if first {
+                    self.replace_buffer_text(graph_buffer, "    reading the history…\n");
+                }
+                std::thread::spawn(move || {
+                    let data = HistoryData::read(&repo_root, limit);
+                    let _ = proxy.send_event(FenixUserEvent::GitHistoryReady { request_id, data: Box::new(data) });
+                });
+            }
+            None => {
+                let data = HistoryData::read(&repo_root, limit);
+                self.apply_history(request_id, data);
+            }
+        }
+    }
 
-        let commits = fenix_git::commit_graph(&repo_root, self.config.git_graph_limit.unwrap_or(200));
-        let rows = fenix_git::assign_lanes(&commits);
+    /// `FenixUserEvent::GitHistoryReady` handling: the graph and the refs
+    /// drawn, unless a newer read has been asked for since.
+    fn apply_history(&mut self, request_id: u64, data: HistoryData) {
+        let Some(session) = self.history_session.as_ref() else { return };
+        if session.refresh_request_id != request_id {
+            return;
+        }
+        let (graph_buffer, refs_buffer) = (session.graph_buffer, session.refs_buffer);
+        let rows = fenix_git::assign_lanes(&data.commits);
         let style = graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
-        let panel = graph_view::render_graph(&commits, &rows, style);
+        let panel = graph_view::render_graph(&data.commits, &rows, style);
         self.graph_lines.insert(graph_buffer, panel.lines);
         self.replace_buffer_text(graph_buffer, &panel.text);
-
-        let branches = fenix_git::list_branches(&repo_root);
-        let remotes = fenix_git::list_remote_branches(&repo_root);
-        let tags = fenix_git::list_tags(&repo_root);
-        let age = fenix_git::seconds_since_fetch(&repo_root);
-        self.set_git_buffer(refs_buffer, graph_view::render_refs(&branches, &remotes, &tags, age));
+        self.set_git_buffer(refs_buffer, graph_view::render_refs(&data.branches, &data.remotes, &data.tags, data.fetch_age));
 
         if let Some(session) = self.history_session.as_mut() {
-            session.commits = commits;
+            session.commits = data.commits;
             session.last_detail_commit = None; // force the detail pane to re-fetch
         }
         self.history_sync_detail();
@@ -19143,6 +19191,7 @@ impl App {
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
             }
+            FenixUserEvent::GitHistoryReady { request_id, data } => self.apply_history(request_id, *data),
             FenixUserEvent::GitFetched { result } => self.apply_git_fetched(result),
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
@@ -21433,18 +21482,6 @@ impl App {
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
-        // Cloned out ahead of the `self.buffers.get_mut` borrow below --
-        // `dashboard_lines` is a different field, but going through a
-        // `&self` method call for it while `ob` (from `self.buffers`) is
-        // still borrowed would look like a whole-`self` borrow to the
-        // compiler. The cloned `Vec` is small (a few dozen entries at
-        // most), so this is cheap.
-        let docker_lines = self.docker_lines.get(&id).cloned();
-        let git_lines = self.git_lines.get(&id).cloned();
-        let diff_lines = self.diff_lines.get(&id).cloned();
-        let graph_lines = self.graph_lines.get(&id).cloned();
-        let merge_lines = self.merge_lines.get(&id).cloned();
-        let dired_lines = self.dired_lines.get(&id).cloned();
 
         // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
         // @function)` rule captures *every* word in command position,
@@ -21486,22 +21523,25 @@ impl App {
             return self.page_highlights(id, render_base_line, rows);
         }
         if ob.kind == BufferKind::Docker {
-            return docker_highlights_for_visible_range(ob, docker_lines.as_deref(), render_base_line, rows, theme);
+            // Borrowed, not cloned: every frame, and a graph or a diff can
+            // run to thousands of lines. The fields are apart from
+            // `self.buffers`, so the borrows don't meet.
+            return docker_highlights_for_visible_range(ob, self.docker_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Git {
-            return git_highlights_for_visible_range(ob, git_lines.as_deref(), render_base_line, rows, theme);
+            return git_highlights_for_visible_range(ob, self.git_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Diff {
-            return diff_highlights_for_visible_range(ob, diff_lines.as_deref(), render_base_line, rows, theme);
+            return diff_highlights_for_visible_range(ob, self.diff_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Graph {
-            return graph_highlights_for_visible_range(ob, graph_lines.as_deref(), render_base_line, rows, theme);
+            return graph_highlights_for_visible_range(ob, self.graph_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Merge {
-            return merge_highlights_for_visible_range(ob, merge_lines.as_deref(), render_base_line, rows, theme);
+            return merge_highlights_for_visible_range(ob, self.merge_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
         if ob.kind == BufferKind::Explorer {
-            return explorer_highlights_for_visible_range(ob, dired_lines.as_deref(), render_base_line, rows, theme);
+            return explorer_highlights_for_visible_range(ob, self.dired_lines.get(&id).map(Vec::as_slice), render_base_line, rows, theme);
         }
 
         // Conflict markers, in an ordinary file. A conflicted file opens

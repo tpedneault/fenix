@@ -64,15 +64,62 @@ pub struct GraphRow {
     pub is_merge: bool,
 }
 
-/// Every commit reachable from any ref (`--all`), newest first in
-/// `--date-order` -- the order a graph is read in, and the one that
-/// keeps a merge's two sides interleaved by time rather than one branch
-/// being drawn entirely before the other (`--topo-order`'s behavior,
-/// which reads as misleadingly linear).
+/// Every commit reachable from any ref (`--all`), newest first by date --
+/// the order a graph is read in, and the one that keeps a merge's two
+/// sides interleaved by time rather than one branch being drawn entirely
+/// before the other (`--topo-order`'s behavior, which reads as
+/// misleadingly linear).
+///
+/// Not `--date-order`: that promises no parent before its children, and
+/// to keep the promise git walks the *whole* history before printing the
+/// first line -- seconds on a large repository, for the newest 200
+/// commits. Git's plain order streams; `children_first` then keeps the
+/// promise for the commits listed, which is all the graph needs.
 pub fn commit_graph(repo: &Path, limit: usize) -> Vec<GraphCommit> {
     let n = format!("-n{limit}");
-    let lines = run_lines(repo, &["log", "--all", "--date-order", &n, "--format=%H\x1f%h\x1f%P\x1f%D\x1f%an\x1f%ar\x1f%s"]);
-    lines.iter().filter_map(|l| parse_line(l)).collect()
+    let lines = run_lines(repo, &["log", "--all", &n, "--format=%H\x1f%h\x1f%P\x1f%D\x1f%an\x1f%ar\x1f%s"]);
+    children_first(lines.iter().filter_map(|l| parse_line(l)).collect())
+}
+
+/// `commits` with every one listed after all of its children that are
+/// listed, otherwise in the order given -- what `assign_lanes` needs. Git
+/// lists by commit date, and a clock that was wrong when a commit was
+/// made can date it before its parent.
+pub fn children_first(commits: Vec<GraphCommit>) -> Vec<GraphCommit> {
+    use std::cmp::Reverse;
+    use std::collections::{BinaryHeap, HashMap};
+
+    let at: HashMap<&str, usize> = commits.iter().enumerate().map(|(i, c)| (c.hash.as_str(), i)).collect();
+    // How many listed children each commit waits for.
+    let mut waiting = vec![0usize; commits.len()];
+    for c in &commits {
+        for p in &c.parents {
+            if let Some(&i) = at.get(p.as_str()) {
+                waiting[i] += 1;
+            }
+        }
+    }
+    // Almost always already so: then there's nothing to do.
+    let in_order = commits.iter().enumerate().all(|(i, c)| c.parents.iter().all(|p| at.get(p.as_str()).is_none_or(|&j| j > i)));
+    if in_order {
+        return commits;
+    }
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..commits.len()).filter(|&i| waiting[i] == 0).map(Reverse).collect();
+    let mut order = Vec::with_capacity(commits.len());
+    while let Some(Reverse(i)) = ready.pop() {
+        order.push(i);
+        for p in &commits[i].parents {
+            if let Some(&j) = at.get(p.as_str()) {
+                waiting[j] -= 1;
+                if waiting[j] == 0 {
+                    ready.push(Reverse(j));
+                }
+            }
+        }
+    }
+    drop(at);
+    let mut slots: Vec<Option<GraphCommit>> = commits.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 fn parse_line(line: &str) -> Option<GraphCommit> {
@@ -272,6 +319,18 @@ mod tests {
         let rows = assign_lanes(&[c("x", &["a"]), c("y", &[]), c("z", &["a"]), c("a", &[])]);
         assert_eq!(rows[1].lane, 1);
         assert_eq!(rows[2].lane, 1, "lane 1 went idle at `y` and is available again");
+    }
+
+    #[test]
+    fn a_parent_dated_before_its_child_is_still_listed_after_it() {
+        // `b`'s clock was behind: git lists its parent `a` first.
+        let listed = vec![c("x", &["a"]), c("a", &["r"]), c("b", &["a"]), c("r", &[])];
+        let order: Vec<String> = children_first(listed).into_iter().map(|c| c.hash).collect();
+        assert_eq!(order, ["x", "b", "a", "r"]);
+        // In order already: as given, parents outside the list ignored.
+        let listed = vec![c("m", &["p", "s"]), c("p", &["gone"]), c("s", &["gone"])];
+        let order: Vec<String> = children_first(listed).into_iter().map(|c| c.hash).collect();
+        assert_eq!(order, ["m", "p", "s"]);
     }
 
     #[test]

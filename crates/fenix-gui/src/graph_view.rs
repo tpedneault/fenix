@@ -119,13 +119,10 @@ impl Rails {
     }
 
     fn finish(self, width: usize) -> String {
-        let mut out: String = self.cells.into_iter().collect();
         // Padded rather than trimmed: every row has to occupy the same
         // width or the hash column after it wanders.
-        while out.chars().count() < width {
-            out.push(' ');
-        }
-        out
+        let pad = width.saturating_sub(self.cells.len());
+        self.cells.into_iter().chain(std::iter::repeat_n(' ', pad)).collect()
     }
 }
 

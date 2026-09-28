@@ -551,6 +551,10 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         g.put(y, left, "No commits match.", Role::Muted);
     }
     let rows = page.rows();
+    // Each commit's line and details, looked up once rather than scanned
+    // for on every row: with every branch, a history runs to hundreds.
+    let line_of: HashMap<&str, usize> = data.lines.iter().enumerate().filter_map(|(n, l)| Some((l.commit.as_deref()?, n))).collect();
+    let commit_of: HashMap<&str, &GraphCommit> = data.commits.iter().map(|c| (c.hash.as_str(), c)).collect();
     for (i, row) in rows.iter().enumerate() {
         let line_y = y;
         match row {
@@ -560,10 +564,10 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                 }
             }
             Row::Commit(hash) => {
-                let Some(n) = data.lines.iter().position(|l| l.commit.as_deref() == Some(hash)) else { continue };
+                let Some(&n) = line_of.get(hash.as_str()) else { continue };
                 let line = &data.lines[n];
                 let chars: Vec<char> = line.text.chars().collect();
-                let age = page.commit(hash).map(|c| format!("{} · {}", c.author, c.relative_date)).unwrap_or_default();
+                let age = commit_of.get(hash.as_str()).map(|c| format!("{} · {}", c.author, c.relative_date)).unwrap_or_default();
                 let room = width.saturating_sub(age.chars().count() + 2);
                 for (k, (start, span)) in line.spans.iter().enumerate() {
                     let end = line.spans.get(k + 1).map(|s| s.0).unwrap_or(chars.len()).min(room);
