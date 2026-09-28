@@ -1173,9 +1173,16 @@ Everything Fenix does, by area. For the keys, see
     bytes, view only, with the packet under the cursor outlined, `w`
     to the next packet, `]`/`[` to sync markers, search and goto.
   - **Recordings** (`SPC k f`): a file of packets, frames (with the
-    sync marker, randomization and Reed-Solomon found by themselves) or
-    records, or a text log with a packet in hex on each line, as a
-    list of packets with time, APID, SPID and checks. Tabs list them by
+    sync marker, randomization and Reed-Solomon found by themselves),
+    CLTUs, or records, or a text log with a packet in hex on each line,
+    as a list of packets with time, APID, SPID and checks. CLTUs are read
+    as a spacecraft's decoder reads them: code blocks until one fails
+    its parity (the tail sequence, or a damaged block that cuts the CLTU
+    short), then the TC frame's length and FECF, sequence gaps on Type-A
+    frames (a retransmission isn't a gap), and the telecommands inside,
+    named by the MIB. Frames with a failed FECF and CLTUs cut short are
+    listed as problems. `f` on a packet opens the CADU or CLTU it came
+    in, taken apart layer by layer in the inspector. Tabs list them by
     APID, follow a TM parameter through them (`t`, with a curve and
     limits) and list problems; `/` filters (`apid:`, `spid:`,
     `check:bad`...), `]`/`[` jump between sequence gaps, `w` writes the

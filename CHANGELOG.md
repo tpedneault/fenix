@@ -49,7 +49,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open; recordings and live sources (TCP, UDP, a file being written,
   NATS) as a packet list with gaps, problems and a parameter followed
   through time; a standards library linking fields to their PDFs.
-  Mission settings live in a new CCSDS & PUS category.
+  Recordings and live sources also read CLTUs (BCH, tail sequence, the
+  TC frame's length and FECF, retransmissions, the telecommands inside)
+  and check TM frames' FECF; `f` on a packet shows the CADU or CLTU it
+  came in. Mission settings live in a new CCSDS & PUS category.
+- `dev/ccsds-sim`: a simulated spacecraft in Docker (TM over TCP, UDP,
+  NATS and a file; CADUs with and without an FECF; the uplink's CLTUs)
+  with a ready mission project, to try the CCSDS tools against.
 - The MIB is checked against the standards, telecommand calls in
   scripts are checked against it, the MIB page gains a services tab,
   and `SPC k g` generates XTCE, a Wireshark dissector, a C header, a

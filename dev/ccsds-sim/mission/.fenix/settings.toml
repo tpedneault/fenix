@@ -16,6 +16,9 @@ frame_randomized = true
 frame_rs_depth = 5
 frame_ocf = true
 frame_fecf = false
+# The uplink's TC frames: a segment header and an FECF (the defaults).
+tc_fecf = true
+tc_segment_header = true
 
 [ccsds.vc_names]
 0 = "HK"
@@ -32,6 +35,18 @@ name = "sim CADUs"
 address = "tcp://localhost:10011"
 subject = ""
 framing = "frames"
+
+[[ccsds.sources]]
+name = "sim CADUs + FECF"
+address = "tcp://localhost:10013"
+subject = ""
+framing = "frames fecf"
+
+[[ccsds.sources]]
+name = "sim CLTUs (uplink)"
+address = "tcp://localhost:10012"
+subject = ""
+framing = "cltus"
 
 [[ccsds.sources]]
 name = "sim UDP"

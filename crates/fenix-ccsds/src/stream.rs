@@ -1,7 +1,9 @@
 //! A recording or a live feed, split into packets: back-to-back space
 //! packets, records with a fixed header each, or frames -- found by their
 //! sync marker, de-randomized, Reed-Solomon corrected -- with the packets
-//! inside them reassembled across frame boundaries by virtual channel.
+//! inside them reassembled across frame boundaries by virtual channel, or
+//! CLTUs, read as a spacecraft's decoder reads them, with the telecommand
+//! packets their TC frames carry.
 //! `Splitter` takes bytes in chunks, so a file and a socket read the same.
 
 use std::collections::HashMap;
@@ -19,6 +21,8 @@ pub enum Framing {
     Records { header: usize },
     /// Transfer frames, with or without sync markers, as the profile says.
     Frames(FrameProfile),
+    /// CLTUs, each with a TC frame the profile describes.
+    Cltus(FrameProfile),
 }
 
 impl Framing {
@@ -42,6 +46,19 @@ impl Framing {
                 }
                 if p.randomized {
                     s.push_str(" · randomized");
+                }
+                if p.fecf {
+                    s.push_str(" · FECF");
+                }
+                s
+            }
+            Framing::Cltus(p) => {
+                let mut s = "CLTUs · TC frames".to_string();
+                if p.tc_segment_header {
+                    s.push_str(" · segment headers");
+                }
+                if p.fecf {
+                    s.push_str(" · FECF");
                 }
                 s
             }
@@ -67,6 +84,11 @@ pub enum Item {
         lost: u64,
         /// Symbols corrected, or `None` when a code word was beyond repair.
         rs: Option<Option<usize>>,
+        /// The unit as it arrived: the CADU (sync marker, randomized,
+        /// check symbols) or the CLTU.
+        raw: Vec<u8>,
+        /// What's wrong with it -- a failed FECF, a CLTU cut short.
+        bad: Option<String>,
     },
     /// Bytes that made no sense, skipped.
     Junk { offset: usize, len: usize, why: String },
@@ -89,11 +111,13 @@ pub struct Splitter {
     partial: HashMap<u8, (usize, Vec<u8>)>,
     last_count: HashMap<u8, u64>,
     junk: Option<(usize, usize)>,
+    /// Why the next junk is junk, when it isn't just "not what we read".
+    abandoned: bool,
 }
 
 impl Splitter {
     pub fn new(framing: Framing) -> Splitter {
-        Splitter { framing, buf: Vec::new(), base: 0, partial: HashMap::new(), last_count: HashMap::new(), junk: None }
+        Splitter { framing, buf: Vec::new(), base: 0, partial: HashMap::new(), last_count: HashMap::new(), junk: None, abandoned: false }
     }
 
     pub fn framing(&self) -> &Framing {
@@ -130,6 +154,7 @@ impl Splitter {
             Framing::Packets => self.packets(&mut out, 0),
             Framing::Records { header } => self.packets(&mut out, header),
             Framing::Frames(p) => self.frames(&p, &mut out),
+            Framing::Cltus(p) => self.cltus(&p, &mut out),
         }
         out
     }
@@ -194,6 +219,7 @@ impl Splitter {
             self.flush_junk(out, "no sync marker");
             let offset = self.base;
             let mut cadu = self.take(need);
+            let raw = cadu.clone();
             let mut frame = if p.asm { cadu.split_off(4) } else { cadu };
             if p.randomized {
                 coding::derandomize(&mut frame);
@@ -208,9 +234,17 @@ impl Splitter {
                 });
                 frame.truncate(p.length);
             }
-            let Some((_, info)) = frames::decode(&frame, p) else {
+            let Some((field, info)) = frames::decode(&frame, p) else {
                 out.push(Item::Junk { offset, len: need, why: "not a frame".into() });
                 continue;
+            };
+            let bad = if p.fecf {
+                field.find("FECF").and_then(|f| match &f.check {
+                    Some(crate::field::Check::Bad(why)) => Some(format!("FECF {} fails: {why}", f.raw)),
+                    _ => None,
+                })
+            } else {
+                None
             };
             let modulus = match p.kind {
                 FrameKind::Aos => 1u64 << 24,
@@ -225,7 +259,7 @@ impl Splitter {
             }
             let data = frame.get(info.data.clone()).unwrap_or(&[]).to_vec();
             let vc = info.vcid;
-            out.push(Item::Frame { offset, info: info.clone(), bytes: frame, lost, rs });
+            out.push(Item::Frame { offset, info: info.clone(), bytes: frame, lost, rs, raw, bad });
             if p.kind == FrameKind::Tc {
                 continue;
             }
@@ -251,6 +285,99 @@ impl Splitter {
                 let s = *start;
                 drain_packets(part, s, vc, out);
                 *start = offset;
+            }
+        }
+    }
+}
+
+impl Splitter {
+    /// Drops `n` octets that are acquisition or idle sequences (0x55,
+    /// 0xAA) quietly, and anything else as junk.
+    fn between_cltus(&mut self, n: usize, out: &mut Vec<Item>) {
+        if n == 0 {
+            return;
+        }
+        if !self.abandoned && self.buf[..n].iter().all(|b| matches!(b, 0x55 | 0xAA)) {
+            self.flush_junk(out, "not a CLTU");
+            self.buf.drain(..n);
+            self.base += n;
+            return;
+        }
+        self.skip(n, out, "");
+    }
+
+    fn cltus(&mut self, p: &FrameProfile, out: &mut Vec<Item>) {
+        // The longest CLTU: a 1024-octet frame in 147 code blocks.
+        const LONGEST: usize = 2 + 147 * 8 + 8;
+        loop {
+            let Some(start) = self.buf.windows(2).position(|w| w == coding::CLTU_START) else {
+                // A start sequence may straddle this chunk and the next.
+                let keep = usize::from(self.buf.last() == Some(&0xEB));
+                let n = self.buf.len() - keep;
+                self.between_cltus(n, out);
+                return;
+            };
+            if start > 0 {
+                self.between_cltus(start, out);
+                continue;
+            }
+            let why = if std::mem::take(&mut self.abandoned) { "the rest of an abandoned CLTU" } else { "not a CLTU" };
+            self.flush_junk(out, why);
+            let Some(r) = coding::cltu_read(&self.buf) else {
+                if self.buf.len() > LONGEST {
+                    self.skip(2, out, "");
+                    self.flush_junk(out, "a start sequence with no CLTU after it");
+                    continue;
+                }
+                return;
+            };
+            let offset = self.base;
+            let raw = self.take(r.end);
+            let cut = match r.ended {
+                coding::CltuEnd::Tail => None,
+                coding::CltuEnd::BadBlock(n) => Some(n),
+            };
+            let Some((_, info, frame, problem)) = frames::tc_frame(&r.data, p) else {
+                self.abandoned = cut.is_some();
+                let why = match cut {
+                    Some(n) => format!("CLTU abandoned at code block {n}, which fails its parity, before a TC frame header"),
+                    None => "a CLTU too short for a TC frame".into(),
+                };
+                out.push(Item::Junk { offset, len: raw.len(), why });
+                continue;
+            };
+            let bad = match (problem, cut) {
+                (Some(p), Some(n)) => Some(format!("code block {n} fails its parity, which cut the CLTU short: {p}")),
+                (Some(p), None) => Some(p),
+                (None, Some(n)) => Some(format!("no tail sequence: code block {n} fails its parity after the frame")),
+                (None, None) => None,
+            };
+            let rejected = bad.as_deref().is_some_and(|b| !b.starts_with("no tail"));
+            // Cut short, what follows up to the next start sequence is the
+            // rest of this CLTU; after a missing tail it's the idle.
+            self.abandoned = cut.is_some() && rejected;
+            // Type-A frames on a virtual channel count up; Type-B and
+            // control commands don't. A number that repeats or steps back
+            // is the ground sending again (FOP-1), not frames lost.
+            let (bypass, control) = (frame[0] & 0x20 != 0, frame[0] & 0x10 != 0);
+            let lost = if bypass || control || rejected {
+                0
+            } else {
+                match self.last_count.insert(info.vcid, info.vc_count) {
+                    Some(last) => match (info.vc_count + 256 - last) % 256 {
+                        0 => 0,
+                        d if d > 128 => 0,
+                        d => d - 1,
+                    },
+                    None => 0,
+                }
+            };
+            let data = frame.get(info.data.clone()).unwrap_or(&[]).to_vec();
+            let vc = info.vcid;
+            out.push(Item::Frame { offset, info, bytes: frame, lost, rs: None, raw, bad });
+            if !rejected && !control {
+                let mut part = data;
+                drain_packets(&mut part, offset, vc, out);
             }
         }
     }
@@ -355,6 +482,12 @@ pub fn guess(bytes: &[u8]) -> (Framing, String) {
         }
         n
     };
+    if let Some(r) = coding::cltu_read(bytes) {
+        if r.ended == coding::CltuEnd::Tail && bytes[..r.start].iter().all(|b| matches!(b, 0x55 | 0xAA)) {
+            let p = FrameProfile { kind: FrameKind::Tc, asm: false, ocf: false, fecf: true, tc_segment_header: true, ..Default::default() };
+            return (Framing::Cltus(p), "a CLTU start sequence, code blocks and a tail sequence".into());
+        }
+    }
     if run(0, 0) >= 3 || (run(0, 0) >= 1 && bytes.len() < 4096) {
         return (Framing::Packets, "packet headers chain from the first octet".into());
     }
@@ -386,6 +519,59 @@ mod tests {
         assert_eq!(items[0], Item::Packet { offset: 24, bytes: p, vc: None });
         assert!(matches!(&items[1], Item::Junk { why, .. } if why.starts_with("line 3")));
         assert!(hex_lines("no packets here\n01 02 03 04\n").is_none());
+    }
+
+    /// A Type-A TC frame on VC 1 with a segment header and an FECF.
+    fn tc_frame(seq: u8, packet: &[u8]) -> Vec<u8> {
+        let len = 5 + 1 + packet.len() + 2;
+        let mut f = vec![0x00, 0xA5, (1 << 2) | ((len - 1) >> 8) as u8, (len - 1) as u8, seq, 0xC0];
+        f.extend_from_slice(packet);
+        let crc = crate::crc::ccitt16(&f);
+        f.extend_from_slice(&crc.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn cltus_give_their_telecommands_and_what_is_wrong_with_them() {
+        let tc = |seq| Packet::build(PrimaryHeader { is_tc: true, secondary_header: true, apid: 0x3F2, seq_flags: 3, seq_count: seq, ..Default::default() }, &[0x29, 8, 1, 0, 0, 12, 3, 2]).bytes;
+        let idle = [0x55u8; 8];
+        let mut stream = Vec::new();
+        let mut add = |cltu: Vec<u8>| {
+            stream.extend_from_slice(&idle);
+            stream.extend(cltu);
+        };
+        add(coding::cltu_encode(&tc_frame(0, &tc(1))));
+        let mut flipped = coding::cltu_encode(&tc_frame(1, &tc(2)));
+        flipped[2 + 8 + 3] ^= 0x01; // in the second code block
+        add(flipped);
+        let mut fecf = tc_frame(2, &tc(3));
+        let n = fecf.len();
+        fecf[n - 1] ^= 0xFF;
+        add(coding::cltu_encode(&fecf));
+        add(coding::cltu_encode(&tc_frame(4, &tc(4)))); // 3 never came
+        add(coding::cltu_encode(&tc_frame(1, &tc(2)))); // sent again
+        let (framing, why) = guess(&stream);
+        assert!(matches!(framing, Framing::Cltus(_)), "{why}");
+        let items = split(&stream, framing);
+        let frames: Vec<(u8, u64, Option<String>)> = items.iter().filter_map(|i| if let Item::Frame { info, lost, bad, .. } = i { Some((info.vc_count as u8, *lost, bad.clone())) } else { None }).collect();
+        assert_eq!(frames.len(), 5, "{items:?}");
+        assert_eq!(frames[4], (1, 0, None), "a retransmission, not 252 lost");
+        assert_eq!(frames[0], (0, 0, None));
+        assert!(frames[1].2.as_deref().is_some_and(|b| b.starts_with("code block 2 fails its parity")), "{:?}", frames[1]);
+        assert!(frames[2].2.as_deref().is_some_and(|b| b.contains("FECF")), "{:?}", frames[2]);
+        assert_eq!((frames[3].1, frames[3].2.clone()), (3, None), "1 and 2 were rejected and 3 never came");
+        let packets = packets_of(&items);
+        assert_eq!(packets, vec![tc(1), tc(4), tc(2)], "rejected frames give no packets");
+        assert!(items.iter().any(|i| matches!(i, Item::Junk { why, .. } if why == "the rest of an abandoned CLTU")), "{items:?}");
+        // A CLTU with no tail: the idle after it ends it, and isn't junk.
+        let mut no_tail = vec![0x55; 8];
+        let unit = coding::cltu_encode(&tc_frame(0, &tc(9)));
+        no_tail.extend_from_slice(&unit[..unit.len() - 8]);
+        no_tail.extend_from_slice(&[0x55; 24]);
+        no_tail.extend(coding::cltu_encode(&tc_frame(1, &tc(10))));
+        let items = split(&no_tail, Framing::Cltus(FrameProfile { kind: FrameKind::Tc, fecf: true, tc_segment_header: true, ..Default::default() }));
+        assert!(!items.iter().any(|i| matches!(i, Item::Junk { .. })), "{items:?}");
+        assert_eq!(packets_of(&items), vec![tc(9), tc(10)]);
     }
 
     /// The packets found, idle ones left out.

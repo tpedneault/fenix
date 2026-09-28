@@ -230,8 +230,10 @@ when it's out of date).
 | `ccsds.frame_rs_depth` | 0–8 | 0 | Interleave depth of the (255,223) Reed-Solomon code; 0 when there's none. Code words are corrected. *A project can set it.* |
 | `ccsds.frame_ocf` | true / false | on | TM or AOS frames end in an operational control field (the CLCW). *A project can set it.* |
 | `ccsds.frame_fecf` | true / false | off | Frames end in a CRC-16 frame error control field. *A project can set it.* |
+| `ccsds.tc_fecf` | true / false | on | Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field. *A project can set it.* |
+| `ccsds.tc_segment_header` | true / false | on | Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags). *A project can set it.* |
 | `ccsds.vc_names` | vc = name | – | A name for each virtual channel, shown wherever its frames are. *A project can set it.* |
-| `ccsds.sources` | [[tables]] of name, address, subject, framing | – | Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames, or records N. Fenix only receives. *A project can set it.* |
+| `ccsds.sources` | [[tables]] of name, address, subject, framing | – | Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records N. Fenix only receives. *A project can set it.* |
 | `ccsds.checks_off` | a list | – | Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time. *A project can set it.* |
 | `ccsds.library` | a path | – | The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading. |
 | `ccsds.leap_seconds` | a path | built in | A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has. |

@@ -19,13 +19,15 @@ docker logs -f fenix-ccsds-sim
 
 Then open `dev/ccsds-sim/mission/thermal_checkout.tcl` in Fenix. The
 project's settings (`mission/.fenix/settings.toml`) already name the MIB
-(`ops/`), the frame layout and the five sources. Use `SPC k l` to pick
+(`ops/`), the frame layout and the seven sources. Use `SPC k l` to pick
 one:
 
 | Source | Address | What arrives |
 |---|---|---|
 | sim packets | `tcp://localhost:10010` | Space packets, back to back |
 | sim CADUs | `tcp://localhost:10011` | ASM + randomized TM frames of 1115 octets, RS(255,223) at depth 5, a CLCW |
+| sim CADUs + FECF | `tcp://localhost:10013` | The same, with an FECF at the end of each frame (framing `frames fecf`) |
+| sim CLTUs (uplink) | `tcp://localhost:10012` | The uplink: CLTUs carrying TC frames, which carry the MIB's telecommands |
 | sim UDP | `udp://:10015` | One packet per datagram (Fenix listens; the container sends to the host) |
 | sim NATS | `nats://localhost:4222`, `tm.ops` | One packet per message, through the `nats` container |
 | sim file | `file://recordings/live.bin` | Packets appended to a file, which is cut back to empty past 4 MB |
@@ -43,6 +45,17 @@ Twice a second:
   The MIB doesn't define them, so they show as unidentified.
 - Idle packets (APID 0x7FF).
 
+Every 3 s, a telecommand goes up, as a ground station would put it on
+the wire. It's a PUS-C packet from the MIB (ZTC08101, ZTC08102,
+ZTC17001, ZTC03005, ZTC08001, ZTC11004) in a Type-A TC frame on VC 0,
+with a segment header and an FECF. The frame is sent in a CLTU (start
+sequence, BCH code blocks, tail sequence) after an acquisition sequence.
+The spacecraft answers accepted telecommands with TM(1,1) and TM(1,7)
+verification reports, or TM(1,2) for one in seven. Its CLCW reports the
+next frame it expects, N(R), and sets the retransmit flag after it turns
+a frame away. The ground then goes back and sends the frame again, as
+FOP-1 does.
+
 Faults on purpose, so there is something to find:
 
 - A sequence gap of 2 every 90 s.
@@ -51,11 +64,32 @@ Faults on purpose, so there is something to find:
   - A few symbol errors in most frames, which Reed-Solomon corrects.
   - A code word with 20 errors every 75 s, beyond repair.
   - A frame dropped every 100 s, so the VC count jumps.
-  - The CLCW shows lockout for a moment every 150 s.
+  - With an FECF, one that doesn't match every 90 s.
+- The uplink:
+  - A bit flipped in a code block: the CLTU is cut short there and the
+    frame turned away.
+  - An FECF that doesn't match.
+  - A frame lost on the way up, then a retransmission.
+  - A CLTU with no tail sequence. The idle after it ends it, and the
+    frame still gets through.
+  - Type-BD frames, and a BC Unlock control command.
 
 The MIB also has two problems of its own on purpose: a telecommand
 parameter with no CPC row, and `TM(17,2)` missing. Press `!` on the MIB
 page to see them.
+
+## Seeing the layers
+
+Press `f` on any packet of a stream page to open the CADU or CLTU it
+came in, taken apart in the packet inspector. A CADU shows the sync
+marker, de-randomization, each Reed-Solomon code word (clean, corrected
+or beyond repair), the frame header, the CLCW and the FECF, then the
+packets. A CLTU shows the start sequence, every code block with its BCH
+parity, the tail sequence, then the TC frame (header, segment header,
+FECF, fill) and the telecommand with its MIB arguments. The TC frame's
+fields are outlined on the octets they occupy inside the code blocks.
+Problems (a failed FECF, a CLTU cut short, a missing tail, frames lost)
+are listed in the page's Problems tab (`4`).
 
 ## Without Docker
 
@@ -63,13 +97,17 @@ page to see them.
 
 ```bash
 python dev/ccsds-sim/sim.py --selftest
-python dev/ccsds-sim/sim.py --capture cadus.bin --packets packets.bin --seconds 300
+python dev/ccsds-sim/sim.py --capture cadus.bin --fecf cadus-fecf.bin --cltus cltus.bin --packets packets.bin --seconds 300
 ```
 
-`--capture` writes the CADU stream (and the packets it carried) to files
-instead of serving anything. Open `cadus.bin` with `SPC k f`: Fenix
-works out the framing (sync marker, randomization, RS depth) by itself.
-Running the script without arguments serves the TCP ports. The
+`--capture` writes the streams to files instead of serving anything,
+and prints what happened on the uplink, CLTU by CLTU. Open them with
+`SPC k f`, and Fenix works out the framing by itself: sync marker,
+randomization and RS depth for CADUs, and CLTUs by their start and tail
+sequences. The one thing it can't guess is an FECF on TM frames:
+`cadus-fecf.bin` needs `ccsds.frame_fecf` on.
+
+Running the script without arguments serves the four TCP ports. The
 `SIM_UDP_TARGET`, `SIM_NATS` (host:port), `SIM_NATS_SUBJECT`, `SIM_FILE`
 and `SIM_SEED` environment variables turn on the other outputs.
 
@@ -81,9 +119,10 @@ With the containers up:
 cargo test -p fenix-gui simulator -- --ignored --nocapture
 ```
 
-This follows each of the five sources for 8 s through Fenix's own live
-code and prints what arrived. It fails if a source delivers fewer than
-10 housekeeping packets that the MIB identifies.
+This follows each of the seven sources for 8 s through Fenix's own
+live code and prints what arrived. It fails if a downlink source
+delivers fewer than 10 housekeeping packets that the MIB identifies, or
+if the uplink gives fewer than 2 telecommands it names.
 
 ## Stop it
 

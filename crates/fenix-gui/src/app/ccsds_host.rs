@@ -25,6 +25,8 @@ pub(crate) struct Mission {
     pub(crate) profile: Profile,
     pub(crate) base: OffsetBase,
     pub(crate) frames: FrameProfile,
+    /// Telecommand frames, as CLTUs carry them.
+    pub(crate) tc: FrameProfile,
     pub(crate) checks_off: Vec<String>,
     /// What didn't parse, to say once.
     pub(crate) problems: Vec<String>,
@@ -110,11 +112,20 @@ impl App {
             vc_names: vc_names.into_iter().filter_map(|(k, v)| Some((k.trim().parse().ok()?, v))).collect(),
             ..Default::default()
         };
+        let tc = FrameProfile {
+            kind: FrameKind::Tc,
+            asm: false,
+            ocf: false,
+            fecf: flag("ccsds.tc_fecf", c.ccsds_tc_fecf, true),
+            tc_segment_header: flag("ccsds.tc_segment_header", c.ccsds_tc_segment_header, true),
+            vc_names: frames.vc_names.clone(),
+            ..Default::default()
+        };
         let checks_off = match ps.and_then(|p| p.get("ccsds.checks_off")) {
             Some(fenix_config::Value::List(l)) => l.clone(),
             _ => c.ccsds_checks_off.clone(),
         };
-        Mission { profile, base, frames, checks_off, problems }
+        Mission { profile, base, frames, tc, checks_off, problems }
     }
 }
 
@@ -330,19 +341,31 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
         },
         DecodeAs::Cltu => {
             let Some((cltu, data)) = coding::cltu_decode(bytes) else { return unreadable("no CLTU start sequence (EB90)") };
-            let p = FrameProfile { kind: fenix_ccsds::frames::FrameKind::Tc, ..m.frames.clone() };
+            let start = cltu.children.first().map(|f| f.bit / 8).unwrap_or(0);
             let mut children = vec![cltu];
             let mut def = None;
-            if let Some((mut frame, info)) = frames::decode(&data, &p) {
-                // The frame's bits count from the CLTU's first code block.
-                frame.shift(0);
-                if let Some(pkt) = data.get(info.data.clone()) {
+            if let Some((mut frame, info, bytes, problem)) = frames::tc_frame(&data, &m.tc) {
+                if let Some(why) = problem {
+                    frame.check = Some(Check::Bad(why));
+                }
+                let ctrl = bytes[0] & 0x10 != 0;
+                if let Some(pkt) = bytes.get(info.data.clone()).filter(|_| !ctrl) {
                     if let Some((mut f, d)) = fenix_mib::packets::decode_packet(set, pkt, &m.profile, m.base) {
                         f.shift(info.data.start * 8);
                         frame.children.push(f);
                         def = d;
                     }
                 }
+                let fill = data.len() - bytes.len();
+                if fill > 0 {
+                    let all_fill = data[bytes.len()..].iter().all(|b| *b == 0x55);
+                    let f = Field::new("fill", bytes.len() * 8, fill * 8, format!("{fill} octets"), "after the frame, to fill the last code block")
+                        .checked(if all_fill { Check::Ok("55".into()) } else { Check::Warn("not 0x55".into()) });
+                    frame.children.push(f);
+                }
+                // The frame's octets are spread over the code blocks:
+                // seven to a block, each block followed by its parity.
+                frame.remap(&|o| coding::cltu_octet(start, o));
                 children.push(frame);
             }
             (Field::group("CLTU", children), def)
@@ -554,5 +577,51 @@ impl App {
                 self.open_packet_page(bytes, source);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fenix_ccsds::coding;
+
+    /// ZTC08101 (line 3, AUTO, seq 7) in a Type-A TC frame with a segment
+    /// header and an FECF, in a CLTU.
+    fn cltu() -> Vec<u8> {
+        let tc = [0x1B, 0xF2, 0xC0, 0x07, 0x00, 0x09, 0x29, 0x08, 0x01, 0x00, 0x00, 0x0C, 0x03, 0x02, 0x3F, 0xA3];
+        let len = 5 + 1 + tc.len() + 2;
+        let mut f = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, 42, 0xC0];
+        f.extend_from_slice(&tc);
+        let crc = fenix_ccsds::crc::ccitt16(&f);
+        f.extend_from_slice(&crc.to_be_bytes());
+        coding::cltu_encode(&f)
+    }
+
+    #[test]
+    fn a_cltu_is_decomposed_down_to_its_telecommand_on_the_octets_it_came_in() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        let set = MibSet::load(vec![fenix_mib::MibRoot { label: "OPS".into(), path: dir }], None);
+        let m = App::with_file(None).mission(None);
+        let bytes = cltu();
+        let (root, def) = decode_bytes(&bytes, DecodeAs::Auto, Some(&set), &m);
+        assert_eq!(def.map(|d| set.get(d).name.clone()).as_deref(), Some("ZTC08101"));
+        assert!(!root.any_bad(), "{root:#?}");
+        let f = |name: &str| root.find(name).unwrap_or_else(|| panic!("no {name} in {root:#?}"));
+        assert!(f("tail sequence").check == Some(Check::Ok("found".into())));
+        assert!(f("frame length").check.as_ref().is_some_and(|c| !c.is_bad()), "the fill isn't counted in the frame");
+        assert_eq!(f("fill").bits, 4 * 8, "24 octets of frame in 4 blocks of 7: 4 of fill");
+        // The TC frame's first octet is the first code block's first data
+        // octet; the packet starts at frame octet 6, which is CLTU octet 8,
+        // and frame octet 7 is past the first block's parity: CLTU octet 10.
+        assert_eq!(f("SCID").bit / 8, 2);
+        assert_eq!(f("segment header").bit / 8, 7);
+        let packet = root.walk().into_iter().map(|(_, x)| x).find(|x| x.name.starts_with("TC(8,1)") || x.name.contains("ZTC08101")).map(|x| x.bit / 8);
+        assert_eq!(packet, Some(8), "{root:#?}");
+        assert!(f("FECF").check == Some(Check::Ok("matches".into())));
+        // A flipped bit in the second code block: its parity fails.
+        let mut broken = bytes.clone();
+        broken[2 + 8 + 1] ^= 0x40;
+        let (root, _) = decode_bytes(&broken, DecodeAs::Auto, Some(&set), &m);
+        assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
     }
 }

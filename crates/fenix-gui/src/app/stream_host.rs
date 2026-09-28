@@ -78,6 +78,7 @@ pub(crate) fn row_of(bytes: Vec<u8>, offset: usize, vc: Option<u8>, set: Option<
         idle: h.apid == fenix_ccsds::packet::IDLE_APID,
         verifies,
         bytes,
+        unit: None,
     }
 }
 
@@ -86,16 +87,28 @@ fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Ve
     let mut rows = Vec::new();
     let mut lost = Vec::new();
     let mut junk = Vec::new();
+    // The unit the packets that follow a frame came in.
+    let mut unit: Option<Arc<Vec<u8>>> = None;
     for item in items {
         match item {
-            Item::Packet { offset, bytes, vc } => rows.push(row_of(bytes, offset, vc, set, m)),
-            Item::Frame { offset, info, lost: n, rs, .. } => {
+            Item::Packet { offset, bytes, vc } => {
+                let mut row = row_of(bytes, offset, vc, set, m);
+                row.unit = unit.clone();
+                rows.push(row);
+            }
+            Item::Frame { offset, info, lost: n, rs, raw, bad, .. } => {
+                let cltu = raw.starts_with(&fenix_ccsds::coding::CLTU_START);
                 if n > 0 {
                     lost.push((offset, info.vcid, n));
                 }
                 if rs == Some(None) {
                     junk.push((offset, 0, "a Reed-Solomon code word was beyond repair".to_string()));
                 }
+                if let Some(why) = bad {
+                    let what = if cltu { format!("CLTU, TC frame {} on VC {}", info.vc_count, info.vcid) } else { format!("frame {} on VC {}", info.vc_count, info.vcid) };
+                    junk.push((offset, 0, format!("{what}: {why}")));
+                }
+                unit = Some(Arc::new(raw));
             }
             Item::Junk { offset, len, why } => junk.push((offset, len, why)),
         }
@@ -109,7 +122,20 @@ fn framing_of(text: &str, m: &Mission) -> Option<Framing> {
     let t = text.trim().to_ascii_lowercase();
     match t.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["packets"] => Some(Framing::Packets),
-        ["frames"] | ["cadu"] | ["cadus"] => Some(Framing::Frames(m.frames.clone())),
+        ["frames" | "cadu" | "cadus", more @ ..] => {
+            // `frames fecf` / `frames no-fecf`: a link that differs from
+            // the project's frames in that one thing.
+            let mut p = m.frames.clone();
+            for word in more {
+                match *word {
+                    "fecf" => p.fecf = true,
+                    "no-fecf" => p.fecf = false,
+                    _ => return None,
+                }
+            }
+            Some(Framing::Frames(p))
+        }
+        ["cltu"] | ["cltus"] => Some(Framing::Cltus(m.tc.clone())),
         ["records", n] => n.parse().ok().map(|header| Framing::Records { header }),
         _ => None,
     }
@@ -122,6 +148,7 @@ fn guessed(head: &[u8], m: &Mission) -> (Framing, String) {
         Framing::Frames(g) if g.length == m.frames.length || g.rs_depth == m.frames.rs_depth && g.rs_depth > 0 => {
             (Framing::Frames(FrameProfileExt::merged(&m.frames, &g)), format!("{why}, the project's frames"))
         }
+        Framing::Cltus(_) => (Framing::Cltus(m.tc.clone()), format!("{why}, the project's TC frames")),
         other => (other, why),
     }
 }
@@ -485,6 +512,13 @@ impl App {
                 let (bytes, source) = (r.bytes.clone(), format!("{} @0x{:X}", p.title, r.offset));
                 self.open_packet_page(bytes, source);
             }
+            A::Unit(row) => {
+                let Some(p) = self.stream_page(id) else { return };
+                let Some((unit, offset)) = p.rows.get(row).and_then(|r| Some((r.unit.clone()?, r.offset))) else { return };
+                let kind = if unit.starts_with(&fenix_ccsds::coding::CLTU_START) { "CLTU" } else { "CADU" };
+                let source = format!("{} @0x{offset:X} · the {kind} it came in", p.title);
+                self.open_packet_page(unit.to_vec(), source);
+            }
             A::Hex(offset) => {
                 if let Some(StreamSource::File(path, _)) = self.stream_sources.get(&id).cloned() {
                     self.open_hex_view(path);
@@ -520,6 +554,7 @@ impl App {
                     None => Some(Framing::Packets),
                     Some(Framing::Packets) => Some(Framing::Frames(mission.frames.clone())),
                     Some(Framing::Frames(f)) if f.asm => Some(Framing::Frames(fenix_ccsds::frames::FrameProfile { asm: false, ..f })),
+                    Some(Framing::Frames(_)) => Some(Framing::Cltus(mission.tc.clone())),
                     Some(_) => None,
                 };
                 if let Some(p) = self.stream_page(id) {
@@ -721,7 +756,7 @@ mod tests {
         let m = app.mission(key.project.as_deref());
         let buffer = app.focused_buffer_id();
         let sources = app.ccsds_sources();
-        assert_eq!(sources.len(), 5, "{sources:?}");
+        assert_eq!(sources.len(), 7, "{sources:?}");
         for src in sources {
             let events: Arc<std::sync::Mutex<Vec<PageEvent>>> = Arc::default();
             let sink = events.clone();
@@ -736,10 +771,16 @@ mod tests {
             let rows: Vec<&stream_page::Row> = events.iter().flat_map(|e| if let PageEvent::StreamRows { rows, .. } = e { rows.iter().collect() } else { Vec::new() }).collect();
             let statuses: Vec<String> = events.iter().filter_map(|e| if let PageEvent::StreamStatus { text, .. } = e { Some(text.clone()) } else { None }).collect();
             let hk = rows.iter().filter(|r| r.spid.as_deref() == Some("30211")).count();
-            let unknown = rows.iter().filter(|r| !r.idle && r.spid.is_none()).count();
-            let line = format!("{name}: {} packets, {hk} TCS_HK_FAST, {unknown} not in the MIB · {}", rows.len(), statuses.join(" · "));
+            let tcs = rows.iter().filter(|r| r.is_tc && r.label.starts_with("ZTC")).count();
+            let unknown = rows.iter().filter(|r| !r.idle && !r.is_tc && r.spid.is_none()).count();
+            let problems: Vec<String> = events.iter().flat_map(|e| if let PageEvent::StreamRows { junk, .. } = e { junk.iter().map(|j| j.2.clone()).collect() } else { Vec::new() }).collect();
+            let line = format!("{name}: {} packets, {hk} TCS_HK_FAST, {tcs} telecommands, {unknown} TM not in the MIB, problems {problems:?} · {}", rows.len(), statuses.join(" · "));
             println!("{line}");
-            assert!(hk >= 10, "{line}");
+            if name.contains("CLTU") {
+                assert!(tcs >= 2 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
+            } else {
+                assert!(hk >= 10, "{line}");
+            }
         }
     }
 

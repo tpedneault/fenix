@@ -79,6 +79,20 @@ impl Field {
         }
     }
 
+    /// Moves the tree onto other octets: `octet` says where each octet of
+    /// the input the fields count from sits now (a CLTU spreads a frame's
+    /// octets over code blocks). A field keeps its first and last bit.
+    pub fn remap(&mut self, octet: &dyn Fn(usize) -> usize) {
+        let at = |bit: usize| octet(bit / 8) * 8 + bit % 8;
+        for c in &mut self.children {
+            c.remap(octet);
+        }
+        let start = at(self.bit);
+        let end = if self.bits == 0 { start } else { at(self.bit + self.bits - 1) + 1 };
+        self.bit = start;
+        self.bits = end - start;
+    }
+
     /// Every field, depth first, with its depth.
     pub fn walk(&self) -> Vec<(usize, &Field)> {
         let mut out = Vec::new();

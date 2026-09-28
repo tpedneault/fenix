@@ -464,8 +464,10 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         })).default("0").project(),
         s("ccsds.frame_ocf", Ccsds, "Frames carry an OCF", Kind::Bool, "TM or AOS frames end in an operational control field (the CLCW).", field!(ccsds_frame_ocf, bool_get, bool_set)).default("on").project(),
         s("ccsds.frame_fecf", Ccsds, "Frames carry an FECF", Kind::Bool, "Frames end in a CRC-16 frame error control field.", field!(ccsds_frame_fecf, bool_get, bool_set)).default("off").project(),
+        s("ccsds.tc_fecf", Ccsds, "TC frames carry an FECF", Kind::Bool, "Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field.", field!(ccsds_tc_fecf, bool_get, bool_set)).default("on").project(),
+        s("ccsds.tc_segment_header", Ccsds, "TC segment header", Kind::Bool, "Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags).", field!(ccsds_tc_segment_header, bool_get, bool_set)).default("on").project(),
         s("ccsds.vc_names", Ccsds, "Virtual channels", Kind::Map { key: "VC", value: "Name", paths: false }, "A name for each virtual channel, shown wherever its frames are.", field!(ccsds_vc_names, map_get, map_set)).project(),
-        s("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames, or records N. Fenix only receives.", (|c: &Config| (!c.ccsds_sources.is_empty()).then(|| Value::Records(c.ccsds_sources.clone())), |c: &mut Config, v| {
+        s("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records N. Fenix only receives.", (|c: &Config| (!c.ccsds_sources.is_empty()).then(|| Value::Records(c.ccsds_sources.clone())), |c: &mut Config, v| {
             c.ccsds_sources = match v {
                 None => Vec::new(),
                 Some(Value::Records(rows)) => rows,

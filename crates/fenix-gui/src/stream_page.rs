@@ -33,6 +33,8 @@ pub struct Row {
     /// A verification report: which telecommand it's about.
     pub verifies: Option<String>,
     pub bytes: Vec<u8>,
+    /// The CADU or CLTU it came in, as it arrived.
+    pub unit: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 /// One sample of a parameter.
@@ -75,6 +77,8 @@ pub enum Action {
     Reframe,
     /// The hex view at an offset.
     Hex(usize),
+    /// The inspector on the CADU or CLTU a row came in.
+    Unit(usize),
 }
 
 pub struct StreamPage {
@@ -274,7 +278,8 @@ impl StreamPage {
             out.push((format!("0x{offset:X}: {n} frame{} lost on VC {vc}", if *n == 1 { "" } else { "s" }), None));
         }
         for (offset, len, why) in &self.junk {
-            out.push((format!("0x{offset:X}: {len} octets skipped -- {why}"), None));
+            // A frame that arrived with something wrong has no length here.
+            out.push((if *len == 0 { format!("0x{offset:X}: {why}") } else { format!("0x{offset:X}: {len} octets skipped -- {why}") }, None));
         }
         if let Some((name, samples)) = &self.param {
             for s in samples.iter().filter(|s| s.off.is_some()) {
@@ -415,6 +420,14 @@ impl StreamPage {
             Key::Char('x') => {
                 if let Some(r) = self.selected_row() {
                     return Action::Hex(self.rows[r].offset);
+                }
+            }
+            Key::Char('f') => {
+                if let Some(r) = self.selected_row() {
+                    if self.rows[r].unit.is_some() {
+                        return Action::Unit(r);
+                    }
+                    self.note = Some(("this packet didn't come in a frame or a CLTU".into(), true));
                 }
             }
             Key::Char('t') => return Action::PickParameter,
@@ -662,6 +675,7 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
             ("/", "filter: words, apid: type: stype: spid: vc: seq: check:bad"),
             ("i", "idle packets shown, hidden"),
             ("Enter x", "inspect the packet, its bytes in hex"),
+            ("f", "inspect the CADU or CLTU it came in"),
             ("t", "follow a TM parameter"),
             ("w", "write the packets shown, or the samples"),
             ("F", "read again with the next framing"),
@@ -674,7 +688,7 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
         all.extend(rows);
         g.popup = Some(Popup { line: anchor, col: left + 4, rows: all });
     }
-    g.keys(left, width, &[("1-4", "tabs"), ("Enter", "inspect"), ("/", "filter"), ("] [", "gaps"), ("t", "parameter"), ("w", "write"), ("x", "hex"), ("?", "all keys"), ("q", "close")]);
+    g.keys(left, width, &[("1-4", "tabs"), ("Enter", "inspect"), ("f", "its frame"), ("/", "filter"), ("] [", "gaps"), ("t", "parameter"), ("w", "write"), ("x", "hex"), ("?", "all keys"), ("q", "close")]);
     g.finish()
 }
 

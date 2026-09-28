@@ -424,6 +424,7 @@ Docker panel's own `s`/`S`/`R` already established.
 | `/` / `i` | Filter / idle packets shown or hidden |
 | `]` `[` | Next, previous sequence gap |
 | `Enter` / `x` | Inspect the packet / show it in the hex view |
+| `f` | Inspect the CADU or CLTU it came in |
 | `t` / `w` / `F` | Follow a TM parameter / write what's shown / read with another framing |
 
 | Keys | Hex view |

@@ -116,6 +116,26 @@ fn fecf_field(bytes: &[u8], std: &'static str) -> Option<Field> {
     )
 }
 
+/// The TC frame a CLTU's data starts with: cut to the length its header
+/// gives (the fill after it dropped), then decoded with `p`. Also says
+/// what's wrong with it as a frame the spacecraft would take -- too short
+/// for its length, or a failed FECF.
+pub fn tc_frame(data: &[u8], p: &FrameProfile) -> Option<(Field, FrameInfo, Vec<u8>, Option<String>)> {
+    let len = bits::get(data, 22, 10)? as usize + 1;
+    let frame = data[..len.min(data.len())].to_vec();
+    let p = FrameProfile { kind: FrameKind::Tc, ..p.clone() };
+    let (field, info) = decode_tc(&frame, &p)?;
+    let problem = if frame.len() < len {
+        Some(format!("TC frame says {len} octets, the CLTU carried {}", frame.len()))
+    } else {
+        field.walk().into_iter().find_map(|(_, f)| match &f.check {
+            Some(Check::Bad(why)) => Some(format!("TC frame {} {}: {why}", f.name, f.raw)),
+            _ => None,
+        })
+    };
+    Some((field, info, frame, problem))
+}
+
 /// Decodes a frame (after any sync marker, de-randomized, corrected).
 pub fn decode(bytes: &[u8], p: &FrameProfile) -> Option<(Field, FrameInfo)> {
     match p.kind {

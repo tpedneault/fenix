@@ -107,6 +107,53 @@ pub fn cltu_decode(bytes: &[u8]) -> Option<(Field, Vec<u8>)> {
     Some((Field::group("CLTU", children), data))
 }
 
+/// Where data octet `d` of the CLTU whose start sequence is at `start`
+/// sits: seven data octets to a code block, then the block's parity.
+pub fn cltu_octet(start: usize, d: usize) -> usize {
+    start + 2 + d / 7 * 8 + d % 7
+}
+
+/// What ended a CLTU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CltuEnd {
+    /// The tail sequence.
+    Tail,
+    /// Code block `n` (from 1) failed its parity; it wasn't the tail.
+    BadBlock(usize),
+}
+
+/// A CLTU as the spacecraft's decoder reads it (231.0-B, detection
+/// mode): from the start sequence, block by block, until a block fails
+/// its parity -- the tail sequence is built to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CltuRead {
+    /// Where the start sequence is.
+    pub start: usize,
+    /// Just after the block that ended it.
+    pub end: usize,
+    /// The information octets of the blocks before that one.
+    pub data: Vec<u8>,
+    pub ended: CltuEnd,
+}
+
+/// The first CLTU in `bytes`; `None` when there's no start sequence, or
+/// the input ends before something ends the CLTU.
+pub fn cltu_read(bytes: &[u8]) -> Option<CltuRead> {
+    let start = bytes.windows(2).position(|w| w == CLTU_START)?;
+    let mut at = start + 2;
+    let mut data = Vec::new();
+    loop {
+        let block = bytes.get(at..at + 8)?;
+        let info: [u8; 7] = block[..7].try_into().ok()?;
+        if bch_parity(&info) != block[7] {
+            let ended = if block == CLTU_TAIL { CltuEnd::Tail } else { CltuEnd::BadBlock((at - start - 2) / 8 + 1) };
+            return Some(CltuRead { start, end: at + 8, data, ended });
+        }
+        data.extend_from_slice(&info);
+        at += 8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +184,21 @@ mod tests {
         assert!(cltu_decode(&broken).unwrap().0.any_bad());
         // Every parity octet ends in the filler bit 0.
         assert!(cltu[2..cltu.len() - 8].chunks(8).all(|b| b[7] & 1 == 0));
+    }
+
+    #[test]
+    fn a_cltu_is_read_until_a_block_fails_as_the_tail_does() {
+        let frame: Vec<u8> = (0..16).collect();
+        let mut stream = vec![0x55, 0x55];
+        stream.extend(cltu_encode(&frame));
+        let r = cltu_read(&stream).unwrap();
+        assert_eq!((r.start, r.end, r.ended), (2, stream.len(), CltuEnd::Tail));
+        assert_eq!(&r.data[..16], &frame[..]);
+        assert_eq!(stream[cltu_octet(2, 7)], 7, "the eighth octet opens the second block");
+        let mut broken = stream.clone();
+        broken[2 + 2 + 8 + 3] ^= 0x10;
+        let r = cltu_read(&broken).unwrap();
+        assert_eq!((r.ended, r.data.len()), (CltuEnd::BadBlock(2), 7), "the rest is abandoned");
+        assert!(cltu_read(&stream[..stream.len() - 1]).is_none(), "not ended yet");
     }
 }

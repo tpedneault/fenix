@@ -7,8 +7,9 @@
 #
 # then open dev/ccsds-sim/mission in Fenix and SPC k l (see README.md).
 #
-# Ports: 10010 packets over TCP, 10011 CADUs over TCP, 4222 NATS; the
-# simulator sends UDP to the host's port 10015, where Fenix listens.
+# Ports: 10010 packets over TCP, 10011 CADUs, 10012 the uplink's CLTUs,
+# 10013 CADUs with an FECF, 4222 NATS; the simulator sends UDP to the
+# host's port 10015, where Fenix listens.
 
 services:
   nats:
@@ -37,5 +38,7 @@ services:
     ports:
       - "127.0.0.1:10010:10010"
       - "127.0.0.1:10011:10011"
+      - "127.0.0.1:10012:10012"
+      - "127.0.0.1:10013:10013"
     volumes:
       - ./mission/recordings:/out
