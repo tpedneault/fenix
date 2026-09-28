@@ -484,7 +484,6 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 190);
     let mut g = Grid::new();
     let x = g.put(1, left, &p.title, Role::Title) + 2;
-    g.put(1, x, &p.framing, Role::Muted);
     let packets = p.rows.iter().filter(|r| !r.idle).count();
     let gaps = p.lines().iter().filter(|l| matches!(l, Line::Gap { .. })).count();
     let bad = p.rows.iter().filter(|r| r.bad.is_some()).count();
@@ -499,7 +498,10 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
     } else {
         Role::Muted
     };
-    g.put(1, (left + width).saturating_sub(right.chars().count()), &right, rrole);
+    let rx = (left + width).saturating_sub(right.chars().count());
+    // The framing takes what the status leaves it.
+    g.put(1, x, &fit(&p.framing, rx.saturating_sub(x + 2)), Role::Muted);
+    g.put(1, rx, &right, rrole);
     let search = if p.searching { format!("/ {}▏", p.query) } else if p.query.is_empty() { "/ filter: words, apid: type: stype: spid: vc: seq: check:bad".to_string() } else { format!("/ {}  (Esc clears)", p.query) };
     let e = g.put(2, left, &fit_tail(&search, width), if p.searching { Role::Title } else { Role::Muted });
     if p.searching {

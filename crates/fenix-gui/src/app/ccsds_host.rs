@@ -342,7 +342,12 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
         DecodeAs::Cltu => {
             let Some((cltu, data)) = coding::cltu_decode(bytes) else { return unreadable("no CLTU start sequence (EB90)") };
             let start = cltu.children.first().map(|f| f.bit / 8).unwrap_or(0);
-            let mut children = vec![cltu];
+            // Its layers side by side -- start sequence, TC frame, code
+            // blocks, tail -- so the bytes take the frame's colour where
+            // the frame is.
+            let mut coding = cltu.children;
+            let tail = coding.pop();
+            let mut children = coding;
             let mut def = None;
             if let Some((mut frame, info, bytes, problem)) = frames::tc_frame(&data, &m.tc) {
                 if let Some(why) = problem {
@@ -366,8 +371,9 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                 // The frame's octets are spread over the code blocks:
                 // seven to a block, each block followed by its parity.
                 frame.remap(&|o| coding::cltu_octet(start, o));
-                children.push(frame);
+                children.insert(1, frame);
             }
+            children.extend(tail);
             (Field::group("CLTU", children), def)
         }
         DecodeAs::Frame => {
@@ -392,7 +398,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                         for (w, o) in outcomes.iter().enumerate() {
                             let (text, check) = match o {
                                 fenix_ccsds::rs::Outcome::Clean => ("no errors".to_string(), Check::Ok("clean".into())),
-                                fenix_ccsds::rs::Outcome::Corrected(v) => (format!("{} symbols corrected", v.len()), Check::Warn(format!("corrected {}", v.len()))),
+                                fenix_ccsds::rs::Outcome::Corrected(v) => (format!("{} symbol{} corrected", v.len(), if v.len() == 1 { "" } else { "s" }), Check::Warn(format!("corrected {}", v.len()))),
                                 fenix_ccsds::rs::Outcome::Uncorrectable => ("beyond repair".to_string(), Check::Bad("more than 16 symbol errors".into())),
                             };
                             words.push(Field::new(format!("code word {}", w + 1), at * 8, 0, "", text).checked(check));
@@ -516,6 +522,19 @@ impl App {
             },
             _ => None,
         }
+    }
+
+    /// The project a MIB or mission page was opened in.
+    pub(crate) fn page_project(&self) -> Option<PathBuf> {
+        let key = match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model)? {
+            PageModel::Stream(p) => &p.key,
+            PageModel::Packet(p) => &p.key,
+            PageModel::Mib(p) => &p.key,
+            PageModel::MibDef(p) => &p.key,
+            PageModel::MibForm(p) => &p.key,
+            _ => return None,
+        };
+        key.project.clone()
     }
 
     /// The file a mission command acts on: the explorer's selection, the

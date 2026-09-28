@@ -7392,7 +7392,9 @@ impl App {
 
     fn refresh_project_root(&mut self) {
         let path = self.open().buffer.path().map(Path::to_path_buf).or_else(|| self.page_file());
-        self.project_root = path.as_deref().and_then(fenix_project::find_project_root);
+        // A page with no file of its own (a live source, a decode) keeps
+        // the project it was opened in.
+        self.project_root = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.page_project());
         self.refresh_project_settings(false);
         self.mib_preload();
         self.refresh_embedded_indicator();

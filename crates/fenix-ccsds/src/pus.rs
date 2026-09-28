@@ -318,6 +318,16 @@ pub fn build_tc(p: &Profile, apid: u16, seq: u16, service: u8, subtype: u8, ack:
 pub fn decode(bytes: &[u8], p: &Profile) -> Option<(Packet, Option<Secondary>, Field)> {
     let (pkt, _) = Packet::parse(bytes)?;
     let mut children = vec![packet::header_field(bytes)?];
+    if pkt.header.apid == packet::IDLE_APID {
+        // An idle packet is fill: no PUS header, no checksum, whatever
+        // its secondary header flag says (133.0-B 4.1.3.3.4.4).
+        let data = pkt.bytes.get(6..).unwrap_or(&[]);
+        children.push(Field::new("idle data", 48, data.len() * 8, hex(data), format!("{} octets of fill", data.len())));
+        let mut root = Field::group("idle packet", children);
+        root.raw = format!("{} octets", pkt.bytes.len());
+        root.value = "APID 0x7FF".into();
+        return Some((pkt, None, root));
+    }
     let sec = decode_secondary(&pkt, p);
     let pec = pec_field(&pkt, p.pec);
     let head = 6 + sec.as_ref().map(|s| s.len).unwrap_or(0);
@@ -340,6 +350,19 @@ pub fn decode(bytes: &[u8], p: &Profile) -> Option<(Packet, Option<Secondary>, F
     root.raw = format!("{} octets", pkt.bytes.len());
     root.value = format!("APID 0x{:03X}", pkt.header.apid);
     Some((pkt, sec, root))
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_packet_is_fill_not_a_packet_with_a_bad_checksum() {
+        let idle = [0x07, 0xFF, 0xC0, 0x00, 0x00, 0x05, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55];
+        let (_, sec, root) = decode(&idle, &Profile::default()).unwrap();
+        assert!(sec.is_none() && !root.any_bad(), "{root:#?}");
+        assert_eq!(root.name, "idle packet");
+    }
 }
 
 /// A standard service's name.

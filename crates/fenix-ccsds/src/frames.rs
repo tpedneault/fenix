@@ -129,7 +129,7 @@ pub fn tc_frame(data: &[u8], p: &FrameProfile) -> Option<(Field, FrameInfo, Vec<
         Some(format!("TC frame says {len} octets, the CLTU carried {}", frame.len()))
     } else {
         field.walk().into_iter().find_map(|(_, f)| match &f.check {
-            Some(Check::Bad(why)) => Some(format!("TC frame {} {}: {why}", f.name, f.raw)),
+            Some(Check::Bad(why)) => Some(format!("{} {}: {why}", f.name, f.raw)),
             _ => None,
         })
     };

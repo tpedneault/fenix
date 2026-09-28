@@ -487,7 +487,7 @@ impl App {
                 // A file source relative to the project.
                 if let (Some(rest), Some(root)) = (address.strip_prefix("file://"), &self.project_root) {
                     if !Path::new(rest).is_absolute() {
-                        address = format!("file://{}", root.join(rest).display());
+                        address = format!("file://{}", root.join(rest).components().collect::<PathBuf>().display());
                     }
                 }
                 Source {

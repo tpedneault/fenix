@@ -233,9 +233,15 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
     let hex_w = 6 + 16 * 3 + 1 + 16;
     let side = width >= hex_w + 60;
     let layers: Vec<(usize, usize)> = p.root.children.iter().map(|c| (c.bit, c.bit + c.bits)).collect();
-    let rows_of_bytes = p.bytes.len().div_ceil(16).min(64);
-    for row in 0..rows_of_bytes {
-        let y = top + row;
+    // 64 rows of 16 at most: past that (a CADU), the rows around the
+    // selected field.
+    let all_rows = p.bytes.len().div_ceil(16);
+    let rows_of_bytes = all_rows.min(64);
+    let sel_row = selected.map(|(s, _)| s / 8 / 16).unwrap_or(0);
+    let first = if sel_row < rows_of_bytes { 0 } else { sel_row.saturating_sub(rows_of_bytes / 2).min(all_rows - rows_of_bytes) };
+    for i in 0..rows_of_bytes {
+        let row = first + i;
+        let y = top + i;
         g.put(y, left, &format!("{:04X}", row * 16), Role::Muted);
         for col in 0..16 {
             let i = row * 16 + col;
@@ -252,8 +258,9 @@ pub fn layout(p: &PacketPage, cols: usize) -> Page {
             g.put(y, left + 6 + 16 * 3 + 1 + col, &c.to_string(), Role::Muted);
         }
     }
-    if p.bytes.len() > 64 * 16 {
-        g.put(top + rows_of_bytes, left, &format!("… {} more bytes", p.bytes.len() - 64 * 16), Role::Muted);
+    if all_rows > rows_of_bytes {
+        let last = ((first + rows_of_bytes) * 16).min(p.bytes.len()) - 1;
+        g.put(top + rows_of_bytes, left, &format!("octets 0x{:X}-0x{last:X} of {} -- the rows follow the field", first * 16, p.bytes.len()), Role::Muted);
     }
 
     // The tree.
@@ -337,6 +344,20 @@ mod tests {
         assert!(text.contains("TM(3,25)") && text.contains("✓ every check passes"), "{text}");
         assert!(text.contains("APID") && text.contains("0x3F2"), "{text}");
         assert!(text.contains("2026-09-27 14:32:05.500 UTC"), "{text}");
+    }
+
+    #[test]
+    fn past_64_rows_the_hex_follows_the_selected_field() {
+        let bytes: Vec<u8> = (0..1279u32).map(|i| i as u8).collect();
+        let mut p = PacketPage::new(MibKey::default(), bytes, "test".into());
+        let near_end = Field::new("CLCW", 1111 * 8, 32, "", "");
+        p.root = Field::group("CADU", vec![Field::new("sync marker", 0, 32, "", ""), near_end]);
+        let text = layout(&p, 200).text;
+        assert!(text.contains("0000  00 01 02") && text.contains("octets 0x0-0x3FF of 1279"), "{text}");
+        p.key(Key::Char('j'));
+        p.key(Key::Char('j'));
+        let text = layout(&p, 200).text;
+        assert!(text.contains("0450  50 51 52") && !text.contains("0000  00 01"), "the CLCW's row is shown: {text}");
     }
 
     #[test]
