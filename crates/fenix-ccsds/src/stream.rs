@@ -444,8 +444,14 @@ pub fn split(bytes: &[u8], framing: Framing) -> Vec<Item> {
 }
 
 /// A good guess at how `bytes` (the start of a recording) is framed, and
-/// why.
+/// why: what `recognize` finds, or packets.
 pub fn guess(bytes: &[u8]) -> (Framing, String) {
+    recognize(bytes).unwrap_or_else(|| (Framing::Packets, "no framing recognized -- reading as packets".into()))
+}
+
+/// How `bytes` are framed, when they show it: sync markers at a steady
+/// stride, a CLTU, packet headers chaining, or chaining after records.
+pub fn recognize(bytes: &[u8]) -> Option<(Framing, String)> {
     let asm = coding::find_asm(bytes);
     if asm.len() >= 3 {
         let stride = asm[1] - asm[0];
@@ -466,7 +472,7 @@ pub fn guess(bytes: &[u8]) -> (Framing, String) {
             let ocf = kind == FrameKind::Tm && first.get(1).is_some_and(|b| b & 1 == 1);
             let p = FrameProfile { kind, length, asm: true, randomized, rs_depth: depth.unwrap_or(0), ocf, fecf: false, ..Default::default() };
             let why = format!("a sync marker every {stride} octets");
-            return (Framing::Frames(p), why);
+            return Some((Framing::Frames(p), why));
         }
     }
     let run = |start: usize, record: usize| {
@@ -485,18 +491,18 @@ pub fn guess(bytes: &[u8]) -> (Framing, String) {
     if let Some(r) = coding::cltu_read(bytes) {
         if r.ended == coding::CltuEnd::Tail && bytes[..r.start].iter().all(|b| matches!(b, 0x55 | 0xAA)) {
             let p = FrameProfile { kind: FrameKind::Tc, asm: false, ocf: false, fecf: true, tc_segment_header: true, ..Default::default() };
-            return (Framing::Cltus(p), "a CLTU start sequence, code blocks and a tail sequence".into());
+            return Some((Framing::Cltus(p), "a CLTU start sequence, code blocks and a tail sequence".into()));
         }
     }
     if run(0, 0) >= 3 || (run(0, 0) >= 1 && bytes.len() < 4096) {
-        return (Framing::Packets, "packet headers chain from the first octet".into());
+        return Some((Framing::Packets, "packet headers chain from the first octet".into()));
     }
     for header in 1..=64 {
         if run(0, header) >= 3 {
-            return (Framing::Records { header }, format!("a packet after every {header}-octet record header"));
+            return Some((Framing::Records { header }, format!("a packet after every {header}-octet record header")));
         }
     }
-    (Framing::Packets, "no framing recognized -- reading as packets".into())
+    None
 }
 
 #[cfg(test)]

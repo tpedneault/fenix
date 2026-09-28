@@ -1189,7 +1189,11 @@ Everything Fenix does, by area. For the keys, see
     packets shown or a parameter's samples.
   - **Live sources** (`SPC k l`): the same page fed by a TCP or UDP
     port, a file being written, or a NATS subject, from `ccsds.sources`.
-    Receive only.
+    Receive only. A source's framing is picked from a list in its form
+    (`←`/`→`): `guess` (worked out from the first octets received),
+    `packets`, `frames`, `frames fecf` / `frames no-fecf` (a link that
+    differs from the frame settings in its FECF), `cltus`, or `records`
+    with the record header's size in its own field.
   - **Standards** (`SPC k ?`): the CCSDS and ECSS standards these tools
     refer to, opened from the folder `ccsds.library` names, or where to
     get them.

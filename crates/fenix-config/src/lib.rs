@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
+pub use schema::{setting, settings, Category, Field, Kind, Setting, Value, FRAMINGS};
 pub use project::ProjectSettings;
 pub use secrets::Secret;
 
@@ -1272,7 +1272,17 @@ mod tests {
             Kind::Map { .. } => Value::Map(vec![("k 1".into(), "flag".into()), ("k2".into(), "10103: On Hold".into())]),
             Kind::Records(fields) => Value::Records(
                 (0..2)
-                    .map(|row| fields.iter().enumerate().map(|(i, f)| match f.range { Some((min, _)) => (min + 1 + row).to_string(), None => format!("v{row} {i}") }).collect())
+                    .map(|row| {
+                        fields
+                            .iter()
+                            .enumerate()
+                            .map(|(i, f)| match (f.range, f.choices) {
+                                (Some((min, _)), _) => (min + 1 + row).to_string(),
+                                (None, []) => format!("v{row} {i}"),
+                                (None, choices) => choices[(row as usize + 1) % choices.len()].to_string(),
+                            })
+                            .collect()
+                    })
                     .collect(),
             ),
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),

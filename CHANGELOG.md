@@ -53,6 +53,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   TC frame's length and FECF, retransmissions, the telecommands inside)
   and check TM frames' FECF; `f` on a packet shows the CADU or CLTU it
   came in. Mission settings live in a new CCSDS & PUS category.
+- A field of a list setting that takes only certain values is picked
+  from them in its form (`←`/`→`), not typed: a live source's framing is
+  the first.
 - `dev/ccsds-sim`: a simulated spacecraft in Docker (TM over TCP, UDP,
   NATS and a file; CADUs with and without an FECF; the uplink's CLTUs)
   with a ready mission project, to try the CCSDS tools against.

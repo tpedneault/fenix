@@ -33,6 +33,9 @@ pub struct Field {
     pub range: Option<(i64, i64)>,
     /// Used when the field is left out.
     pub default: Option<&'static str>,
+    /// The only values it takes, picked rather than typed; empty for
+    /// free text.
+    pub choices: &'static [&'static str],
 }
 
 /// What a setting takes, and so how it's edited and checked.
@@ -310,17 +313,24 @@ macro_rules! sub {
     };
 }
 
+/// How a live source's bytes are split into packets: `guess` from the
+/// first octets; `packets` back to back; `frames` as the frame settings
+/// say, or with or without an FECF where one link differs; `cltus`; or
+/// `records`, each packet after a header of `header` octets.
+pub const FRAMINGS: &[&str] = &["guess", "packets", "frames", "frames fecf", "frames no-fecf", "cltus", "records"];
+
 const SOURCE: &[Field] = &[
-    Field { name: "name", label: "Name", range: None, default: None },
-    Field { name: "address", label: "Address", range: None, default: None },
-    Field { name: "subject", label: "NATS subject", range: None, default: Some("") },
-    Field { name: "framing", label: "Framing", range: None, default: Some("guess") },
+    Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+    Field { name: "address", label: "Address", range: None, default: None, choices: &[] },
+    Field { name: "subject", label: "NATS subject", range: None, default: Some(""), choices: &[] },
+    Field { name: "framing", label: "Framing", range: None, default: Some("guess"), choices: FRAMINGS },
+    Field { name: "header", label: "Record header", range: Some((0, 64)), default: Some("0"), choices: &[] },
 ];
 
 const HOST: &[Field] = &[
-    Field { name: "name", label: "Name", range: None, default: None },
-    Field { name: "host", label: "Host", range: None, default: None },
-    Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900") },
+    Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+    Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
+    Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
 ];
 
 static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
@@ -467,7 +477,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("ccsds.tc_fecf", Ccsds, "TC frames carry an FECF", Kind::Bool, "Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field.", field!(ccsds_tc_fecf, bool_get, bool_set)).default("on").project(),
         s("ccsds.tc_segment_header", Ccsds, "TC segment header", Kind::Bool, "Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags).", field!(ccsds_tc_segment_header, bool_get, bool_set)).default("on").project(),
         s("ccsds.vc_names", Ccsds, "Virtual channels", Kind::Map { key: "VC", value: "Name", paths: false }, "A name for each virtual channel, shown wherever its frames are.", field!(ccsds_vc_names, map_get, map_set)).project(),
-        s("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records N. Fenix only receives.", (|c: &Config| (!c.ccsds_sources.is_empty()).then(|| Value::Records(c.ccsds_sources.clone())), |c: &mut Config, v| {
+        s("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing, picked: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records with the record header's size in octets. Fenix only receives.", (|c: &Config| (!c.ccsds_sources.is_empty()).then(|| Value::Records(c.ccsds_sources.clone())), |c: &mut Config, v| {
             c.ccsds_sources = match v {
                 None => Vec::new(),
                 Some(Value::Records(rows)) => rows,
@@ -616,6 +626,9 @@ impl Kind {
                     for (f, v) in fields.iter().zip(row) {
                         if v.trim().is_empty() && f.default.is_none() {
                             return Err(format!("{} can't be empty", f.label));
+                        }
+                        if !f.choices.is_empty() && !v.trim().is_empty() && !f.choices.contains(&v.trim()) {
+                            return Err(format!("{}: one of {}", f.label, f.choices.join(", ")));
                         }
                         if let Some((min, max)) = f.range {
                             match v.trim().parse::<i64>() {

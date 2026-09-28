@@ -116,9 +116,11 @@ fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Ve
     (rows, lost, junk)
 }
 
-/// A source's framing: `guess`, `packets`, `frames` (the project's
-/// profile), `records N`.
-fn framing_of(text: &str, m: &Mission) -> Option<Framing> {
+/// A source's framing (one of `fenix_config::FRAMINGS`), `None` for
+/// `guess`: `packets`, `frames` (the project's profile, with or without
+/// an FECF), `cltus`, `records` after `header` octets (`records N` as
+/// written by hand).
+fn framing_of(text: &str, header: usize, m: &Mission) -> Option<Framing> {
     let t = text.trim().to_ascii_lowercase();
     match t.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["packets"] => Some(Framing::Packets),
@@ -136,14 +138,60 @@ fn framing_of(text: &str, m: &Mission) -> Option<Framing> {
             Some(Framing::Frames(p))
         }
         ["cltu"] | ["cltus"] => Some(Framing::Cltus(m.tc.clone())),
+        ["records"] => (header > 0).then_some(Framing::Records { header }),
         ["records", n] => n.parse().ok().map(|header| Framing::Records { header }),
         _ => None,
+    }
+}
+
+/// A live source's splitter. With `guess`, the first octets are held
+/// until they show how they're framed -- or 16 KB came without showing
+/// it, and they're read as packets.
+struct LiveSplitter {
+    splitter: Option<Splitter>,
+    pending: Vec<u8>,
+}
+
+impl LiveSplitter {
+    /// Enough to see three packets, three sync markers or a CLTU.
+    const ENOUGH: usize = 4096;
+    const GIVE_UP: usize = 16 * 1024;
+
+    fn new(framing: Option<Framing>) -> Self {
+        LiveSplitter { splitter: framing.map(Splitter::new), pending: Vec::new() }
+    }
+
+    /// Items out of `bytes`, and the framing when this is when it was
+    /// decided.
+    fn feed(&mut self, bytes: &[u8], m: &Mission) -> (Vec<Item>, Option<String>) {
+        if let Some(s) = &mut self.splitter {
+            return (s.feed(bytes), None);
+        }
+        self.pending.extend_from_slice(bytes);
+        if self.pending.len() < Self::ENOUGH {
+            return (Vec::new(), None);
+        }
+        let (framing, why) = match stream::recognize(&self.pending) {
+            Some((f, why)) => reconciled(f, why, m),
+            None if self.pending.len() >= Self::GIVE_UP => (Framing::Packets, "no framing recognized in 16 KB -- reading as packets".into()),
+            None => return (Vec::new(), None),
+        };
+        let label = format!("{} · {why}", framing.label());
+        let mut s = Splitter::new(framing);
+        let items = s.feed(&std::mem::take(&mut self.pending));
+        self.splitter = Some(s);
+        (items, Some(label))
     }
 }
 
 /// A guess, reconciled with the project's frame profile when it agrees.
 fn guessed(head: &[u8], m: &Mission) -> (Framing, String) {
     let (f, why) = stream::guess(head);
+    reconciled(f, why, m)
+}
+
+/// What was recognized, with the project's settings where they agree.
+fn reconciled(f: Framing, why: String, m: &Mission) -> (Framing, String) {
     match f {
         Framing::Frames(g) if g.length == m.frames.length || g.rs_depth == m.frames.rs_depth && g.rs_depth > 0 => {
             (Framing::Frames(FrameProfileExt::merged(&m.frames, &g)), format!("{why}, the project's frames"))
@@ -238,16 +286,28 @@ pub(crate) struct Source {
     pub(crate) address: String,
     pub(crate) subject: String,
     pub(crate) framing: String,
+    /// With `records` framing, the record header's size in octets.
+    pub(crate) header: usize,
 }
 
 /// Receives from `src` until the page closes, reconnecting as needed.
 fn run_live(src: Source, set: Option<Arc<MibSet>>, m: Mission, buffer: BufferId, send: Sender, stop: Arc<AtomicBool>) {
-    let framing = framing_of(&src.framing, &m).unwrap_or(Framing::Packets);
-    send(PageEvent::StreamInfo { buffer, framing: format!("{} · {}", framing.label(), src.address) });
-    let mut splitter = Splitter::new(framing);
+    let framing = framing_of(&src.framing, src.header, &m);
+    let info = |text: String| send(PageEvent::StreamInfo { buffer, framing: format!("{text} · {}", src.address) });
+    match &framing {
+        Some(f) => info(f.label()),
+        None => info("guessing the framing from the first octets".into()),
+    }
+    let mut splitter = LiveSplitter::new(framing);
     let status = |text: String, ok: bool| send(PageEvent::StreamStatus { buffer, text, ok });
-    let feed = |bytes: &[u8], splitter: &mut Splitter| {
-        let items = splitter.feed(bytes);
+    if src.framing.trim() == "records" && src.header == 0 {
+        status("records framing without a record header size -- guessing instead".into(), false);
+    }
+    let feed = |bytes: &[u8], splitter: &mut LiveSplitter| {
+        let (items, decided) = splitter.feed(bytes, &m);
+        if let Some(label) = decided {
+            info(label);
+        }
         send_rows(&send, buffer, items, set.as_deref(), &m, false);
     };
     let (scheme, rest) = src.address.split_once("://").unwrap_or(("tcp", src.address.as_str()));
@@ -430,7 +490,13 @@ impl App {
                         address = format!("file://{}", root.join(rest).display());
                     }
                 }
-                Source { name: r[0].clone(), address, subject: r.get(2).cloned().unwrap_or_default(), framing: r.get(3).cloned().unwrap_or_default() }
+                Source {
+                    name: r[0].clone(),
+                    address,
+                    subject: r.get(2).cloned().unwrap_or_default(),
+                    framing: r.get(3).cloned().unwrap_or_default(),
+                    header: r.get(4).and_then(|h| h.trim().parse().ok()).unwrap_or(0),
+                }
             })
             .collect()
     }
@@ -777,7 +843,10 @@ mod tests {
             let line = format!("{name}: {} packets, {hk} TCS_HK_FAST, {tcs} telecommands, {unknown} TM not in the MIB, problems {problems:?} · {}", rows.len(), statuses.join(" · "));
             println!("{line}");
             if name.contains("CLTU") {
-                assert!(tcs >= 2 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
+                // A CLTU every 3 s, some damaged on purpose and rightly
+                // turned away: count both.
+                let turned_away = problems.iter().filter(|p| p.starts_with("CLTU")).count();
+                assert!(tcs >= 1 && tcs + turned_away >= 2 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
             } else {
                 assert!(hk >= 10, "{line}");
             }
@@ -785,11 +854,51 @@ mod tests {
     }
 
     #[test]
+    fn a_live_source_left_to_guess_waits_until_it_can_tell() {
+        let m = App::with_file(None).mission(None);
+        // CLTUs arriving a few octets at a time.
+        let frame = |seq: u8| {
+            let tc = tm(u16::from(seq));
+            let len = 5 + 1 + tc.len() + 2;
+            let mut f = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, seq, 0xC0];
+            f.extend_from_slice(&tc);
+            let crc = fenix_ccsds::crc::ccitt16(&f);
+            f.extend_from_slice(&crc.to_be_bytes());
+            f
+        };
+        let mut stream = Vec::new();
+        for seq in 0..100u8 {
+            stream.extend_from_slice(&[0x55; 16]);
+            stream.extend(fenix_ccsds::coding::cltu_encode(&frame(seq)));
+        }
+        let mut live = LiveSplitter::new(None);
+        let (mut items, mut decided) = (Vec::new(), None);
+        for chunk in stream.chunks(37) {
+            let (got, d) = live.feed(chunk, &m);
+            if decided.is_none() && d.is_none() {
+                assert!(got.is_empty(), "nothing until it's decided");
+            }
+            decided = decided.or(d);
+            items.extend(got);
+        }
+        assert!(decided.as_deref().is_some_and(|d| d.starts_with("CLTUs")), "{decided:?}");
+        let packets = items.iter().filter(|i| matches!(i, Item::Packet { .. })).count();
+        assert_eq!(packets, 100, "none lost while it was guessing");
+    }
+
+    #[test]
     fn framing_names_read() {
         let m = App::with_file(None).mission(None);
-        assert_eq!(framing_of("packets", &m), Some(Framing::Packets));
-        assert_eq!(framing_of("records 12", &m), Some(Framing::Records { header: 12 }));
-        assert!(matches!(framing_of("frames", &m), Some(Framing::Frames(_))));
-        assert_eq!(framing_of("guess", &m), None);
+        assert_eq!(framing_of("packets", 0, &m), Some(Framing::Packets));
+        assert_eq!(framing_of("records", 12, &m), Some(Framing::Records { header: 12 }));
+        assert_eq!(framing_of("records", 0, &m), None, "no header size: guessed");
+        assert_eq!(framing_of("records 12", 0, &m), Some(Framing::Records { header: 12 }), "as written by hand");
+        assert!(matches!(framing_of("frames fecf", 0, &m), Some(Framing::Frames(p)) if p.fecf));
+        assert!(matches!(framing_of("cltus", 0, &m), Some(Framing::Cltus(_))));
+        assert_eq!(framing_of("guess", 0, &m), None);
+        // Every choice the settings offer means something here.
+        for f in fenix_config::FRAMINGS {
+            assert!(framing_of(f, 8, &m).is_some() || *f == "guess", "{f}");
+        }
     }
 }

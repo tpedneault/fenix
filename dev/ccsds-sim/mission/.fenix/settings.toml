@@ -34,7 +34,8 @@ framing = "packets"
 name = "sim CADUs"
 address = "tcp://localhost:10011"
 subject = ""
-framing = "frames"
+# Left to Fenix to work out from the first octets.
+framing = "guess"
 
 [[ccsds.sources]]
 name = "sim CADUs + FECF"
@@ -65,3 +66,6 @@ name = "sim file"
 address = "file://recordings/live.bin"
 subject = ""
 framing = "packets"
+
+[editor]
+indent_width = 3
