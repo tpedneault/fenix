@@ -196,7 +196,8 @@ fn reconciled(f: Framing, why: String, m: &Mission) -> (Framing, String) {
         Framing::Frames(g) if g.length == m.frames.length || g.rs_depth == m.frames.rs_depth && g.rs_depth > 0 => {
             (Framing::Frames(FrameProfileExt::merged(&m.frames, &g)), format!("{why}, the project's frames"))
         }
-        Framing::Cltus(_) => (Framing::Cltus(m.tc.clone()), format!("{why}, the project's TC frames")),
+        // The guess can see the randomizer; the project says the rest.
+        Framing::Cltus(g) => (Framing::Cltus(fenix_ccsds::frames::FrameProfile { randomized: g.randomized || m.tc.randomized, ..m.tc.clone() }), format!("{why}, the project's TC frames")),
         other => (other, why),
     }
 }
@@ -822,7 +823,7 @@ mod tests {
         let m = app.mission(key.project.as_deref());
         let buffer = app.focused_buffer_id();
         let sources = app.ccsds_sources();
-        assert_eq!(sources.len(), 7, "{sources:?}");
+        assert_eq!(sources.len(), 8, "{sources:?}");
         for src in sources {
             let events: Arc<std::sync::Mutex<Vec<PageEvent>>> = Arc::default();
             let sink = events.clone();

@@ -118,6 +118,8 @@ impl App {
             ocf: false,
             fecf: flag("ccsds.tc_fecf", c.ccsds_tc_fecf, true),
             tc_segment_header: flag("ccsds.tc_segment_header", c.ccsds_tc_segment_header, true),
+            randomized: flag("ccsds.tc_randomized", c.ccsds_tc_randomized, false),
+            bch_correct: text("ccsds.tc_bch", &c.ccsds_tc_bch).as_deref() != Some("detect"),
             vc_names: frames.vc_names.clone(),
             ..Default::default()
         };
@@ -340,7 +342,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
             None => unreadable("shorter than a CFDP header"),
         },
         DecodeAs::Cltu => {
-            let Some((cltu, data)) = coding::cltu_decode(bytes) else { return unreadable("no CLTU start sequence (EB90)") };
+            let Some((cltu, sent)) = coding::cltu_decode(bytes, m.tc.bch_correct) else { return unreadable("no CLTU start sequence (EB90)") };
             let start = cltu.children.first().map(|f| f.bit / 8).unwrap_or(0);
             // Its layers side by side -- start sequence, TC frame, code
             // blocks, tail -- so the bytes take the frame's colour where
@@ -348,6 +350,13 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
             let mut coding = cltu.children;
             let tail = coding.pop();
             let mut children = coding;
+            // The randomizer ran over the frame before it was coded: it
+            // comes off after the code blocks (the fill was never on it).
+            let mut data = sent.clone();
+            if m.tc.randomized {
+                coding::derandomize(&mut data);
+                children.insert(1, Field::new("de-randomized", (start + 2) * 8, 0, "", "pseudo-randomizer removed from the frame").linked(Link::Standard(coding::TC_STANDARD, "Pseudo-Randomizer")));
+            }
             let mut def = None;
             if let Some((mut frame, info, bytes, problem)) = frames::tc_frame(&data, &m.tc) {
                 if let Some(why) = problem {
@@ -363,7 +372,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                 }
                 let fill = data.len() - bytes.len();
                 if fill > 0 {
-                    let all_fill = data[bytes.len()..].iter().all(|b| *b == 0x55);
+                    let all_fill = sent[bytes.len()..].iter().all(|b| *b == 0x55);
                     let f = Field::new("fill", bytes.len() * 8, fill * 8, format!("{fill} octets"), "after the frame, to fill the last code block")
                         .checked(if all_fill { Check::Ok("55".into()) } else { Check::Warn("not 0x55".into()) });
                     frame.children.push(f);
@@ -371,7 +380,8 @@ pub(crate) fn decode_bytes(bytes: &[u8], reading: DecodeAs, set: Option<&MibSet>
                 // The frame's octets are spread over the code blocks:
                 // seven to a block, each block followed by its parity.
                 frame.remap(&|o| coding::cltu_octet(start, o));
-                children.insert(1, frame);
+                let at = if m.tc.randomized { 2 } else { 1 };
+                children.insert(at, frame);
             }
             children.extend(tail);
             (Field::group("CLTU", children), def)
@@ -607,13 +617,40 @@ mod tests {
     /// ZTC08101 (line 3, AUTO, seq 7) in a Type-A TC frame with a segment
     /// header and an FECF, in a CLTU.
     fn cltu() -> Vec<u8> {
+        coding::cltu_encode(&frame())
+    }
+
+    fn frame() -> Vec<u8> {
         let tc = [0x1B, 0xF2, 0xC0, 0x07, 0x00, 0x09, 0x29, 0x08, 0x01, 0x00, 0x00, 0x0C, 0x03, 0x02, 0x3F, 0xA3];
         let len = 5 + 1 + tc.len() + 2;
         let mut f = vec![0x00, 0xA5, ((len - 1) >> 8) as u8, (len - 1) as u8, 42, 0xC0];
         f.extend_from_slice(&tc);
         let crc = fenix_ccsds::crc::ccitt16(&f);
         f.extend_from_slice(&crc.to_be_bytes());
-        coding::cltu_encode(&f)
+        f
+    }
+
+    #[test]
+    fn a_randomized_cltu_with_a_wrong_bit_still_gives_its_telecommand() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        let set = MibSet::load(vec![fenix_mib::MibRoot { label: "OPS".into(), path: dir }], None);
+        let mut m = App::with_file(None).mission(None);
+        m.tc.randomized = true;
+        let mut f = frame();
+        coding::derandomize(&mut f); // randomizes: its own inverse
+        let mut bytes = coding::cltu_encode(&f);
+        bytes[2 + 8 + 3] ^= 0x10; // one bit in code block 2
+        let (root, def) = decode_bytes(&bytes, DecodeAs::Cltu, Some(&set), &m);
+        assert_eq!(def.map(|d| set.get(d).name.clone()).as_deref(), Some("ZTC08101"), "{root:#?}");
+        assert!(root.find("de-randomized").is_some());
+        let block = root.find("code block 2").unwrap();
+        assert_eq!(block.check, Some(Check::Warn("1 bit corrected".into())));
+        assert!(!root.any_bad(), "{root:#?}");
+        assert!(root.find("fill").and_then(|f| f.check.clone()) == Some(Check::Ok("55".into())), "fill is checked as sent");
+        // Detecting only: the same block fails.
+        m.tc.bch_correct = false;
+        let (root, _) = decode_bytes(&bytes, DecodeAs::Cltu, Some(&set), &m);
+        assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
     }
 
     #[test]
@@ -637,9 +674,9 @@ mod tests {
         let packet = root.walk().into_iter().map(|(_, x)| x).find(|x| x.name.starts_with("TC(8,1)") || x.name.contains("ZTC08101")).map(|x| x.bit / 8);
         assert_eq!(packet, Some(8), "{root:#?}");
         assert!(f("FECF").check == Some(Check::Ok("matches".into())));
-        // A flipped bit in the second code block: its parity fails.
+        // Two flipped bits in the second code block: beyond correction.
         let mut broken = bytes.clone();
-        broken[2 + 8 + 1] ^= 0x40;
+        broken[2 + 8 + 1] ^= 0x41;
         let (root, _) = decode_bytes(&broken, DecodeAs::Auto, Some(&set), &m);
         assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
     }

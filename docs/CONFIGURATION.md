@@ -232,6 +232,8 @@ when it's out of date).
 | `ccsds.frame_fecf` | true / false | off | Frames end in a CRC-16 frame error control field. *A project can set it.* |
 | `ccsds.tc_fecf` | true / false | on | Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field. *A project can set it.* |
 | `ccsds.tc_segment_header` | true / false | on | Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags). *A project can set it.* |
+| `ccsds.tc_randomized` | true / false | off | Telecommand transfer frames went through the CCSDS pseudo-randomizer before their CLTU was coded (optional in 231.0-B). *A project can set it.* |
+| `ccsds.tc_bch` | correct / detect | correct | How CLTU code blocks are decoded, as the spacecraft does: correct puts one wrong bit per block right (error-correcting mode), detect turns the block away. *A project can set it.* |
 | `ccsds.vc_names` | vc = name | – | A name for each virtual channel, shown wherever its frames are. *A project can set it.* |
 | `ccsds.sources` | [[tables]] of name, address, subject, framing, header | – | Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing, picked: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records with the record header's size in octets. Fenix only receives. *A project can set it.* |
 | `ccsds.checks_off` | a list | – | Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time. *A project can set it.* |

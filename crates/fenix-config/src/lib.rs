@@ -241,6 +241,8 @@ pub struct Config {
     pub ccsds_frame_fecf: Option<bool>,
     pub ccsds_tc_fecf: Option<bool>,
     pub ccsds_tc_segment_header: Option<bool>,
+    pub ccsds_tc_randomized: Option<bool>,
+    pub ccsds_tc_bch: Option<String>,
     pub ccsds_vc_names: Vec<(String, String)>,
     /// Live sources: name, address, NATS subject, framing.
     pub ccsds_sources: Vec<Vec<String>>,
@@ -570,6 +572,8 @@ impl Config {
             ccsds_frame_fecf: None,
             ccsds_tc_fecf: None,
             ccsds_tc_segment_header: None,
+            ccsds_tc_randomized: None,
+            ccsds_tc_bch: None,
             ccsds_vc_names: Vec::new(),
             ccsds_sources: Vec::new(),
             ccsds_library: None,

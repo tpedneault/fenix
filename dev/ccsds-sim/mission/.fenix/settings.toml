@@ -50,6 +50,13 @@ subject = ""
 framing = "cltus"
 
 [[ccsds.sources]]
+name = "sim CLTUs (randomized)"
+address = "tcp://localhost:10014"
+subject = ""
+# The randomizer is recognized from the first CLTU.
+framing = "guess"
+
+[[ccsds.sources]]
 name = "sim UDP"
 address = "udp://:10015"
 subject = ""
