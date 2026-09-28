@@ -457,12 +457,16 @@ pub fn split(bytes: &[u8], framing: Framing) -> Vec<Item> {
 /// A good guess at how `bytes` (the start of a recording) is framed, and
 /// why: what `recognize` finds, or packets.
 pub fn guess(bytes: &[u8]) -> (Framing, String) {
-    recognize(bytes).unwrap_or_else(|| (Framing::Packets, "no framing recognized -- reading as packets".into()))
+    recognize(bytes, false).unwrap_or_else(|| (Framing::Packets, "no framing recognized -- reading as packets".into()))
 }
 
 /// How `bytes` are framed, when they show it: sync markers at a steady
 /// stride, a CLTU, packet headers chaining, or chaining after records.
-pub fn recognize(bytes: &[u8]) -> Option<(Framing, String)> {
+///
+/// `sure`: only what can't be chance -- three packets chaining, not one
+/// that happens to fit a short file -- for a live source deciding on
+/// its first octets.
+pub fn recognize(bytes: &[u8], sure: bool) -> Option<(Framing, String)> {
     let asm = coding::find_asm(bytes);
     if asm.len() >= 3 {
         let stride = asm[1] - asm[0];
@@ -515,7 +519,7 @@ pub fn recognize(bytes: &[u8]) -> Option<(Framing, String)> {
             return Some((Framing::Cltus(p), why.into()));
         }
     }
-    if run(0, 0) >= 3 || (run(0, 0) >= 1 && bytes.len() < 4096) {
+    if run(0, 0) >= 3 || (!sure && run(0, 0) >= 1 && bytes.len() < 4096) {
         return Some((Framing::Packets, "packet headers chain from the first octet".into()));
     }
     for header in 1..=64 {

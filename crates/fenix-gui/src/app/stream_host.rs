@@ -176,8 +176,8 @@ struct LiveSplitter {
 }
 
 impl LiveSplitter {
-    /// Enough to see three packets, three sync markers or a CLTU.
-    const ENOUGH: usize = 4096;
+    /// Too little to tell anything from; past it, every chunk is tried.
+    const ENOUGH: usize = 64;
     const GIVE_UP: usize = 16 * 1024;
 
     fn new(framing: Option<Framing>) -> Self {
@@ -194,7 +194,7 @@ impl LiveSplitter {
         if self.pending.len() < Self::ENOUGH {
             return (Vec::new(), None);
         }
-        let (framing, why) = match stream::recognize(&self.pending) {
+        let (framing, why) = match stream::recognize(&self.pending, true) {
             Some((f, why)) => reconciled(f, why, m),
             None if self.pending.len() >= Self::GIVE_UP => (Framing::Packets, "no framing recognized in 16 KB -- reading as packets".into()),
             None => return (Vec::new(), None),
@@ -893,7 +893,8 @@ mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let (set, m, name, stop2) = (set.clone(), m.clone(), src.name.clone(), stop.clone());
             let worker = std::thread::spawn(move || run_live(src, Some(set), m, buffer, send, stop2));
-            std::thread::sleep(Duration::from_secs(8));
+            // A telecommand goes up every 3 s: the uplink gets longer.
+            std::thread::sleep(Duration::from_secs(if name.contains("CLTU") { 15 } else { 8 }));
             stop.store(true, Ordering::Relaxed);
             worker.join().unwrap();
             let events = events.lock().unwrap();
@@ -909,7 +910,7 @@ mod tests {
                 // A CLTU every 3 s, some damaged on purpose and rightly
                 // turned away: count both.
                 let turned_away = problems.iter().filter(|p| p.starts_with("CLTU")).count();
-                assert!(tcs >= 1 && tcs + turned_away >= 2 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
+                assert!(tcs >= 1 && tcs + turned_away >= 3 && rows.iter().all(|r| r.is_tc && r.unit.is_some()), "{line}");
             } else {
                 assert!(hk >= 10, "{line}");
             }
