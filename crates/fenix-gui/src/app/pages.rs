@@ -564,6 +564,11 @@ impl App {
             (KeyCode::Char('i'), true) if is_def => Key::CtrlI,
             (KeyCode::Named(FenixNamedKey::Enter), true) if is_form => Key::CtrlEnter,
             (KeyCode::Char('o'), true) if typing => Key::CtrlO,
+            // A field's caret, a word at a time.
+            (KeyCode::Named(FenixNamedKey::Left), true) if typing => Key::WordLeft,
+            (KeyCode::Named(FenixNamedKey::Right), true) if typing => Key::WordRight,
+            (KeyCode::Named(FenixNamedKey::Backspace), true) if typing => Key::DeleteWordBack,
+            (KeyCode::Char('w'), true) if typing => Key::DeleteWordBack,
             (_, true) => return false,
             (KeyCode::Char(' '), false) if claims_space => Key::Space,
             (KeyCode::Char(':'), false) if typing => Key::Char(':'),
@@ -579,6 +584,9 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Down), _) => Key::Down,
             (KeyCode::Named(FenixNamedKey::Left), _) => Key::Left,
             (KeyCode::Named(FenixNamedKey::Right), _) => Key::Right,
+            (KeyCode::Named(FenixNamedKey::Home), _) if typing => Key::Home,
+            (KeyCode::Named(FenixNamedKey::End), _) if typing => Key::End,
+            (KeyCode::Named(FenixNamedKey::Delete), _) if typing => Key::Delete,
             _ => return false,
         };
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
@@ -1473,6 +1481,7 @@ impl App {
                 self.save_project_meta();
             }
             Action::RunTask(name) => self.run_task(fenix_tasks::TaskDef { name, command: String::new(), args: Vec::new() }, root),
+            Action::Browse { start, folder } => self.settings_browse(start.or(Some(root)), folder),
             Action::OpenRaw => {
                 let path = root.join(".fenix").join("tools.json");
                 if !path.exists() {

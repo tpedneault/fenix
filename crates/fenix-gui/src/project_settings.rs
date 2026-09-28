@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use fenix_project::tools::{join_command_line, split_command_line, CommandSpec, ProjectTools};
 use fenix_project::ProjectKind;
 
-use crate::page::{fit, fit_tail, Grid, Key, Page, Role};
+use crate::page::{edit_line, fit, insert_at, with_caret, Grid, Key, Page, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Field {
@@ -43,6 +43,9 @@ pub enum Action {
     SetJira(String),
     RunTask(String),
     OpenRaw,
+    /// Pick a path in the explorer for the field being typed, starting
+    /// from `start`; it comes back through `Settings::browsed`.
+    Browse { start: Option<PathBuf>, folder: bool },
 }
 
 pub struct Settings {
@@ -59,6 +62,9 @@ pub struct Settings {
     pub focus: usize,
     /// The field being typed into, and its text so far.
     pub editing: Option<(Field, String)>,
+    /// Where the caret is in the field being typed, a char index; `None`
+    /// at its end.
+    pub caret: Option<usize>,
     /// Why the last edit of a field was refused.
     pub problem: Option<(Field, String)>,
     /// `d` once asks; `d` again deletes.
@@ -84,6 +90,7 @@ impl Settings {
             tools_error,
             focus: 0,
             editing: None,
+            caret: None,
             problem: None,
             confirm_delete: None,
             note: None,
@@ -134,18 +141,26 @@ impl Settings {
     }
 
     pub fn key(&mut self, key: Key) -> Action {
-        if self.editing.is_some() {
+        if self.editing.is_none() {
+            self.caret = None;
+        }
+        if let Some((field, text)) = &mut self.editing {
             match key {
                 Key::Escape => self.editing = None,
                 Key::Enter => return self.commit(),
-                Key::Backspace => {
-                    if let Some((_, text)) = &mut self.editing {
-                        text.pop();
+                Key::CtrlO => match field {
+                    Field::Program | Field::Cwd => {
+                        let start = Some(self.root.join(text.trim())).filter(|_| !text.trim().is_empty());
+                        return Action::Browse { start, folder: *field == Field::Cwd };
+                    }
+                    _ => self.note = Some("Ctrl-O browses for the program or the cwd".to_string()),
+                },
+                _ => {
+                    let mut at = self.caret.unwrap_or(text.chars().count());
+                    if edit_line(text, &mut at, key) {
+                        self.caret = Some(at);
                     }
                 }
-                Key::Char(c) => self.type_text(&c.to_string()),
-                Key::Space => self.type_text(" "),
-                _ => {}
             }
             return Action::None;
         }
@@ -214,7 +229,19 @@ impl Settings {
 
     pub fn type_text(&mut self, text: &str) {
         if let Some((_, editing)) = &mut self.editing {
-            editing.extend(text.chars().filter(|c| !c.is_control()));
+            let mut at = self.caret.unwrap_or(usize::MAX);
+            insert_at(editing, &mut at, text);
+            self.caret = Some(at);
+        }
+    }
+
+    /// The path picked in the explorer, into the field being typed --
+    /// relative to the project when it's inside it.
+    pub fn browsed(&mut self, path: &std::path::Path) {
+        if let Some((_, text)) = &mut self.editing {
+            let path = path.strip_prefix(&self.root).ok().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
+            *text = path.display().to_string();
+            self.caret = None;
         }
     }
 
@@ -437,7 +464,8 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
         g.put(y, label_x, &fit(&label, 15), if add_row { Role::Accent } else { Role::Muted });
         let editing = settings.editing.as_ref().filter(|(f, _)| *f == field);
         if let Some((_, text)) = editing {
-            let end = g.put(y, value_x, &fit_tail(&format!("{text}▏"), value_room), Role::Title);
+            let caret = settings.caret.unwrap_or(usize::MAX).min(text.chars().count());
+            let end = g.put(y, value_x, &with_caret(text, caret, value_room), Role::Title);
             g.panels.push((y, value_x - 1..end + 1));
             if add_row && text.is_empty() {
                 let hint = match field {
@@ -544,6 +572,30 @@ mod tests {
         let task = &tools.tasks["test"];
         assert_eq!(task.args, ["run", "pytest", "-q", "tests dir"]);
         assert_eq!(task.cwd.as_deref(), Some(std::path::Path::new("sub")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_field_is_edited_at_its_caret_and_ctrl_o_browses_for_a_path() {
+        let (mut s, root) = settings("caret", Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}}}"#));
+        s.focus_on(&Field::Task("test".into()));
+        s.key(Key::Enter);
+        s.key(Key::WordLeft);
+        type_in(&mut s, "-q ");
+        s.key(Key::Home);
+        s.key(Key::Delete);
+        s.key(Key::Delete);
+        type_in(&mut s, "p");
+        assert_eq!(s.editing.as_ref().map(|(_, t)| t.as_str()), Some("p run -q pytest"));
+        assert!(layout(&s, 100).text.contains("p▏ run -q pytest"));
+        assert_eq!(s.key(Key::CtrlO), Action::None, "a task isn't a path");
+        s.key(Key::Escape);
+        s.focus_on(&Field::Cwd);
+        s.key(Key::Enter);
+        assert_eq!(s.key(Key::CtrlO), Action::Browse { start: None, folder: true });
+        s.browsed(&root.join("sub").join("dir"));
+        assert_eq!(s.editing.as_ref().map(|(_, t)| t.replace('\\', "/")), Some("sub/dir".to_string()), "relative to the project");
+        assert!(matches!(s.key(Key::Enter), Action::SaveTools(t) if t.launch.cwd == Some(PathBuf::from("sub").join("dir"))));
         let _ = std::fs::remove_dir_all(root);
     }
 

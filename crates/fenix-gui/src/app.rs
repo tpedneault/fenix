@@ -2085,7 +2085,7 @@ enum ExplorerPurpose {
     /// The new-project wizard's "In" folder: `S` hands it back.
     PickWizardParent,
     /// A path for the settings page (`b`, `Ctrl-O`): `Enter` on a file
-    /// hands it back, or `S` the folder when a folder's wanted.
+    /// hands it back (unless a folder's wanted), `S` the folder.
     PickSettingPath { folder: bool },
 }
 
@@ -17629,7 +17629,8 @@ impl App {
                 } else if self.main_view == MainView::Explorer && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.wizard_parent_picked(&cwd);
-                } else if self.main_view == MainView::Explorer && self.explorer_purpose == (ExplorerPurpose::PickSettingPath { folder: true }) {
+                } else if self.main_view == MainView::Explorer && matches!(self.explorer_purpose, ExplorerPurpose::PickSettingPath { .. }) {
+                    // A path setting takes a folder as readily as a file.
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.settings_path_picked(&cwd);
                 }
@@ -20811,7 +20812,7 @@ impl App {
                             format!("{}   S to pick this folder, q to go back ", explorer.cwd.display())
                         }
                         ExplorerPurpose::PickSettingPath { folder: false } => {
-                            format!("{}   Enter to pick a file, q to go back ", explorer.cwd.display())
+                            format!("{}   Enter to pick a file, S this folder, q to go back ", explorer.cwd.display())
                         }
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
