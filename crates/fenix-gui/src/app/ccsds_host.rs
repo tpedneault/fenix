@@ -224,7 +224,23 @@ impl App {
             }
             A::Settings => self.ccsds_open_settings(),
             A::Follow(link) => self.follow_link(key, link),
+            A::FollowParameter(name) => match self.mib_set_ready(&key).and_then(|set| set.resolve(&name)) {
+                Some(def) => self.follow_on_stream(def),
+                None => self.set_error(format!("{name} isn't in the project's MIBs")),
+            },
         }
+    }
+
+    /// `t` on a TM parameter: follows it through the recording or live
+    /// source open most recently, shown on its Parameter tab.
+    pub(crate) fn follow_on_stream(&mut self, def: DefRef) {
+        let stream = self.buffers.mru().iter().copied().find(|b| matches!(self.pages.get(b).map(|s| &s.model), Some(PageModel::Stream(_))));
+        let Some(stream) = stream else {
+            self.set_error("no recording or live source open -- SPC k f or SPC k l, then t");
+            return;
+        };
+        self.show_page(stream);
+        self.stream_follow(stream, def);
     }
 
     /// The project's CCSDS settings.
@@ -258,13 +274,17 @@ impl App {
         }
         let (line, col) = self.open().buffer.line_col(&self.cursor());
         let text = self.open().buffer.line(line).to_string();
-        let (_, bytes) = fenix_ccsds::hex::around(text.trim_end_matches(['\n', '\r']), col)?;
+        let text = text.trim_end_matches(['\n', '\r']);
+        let (key, _) = self.mib_key_here();
+        let mission = self.mission(key.project.as_deref());
+        if let Some(hover) = time_hover(text, col, &mission) {
+            return Some(hover);
+        }
+        let (_, bytes) = fenix_ccsds::hex::around(text, col)?;
         if bytes.len() < 6 {
             return None;
         }
-        let (key, _) = self.mib_key_here();
         let set = if key.roots.is_empty() { None } else { self.mib_set(&key) };
-        let mission = self.mission(key.project.as_deref());
         let (root, def) = decode_bytes(&bytes, DecodeAs::Auto, set.as_deref(), &mission);
         let walk = root.walk();
         let bad: Vec<String> = walk
@@ -396,6 +416,48 @@ impl App {
         }
         true
     }
+}
+
+/// `K` on an on-board time: the word under the cursor, when it's the
+/// mission's time code -- `814B878A.8000` as the converter writes a CUC,
+/// or its octets in hex -- read from the mission's epoch.
+fn time_hover(line: &str, col: usize, m: &Mission) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let part = |c: char| c.is_ascii_hexdigit() || c == '.' || c == 'x' || c == 'X';
+    if !chars.get(col).is_some_and(|c| part(*c)) {
+        return None;
+    }
+    let (mut a, mut b) = (col, col);
+    while a > 0 && part(chars[a - 1]) {
+        a -= 1;
+    }
+    while b < chars.len() && part(chars[b]) {
+        b += 1;
+    }
+    let word: String = chars[a..b].iter().collect();
+    let word = word.trim_start_matches("0x").trim_start_matches("0X");
+    let hex = |s: &str| (s.len() % 2 == 0).then(|| fenix_ccsds::hex::parse(s)).flatten();
+    let bytes = match word.split_once('.') {
+        Some((c, f)) => {
+            let mut v = hex(c)?;
+            v.extend(hex(f)?);
+            v
+        }
+        None => hex(word)?,
+    };
+    let p = &m.profile;
+    if bytes.len() != p.tm_time.len() {
+        return None;
+    }
+    let d = fenix_ccsds::time::decode(&bytes, p.tm_time, p.epoch, &p.leap, 0)?;
+    let utc = fenix_ccsds::time::tai_to_utc(d.tai, &p.leap);
+    let correlated = if m.nominal_epoch.is_some() { " (correlated)" } else { "" };
+    Some(format!(
+        "{} · {}{correlated}\n{}\nSPC k T converts it",
+        p.tm_time.label(),
+        fenix_ccsds::time::format_utc(utc),
+        fenix_ccsds::time::format_doy(utc)
+    ))
 }
 
 /// Bytes decoded as `reading`, through the MIB when there is one: the
@@ -743,6 +805,28 @@ mod tests {
         let crc = fenix_ccsds::crc::ccitt16(&f);
         f.extend_from_slice(&crc.to_be_bytes());
         f
+    }
+
+    #[test]
+    fn k_on_an_on_board_time_says_when_it_was() {
+        let m = App::with_file(None).mission(None);
+        let line = "  at 814B878A.8000 the heater came on (814B878A8000, 0x814B878A8000)";
+        for word in ["814B878A.8000", "814B878A8000,", "0x814B878A8000"] {
+            let col = line.find(word).unwrap() + 3;
+            let hover = time_hover(line, col, &m).unwrap_or_else(|| panic!("{word}"));
+            assert!(hover.starts_with("CUC 4+2 · 2026-09-27 14:32:05.500") && hover.contains("2026-270T14:32:05.500Z"), "{hover}");
+        }
+        assert!(time_hover(line, line.find("heater").unwrap(), &m).is_none());
+        assert!(time_hover("0B F2 C1 23", 1, &m).is_none(), "not the time code's length");
+    }
+
+    #[test]
+    fn t_on_a_tm_parameter_follows_it_on_the_recording_open() {
+        let mut app = App::with_file(None);
+        let set = MibSet::load(vec![fenix_mib::MibRoot { label: "OPS".into(), path: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops") }], None);
+        let def = set.find(Kind::TmParam, 0, "NTH00123").unwrap();
+        app.follow_on_stream(def);
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.starts_with("no recording or live source open")));
     }
 
     #[test]

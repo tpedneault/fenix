@@ -545,6 +545,8 @@ pub enum Action {
     OpenFile(PathBuf, usize),
     /// The MIB page.
     MibPage,
+    /// Follow a TM parameter through the recording or live source open.
+    Follow(DefRef),
 }
 
 pub struct DefPage {
@@ -697,6 +699,12 @@ impl DefPage {
                     return Action::Insert(self.current());
                 }
                 self.note = Some(("i inserts a telecommand -- open one first".into(), true));
+            }
+            Key::Char('t') => {
+                if self.current().kind == Kind::TmParam {
+                    return Action::Follow(self.current());
+                }
+                self.note = Some(("t follows a TM parameter through a recording -- open one first".into(), true));
             }
             Key::Char('y') => return Action::Copy(set.get(self.current()).name.clone()),
             Key::Char('m') => return Action::MibPage,

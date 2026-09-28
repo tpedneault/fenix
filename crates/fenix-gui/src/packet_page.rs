@@ -53,6 +53,9 @@ pub enum Action {
     Copy(String, &'static str),
     /// The CCSDS settings.
     Settings,
+    /// Follow the selected TM parameter through the recording or live
+    /// source open.
+    FollowParameter(String),
 }
 
 pub struct PacketPage {
@@ -258,6 +261,10 @@ impl PacketPage {
                     return Action::Copy(v, "value");
                 }
             }
+            Key::Char('t') => match self.selected().and_then(|f| f.link) {
+                Some(Link::Parameter(name)) => return Action::FollowParameter(name),
+                _ => self.note = Some(("t follows a TM parameter -- select one".into(), true)),
+            },
             Key::Char('Y') => return Action::Copy(tree_text(&self.root), "decode"),
             Key::Char('b') => return Action::Copy(fenix_ccsds::field::hex(&self.bytes), "bytes"),
             Key::Char('a') => self.menu = Some(DecodeAs::ALL.iter().position(|d| *d == self.reading).unwrap_or(0)),
