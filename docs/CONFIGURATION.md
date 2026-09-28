@@ -220,6 +220,8 @@ when it's out of date).
 | `ccsds.pus` | c / a / none | c | The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets. *A project can set it.* |
 | `ccsds.tm_time` | text | cuc 4.2 | The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none. *A project can set it.* |
 | `ccsds.epoch` | text | 1958-01-01 TAI | What on-board times count from: a date and time, then TAI, UTC or GPS. *A project can set it.* |
+| `ccsds.time_correlation` | text | – | An on-board time and the UTC it matched (814B878A.8000 = 2026-09-27 14:32:05.5): on-board times are read from the epoch this implies, everywhere, and the time converter shows them uncorrelated too. *A project can set it.* |
+| `ccsds.clock` | true / false | off | The modeline shows the time now as the mission writes it on board, beside the clock. *A project can set it.* |
 | `ccsds.crc` | ccitt16 / iso / none | ccitt16 | The check at the end of a packet, where the MIB doesn't say: CRC-16-CCITT, the ISO checksum, or none. *A project can set it.* |
 | `ccsds.tc_source_id` | 0–65535 | 0 | The source ID written into telecommand packets Fenix builds. *A project can set it.* |
 | `ccsds.plf_offset` | after-headers / packet-start | after-headers | Where the MIB's PLF_OFFBY counts from: after the packet's headers (PID_DFHSIZE), or its first octet. *A project can set it.* |

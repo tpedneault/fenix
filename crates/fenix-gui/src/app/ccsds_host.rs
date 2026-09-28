@@ -27,6 +27,8 @@ pub(crate) struct Mission {
     pub(crate) frames: FrameProfile,
     /// Telecommand frames, as CLTUs carry them.
     pub(crate) tc: FrameProfile,
+    /// The nominal epoch, when a time correlation moved the profile's.
+    pub(crate) nominal_epoch: Option<Epoch>,
     pub(crate) checks_off: Vec<String>,
     /// What didn't parse, to say once.
     pub(crate) problems: Vec<String>,
@@ -93,6 +95,18 @@ impl App {
             }),
             None => Epoch::default(),
         };
+        let tm_time_for_correlation = TimeFormat::parse(&text("ccsds.tm_time", &c.ccsds_tm_time).unwrap_or_else(|| "cuc 4.2".into())).unwrap_or(TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false });
+        // A correlation says where the on-board clock really counts from.
+        let (epoch, nominal_epoch) = match text("ccsds.time_correlation", &c.ccsds_time_correlation).filter(|t| !t.trim().is_empty()) {
+            Some(t) => match fenix_ccsds::time::correlate(&t, tm_time_for_correlation, &leap) {
+                Ok(correlated) => (correlated, Some(epoch)),
+                Err(why) => {
+                    problems.push(format!("ccsds.time_correlation: {why}"));
+                    (epoch, None)
+                }
+            },
+            None => (epoch, None),
+        };
         let pec = Pec::parse(&text("ccsds.crc", &c.ccsds_crc).unwrap_or_default()).unwrap_or(Pec::Ccitt16);
         let pec = if text("ccsds.crc", &c.ccsds_crc).is_none() { Pec::Ccitt16 } else { pec };
         let base = OffsetBase::parse(&text("ccsds.plf_offset", &c.ccsds_plf_offset).unwrap_or_default()).unwrap_or_default();
@@ -127,7 +141,7 @@ impl App {
             Some(fenix_config::Value::List(l)) => l.clone(),
             _ => c.ccsds_checks_off.clone(),
         };
-        Mission { profile, base, frames, tc, checks_off, problems }
+        Mission { profile, base, frames, tc, nominal_epoch, checks_off, problems }
     }
 }
 
@@ -472,10 +486,36 @@ impl App {
             }
         }
         let origin = self.ccsds_origin();
-        let id = self.open_page(PageModel::Time(Box::new(TimePage::new(p, tai))));
+        let mut page = TimePage::new(p, tai);
+        page.nominal = mission.nominal_epoch;
+        let id = self.open_page(PageModel::Time(Box::new(page)));
         if let Some(o) = origin {
             self.mib_origins.insert(id, o);
         }
+    }
+
+    /// The time now as the mission writes it on board, for the modeline,
+    /// when the project turns `ccsds.clock` on. Worked out at most four
+    /// times a second.
+    pub(crate) fn mission_clock_text(&mut self) -> Option<String> {
+        let on = match self.project_settings.as_ref().and_then(|(_, p)| p.get("ccsds.clock")) {
+            Some(fenix_config::Value::Bool(b)) => *b,
+            _ => self.config.ccsds_clock.unwrap_or(false),
+        };
+        if !on {
+            return None;
+        }
+        let tick = chrono::Utc::now().timestamp_millis() / 250;
+        if let Some((at, text)) = &self.mission_clock {
+            if *at == tick {
+                return Some(text.clone());
+            }
+        }
+        let m = self.mission(None);
+        let tai = fenix_ccsds::time::utc_to_tai(chrono::Utc::now().naive_utc(), &m.profile.leap);
+        let text = format!("OBT {}", time_page::mission_code(tai, &m.profile));
+        self.mission_clock = Some((tick, text.clone()));
+        Some(text)
     }
 
     pub(super) fn time_page_action(&mut self, id: BufferId, action: time_page::Action) {
@@ -628,6 +668,25 @@ mod tests {
         let crc = fenix_ccsds::crc::ccitt16(&f);
         f.extend_from_slice(&crc.to_be_bytes());
         f
+    }
+
+    #[test]
+    fn a_time_correlation_moves_every_decode_and_the_clock_shows_on_board_time() {
+        let mut app = App::with_file(None);
+        assert!(app.mission(None).nominal_epoch.is_none());
+        assert!(app.mission_clock_text().is_none(), "off by default");
+        app.config.ccsds_time_correlation = Some("814B878A.8000 = 2026-09-27 14:31:55.5".into());
+        let m = app.mission(None);
+        assert!(m.nominal_epoch.is_some() && m.problems.is_empty(), "{:?}", m.problems);
+        // The example packet's time now reads 10 s earlier.
+        let tm = [0x0B, 0xF2, 0xC1, 0x23, 0x00, 0x16, 0x20, 0x03, 0x19, 0x00, 0x42, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x01, 0x01, 0x0B, 0xB8, 0x0A, 0x28, 0x02, 0x60, 0xE5];
+        let (root, _) = decode_bytes(&tm, DecodeAs::Packet, None, &m);
+        assert_eq!(root.find("time (CUC 4+2)").map(|f| f.value.clone()).as_deref(), Some("2026-09-27 14:31:55.500 UTC"));
+        app.config.ccsds_time_correlation = Some("soon = then".into());
+        assert!(app.mission(None).problems.iter().any(|p| p.starts_with("ccsds.time_correlation")));
+        app.config.ccsds_clock = Some(true);
+        let clock = app.mission_clock_text().unwrap();
+        assert!(clock.starts_with("OBT ") && clock.len() == "OBT 814B878A.8000".len(), "{clock}");
     }
 
     #[test]

@@ -5922,6 +5922,8 @@ pub struct App {
     mib_last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
     /// Where each stream page's packets come from.
     stream_sources: HashMap<BufferId, stream_host::StreamSource>,
+    /// The modeline's mission clock, with the quarter second it's for.
+    mission_clock: Option<(i64, String)>,
     /// A stream page waiting for a parameter from the `MibDef` picker.
     mib_pick_for_stream: Option<BufferId>,
     /// Telecommand calls the MIB disagrees with, by file -- drawn with
@@ -6711,6 +6713,7 @@ impl App {
             mib_origins: HashMap::new(),
             mib_last: HashMap::new(),
             stream_sources: HashMap::new(),
+            mission_clock: None,
             mib_pick_for_stream: None,
             mib_diagnostics: HashMap::new(),
             mib_checked: HashMap::new(),
@@ -23016,6 +23019,8 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // The mission clock, worked out before the GPU is borrowed.
+        let mission_clock = self.mission_clock_text();
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");
@@ -24230,7 +24235,10 @@ impl App {
             [one] => format!("{one}   "),
             [first, rest @ ..] => format!("{first} +{}   ", rest.len()),
         };
-        let clock_text = modeline_clock_text();
+        let clock_text = match mission_clock {
+            Some(obt) => format!("{obt}   {}", modeline_clock_text()),
+            None => modeline_clock_text(),
+        };
         let clock_chars = clock_text.chars().count() + job_text.chars().count();
         let box_width = window_width - text::PAD_LEFT;
         // `modeline_char_width`, not the body `char_width`: both this

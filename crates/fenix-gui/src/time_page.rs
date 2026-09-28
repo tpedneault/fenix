@@ -20,6 +20,9 @@ enum Row {
     Gps,
     Cds,
     Doy,
+    /// With a time correlation: the UTC the same on-board time reads
+    /// from the nominal epoch.
+    Uncorrelated,
 }
 
 const ROWS: [Row; 7] = [Row::Mission, Row::Seconds, Row::Utc, Row::Tai, Row::Gps, Row::Cds, Row::Doy];
@@ -34,6 +37,8 @@ pub enum Action {
 
 pub struct TimePage {
     profile: Profile,
+    /// The nominal epoch, when a correlation moved the profile's.
+    pub nominal: Option<time::Epoch>,
     pub tai: Tai,
     sel: usize,
     editing: Option<String>,
@@ -69,7 +74,15 @@ pub fn mission_code(tai: Tai, p: &Profile) -> String {
 
 impl TimePage {
     pub fn new(profile: Profile, tai: Tai) -> Self {
-        TimePage { profile, tai, sel: 0, editing: None, note: None }
+        TimePage { profile, nominal: None, tai, sel: 0, editing: None, note: None }
+    }
+
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = ROWS.to_vec();
+        if self.nominal.is_some() {
+            rows.insert(3, Row::Uncorrelated);
+        }
+        rows
     }
 
     pub fn typing(&self) -> bool {
@@ -105,6 +118,10 @@ impl TimePage {
                 format!("{days} · {ms} ms")
             }
             Row::Doy => time::format_doy(time::tai_to_utc(t, &p.leap)),
+            Row::Uncorrelated => match self.nominal {
+                Some(n) => time::format_utc(time::tai_to_utc(Tai(n.tai.0 + (t.0 - p.epoch.tai.0)), &p.leap)),
+                None => String::new(),
+            },
         }
     }
 
@@ -117,6 +134,7 @@ impl TimePage {
             Row::Gps => "GPS".into(),
             Row::Cds => "CDS (16-bit days)".into(),
             Row::Doy => "day of year (UTC)".into(),
+            Row::Uncorrelated => "UTC, uncorrelated".into(),
         }
     }
 
@@ -150,6 +168,11 @@ impl TimePage {
                 let [days, ms] = nums[..] else { return Err("days and milliseconds".into()) };
                 Tai(p.epoch.tai.0 + days * 86400.0 + ms / 1000.0)
             }
+            Row::Uncorrelated => {
+                let n = self.nominal.ok_or("no time correlation")?;
+                let at = time::utc_to_tai(time::parse_utc(text).ok_or("a date and time")?, &p.leap);
+                Tai(p.epoch.tai.0 + (at.0 - n.tai.0))
+            }
         };
         self.tai = t;
         Ok(())
@@ -163,7 +186,7 @@ impl TimePage {
                 Key::Enter => {
                     let text = std::mem::take(text);
                     self.editing = None;
-                    if let Err(e) = self.set(ROWS[self.sel], &text) {
+                    if let Err(e) = self.set(self.rows()[self.sel], &text) {
                         self.note = Some((e, true));
                     }
                 }
@@ -178,12 +201,12 @@ impl TimePage {
         }
         match key {
             Key::Char('q') | Key::Escape => return Action::Close,
-            Key::Down | Key::Char('j') | Key::Tab => self.sel = (self.sel + 1).min(ROWS.len() - 1),
+            Key::Down | Key::Char('j') | Key::Tab => self.sel = (self.sel + 1).min(self.rows().len() - 1),
             Key::Up | Key::Char('k') | Key::BackTab => self.sel = self.sel.saturating_sub(1),
             Key::Enter | Key::Char('c') => self.editing = Some(String::new()),
-            Key::Char('e') => self.editing = Some(self.value(ROWS[self.sel])),
+            Key::Char('e') => self.editing = Some(self.value(self.rows()[self.sel])),
             Key::Char('n') => self.tai = time::utc_to_tai(chrono::Utc::now().naive_utc(), &self.profile.leap),
-            Key::Char('y') => return Action::Copy(self.value(ROWS[self.sel])),
+            Key::Char('y') => return Action::Copy(self.value(self.rows()[self.sel])),
             Key::Char('i') => return Action::Insert(hex_tight(&time::encode(self.tai, self.profile.tm_time, self.profile.epoch))),
             _ => {}
         }
@@ -200,14 +223,16 @@ pub fn layout(p: &TimePage, cols: usize) -> Page {
     let (left, width) = frame(cols, 110);
     let mut g = Grid::new();
     g.put(1, left, "Time", Role::Title);
-    let epoch = if p.profile.epoch.level1 { "1958 TAI (level 1)".to_string() } else { format!("{} TAI", (base_1958() + Duration::seconds(p.profile.epoch.tai.0 as i64)).format("%Y-%m-%d %H:%M:%S")) };
+    let epoch = if p.nominal.is_some() {
+        "correlated".to_string()
+    } else if p.profile.epoch.level1 { "1958 TAI (level 1)".to_string() } else { format!("{} TAI", (base_1958() + Duration::seconds(p.profile.epoch.tai.0 as i64)).format("%Y-%m-%d %H:%M:%S")) };
     let info = format!("{} · epoch {epoch} · TAI - UTC {} s", p.profile.tm_time.label(), p.profile.leap.offset(time::tai_to_utc(p.tai, &p.profile.leap).date()));
     g.put(1, (left + width).saturating_sub(info.chars().count()), &info, Role::Muted);
     let mut y = 3;
     if let Some((text, bad)) = &p.note {
         g.put(2, left, &fit(text, width), if *bad { Role::Bad } else { Role::Good });
     }
-    for (i, row) in ROWS.iter().enumerate() {
+    for (i, row) in p.rows().iter().enumerate() {
         g.put(y, left, &p.label(*row), Role::Muted);
         let on = i == p.sel;
         let x = left + 24;
@@ -250,6 +275,29 @@ mod tests {
         for want in ["814B878A.8000", "2169210762.5", "2026-09-27 14:32:05.500", "2026-09-27 14:32:42.500", "week 2438 · 52343.5 s", "25106 · 52362500 ms", "2026-270T14:32:05.500Z"] {
             assert!(text.contains(want), "{want}: {text}");
         }
+    }
+
+    #[test]
+    fn a_correlated_time_shows_what_it_would_read_uncorrelated() {
+        let mut p = Profile::default();
+        let nominal = p.epoch;
+        // The on-board clock runs 10 s fast.
+        p.epoch = time::correlate("814B878A.8000 = 2026-09-27 14:31:55.5", p.tm_time, &p.leap).unwrap();
+        let t = time::utc_to_tai(time::parse_utc("2026-09-27 14:31:55.5").unwrap(), &p.leap);
+        let mut page = TimePage::new(p, t);
+        page.nominal = Some(nominal);
+        let text = layout(&page, 120).text;
+        assert!(text.contains("814B878A.8000") && text.contains("UTC, uncorrelated") && text.contains("2026-09-27 14:32:05.500") && text.contains("epoch correlated"), "{text}");
+        // Typing the uncorrelated time moves the rest.
+        for _ in 0..3 {
+            page.key(Key::Char('j'));
+        }
+        page.key(Key::Enter);
+        for c in "2026-09-27 14:32:15.5".chars() {
+            page.key(Key::Char(c));
+        }
+        page.key(Key::Enter);
+        assert!(layout(&page, 120).text.contains("2026-09-27 14:32:05.500"), "correlated: 10 s behind");
     }
 
     #[test]
