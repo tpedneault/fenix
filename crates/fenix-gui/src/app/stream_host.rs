@@ -116,6 +116,29 @@ fn convert(items: Vec<Item>, set: Option<&MibSet>, m: &Mission) -> (Vec<Row>, Ve
     (rows, lost, junk)
 }
 
+/// The samples of parameter `def` in `rows` from `from` on: calibrated,
+/// with their limit state.
+fn samples_of(rows: &[Row], from: usize, set: &MibSet, m: &Mission, def: DefRef) -> Vec<Sample> {
+    let name = set.get(def).name.clone();
+    let carriers: Vec<String> = set.used_by(def).iter().map(|d| set.get(*d).name.clone()).collect();
+    let mut samples = Vec::new();
+    for (i, r) in rows.iter().enumerate().skip(from) {
+        if !r.spid.as_ref().is_some_and(|s| carriers.contains(s)) {
+            continue;
+        }
+        let Some((root, _)) = fenix_mib::packets::decode_packet(Some(set), &r.bytes, &m.profile, m.base) else { continue };
+        let Some(f) = root.walk().into_iter().map(|(_, f)| f).find(|f| f.link == Some(fenix_ccsds::Link::Parameter(name.clone()))).cloned() else { continue };
+        let number = f.value.split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
+        let off = match &f.check {
+            Some(Check::Warn(m)) => Some((m.clone(), false)),
+            Some(Check::Bad(m)) => Some((m.clone(), true)),
+            _ => None,
+        };
+        samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off });
+    }
+    samples
+}
+
 /// A source's framing (one of `fenix_config::FRAMINGS`), `None` for
 /// `guess`: `packets`, `frames` (the project's profile, with or without
 /// an FECF), `cltus`, `records` after `header` octets (`records N` as
@@ -534,16 +557,48 @@ impl App {
     pub(super) fn apply_stream_event(&mut self, event: PageEvent) {
         match event {
             PageEvent::StreamRows { buffer, rows, lost, junk, done } => {
+                // What the followed parameter needs, before the page is borrowed.
+                let follow = self.stream_page(buffer).and_then(|p| Some((p.key.clone(), p.param_def?)));
+                let follow = follow.and_then(|(key, def)| Some((self.mib_set_ready(&key)?, self.mission(key.project.as_deref()), def)));
                 let Some(p) = self.stream_page(buffer) else { return };
+                let from = p.rows.len();
                 p.rows.extend(rows);
+                let mut notice = None;
+                if let (Some((set, mission, def)), Some((name, samples))) = (&follow, &mut p.param) {
+                    let fresh = samples_of(&p.rows, from, set, mission, *def);
+                    // A live source says when the parameter crosses a limit.
+                    let mut was = samples.last().and_then(|s| s.off.clone());
+                    for s in &fresh {
+                        if s.off != was && p.live {
+                            let at = s.time.clone().unwrap_or_default();
+                            notice = Some(match &s.off {
+                                Some((why, hard)) => (format!("{}: {name} {why} -- {} at {at}", p.title, s.value), *hard),
+                                None => (format!("{}: {name} back within limits -- {} at {at}", p.title, s.value), false),
+                            });
+                        }
+                        was = s.off.clone();
+                    }
+                    samples.extend(fresh);
+                }
                 if p.rows.len() > MAX_ROWS {
                     let drop = p.rows.len() - MAX_ROWS;
                     p.rows.drain(..drop);
+                    if let Some((_, samples)) = &mut p.param {
+                        samples.retain(|s| s.row >= drop);
+                        for s in samples.iter_mut() {
+                            s.row -= drop;
+                        }
+                    }
                 }
                 p.lost.extend(lost);
                 p.junk.extend(junk);
                 p.done |= done;
                 p.arrived();
+                match notice {
+                    Some((text, true)) => self.set_error(text),
+                    Some((text, false)) => self.set_message(text),
+                    None => {}
+                }
             }
             PageEvent::StreamInfo { buffer, framing } => {
                 if let Some(p) = self.stream_page(buffer) {
@@ -642,23 +697,10 @@ impl App {
         let name = set.get(param).name.clone();
         let carriers: Vec<String> = set.used_by(param).iter().map(|d| set.get(*d).name.clone()).collect();
         let Some(p) = self.stream_page(id) else { return };
-        let mut samples = Vec::new();
-        for (i, r) in p.rows.iter().enumerate() {
-            if !r.spid.as_ref().is_some_and(|s| carriers.contains(s)) {
-                continue;
-            }
-            let Some((root, _)) = fenix_mib::packets::decode_packet(Some(&set), &r.bytes, &mission.profile, mission.base) else { continue };
-            let Some(f) = root.walk().into_iter().map(|(_, f)| f).find(|f| f.link == Some(fenix_ccsds::Link::Parameter(name.clone()))).cloned() else { continue };
-            let number = f.value.split_whitespace().next().and_then(|v| v.parse::<f64>().ok());
-            let off = match &f.check {
-                Some(Check::Warn(m)) => Some((m.clone(), false)),
-                Some(Check::Bad(m)) => Some((m.clone(), true)),
-                _ => None,
-            };
-            samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off });
-        }
+        let samples = samples_of(&p.rows, 0, &set, &mission, param);
         let n = samples.len();
         p.param = Some((name.clone(), samples));
+        p.param_def = Some(param);
         p.note = Some((format!("{name}: {n} samples in {} packets carrying it", carriers.join(", ")), n == 0));
         if let Some(p) = self.stream_page(id) {
             p.key(crate::page::Key::Char('3'));
@@ -803,6 +845,26 @@ mod tests {
         app.stream_write(id, stream_page::Write::Csv);
         let csv = std::fs::read_to_string(dir.join("run-NTH00123.csv")).unwrap();
         assert!(csv.starts_with("time,raw,value,limits\n2026-09-27 14:32:05.500,3000,\"45.0 degC\""), "{csv}");
+
+        // Live: new rows add samples, and a crossing is said in the modeline.
+        let live = app.open_page(PageModel::Stream(Box::new(StreamPage::new(key, "bench".into(), true))));
+        app.stream_follow(live, param);
+        let m = app.mission(None);
+        let with_raw = |seq: u16, raw: u16| {
+            let mut b = tm(seq);
+            b.truncate(27);
+            b[22..24].copy_from_slice(&raw.to_be_bytes());
+            let crc = fenix_ccsds::crc::ccitt16(&b);
+            b.extend(crc.to_be_bytes());
+            row_of(b, 0, None, Some(&set), &m)
+        };
+        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(1, 2000), with_raw(2, 2100)], lost: Vec::new(), junk: Vec::new(), done: false });
+        assert_eq!(app.stream_page(live).unwrap().param.as_ref().unwrap().1.len(), 2, "samples follow the rows");
+        assert!(app.status_message.as_ref().is_none_or(|s| !s.text.starts_with("bench: ")), "within: nothing said");
+        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(3, 3000)], lost: Vec::new(), junk: Vec::new(), done: false });
+        let said = app.status_message.as_ref().map(|s| s.text.clone()).unwrap_or_default();
+        assert!(said.starts_with("bench: NTH00123") && said.contains("45.0 degC"), "{said}");
+        assert_eq!(app.stream_page(live).unwrap().crossings().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
