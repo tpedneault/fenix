@@ -336,7 +336,7 @@ impl App {
         };
         let templates = self.mib_templates(&key);
         let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
-        let args = mib_form::read_arguments(&line_text, &names, &templates);
+        let args = mib_form::read_arguments(&line_text, &set.get(tc).name, &names, &templates);
         let indent = line_text.chars().take_while(|c| c.is_whitespace()).count();
         let range = line_start + indent..line_start + line_text.chars().count();
         let mut form = InsertForm::new(&set, key.clone(), tc, templates, None, self.mib_apid_hex());
@@ -518,7 +518,7 @@ impl App {
         };
         let templates = self.mib_templates(&key);
         let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
-        let args = mib_form::read_arguments(text, &names, &templates);
+        let args = mib_form::read_arguments(text, &set.get(tc).name, &names, &templates);
         let mission = self.mission(key.project.as_deref());
         let name = set.get(tc).name.clone();
         match fenix_mib::packets::encode_tc(&set, tc, &args, &mission.profile, 0) {

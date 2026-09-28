@@ -6,7 +6,9 @@
 //! run time (a variable mnemonic) isn't guessed at.
 
 use fenix_mib::telecommand;
-use fenix_mib::{Kind, MibSet};
+use std::collections::HashMap;
+
+use fenix_mib::{DefRef, Kind, MibSet};
 
 use crate::mib_form::{read_arguments, Templates};
 
@@ -66,6 +68,10 @@ fn char_col(line: &str, byte: usize) -> usize {
 pub fn check(text: &str, set: &MibSet, t: &Templates) -> Vec<Finding> {
     let Some(marker) = mnemo_marker(&t.command) else { return Vec::new() };
     let mut out = Vec::new();
+    // A script calls the same few telecommands over and over, and each
+    // one's parameters are a scan of the whole `cdf` table: once each.
+    let mut known: HashMap<DefRef, (Vec<(telecommand::TcParameter, telecommand::ParamDomain)>, bool)> = HashMap::new();
+    let mut unknown: HashMap<String, Vec<String>> = HashMap::new();
     for (ln, line) in text.lines().enumerate() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.starts_with("--") {
@@ -80,7 +86,7 @@ pub fn check(text: &str, set: &MibSet, t: &Templates) -> Vec<Finding> {
         }
         let cols = char_col(line, start)..char_col(line, start + word.len());
         let Some(tc) = set.resolve(&word).filter(|d| d.kind == Kind::Telecommand) else {
-            let near = nearest(set, &word);
+            let near = unknown.entry(word.clone()).or_insert_with(|| nearest(set, &word));
             let hint = if near.is_empty() { String::new() } else { format!(" -- did you mean {}?", near.join(" or ")) };
             out.push(Finding { line: ln, cols, severity: Severity::Error, message: format!("unknown telecommand {word}{hint}") });
             continue;
@@ -89,21 +95,30 @@ pub fn check(text: &str, set: &MibSet, t: &Templates) -> Vec<Finding> {
         if e.row.clean("CCF_CRITICAL") == "Y" {
             out.push(Finding { line: ln, cols: cols.clone(), severity: Severity::Info, message: format!("{word} is a critical telecommand") });
         }
-        let params: Vec<telecommand::TcParameter> = telecommand::tc_parameters(set.index(), &e.row).into_iter().filter(|p| !p.fixed && !p.name.is_empty()).collect();
-        let names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-        let args = read_arguments(line, &names, t);
-        let grouped = params.iter().any(|p| fenix_mib::types::parse_int(p.cdf.clean("CDF_GRPSIZE")).unwrap_or(0) > 0);
-        for p in &params {
+        let (params, grouped) = known.entry(tc).or_insert_with(|| {
+            let params: Vec<_> = telecommand::tc_parameters(set.index(), &e.row)
+                .into_iter()
+                .filter(|p| !p.fixed && !p.name.is_empty())
+                .map(|p| {
+                    let domain = telecommand::parameter_domain(set.index(), &p);
+                    (p, domain)
+                })
+                .collect();
+            let grouped = params.iter().any(|(p, _)| fenix_mib::types::parse_int(p.cdf.clean("CDF_GRPSIZE")).unwrap_or(0) > 0);
+            (params, grouped)
+        });
+        let names: Vec<String> = params.iter().map(|(p, _)| p.name.clone()).collect();
+        let args = read_arguments(line, &word, &names, t);
+        for (p, domain) in params.iter() {
             let found: Vec<&(String, String)> = args.iter().filter(|(n, _)| n == &p.name).collect();
             if found.is_empty() {
-                if !grouped {
+                if !*grouped {
                     out.push(Finding { line: ln, cols: cols.clone(), severity: Severity::Warning, message: format!("{} is missing", p.name) });
                 }
                 continue;
             }
-            let domain = telecommand::parameter_domain(set.index(), p);
             for (_, value) in found {
-                let warnings = telecommand::validate_argument(p, value, &domain);
+                let warnings = telecommand::validate_argument(p, value, domain);
                 if let Some(w) = warnings.first() {
                     let name_at = line.find(&p.name).unwrap_or(start);
                     let vat = line[name_at..].find(value.as_str()).map(|i| name_at + i).unwrap_or(name_at);
@@ -136,6 +151,20 @@ mod tests {
         assert!(!found.iter().any(|f| f.line == 2 || f.line == 5), "comments and variables are left alone: {msgs:?}");
         assert_eq!(mnemo_marker("telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]").as_deref(), Some(" MNEMO="));
         assert_eq!(mnemo_marker("{mnemo}({arguments})"), None);
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn a_template_whose_arguments_are_just_values_is_checked_by_position() {
+        // `{value}` alone used to hang the check -- and the editor with it --
+        // as soon as a script had a call in it.
+        let root = crate::mib_page::tests::fixture();
+        let set = MibSet::load(vec![root.clone()], None);
+        let t = Templates { command: "tc::send {mnemo} {arguments}".into(), argument: "{value}".into(), separator: " ".into() };
+        let found = check("tc::send ZTC08101 9 AUTO\ntc::send ZTC08101 3\n", &set, &t);
+        let msgs: Vec<(usize, &str)> = found.iter().map(|f| (f.line, f.message.as_str())).collect();
+        assert!(found.iter().any(|f| f.line == 0 && f.message.contains("'9' is outside")), "{msgs:?}");
+        assert!(found.iter().any(|f| f.line == 1 && f.message == "PTH00102 is missing"), "{msgs:?}");
         std::fs::remove_dir_all(&root.path).ok();
     }
 }
