@@ -142,7 +142,8 @@ fn samples_of(rows: &[Row], from: usize, set: &MibSet, m: &Mission, def: DefRef)
             Some(Check::Bad(m)) => Some((m.clone(), true)),
             _ => None,
         };
-        samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off });
+        let partial = matches!(&f.check, Some(Check::Ok(m)) if m.ends_with(fenix_mib::packets::NOT_HERE));
+        samples.push(Sample { row: i, time: r.time.clone(), raw: f.raw.clone(), value: f.value.clone(), number, off, partial });
     }
     samples
 }
@@ -576,7 +577,7 @@ impl App {
                     let fresh = samples_of(&p.rows, from, set, mission, *def);
                     // A live source says when the parameter crosses a limit.
                     let mut was = samples.last().and_then(|s| s.off.clone());
-                    for s in &fresh {
+                    for s in fresh.iter().filter(|s| !(s.partial && s.off.is_none())) {
                         if s.off != was && p.live {
                             let at = s.time.clone().unwrap_or_default();
                             notice = Some(match &s.off {

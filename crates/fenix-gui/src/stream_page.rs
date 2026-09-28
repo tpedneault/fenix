@@ -85,6 +85,9 @@ pub struct Sample {
     pub number: Option<f64>,
     /// `None` within limits, else the limit broken.
     pub off: Option<(String, bool)>,
+    /// Within the limits that could be checked; one that depends on a
+    /// parameter this packet doesn't carry couldn't be.
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +323,10 @@ impl StreamPage {
         let mut out = Vec::new();
         let mut was: Option<bool> = None;
         for (i, s) in self.samples_shown().iter().enumerate() {
+            // What a packet couldn't fully check says nothing new.
+            if s.partial && s.off.is_none() {
+                continue;
+            }
             let now = s.off.as_ref().map(|(_, hard)| *hard);
             if now != was {
                 let text = match (&s.off, was) {
@@ -831,6 +838,7 @@ pub fn layout(p: &StreamPage, cols: usize) -> Page {
                     g.put(y, left + 40, &fit(&s.value, 23), Role::Text);
                     match &s.off {
                         Some((why, hard)) => g.put(y, left + 64, &fit(why, width.saturating_sub(64)), if *hard { Role::Bad } else { Role::Warn }),
+                        None if s.partial => g.put(y, left + 64, "within -- not all checked here", Role::Muted),
                         None => g.put(y, left + 64, "within", Role::Good),
                     };
                     if i == sel {
@@ -919,7 +927,7 @@ mod tests {
         // 20 25 55 58 30 65 40: soft out at 55, hard at 65, back in between.
         let values = [20.0, 25.0, 55.0, 58.0, 30.0, 65.0, 40.0];
         let off = |v: f64| if v > 60.0 { Some(("hard high 60".to_string(), true)) } else if v > 50.0 { Some(("soft high 50".to_string(), false)) } else { None };
-        p.param = Some(("NTH00123".into(), values.iter().enumerate().map(|(i, &v)| Sample { row: i % 5, time: Some(format!("14:30:0{i}")), raw: format!("0x{:X}", (v * 10.0) as i64), value: format!("{v} degC"), number: Some(v), off: off(v) }).collect()));
+        p.param = Some(("NTH00123".into(), values.iter().enumerate().map(|(i, &v)| Sample { row: i % 5, time: Some(format!("14:30:0{i}")), raw: format!("0x{:X}", (v * 10.0) as i64), value: format!("{v} degC"), number: Some(v), off: off(v), partial: false }).collect()));
         p.key(Key::Char('3'));
         let c = p.crossings();
         assert_eq!(c.iter().map(|c| (c.sample, c.out)).collect::<Vec<_>>(), vec![(2, Some(false)), (4, None), (5, Some(true)), (6, None)]);
@@ -936,6 +944,16 @@ mod tests {
         assert!(layout(&p, 160).text.contains("max 65.000 · mean"));
         p.key(Key::Char('r'));
         assert!(layout(&p, 160).text.contains("max 650.000 · mean 418.571 (raw)"), "{}", layout(&p, 160).text);
+        // A sample from a packet that couldn't check every limit doesn't
+        // end a crossing.
+        if let Some((_, samples)) = &mut p.param {
+            samples[3].off = None;
+            samples[3].partial = true;
+        }
+        let c = p.crossings();
+        assert_eq!(c.iter().map(|c| (c.sample, c.out)).collect::<Vec<_>>(), vec![(2, Some(false)), (4, None), (5, Some(true)), (6, None)], "58 unknown between 55 and 30");
+        p.key(Key::Char('r'));
+        assert!(layout(&p, 160).text.contains("within -- not all checked here"));
     }
 
     #[test]
@@ -1008,7 +1026,7 @@ mod tests {
         filter(&mut p, "lost");
         assert!(p.problems().iter().any(|(t, _)| t.contains("frames lost on VC 1")));
         p.key(Key::Escape);
-        p.param = Some(("NTH00123".into(), (0..5).map(|i| Sample { row: i.min(4), time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 2).then(|| ("soft limit".to_string(), false)) }).collect()));
+        p.param = Some(("NTH00123".into(), (0..5).map(|i| Sample { row: i.min(4), time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 2).then(|| ("soft limit".to_string(), false)), partial: false }).collect()));
         p.key(Key::Char('3'));
         filter(&mut p, "limits:out -apid:0x100");
         assert_eq!(p.samples_shown().iter().map(|s| s.raw.as_str()).collect::<Vec<_>>(), ["3"], "out of limits, and not in APID 0x100's packet");
@@ -1020,7 +1038,7 @@ mod tests {
         let mut p = page();
         p.param = Some((
             "NTH00123".into(),
-            (0..10).map(|i| Sample { row: 0, time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 8).then(|| ("soft limit -10..8".to_string(), false)) }).collect(),
+            (0..10).map(|i| Sample { row: 0, time: None, raw: i.to_string(), value: format!("{i}.0 degC"), number: Some(i as f64), off: (i > 8).then(|| ("soft limit -10..8".to_string(), false)), partial: false }).collect(),
         ));
         p.key(Key::Char('3'));
         let text = layout(&p, 160).text;

@@ -238,11 +238,16 @@ pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, ba
     // the packet.
     for (i, param, y) in checks {
         let mut check = None;
+        // Limits that couldn't be checked: their parameter isn't here.
+        let mut unknown: Vec<String> = Vec::new();
         for l in detail::limits(set, param) {
             let (Some(lo), Some(hi)) = (l.low.trim().parse::<f64>().ok(), l.high.trim().parse::<f64>().ok()) else { continue };
             if let Some((p, v)) = &l.when {
                 // Skipped unless that parameter is in this packet with that value.
                 let other = children.iter().find(|c| &c.name == p).map(|c| c.raw.clone());
+                if other.is_none() && !unknown.contains(p) {
+                    unknown.push(p.clone());
+                }
                 if other.as_deref() != Some(v.trim()) {
                     continue;
                 }
@@ -254,6 +259,9 @@ pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, ba
             }
             check.get_or_insert(Check::Ok(format!("within {} {lo}..{hi}", l.kind)));
         }
+        if let (Some(Check::Ok(m)), false) = (&mut check, unknown.is_empty()) {
+            m.push_str(&format!(" -- {} {NOT_HERE}", unknown.join(", ")));
+        }
         children[i].check = check;
     }
     let mut g = Field::group(format!("SPID {} · {}", e.name, if e.alias.is_empty() { &e.description } else { &e.alias }), children);
@@ -261,6 +269,10 @@ pub fn decode_tm(set: &MibSet, spid: DefRef, pkt: &Packet, profile: &Profile, ba
     g.value = e.description.clone();
     g
 }
+
+/// Ends a limit check's message when a limit that depends on another
+/// parameter couldn't be checked: that parameter isn't in the packet.
+pub const NOT_HERE: &str = "isn't in this packet, so its limit isn't checked";
 
 /// Which telecommand a TC packet is: same type, subtype and APID, and
 /// every fixed argument where the packet has it.
@@ -563,6 +575,15 @@ pub(crate) mod tests {
         assert_eq!(check(3153, 2), Some(Check::Warn("soft limit -10..50".into())), "AUTO: the soft limit");
         assert_eq!(check(3153, 1), Some(Check::Ok("within hard -20..60".into())), "ON: only the hard one");
         assert_eq!(check(2000, 2), Some(Check::Ok("within soft -10..50".into())));
+        // The diagnostic packet (SID 2) doesn't carry NTH00201: its soft
+        // limit can't be checked there, and says so.
+        let mut diag = vec![0x0B, 0xF2, 0xC1, 0x24, 0x00, 0x1B, 0x20, 0x03, 0x19, 0x00, 0x43, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x02, 0x00];
+        diag.extend(3153u16.to_be_bytes());
+        diag.extend([0u8; 8]);
+        let crc = fenix_ccsds::crc::ccitt16(&diag);
+        diag.extend(crc.to_be_bytes());
+        let (root, _) = decode_packet(Some(&set), &diag, &Profile::default(), OffsetBase::AfterHeaders).unwrap();
+        assert_eq!(root.find("NTH00123").unwrap().check, Some(Check::Ok(format!("within hard -20..60 -- NTH00201 {NOT_HERE}"))));
     }
 
     #[test]
