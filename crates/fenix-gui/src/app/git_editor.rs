@@ -219,18 +219,36 @@ impl App {
     }
 
     /// Reads where the focused file's repository stands, off the UI
-    /// thread, for the modeline.
+    /// thread, for the modeline -- finding the repository included, which
+    /// is a walk up the folders. One read at a time: the disk poll asks
+    /// every couple of seconds, and a `git status` that takes longer than
+    /// that (a big repository, a slow disk after a wake) would otherwise
+    /// start another behind it, and another.
     pub(super) fn refresh_chrome_git(&mut self) {
         let buffer = self.focused_buffer_id();
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
             self.chrome_git = None;
             return;
         };
-        let Some(root) = repository_of(&path) else {
-            self.chrome_git = None;
+        // One that hasn't come back in minutes is stuck, not slow: it
+        // stops holding the next one up.
+        if self.chrome_git_out.as_ref().is_some_and(|(sent, done)| !done.load(Ordering::Relaxed) && sent.elapsed() < Duration::from_secs(300)) {
             return;
-        };
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        self.chrome_git_out = Some((Instant::now(), Arc::clone(&done)));
         self.page_spawn(move |send| {
+            struct Done(Arc<AtomicBool>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+            let _done = Done(done);
+            let Some(root) = repository_of(&path) else {
+                send(PageEvent::ChromeGit(None));
+                return;
+            };
             let (status, files) = fenix_git::status_and_files(&root);
             let Some(status) = status else { return };
             let state = ChromeGit {
@@ -241,7 +259,7 @@ impl App {
                 op: fenix_git::in_progress(&root).map(|op| op.label()),
                 root,
             };
-            send(PageEvent::ChromeGit(Box::new(state)));
+            send(PageEvent::ChromeGit(Some(Box::new(state))));
         });
     }
 
@@ -256,11 +274,13 @@ impl App {
         if self.fetch_attempts.get(&root).is_some_and(|t| t.elapsed() < every) {
             return;
         }
-        if fenix_git::seconds_since_fetch(&root).is_some_and(|s| s < every.as_secs()) || fenix_git::remotes(&root).is_empty() {
-            return;
-        }
         self.fetch_attempts.insert(root.clone(), Instant::now());
         self.page_spawn(move |send| {
+            // Whether it's due is asked here, not on the UI thread: it
+            // reads the repository and runs `git remote`.
+            if fenix_git::seconds_since_fetch(&root).is_some_and(|s| s < every.as_secs()) || fenix_git::remotes(&root).is_empty() {
+                return;
+            }
             let result = fenix_git::oplog::logged(&root, "fetch --all --prune (automatic)", || fenix_git::fetch(&root), |_| {
                 fenix_git::oplog::Undo::Not("a fetch only updates what Fenix knows about the remote".to_string())
             });

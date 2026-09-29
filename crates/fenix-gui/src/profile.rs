@@ -1,7 +1,9 @@
 //! Opt-in latency tracing: launch with FENIX_PROFILE=1 and capture stderr.
 use std::time::Instant;
 
-pub struct Scope(Option<(&'static str, Instant)>);
+/// A span of work: timed with FENIX_PROFILE set, and -- on the UI thread
+/// -- named in the hang log while it runs (`watchdog`).
+pub struct Scope(Option<(&'static str, Instant)>, #[allow(dead_code)] Option<crate::watchdog::Busy>);
 
 impl Scope {
     pub fn mark(&self, stage: &'static str) {
@@ -11,11 +13,11 @@ impl Scope {
     }
     pub fn new(name: &'static str) -> Self {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        Self(if *ENABLED.get_or_init(|| std::env::var_os("FENIX_PROFILE").is_some()) {
-            Some((name, Instant::now()))
-        } else {
-            None
-        })
+        let busy = crate::watchdog::enter(name);
+        Self(
+            if *ENABLED.get_or_init(|| std::env::var_os("FENIX_PROFILE").is_some()) { Some((name, Instant::now())) } else { None },
+            busy,
+        )
     }
 }
 
