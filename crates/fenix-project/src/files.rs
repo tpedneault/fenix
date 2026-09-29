@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Directories the last-resort plain walk skips outright -- there's no
 /// `.gitignore` parsing in that fallback path, so this is a small,
@@ -32,7 +31,9 @@ pub fn list_project_files_including_ignored(root: &Path) -> Vec<PathBuf> {
 }
 
 fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
-    if root.join(".git").exists() {
+    // A subproject of a monorepo is in a repository too: `git ls-files`
+    // run there lists that folder's files, relative to it.
+    if crate::vcs::repository_root(root).is_some() {
         if let Some(files) = git_ls_files(root, include_ignored) {
             return files;
         }
@@ -43,31 +44,44 @@ fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
     walk_files(root)
 }
 
+/// Paths from a helper's NUL-separated output, joined onto `root`.
+fn nul_separated(root: &Path, stdout: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(stdout).split('\0').filter(|line| !line.is_empty()).map(|line| root.join(line)).collect()
+}
+
 fn git_ls_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
-    let mut args = vec!["ls-files", "--cached", "--others"];
+    // `-z`: names as they are. Without it git quotes and escapes any
+    // path with a non-ASCII character in it, which then names no file.
+    let mut args = vec!["ls-files", "-z", "--cached", "--others"];
     if !include_ignored {
         args.push("--exclude-standard");
     }
-    let output = Command::new("git").args(&args).current_dir(root).output().ok()?;
+    let output = crate::process::quiet("git").args(&args).current_dir(root).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Some(stdout.lines().map(|line| root.join(line)).collect())
+    let mut files = nul_separated(root, &output.stdout);
+    // A conflicted file is listed once per stage, one after another.
+    files.dedup();
+    Some(files)
 }
 
 fn fd_list_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
-    let mut args = vec!["--type", "f", "--hidden", "--exclude", ".git"];
+    let mut args = vec!["--type", "f", "--hidden", "--exclude", ".git", "--print0"];
     if include_ignored {
         args.push("--no-ignore");
     }
-    let output = Command::new("fd").args(&args).current_dir(root).output().ok()?;
+    let output = crate::process::quiet("fd").args(&args).current_dir(root).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Some(stdout.lines().map(|line| root.join(line)).collect())
+    Some(nul_separated(root, &output.stdout))
 }
+
+/// How many files the plain walk lists at most. It's the fallback for a
+/// folder that is no project at all -- a home folder, a drive -- where
+/// walking everything would take minutes.
+const WALK_LIMIT: usize = 100_000;
 
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -78,6 +92,9 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
+        if out.len() >= WALK_LIMIT {
+            return;
+        }
         let name = entry.file_name();
         if WALK_IGNORE.iter().any(|ignored| name == std::ffi::OsStr::new(ignored)) {
             continue;
@@ -95,6 +112,7 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
     use crate::test_util::TempDir;
+    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git").args(args).current_dir(dir).status().expect("run git");
@@ -197,6 +215,23 @@ mod tests {
         let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
         assert!(names.contains(&"a.rs".to_string()));
         assert!(names.iter().any(|n| n.ends_with("b.rs")));
+    }
+
+    #[test]
+    fn a_non_ascii_name_and_a_subfolder_of_the_repo_are_listed_as_they_are() {
+        let dir = TempDir::new("list_project_files_unicode");
+        init_repo(dir.path());
+        dir.write("sub/café.rs", "x");
+        dir.write("top.rs", "x");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+
+        let files = list_project_files(dir.path());
+        assert!(files.iter().any(|p| p.ends_with("sub/café.rs") && p.is_file()), "{files:?}");
+
+        let sub = list_project_files(&dir.path().join("sub"));
+        assert_eq!(sub.len(), 1, "only the subfolder's own files: {sub:?}");
+        assert!(sub[0].is_file());
     }
 
     #[test]

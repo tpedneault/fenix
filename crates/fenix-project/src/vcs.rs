@@ -5,7 +5,6 @@
 //! (the hub runs them off the UI thread).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The repository `path` is in: the nearest ancestor (or `path` itself)
 /// with a `.git` -- so a subproject of a monorepo belongs to the
@@ -72,15 +71,7 @@ fn parse_status(text: &str, summary: &mut GitSummary) {
 }
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Command::new("git");
-    command.args(args).current_dir(root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let output = command.output().ok()?;
+    let output = crate::process::quiet("git").args(args).current_dir(root).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 

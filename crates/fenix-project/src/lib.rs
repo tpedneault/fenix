@@ -1,5 +1,6 @@
 mod files;
 mod grep;
+mod process;
 mod root;
 
 #[cfg(test)]

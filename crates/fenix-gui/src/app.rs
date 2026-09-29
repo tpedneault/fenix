@@ -30,6 +30,7 @@ mod which_key;
 mod mib_host;
 mod ccsds_host;
 mod stream_host;
+mod file_index;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -1932,6 +1933,10 @@ pub enum FenixUserEvent {
     /// The error is a `String`, not an `io::Error`: by the time it
     /// reaches here the only thing anyone can do with it is show it.
     ExplorerListed { target: ExplorerTarget, request: u64, result: Result<fenix_explorer::Listing, String> },
+    /// A root's files, listed for the find-file picker (`file_index`).
+    FilesListed { root: PathBuf, include_ignored: bool, files: Vec<fenix_picker::Candidate<PathBuf>> },
+    /// Home's TODO column for a project root, swept off the UI thread.
+    HomeTodos { root: PathBuf, items: Vec<dashboard::TodoItem> },
     /// The `git status` pass for a listing that already arrived -- the
     /// second half of the same background thread. Deliberately separate
     /// so badges never hold up the listing itself, which is the whole
@@ -5464,6 +5469,12 @@ pub struct App {
     /// A project workspace's Home data, by project root -- see
     /// `App::home_data_for`.
     home_project_data: HashMap<PathBuf, dashboard::HomeData>,
+    /// The find-file picker's listings, per root (`file_index`).
+    file_index: file_index::FileIndex,
+    /// Home's TODO column, per project root, as the last sweep found it,
+    /// and the roots being swept now (see `refresh_home_data`).
+    home_todos: HashMap<PathBuf, Vec<dashboard::TodoItem>>,
+    home_todos_pending: HashSet<PathBuf>,
     /// The logo lockup image and its GPU copy.
     home_logo: Option<home::HomeLogo>,
     /// An alpha-blended textured-quad pipeline for the logo -- the PDF
@@ -6590,6 +6601,9 @@ impl App {
             last_tab_click: None,
             tab_drag: None,
             home_project_data: HashMap::new(),
+            file_index: Default::default(),
+            home_todos: HashMap::new(),
+            home_todos_pending: HashSet::new(),
             home_logo: None,
             logo_pipeline: None,
             dired_states: HashMap::new(),
@@ -7430,7 +7444,17 @@ impl App {
         let path = self.open().buffer.path().map(Path::to_path_buf).or_else(|| self.page_file());
         // A page with no file of its own (a live source, a decode) keeps
         // the project it was opened in.
-        self.project_root = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.page_project());
+        // Home, and any other buffer that belongs to no project, is in
+        // its workspace's project -- `SPC SPC` from a project's Home
+        // finds that project's files, not the folder Fenix started in.
+        self.project_root = path
+            .as_deref()
+            .and_then(fenix_project::find_project_root)
+            .or_else(|| self.page_project())
+            .or_else(|| self.workspaces.active_workspace().project.clone());
+        if let Some(root) = self.project_root.clone() {
+            self.prewarm_file_index(&root);
+        }
         self.refresh_project_settings(false);
         self.mib_preload();
         self.refresh_embedded_indicator();
@@ -10917,37 +10941,12 @@ impl App {
         path.strip_prefix(root).unwrap_or(path).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
     }
 
-    fn find_file_candidates(root: &Path) -> Vec<fenix_picker::Candidate<PathBuf>> {
-        fenix_project::list_project_files(root)
-            .into_iter()
-            .map(|path| {
-                let label = Self::relative_label(root, &path);
-                fenix_picker::Candidate::new(label, path)
-            })
-            .collect()
-    }
-
     /// `SPC p f`: a fuzzy file picker scoped to the current project (or
     /// the process's cwd, if no project was detected -- still useful,
     /// just not project-scoped).
     pub(crate) fn picker_find_file(&mut self) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let candidates = Self::find_file_candidates(&root);
-        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
-    }
-
-    /// Same shape as `find_file_candidates`, backed by `fenix_project::
-    /// list_project_files_including_ignored` instead -- every file
-    /// `.gitignore` would otherwise hide (`.env`, a build artifact,
-    /// anything else) is fuzzy-findable by name here.
-    fn find_file_candidates_all(root: &Path) -> Vec<fenix_picker::Candidate<PathBuf>> {
-        fenix_project::list_project_files_including_ignored(root)
-            .into_iter()
-            .map(|path| {
-                let label = Self::relative_label(root, &path);
-                fenix_picker::Candidate::new(label, path)
-            })
-            .collect()
+        let root = self.find_file_root();
+        self.open_find_file(&root, false);
     }
 
     /// `SPC f a`: `picker_find_file`'s gitignore-blind sibling. Reuses
@@ -10955,9 +10954,8 @@ impl App {
     /// cares that the payload is a path, not how the candidate list was
     /// built.
     pub(crate) fn picker_find_file_all(&mut self) {
-        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let candidates = Self::find_file_candidates_all(&root);
-        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        let root = self.find_file_root();
+        self.open_find_file(&root, true);
     }
 
     /// `SPC f r`: a fuzzy picker over `recent_files` (already loaded,
@@ -11078,10 +11076,9 @@ impl App {
     /// `picker_find_file`, just rooted wherever the user navigated
     /// instead of the project root.
     fn start_find_from_here(&mut self, dir: &Path) {
-        let candidates = Self::find_file_candidates(dir);
         self.explorer = None;
         self.explorer_purpose = ExplorerPurpose::Browse;
-        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        self.open_find_file(dir, false);
     }
 
     /// `SPC p s`: unlike find-file/switch-project (which already have a
@@ -17524,10 +17521,7 @@ impl App {
         if let Err(err) = self.known_projects.save() {
             eprintln!("fenix: couldn't save project history: {err}");
         }
-        let candidates = Self::find_file_candidates(&root);
-        self.active_picker = Some(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
-        self.picker_scroll = 0;
-        self.main_view = MainView::Picker;
+        self.open_find_file(&root, false);
     }
 
     /// Routes one keypress to the active picker: plain characters edit
@@ -17926,12 +17920,7 @@ impl App {
     /// artifact does not exist.
     fn explorer_find_under_here(&mut self) {
         let Some(root) = self.active_explorer().map(|e| e.cwd.clone()) else { return };
-        let candidates = Self::find_file_candidates_all(&root);
-        if candidates.is_empty() {
-            self.set_message(format!("nothing under {}", readable_path(&root)));
-            return;
-        }
-        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        self.open_find_file_with(&root, true, true);
     }
 
     /// Recomputes what the current text could become. Cheap enough to
@@ -19243,6 +19232,8 @@ impl App {
             FenixUserEvent::GitRefreshReady { request_id, data } => self.apply_git_refresh(request_id, data),
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
+            FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
+            FenixUserEvent::HomeTodos { root, items } => self.apply_home_todos(root, items),
             FenixUserEvent::ExplorerGitStatus { target, request, statuses } => self.apply_explorer_git_status(target, request, statuses),
             FenixUserEvent::ExplorerShares { host, result } => self.apply_explorer_shares(host, result),
             FenixUserEvent::ExplorerJobProgress(progress) => {
@@ -20983,6 +20974,10 @@ impl App {
                 },
                 Some(ActivePicker::Embedded(_)) => match &self.embedded.picker {
                     Some(ctx) => format!("{}   {count} matches ", ctx.label),
+                    None => format!("{count} matches "),
+                },
+                Some(ActivePicker::FindFile(_)) => match self.file_listing_note() {
+                    Some(note) => format!("{count} matches   {note} "),
                     None => format!("{count} matches "),
                 },
                 _ => format!("{count} matches "),
@@ -32567,14 +32562,16 @@ configure_board stm32
     }
 
     #[test]
-    fn find_file_candidates_labels_are_relative_to_root() {
+    fn find_file_labels_are_relative_to_root() {
         let dir = TempDir::new("find_file_candidates");
         dir.touch("a.txt");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         dir.write("sub/b.txt", "hello\n");
 
-        let mut labels: Vec<String> =
-            App::find_file_candidates(dir.path()).into_iter().map(|c| c.label).collect();
+        let mut app = App::with_file(None);
+        app.open_find_file(dir.path(), false);
+        let Some(ActivePicker::FindFile(state)) = &app.active_picker else { panic!("a find-file picker") };
+        let mut labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
         labels.sort();
         assert_eq!(labels, vec!["a.txt".to_string(), "sub/b.txt".to_string()]);
     }
