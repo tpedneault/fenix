@@ -5,7 +5,12 @@
 //! see `fenix_mib::Query`), with a preview of the selected row when the
 //! pane is wide enough. `Enter` opens the definition's own page
 //! (`mib_def`), `i` the insert form for a telecommand. `!` lists what's
-//! wrong in the MIBs' files.
+//! wrong in the MIBs' files. `f` opens the filters as a form, for when
+//! you don't remember their names.
+//!
+//! `6` groups the telecommands and packets by PUS service: `]`/`[` go
+//! from one service to the next, `z` folds them to one line each -- an
+//! index to pick a service from.
 //!
 //! Pure like the other pages: the host loads the set and carries out the
 //! `Action`s.
@@ -17,7 +22,7 @@ use fenix_mib::{DefRef, Kind, MibSet, Query};
 use fenix_project::ProjectKind;
 
 use crate::mib_def;
-use crate::page::{fit, fit_tail, frame, wrap, Grid, Key, Page, Popup, Role};
+use crate::page::{edit_line, fit, fit_tail, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
 /// What the page reads besides its own state.
 pub struct Ctx<'a> {
@@ -73,6 +78,11 @@ pub struct MibPage {
     /// The services view (tab 6), and its selected definition.
     pub services: bool,
     svc_sel: usize,
+    /// The services folded to a line each, and the selected one.
+    svc_folded: bool,
+    svc_head: usize,
+    /// `f`: the filters as a form.
+    form: Option<FilterForm>,
     /// The problems list, and its selected row.
     problems: Option<usize>,
     pub note: Option<(String, bool)>,
@@ -109,21 +119,28 @@ impl MibPage {
             help: false,
             services: false,
             svc_sel: 0,
+            svc_folded: false,
+            svc_head: 0,
+            form: None,
             problems: None,
             note: None,
         }
     }
 
     pub fn typing(&self) -> bool {
-        self.searching
+        self.searching || self.form.is_some()
     }
 
     pub fn claims_space(&self) -> bool {
-        self.searching
+        self.typing()
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.searching {
+        if let Some(form) = &mut self.form {
+            let field = &mut form.fields[form.at];
+            insert_at(&mut field.value, &mut form.caret, text);
+            self.query = form.query();
+        } else if self.searching {
             self.query.extend(text.chars().filter(|c| !c.is_control()));
         }
     }
@@ -209,6 +226,10 @@ impl MibPage {
             self.help = false;
             return Action::None;
         }
+        if self.form.is_some() {
+            self.form_key(key);
+            return Action::None;
+        }
         if self.searching {
             match key {
                 Key::Escape => {
@@ -260,16 +281,39 @@ impl MibPage {
             return Action::None;
         }
         if self.services {
-            let defs: Vec<DefRef> = self.services_shown(set).into_iter().flat_map(|(_, d)| d).collect();
+            let shown = self.services_shown(set);
+            if self.svc_folded {
+                return self.folded_key(key, set, &shown);
+            }
+            let defs: Vec<DefRef> = shown.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+            let starts = service_starts(&shown);
+            let current = starts.iter().rposition(|&s| s <= self.svc_sel).unwrap_or(0);
             match key {
                 Key::Char('/') => {
                     self.searching = true;
                     self.svc_sel = 0;
                 }
+                Key::Char('f') => self.open_form(set),
                 Key::Escape if !self.query.is_empty() => {
                     self.query.clear();
                     self.svc_sel = 0;
                 }
+                Key::Char(']') => {
+                    if let Some(&next) = starts.get(current + 1) {
+                        self.svc_sel = next;
+                    }
+                }
+                Key::Char('[') => {
+                    // To the top of this service first, then the one before.
+                    let here = starts.get(current).copied().unwrap_or(0);
+                    self.svc_sel = if self.svc_sel > here { here } else { starts.get(current.saturating_sub(1)).copied().unwrap_or(0) };
+                }
+                Key::Char('z') => {
+                    self.svc_folded = true;
+                    self.svc_head = current;
+                }
+                Key::Char('d') => self.svc_sel = (self.svc_sel + 20).min(defs.len().saturating_sub(1)),
+                Key::Char('u') => self.svc_sel = self.svc_sel.saturating_sub(20),
                 Key::Char('q') | Key::Escape => return Action::Close,
                 Key::Char(c @ '1'..='5') => {
                     self.services = false;
@@ -327,6 +371,7 @@ impl MibPage {
                 self.searching = true;
                 self.sel = [0; 5];
             }
+            Key::Char('f') => self.open_form(set),
             Key::Down | Key::Char('j') => self.move_to(set, row + 1),
             Key::Up | Key::Char('k') => self.move_to(set, row - 1),
             Key::Char('d') => self.move_to(set, row + 20),
@@ -383,6 +428,79 @@ impl MibPage {
         Action::None
     }
 
+    /// A key with the services folded: one row per service.
+    fn folded_key(&mut self, key: Key, set: &MibSet, shown: &[(u8, Vec<DefRef>)]) -> Action {
+        let n = shown.len();
+        match key {
+            Key::Down | Key::Char('j') | Key::Char(']') => self.svc_head = (self.svc_head + 1).min(n.saturating_sub(1)),
+            Key::Up | Key::Char('k') | Key::Char('[') => self.svc_head = self.svc_head.saturating_sub(1),
+            Key::Char('g') => self.svc_head = 0,
+            Key::Char('G') => self.svc_head = n.saturating_sub(1),
+            // Unfolded, on the service picked.
+            Key::Enter | Key::Char('l') | Key::Char('z') => {
+                self.svc_folded = false;
+                self.svc_sel = service_starts(shown).get(self.svc_head).copied().unwrap_or(0);
+            }
+            Key::Char('/') => {
+                self.searching = true;
+                self.svc_head = 0;
+            }
+            Key::Char('f') => self.open_form(set),
+            Key::Escape if !self.query.is_empty() => {
+                self.query.clear();
+                self.svc_head = 0;
+            }
+            Key::Escape | Key::Char('q') => return Action::Close,
+            Key::Char(c @ '1'..='5') => {
+                self.services = false;
+                self.tab = Kind::ALL[c as usize - '1' as usize];
+            }
+            Key::Char('?') => self.help = true,
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// `f`: the filters for what's shown, as a form filled from the
+    /// search.
+    fn open_form(&mut self, set: &MibSet) {
+        let fields = form_fields(if self.services { None } else { Some(self.tab) }, set.roots().len() > 1);
+        self.form = Some(FilterForm::new(fields, &self.query));
+    }
+
+    /// A key in the filter form. Every change narrows the list behind it
+    /// straight away; `Esc` puts the search back as it was.
+    fn form_key(&mut self, key: Key) {
+        let Some(form) = &mut self.form else { return };
+        let n = form.fields.len();
+        match key {
+            Key::Escape => {
+                self.query = form.before.clone();
+                self.form = None;
+            }
+            Key::Enter => self.form = None,
+            Key::Tab | Key::Down => form.move_to((form.at + 1) % n),
+            Key::BackTab | Key::Up => form.move_to((form.at + n - 1) % n),
+            // Every field emptied.
+            Key::CtrlC => {
+                for field in &mut form.fields {
+                    field.value.clear();
+                }
+                form.caret = 0;
+            }
+            key => {
+                let field = &mut form.fields[form.at];
+                edit_line(&mut field.value, &mut form.caret, key);
+            }
+        }
+        if let Some(form) = &self.form {
+            self.query = form.query();
+        }
+        self.sel = [0; 5];
+        self.svc_sel = 0;
+        self.svc_head = 0;
+    }
+
     /// `Tab` in the search: completes the field name being typed.
     fn complete_field(&mut self) {
         let start = self.query.rfind(' ').map(|i| i + 1).unwrap_or(0);
@@ -422,6 +540,99 @@ pub fn services(set: &MibSet, only: Option<usize>) -> Vec<(u8, Vec<DefRef>)> {
             (s, v.into_iter().map(|x| x.3).collect())
         })
         .collect()
+}
+
+/// Where each service's rows start in the services view's list.
+fn service_starts(shown: &[(u8, Vec<DefRef>)]) -> Vec<usize> {
+    let mut at = 0;
+    shown
+        .iter()
+        .map(|(_, defs)| {
+            let start = at;
+            at += defs.len();
+            start
+        })
+        .collect()
+}
+
+/// One field of the filter form: what it's called, the filter it sets
+/// (`""`: the free words), and what's typed in it.
+struct FormField {
+    label: &'static str,
+    key: &'static str,
+    value: String,
+}
+
+/// `f`: the search's `field:value` filters as a form.
+struct FilterForm {
+    fields: Vec<FormField>,
+    at: usize,
+    caret: usize,
+    /// The search as it was, for `Esc`.
+    before: String,
+}
+
+impl FilterForm {
+    /// The form for `fields`, filled from `query`: its filters in their
+    /// fields, everything else -- words, filters the form has no field
+    /// for -- in the first one.
+    fn new(fields: Vec<(&'static str, &'static str)>, query: &str) -> Self {
+        let mut fields: Vec<FormField> = fields.into_iter().map(|(label, key)| FormField { label, key, value: String::new() }).collect();
+        let mut rest = Vec::new();
+        for token in query.split_whitespace() {
+            let field = token.split_once(':').and_then(|(k, v)| {
+                let k = k.to_ascii_lowercase();
+                let k = if k == "subtype" { "stype".to_string() } else { k };
+                fields.iter().position(|f| !f.key.is_empty() && f.key == k && !v.is_empty()).map(|i| (i, v))
+            });
+            match field {
+                Some((i, v)) => fields[i].value = v.to_string(),
+                None => rest.push(token),
+            }
+        }
+        fields[0].value = rest.join(" ");
+        // Straight on the first filter when nothing's set yet: words are
+        // what `/` is for.
+        let at = if fields.iter().any(|f| !f.value.is_empty()) { 0 } else { 1.min(fields.len() - 1) };
+        let caret = fields[at].value.chars().count();
+        FilterForm { fields, at, caret, before: query.to_string() }
+    }
+
+    fn move_to(&mut self, at: usize) {
+        self.at = at;
+        self.caret = self.fields[at].value.chars().count();
+    }
+
+    /// The search the form stands for.
+    fn query(&self) -> String {
+        let mut parts = Vec::new();
+        for field in &self.fields {
+            // A filter's value is one word: spaces typed in it are dropped.
+            let value: String = if field.key.is_empty() { field.value.trim().to_string() } else { field.value.split_whitespace().collect() };
+            if value.is_empty() {
+                continue;
+            }
+            parts.push(if field.key.is_empty() { value } else { format!("{}:{value}", field.key) });
+        }
+        parts.join(" ")
+    }
+}
+
+/// The form's fields for a tab (`None`: the services), as (label, filter).
+fn form_fields(tab: Option<Kind>, several_mibs: bool) -> Vec<(&'static str, &'static str)> {
+    let mut fields = vec![("Name or text", "")];
+    fields.extend_from_slice(match tab {
+        None => &[("Service", "type"), ("Subtype", "stype"), ("APID", "apid"), ("Subsystem", "subsys"), ("SPID", "spid")][..],
+        Some(Kind::Telecommand) => &[("Service", "type"), ("Subtype", "stype"), ("APID", "apid"), ("Subsystem", "subsys"), ("Critical", "critical")][..],
+        Some(Kind::TmPacket) => &[("Service", "type"), ("Subtype", "stype"), ("APID", "apid"), ("SPID", "spid")][..],
+        Some(Kind::TcParam) => &[("PTC", "ptc"), ("PFC", "pfc"), ("Unit", "unit"), ("Calibration", "cal")][..],
+        Some(Kind::TmParam) => &[("PTC", "ptc"), ("PFC", "pfc"), ("Unit", "unit"), ("Subsystem", "subsys"), ("Calibration", "cal")][..],
+        Some(Kind::Calibration) => &[("Kind", "cal"), ("Unit", "unit")][..],
+    });
+    if several_mibs {
+        fields.push(("MIB", "mib"));
+    }
+    fields
 }
 
 /// Compares numbers as numbers and the rest as text.
@@ -526,43 +737,7 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     y += 1;
 
     if page.services {
-        let mut k = 0;
-        let mut anchor = y;
-        for (service, defs) in &svc {
-            let name = fenix_ccsds::pus::service_name(*service).unwrap_or(if *service >= 128 { "mission specific" } else { "not a standard service" });
-            let tcs = defs.iter().filter(|d| d.kind == Kind::Telecommand).count();
-            g.heading(y, left, width, &format!("{service} · {name} · {tcs} TC · {} TM", defs.len() - tcs));
-            y += 1;
-            for d in defs {
-                let e = set.get(*d);
-                let r = &e.row;
-                let (t, st) = if d.kind == Kind::Telecommand { (r.clean("CCF_TYPE"), r.clean("CCF_STYPE")) } else { (r.clean("PID_TYPE"), r.clean("PID_STYPE")) };
-                let sub = fenix_mib::types::parse_int(st).and_then(|n| fenix_ccsds::pus::subtype_name(*service, n as u8)).unwrap_or("");
-                let mut x = g.put(y, left + 1, if d.kind == Kind::Telecommand { "TC " } else { "TM " }, kind_role()) + 1;
-                x = g.put(y, x, &format!("{:<10}", e.name), Role::Title) + 1;
-                x = g.put(y, x, &format!("{t},{st:<4}"), Role::Muted) + 1;
-                let right = if d.kind == Kind::Telecommand {
-                    let ack = fenix_mib::types::parse_int(r.clean("CCF_ACK")).unwrap_or(0) as u8;
-                    let v: Vec<String> = fenix_ccsds::pus::verification_reports(ack).iter().map(|(s, _)| format!("1,{s}")).collect();
-                    if v.is_empty() { String::new() } else { format!("verified by {}", v.join(" ")) }
-                } else {
-                    match r.clean("PID_PI1_VAL") {
-                        "" | "0" => String::new(),
-                        v => format!("PI1 {v}"),
-                    }
-                };
-                let desc = if sub.is_empty() { e.description.clone() } else { format!("{sub} -- {}", e.description) };
-                g.put(y, x, &fit(&desc, (left + width).saturating_sub(x + right.chars().count() + 2)), Role::Text);
-                g.put(y, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
-                if k == page.svc_sel {
-                    g.focus(y, left..left + width);
-                    anchor = y;
-                }
-                k += 1;
-                y += 1;
-            }
-            y += 1;
-        }
+        let anchor = if page.svc_folded { services_folded(&mut g, page, set, &svc, left, width, y) } else { services_list(&mut g, page, set, &svc, ctx, left, width, y) };
         if svc.is_empty() {
             let why = if page.query.trim().is_empty() { "No telecommands or packets with a service type." } else { "Nothing matches -- Esc clears the search." };
             g.put(y, left, why, Role::Muted);
@@ -570,7 +745,17 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
         if page.help {
             help(&mut g, anchor, left);
         }
-        g.keys(left, width, &[("1-6", "tabs"), ("j k", "move"), ("/", "search"), ("Enter", "open"), ("i", "insert"), ("m", "one MIB"), ("q", "close")]);
+        form_popup(&mut g, page, left);
+        let keys: &[(&str, &str)] = if page.form.is_some() {
+            &[("Tab", "next field"), ("Enter", "keep"), ("Ctrl-C", "clear all"), ("Esc", "cancel")]
+        } else if page.searching {
+            &[("Enter", "keep"), ("Tab", "complete field"), ("Esc", "clear")]
+        } else if page.svc_folded {
+            &[("Enter", "open the service"), ("j k", "move"), ("/", "search"), ("f", "filter"), ("z", "unfold"), ("q", "close")]
+        } else {
+            &[("] [", "next, previous service"), ("z", "fold"), ("j k", "move"), ("/", "search"), ("f", "filter"), ("Enter", "open"), ("i", "insert"), ("m", "one MIB"), ("q", "close")]
+        };
+        g.keys(left, width, keys);
         return g.finish();
     }
 
@@ -659,8 +844,9 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     if page.help {
         help(&mut g, anchor, left);
     }
+    form_popup(&mut g, page, left);
     let insert = if page.tab == Kind::Telecommand { ("i", "insert") } else { ("", "") };
-    let mut keys = vec![("1-5", "tabs"), ("/", "search"), ("Enter", "open")];
+    let mut keys = vec![("1-5", "tabs"), ("/", "search"), ("f", "filter"), ("Enter", "open")];
     if !insert.0.is_empty() {
         keys.push(insert);
     }
@@ -672,8 +858,161 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     if page.searching {
         keys = vec![("Enter", "keep"), ("Tab", "complete field"), ("Esc", "clear")];
     }
+    if page.form.is_some() {
+        keys = vec![("Tab", "next field"), ("Enter", "keep"), ("Ctrl-C", "clear all"), ("Esc", "cancel")];
+    }
     g.keys(left, width, &keys);
     g.finish()
+}
+
+/// The services, a line each: the index `z` folds them into.
+fn services_folded(g: &mut Grid, page: &MibPage, set: &MibSet, svc: &[(u8, Vec<DefRef>)], left: usize, width: usize, top: usize) -> usize {
+    let mut y = top;
+    let at = page.svc_head.min(svc.len().saturating_sub(1));
+    for (i, (service, defs)) in svc.iter().enumerate() {
+        let tcs = defs.iter().filter(|d| d.kind == Kind::Telecommand).count();
+        let x = g.put(y, left + 1, &format!("{service:>3}"), Role::Accent) + 2;
+        let x = g.put(y, x, &fit(service_label(*service), 34), Role::Title).max(left + 42);
+        let counts = format!("{tcs:>4} TC  {:>4} TM", defs.len() - tcs);
+        let x = g.put(y, x, &counts, Role::Muted) + 3;
+        // The APIDs it's on, so "which service is on this APID" reads
+        // off the index.
+        let mut apids: Vec<String> = Vec::new();
+        for d in defs {
+            let e = set.get(*d);
+            let col = if d.kind == Kind::Telecommand { "CCF_APID" } else { "PID_APID" };
+            let a = fenix_mib::types::apid(e.row.clean(col), true);
+            if !a.is_empty() && !apids.contains(&a) {
+                apids.push(a);
+            }
+        }
+        apids.sort_by(|a, b| natural(a, b));
+        let apids = match apids.len() {
+            0 => String::new(),
+            1..=6 => format!("APID {}", apids.join(" ")),
+            n => format!("APID {} … ({n})", apids[..5].join(" ")),
+        };
+        g.put(y, x, &fit(&apids, (left + width).saturating_sub(x)), Role::Muted);
+        if i == at {
+            g.focus(y, left..left + width);
+        }
+        y += 1;
+    }
+    top + at
+}
+
+/// What a service is called in the list.
+fn service_label(service: u8) -> &'static str {
+    fenix_ccsds::pus::service_name(service).unwrap_or(if service >= 128 { "mission specific" } else { "not a standard service" })
+}
+
+/// A row of the services list: a service's heading, one of its
+/// definitions (its index among all shown), or the gap after a service.
+enum SvcRow {
+    Head(u8, usize, usize),
+    Def(usize, DefRef),
+    Gap,
+}
+
+/// The services with their telecommands and packets -- only the rows
+/// around the selected one are laid out, so a MIB with thousands stays
+/// quick to move through.
+#[allow(clippy::too_many_arguments)]
+fn services_list(g: &mut Grid, page: &MibPage, set: &MibSet, svc: &[(u8, Vec<DefRef>)], ctx: &Ctx, left: usize, width: usize, top: usize) -> usize {
+    let mut rows = Vec::new();
+    let mut k = 0;
+    for (service, defs) in svc {
+        let tcs = defs.iter().filter(|d| d.kind == Kind::Telecommand).count();
+        rows.push(SvcRow::Head(*service, tcs, defs.len() - tcs));
+        for d in defs {
+            rows.push(SvcRow::Def(k, *d));
+            k += 1;
+        }
+        rows.push(SvcRow::Gap);
+    }
+    let sel = page.svc_sel.min(k.saturating_sub(1));
+    let at = rows.iter().position(|r| matches!(r, SvcRow::Def(i, _) if *i == sel)).unwrap_or(0);
+    let start = at.saturating_sub(WINDOW / 2).min(rows.len().saturating_sub(WINDOW));
+    let mut y = top;
+    if start > 0 {
+        let above = rows[..start].iter().filter(|r| matches!(r, SvcRow::Def(..))).count();
+        g.put(y, left, &format!("↑ {} more", thousands(above)), Role::Muted);
+        y += 1;
+    }
+    // Starting inside a service: its heading still comes first.
+    let open = rows[..start].iter().rposition(|r| matches!(r, SvcRow::Head(..))).filter(|_| !matches!(rows.get(start), Some(SvcRow::Head(..))));
+    let mut anchor = top;
+    let end = (start + WINDOW).min(rows.len());
+    for row in open.map(|h| &rows[h]).into_iter().chain(&rows[start..end]) {
+        match row {
+            SvcRow::Head(service, tcs, tms) => {
+                g.heading(y, left, width, &format!("{service} · {} · {tcs} TC · {tms} TM", service_label(*service)));
+            }
+            SvcRow::Gap => {}
+            SvcRow::Def(i, d) => {
+                let e = set.get(*d);
+                let r = &e.row;
+                let service = if d.kind == Kind::Telecommand { r.clean("CCF_TYPE") } else { r.clean("PID_TYPE") };
+                let (st, apid) = if d.kind == Kind::Telecommand { (r.clean("CCF_STYPE"), r.clean("CCF_APID")) } else { (r.clean("PID_STYPE"), r.clean("PID_APID")) };
+                let sub = match (fenix_mib::types::parse_int(service), fenix_mib::types::parse_int(st)) {
+                    (Some(t), Some(n)) => fenix_ccsds::pus::subtype_name(t as u8, n as u8).unwrap_or(""),
+                    _ => "",
+                };
+                let mut x = g.put(y, left + 1, if d.kind == Kind::Telecommand { "TC " } else { "TM " }, kind_role()) + 1;
+                x = g.put(y, x, &format!("{:<10}", e.name), Role::Title) + 1;
+                x = g.put(y, x, &format!("{service},{st:<4}"), Role::Muted) + 1;
+                x = g.put(y, x, &format!("{:<7}", fenix_mib::types::apid(apid, ctx.apid_hex)), Role::Muted) + 1;
+                let right = if d.kind == Kind::Telecommand {
+                    let ack = fenix_mib::types::parse_int(r.clean("CCF_ACK")).unwrap_or(0) as u8;
+                    let v: Vec<String> = fenix_ccsds::pus::verification_reports(ack).iter().map(|(s, _)| format!("1,{s}")).collect();
+                    if v.is_empty() { String::new() } else { format!("verified by {}", v.join(" ")) }
+                } else {
+                    match r.clean("PID_PI1_VAL") {
+                        "" | "0" => String::new(),
+                        v => format!("PI1 {v}"),
+                    }
+                };
+                let desc = if sub.is_empty() { e.description.clone() } else { format!("{sub} -- {}", e.description) };
+                g.put(y, x, &fit(&desc, (left + width).saturating_sub(x + right.chars().count() + 2)), Role::Text);
+                g.put(y, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
+                if *i == sel {
+                    g.focus(y, left..left + width);
+                    anchor = y;
+                }
+            }
+        }
+        y += 1;
+    }
+    let below = rows[end..].iter().filter(|r| matches!(r, SvcRow::Def(..))).count();
+    if below > 0 {
+        g.put(y, left, &format!("↓ {} more -- ] next service, z the index", thousands(below)), Role::Muted);
+    }
+    anchor
+}
+
+/// `f`'s form, floating under the search line.
+fn form_popup(g: &mut Grid, page: &MibPage, left: usize) {
+    let Some(form) = &page.form else { return };
+    let what = if page.services { "the services" } else { page.tab.plural() };
+    let mut rows = vec![vec![(format!("Filter {}", what.to_lowercase()), Role::Title)], Vec::new()];
+    for (i, field) in form.fields.iter().enumerate() {
+        let cur = i == form.at;
+        let label = (format!("{:<14}", field.label), if cur { Role::Title } else { Role::Muted });
+        let value = if cur {
+            (with_caret(&field.value, form.caret, 30), Role::Title)
+        } else if field.value.is_empty() {
+            ("any".to_string(), Role::Muted)
+        } else {
+            (fit(&field.value, 30), Role::Accent)
+        };
+        rows.push(vec![label, value]);
+    }
+    rows.push(Vec::new());
+    let query = form.query();
+    rows.push(vec![(if query.is_empty() { "/ (nothing yet)".to_string() } else { format!("/ {}", fit(&query, 44)) }, Role::Muted)]);
+    rows.push(vec![("numbers in hex or decimal: 0x3F2 is 1010".into(), Role::Muted)]);
+    rows.push(vec![("Tab next · Enter keep · Esc cancel".into(), Role::Muted)]);
+    g.popup = Some(Popup { line: 2, col: left + 2, rows });
 }
 
 fn empty(g: &mut Grid, ctx: &Ctx, left: usize, width: usize) {
@@ -726,9 +1065,9 @@ fn problems(g: &mut Grid, set: &MibSet, shown: &[&fenix_mib::Problem], at: usize
 
 fn help(g: &mut Grid, line: usize, left: usize) {
     let groups: [(&str, &[(&str, &str)]); 3] = [
-        ("Move", &[("1-5 Tab", "tabs"), ("j k g G", "rows"), ("d u", "20 rows down, up"), ("/", "search: words, field:value"), ("o", "sort by the next column"), ("m", "one MIB, all MIBs"), ("q", "close")]),
+        ("Move", &[("1-5 Tab", "tabs"), ("j k g G", "rows"), ("d u", "20 rows down, up"), ("/", "search: words, field:value"), ("f", "filter with a form"), ("o", "sort by the next column"), ("m", "one MIB, all MIBs"), ("q", "close")]),
         ("A row", &[("Enter", "open its page"), ("i", "insert the telecommand"), ("y", "copy its name"), ("p", "preview on, off")]),
-        ("The MIBs", &[("6", "by PUS service"), ("!", "problems in their files and against the standards"), ("R", "read them again"), ("a A", "this project's MIB settings, yours")]),
+        ("The MIBs", &[("6", "by PUS service"), ("] [ z", "next, previous service, index"), ("!", "problems in their files and against the standards"), ("R", "read them again"), ("a A", "this project's MIB settings, yours")]),
     ];
     let mut rows = vec![vec![("Keys".to_string(), Role::Title)]];
     for (title, keys) in groups {
@@ -862,6 +1201,91 @@ pub(crate) mod tests {
         page.key(Key::Char('1'), &c);
         assert!(!page.services);
         std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn the_filter_form_writes_the_search_and_esc_puts_it_back() {
+        let root = fixture();
+        let set = MibSet::load(vec![root.clone()], None);
+        let mut page = MibPage::new(MibKey { roots: vec![root.clone()], ..Default::default() });
+        let c = ctx(&set);
+        page.key(Key::Char('f'), &c);
+        assert!(page.typing(), "the form has the keyboard");
+        let text = layout(&page, &c, 160).all_text();
+        assert!(text.contains("Filter telecommands") && text.contains("APID"), "{text}");
+        // It opens on the first filter, Service; APID is two down.
+        page.key(Key::Tab, &c);
+        page.key(Key::Tab, &c);
+        for ch in "0x3F0".chars() {
+            page.key(Key::Char(ch), &c);
+        }
+        assert_eq!(page.hits(&set, Kind::Telecommand).len(), 1, "narrowed as it's typed");
+        page.key(Key::Enter, &c);
+        assert!(!page.typing());
+        assert_eq!(page.query, "apid:0x3F0");
+        assert_eq!(set.get(page.hits(&set, Kind::Telecommand)[0].def).name, "ZTC17001");
+
+        // Reopened, it reads the search back; Esc leaves it as it was.
+        page.key(Key::Char('f'), &c);
+        assert_eq!(page.form.as_ref().unwrap().fields[3].value, "0x3F0");
+        page.key(Key::Tab, &c);
+        page.key(Key::CtrlC, &c);
+        assert_eq!(page.hits(&set, Kind::Telecommand).len(), 2);
+        page.key(Key::Escape, &c);
+        assert_eq!(page.query, "apid:0x3F0");
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn services_are_jumped_between_and_folded_into_an_index() {
+        let root = fixture();
+        let set = MibSet::load(vec![root.clone()], None);
+        let mut page = MibPage::new(MibKey { roots: vec![root.clone()], ..Default::default() });
+        let c = ctx(&set);
+        page.key(Key::Char('6'), &c);
+        page.key(Key::Char(']'), &c);
+        let Action::Open(def) = page.key(Key::Enter, &c) else { panic!("Enter opens") };
+        assert_eq!(set.get(def).name, "ZTC17001", "] goes to the next service");
+        page.key(Key::Char('['), &c);
+        let Action::Open(def) = page.key(Key::Enter, &c) else { panic!() };
+        assert_eq!(set.get(def).name, "ZTC08101");
+
+        page.key(Key::Char('z'), &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.contains("  8  function management") && text.contains(" 17  test"), "{text}");
+        assert!(text.contains("APID 0x3F2") && !text.contains("Set heater control mode"), "one line a service: {text}");
+        page.key(Key::Char('j'), &c);
+        page.key(Key::Enter, &c);
+        let Action::Open(def) = page.key(Key::Enter, &c) else { panic!("unfolded, on the service picked") };
+        assert_eq!(set.get(def).name, "ZTC17001");
+
+        // The form on the services: one service by its number.
+        page.key(Key::Char('f'), &c);
+        for ch in "8".chars() {
+            page.key(Key::Char(ch), &c);
+        }
+        page.key(Key::Enter, &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.contains("8 · FUNCTION MANAGEMENT") && !text.contains("17 · TEST"), "{text}");
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn a_big_services_list_lays_out_only_the_rows_around_the_selection() {
+        let dir = std::env::temp_dir().join(format!("fenix-mib-page-big-{}-{}", std::process::id(), rand_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ccf: String = (0..2000).map(|i| format!("ZTC{i:05}\tCommand {i}\t\t\tN\t\t{}\t1\t{}\t0\n", 1 + i % 20, 1000 + i % 7)).collect();
+        std::fs::write(dir.join("ccf.dat"), ccf).unwrap();
+        let root = MibRoot { label: "BIG".into(), path: dir.clone() };
+        let set = MibSet::load(vec![root.clone()], None);
+        let mut page = MibPage::new(MibKey { roots: vec![root], ..Default::default() });
+        let c = ctx(&set);
+        page.key(Key::Char('6'), &c);
+        page.key(Key::Char('G'), &c);
+        let text = layout(&page, &c, 160).text;
+        assert!(text.lines().count() < WINDOW + 40, "{} lines", text.lines().count());
+        assert!(text.contains("↑ ") && text.contains("20 · "), "the last service, with what's above counted: {}", &text[..400]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

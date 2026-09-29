@@ -1,6 +1,5 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepMatch {
@@ -17,7 +16,7 @@ pub struct GrepMatch {
 /// isn't on `PATH` -- disclosed hard requirement for this one feature,
 /// per the plan's scope notes.
 pub fn grep_project(root: &Path, query: &str) -> io::Result<Vec<GrepMatch>> {
-    let output = Command::new("rg")
+    let output = crate::process::quiet("rg")
         .args(["--vimgrep", "--", query])
         .current_dir(root)
         .output()
@@ -38,7 +37,7 @@ pub fn grep_project(root: &Path, query: &str) -> io::Result<Vec<GrepMatch>> {
 /// For callers that need to look at a matching file as a whole -- to
 /// parse it, say -- rather than at individual matched lines.
 pub fn files_matching(root: &Path, pattern: &str) -> io::Result<Vec<PathBuf>> {
-    let output = Command::new("rg")
+    let output = crate::process::quiet("rg")
         .args(["--files-with-matches", "--", pattern])
         .current_dir(root)
         .output()

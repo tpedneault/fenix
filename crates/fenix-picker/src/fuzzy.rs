@@ -11,21 +11,29 @@
 /// lowercase-to-uppercase transition) -- so a query like `"fp"` ranks
 /// `foo/**p**ath` above `foopa**p**er`.
 pub fn fuzzy_match(query: &str, label: &str) -> Option<i64> {
+    let query_chars: Vec<char> = query.chars().collect();
+    fuzzy_match_chars(&query_chars, label)
+}
+
+/// `fuzzy_match` with the query already split into chars -- for a caller
+/// scoring one query against many labels, which then allocates nothing
+/// per label.
+pub fn fuzzy_match_chars(query: &[char], label: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
-    let query_chars: Vec<char> = query.chars().collect();
-    let label_chars: Vec<char> = label.chars().collect();
 
     let mut score: i64 = 0;
     let mut qi = 0;
     let mut prev_matched: Option<usize> = None;
+    let mut prev_char: Option<char> = None;
 
-    for (li, &lc) in label_chars.iter().enumerate() {
-        if qi >= query_chars.len() {
+    for (li, lc) in label.chars().enumerate() {
+        if qi >= query.len() {
             break;
         }
-        if !lc.eq_ignore_ascii_case(&query_chars[qi]) {
+        let before = prev_char.replace(lc);
+        if !lc.eq_ignore_ascii_case(&query[qi]) {
             continue;
         }
 
@@ -35,10 +43,9 @@ pub fn fuzzy_match(query: &str, label: &str) -> Option<i64> {
             None if li == 0 => score += 3,
             _ => {}
         }
-        if li > 0 {
-            let prev_char = label_chars[li - 1];
-            let separator_boundary = matches!(prev_char, '/' | '_' | '-' | '.' | ' ');
-            let camel_boundary = prev_char.is_lowercase() && lc.is_uppercase();
+        if let Some(before) = before {
+            let separator_boundary = matches!(before, '/' | '_' | '-' | '.' | ' ');
+            let camel_boundary = before.is_lowercase() && lc.is_uppercase();
             if separator_boundary || camel_boundary {
                 score += 4;
             }
@@ -47,7 +54,7 @@ pub fn fuzzy_match(query: &str, label: &str) -> Option<i64> {
         qi += 1;
     }
 
-    (qi == query_chars.len()).then_some(score)
+    (qi == query.len()).then_some(score)
 }
 
 #[cfg(test)]

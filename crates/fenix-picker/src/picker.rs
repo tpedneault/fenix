@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
-use crate::fuzzy::fuzzy_match;
+use crate::fuzzy::fuzzy_match_chars;
 
 /// One entry in a picker: `label` is what's displayed and fuzzy-matched
 /// against; `payload` is whatever the caller actually wants back when the
 /// entry is chosen (a `PathBuf` for find-file, a `GrepMatch` for search
 /// results, etc.) -- kept separate so the picker never needs to know
 /// anything about what it's picking between.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Candidate<T> {
     pub label: String,
     pub payload: T,
@@ -83,7 +83,39 @@ impl<T> PickerState<T> {
 
     pub fn push_char(&mut self, c: char) {
         self.query.push(c);
+        // Whatever matches the longer query matched the shorter one, so
+        // only the rows still shown need scoring again -- each character
+        // typed into a big list gets cheaper, not the same.
+        let query: Vec<char> = self.query.chars().collect();
+        let all = &self.all;
+        self.filtered.retain_mut(|s| match fuzzy_match_chars(&query, &all[s.index].label) {
+            Some(score) => {
+                s.score = score;
+                true
+            }
+            None => false,
+        });
+        self.sort_filtered();
+    }
+
+    /// Swaps in a fresh candidate list -- a listing that finished after
+    /// the picker opened -- keeping the query, and the selection when the
+    /// selected label is still there. Marks refer to the old list, so they go.
+    pub fn replace_candidates(&mut self, candidates: Vec<Candidate<T>>) {
+        let selected = self.selected().map(|c| c.label.clone());
+        self.all = candidates;
+        self.marks.clear();
         self.refilter();
+        if let Some(label) = selected {
+            if let Some(row) = self.filtered.iter().position(|s| self.all[s.index].label == label) {
+                self.selected = row;
+            }
+        }
+    }
+
+    /// How many candidates there are, before any filtering.
+    pub fn total(&self) -> usize {
+        self.all.len()
     }
 
     pub fn backspace(&mut self) {
@@ -101,15 +133,20 @@ impl<T> PickerState<T> {
     }
 
     fn refilter(&mut self) {
+        let query: Vec<char> = self.query.chars().collect();
         self.filtered = self
             .all
             .iter()
             .enumerate()
-            .filter_map(|(index, c)| fuzzy_match(&self.query, &c.label).map(|score| Scored { index, score }))
+            .filter_map(|(index, c)| fuzzy_match_chars(&query, &c.label).map(|score| Scored { index, score }))
             .collect();
+        self.sort_filtered();
+    }
+
+    fn sort_filtered(&mut self) {
         // Highest score first; stable tie-break by original order so
         // results don't jitter between keystrokes when scores are equal.
-        self.filtered.sort_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
+        self.filtered.sort_unstable_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
         self.selected = 0;
     }
 
@@ -303,6 +340,31 @@ mod tests {
         assert!(picker.is_marked(2));
         let marked: Vec<usize> = picker.marked().copied().collect();
         assert_eq!(marked, vec![0, 2]);
+    }
+
+    #[test]
+    fn typing_narrows_to_the_same_rows_a_fresh_filter_would() {
+        let labels = ["src/app.rs", "src/app/pages.rs", "crates/picker/src/lib.rs", "README.md", "apps/a.rs", "sap.rs"];
+        let mut typed = PickerState::new(candidates(&labels));
+        for c in "aps".chars() {
+            typed.push_char(c);
+        }
+        let mut fresh = PickerState::new(candidates(&labels));
+        fresh.set_query("aps");
+        let rows = |p: &PickerState<usize>| p.visible_rows(0, 10).map(|(_, c)| c.payload).collect::<Vec<_>>();
+        assert_eq!(rows(&typed), rows(&fresh));
+    }
+
+    #[test]
+    fn replacing_the_candidates_keeps_the_query_and_the_selected_label() {
+        let mut picker = PickerState::new(candidates(&["main.rs", "mod.rs"]));
+        picker.push_char('m');
+        picker.move_selection(1);
+        assert_eq!(picker.selected().unwrap().label, "mod.rs");
+        picker.replace_candidates(candidates(&["lib.rs", "main.rs", "mod.rs", "more.rs"]));
+        assert_eq!(picker.query(), "m");
+        assert_eq!(picker.total(), 4);
+        assert_eq!(picker.selected().unwrap().label, "mod.rs");
     }
 
     #[test]

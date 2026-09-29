@@ -1,5 +1,7 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
@@ -16,7 +18,7 @@ struct InlineGrammar {
     /// Finds every `(inline)` node in the *block* tree -- run against
     /// the block grammar/tree, not this grammar's own one; what tells
     /// `highlights_in_range` where to run the inline parse at all.
-    span_query: Query,
+    span_query: Arc<Query>,
     /// Parses each of those spans' own text with the inline grammar.
     /// `RefCell`, not a plain field: `Parser::parse` needs `&mut self`,
     /// but `highlights_in_range` only ever borrows `&self` (matching
@@ -29,7 +31,7 @@ struct InlineGrammar {
     /// screen, the same reason the per-frame cost of the outer block
     /// parse alone was never a concern either.
     parser: RefCell<Parser>,
-    query: Query,
+    query: Arc<Query>,
 }
 
 fn is_scope_node(lang: LanguageId, node: Node<'_>) -> bool {
@@ -44,17 +46,39 @@ fn is_scope_node(lang: LanguageId, node: Node<'_>) -> bool {
         }
 }
 
+/// A query compiled once per process and shared from then on. Compiling
+/// a grammar's highlights takes tens of milliseconds -- far longer than
+/// parsing a typical file -- and it's the same query every time, so a
+/// session restoring twenty buffers, or a TODO sweep reading thousands
+/// of files, pays for it once per language rather than once per file.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryKey {
+    Highlights(LanguageId),
+    MarkdownInlineSpans,
+    MarkdownInline,
+}
+
+fn compiled(key: QueryKey, language: &Language, source: &str) -> Arc<Query> {
+    static CACHE: OnceLock<Mutex<HashMap<QueryKey, Arc<Query>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(query) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Arc::clone(query);
+    }
+    // Compiled outside the lock: two threads racing on the same language
+    // both compile it, and one of the two copies is kept.
+    let query = Arc::new(Query::new(language, source).expect("bundled highlights.scm for this language failed to compile"));
+    Arc::clone(cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(query))
+}
+
 impl InlineGrammar {
     fn new(block_language: &Language) -> Self {
-        let span_query =
-            Query::new(block_language, "(inline) @inline").expect("hand-written query is valid for tree-sitter-md's own block grammar");
+        let span_query = compiled(QueryKey::MarkdownInlineSpans, block_language, "(inline) @inline");
         let inline_language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
         let mut parser = Parser::new();
         parser
             .set_language(&inline_language)
             .expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
-        let query = Query::new(&inline_language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE)
-            .expect("bundled highlights.scm for this language failed to compile");
+        let query = compiled(QueryKey::MarkdownInline, &inline_language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE);
         Self { span_query, parser: RefCell::new(parser), query }
     }
 }
@@ -87,7 +111,7 @@ pub struct SyntaxState {
     lang: LanguageId,
     parser: Parser,
     tree: Option<Tree>,
-    query: Query,
+    query: Arc<Query>,
     /// Markdown only: tree-sitter-md ships *two* grammars, one for
     /// block structure (headings, lists, code fences -- everything
     /// `query` above already covers) and a separate one for the prose
@@ -152,8 +176,7 @@ impl SyntaxState {
             .set_language(&language)
             .expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
         let tree = parser.parse(source, None);
-        let query = Query::new(&language, lang.highlights_query())
-            .expect("bundled highlights.scm for this language failed to compile");
+        let query = compiled(QueryKey::Highlights(lang), &language, lang.highlights_query());
         let inline = (lang == LanguageId::Markdown).then(|| InlineGrammar::new(&language));
         Self { lang, parser, tree, query, inline }
     }
@@ -213,6 +236,42 @@ impl SyntaxState {
             .filter_map(|(range, name)| TodoKind::from_capture_name(name).map(|kind| (range, kind)))
             .collect();
         todo::items_from_ranges(source, ranges)
+    }
+
+    /// `todo_items` for text that isn't open anywhere -- a TODO sweep of
+    /// a whole project. The same keywords in the same comments, found by
+    /// walking the parse for comment nodes instead of running the
+    /// highlight query over the whole file, which costs many times the
+    /// parse itself.
+    pub fn todo_items_of(lang: LanguageId, source: &str) -> Vec<TodoItem> {
+        let mut parser = Parser::new();
+        if parser.set_language(&lang.language()).is_err() {
+            return Vec::new();
+        }
+        let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+        let mut ranges = Vec::new();
+        let mut cursor = tree.walk();
+        loop {
+            let node = cursor.node();
+            let is_comment = node.kind().to_ascii_lowercase().contains("comment");
+            if is_comment {
+                let range = node.start_byte()..node.end_byte();
+                if let Some(text) = source.get(range.clone()) {
+                    ranges.extend(todo::find_keywords(text).into_iter().map(|(k, kind)| ((range.start + k.start)..(range.start + k.end), kind)));
+                }
+            }
+            if !is_comment && cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return todo::items_from_ranges(source, ranges);
+                }
+            }
+        }
     }
 
     /// The language this state parses.
@@ -749,6 +808,7 @@ mod tests {
         assert!(!highlights.iter().any(|(r, n)| r.start == in_string && n.starts_with("comment.todo")), "{highlights:?}");
 
         let items = state.todo_items(source);
+        assert_eq!(SyntaxState::todo_items_of(LanguageId::Rust, source), items);
         let summary: Vec<(TodoKind, usize, &str)> = items.iter().map(|i| (i.kind, i.line, i.message.as_str())).collect();
         assert_eq!(summary, vec![(TodoKind::Todo, 1, "wire up"), (TodoKind::Fix, 3, "broken")]);
     }
@@ -769,6 +829,7 @@ puts hi
             let state = SyntaxState::new(lang, source);
             let items = state.todo_items(source);
             assert_eq!(items.len(), 1, "{lang:?}: {items:?}");
+            assert_eq!(SyntaxState::todo_items_of(lang, source), items, "{lang:?}: the sweep finds the same");
             assert_eq!(items[0].kind, TodoKind::Todo);
         }
     }

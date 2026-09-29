@@ -49,6 +49,28 @@ fn age(modified: Option<std::time::SystemTime>) -> String {
 
 use fenix_project::vcs::git_branch;
 
+/// The TODO column for `root`, grouped by kind -- what a Home sweep
+/// hands back.
+fn home_todo_items(root: &Path, unsaved: &HashMap<PathBuf, String>) -> Vec<dashboard::TodoItem> {
+    super::todos::collect_todos(root, unsaved)
+        .map(|(found, _)| {
+            let mut items: Vec<dashboard::TodoItem> = found
+                .into_iter()
+                .map(|(kind, m)| dashboard::TodoItem {
+                    kind,
+                    message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
+                    file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    path: m.path,
+                    line: m.line,
+                    col: m.col,
+                })
+                .collect();
+            items.sort_by_key(|t| t.kind);
+            items
+        })
+        .unwrap_or_default()
+}
+
 fn format_elapsed(duration: chrono::Duration) -> String {
     let minutes = duration.num_minutes().max(0);
     format!("{}:{:02}", minutes / 60, minutes % 60)
@@ -62,9 +84,11 @@ impl App {
         self.buffers.open_dashboard("")
     }
 
-    /// Re-gathers everything Home shows. The project TODO scan reads
-    /// files, so it only runs when `with_todos` (Home opening, the window
-    /// regaining focus); the minute tick keeps the last scan.
+    /// Re-gathers everything Home shows. The project TODO sweep reads
+    /// files, so it only runs when `with_todos` (Home opening, a session
+    /// restored), and on another thread: Home shows the last sweep's
+    /// TODOs until the new one lands (`apply_home_todos`). The minute
+    /// tick keeps the last sweep.
     pub(super) fn refresh_home_data(&mut self, with_todos: bool) {
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
@@ -128,25 +152,24 @@ impl App {
             })
             .collect();
 
-        let todos = if with_todos {
-            let root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
-            root.map(|root| self.home_todos(&root)).unwrap_or_default()
-        } else {
-            self.home_data.todos.clone()
-        };
+        let todo_root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
+        let scoped_roots = self.home_projects();
+        if with_todos {
+            for root in todo_root.iter().chain(&scoped_roots) {
+                self.request_home_todos(root);
+            }
+        }
+        let todos = todo_root.and_then(|root| self.home_todos.get(&root).cloned()).unwrap_or_default();
 
         let date = now.format("%A %-d %B · %H:%M").to_string();
         let recovery = self.unclaimed_snapshot_names().len();
         // A project workspace's Home: the same page, narrowed to the
         // project's own files and TODOs, and named after it.
         let mut scoped = HashMap::new();
-        for root in self.home_projects() {
+        for root in scoped_roots {
             let (resume, recent) = self.home_recent_files(Some(&root));
             let reading = self.home_reading(Some(&root));
-            let todos = match self.home_project_data.get(&root) {
-                Some(previous) if !with_todos => previous.todos.clone(),
-                _ => self.home_todos(&root),
-            };
+            let todos = self.home_todos.get(&root).cloned().unwrap_or_default();
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
             let data = HomeData {
                 date: format!("{name} · {date}"),
@@ -233,25 +256,41 @@ impl App {
         (resume, recent)
     }
 
-    /// The TODO column for `root`, grouped by kind.
-    fn home_todos(&self, root: &Path) -> Vec<dashboard::TodoItem> {
-        self.collect_project_todos(root)
-            .map(|(found, _)| {
-                let mut items: Vec<dashboard::TodoItem> = found
-                    .into_iter()
-                    .map(|(kind, m)| dashboard::TodoItem {
-                        kind,
-                        message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
-                        file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                        path: m.path,
-                        line: m.line,
-                        col: m.col,
-                    })
-                    .collect();
-                items.sort_by_key(|t| t.kind);
-                items
-            })
-            .unwrap_or_default()
+    /// Sweeps `root` for Home's TODO column on another thread, unless a
+    /// sweep of it is already under way. With no event loop (tests) it
+    /// sweeps inline.
+    fn request_home_todos(&mut self, root: &Path) {
+        if !self.home_todos_pending.insert(root.to_path_buf()) {
+            return;
+        }
+        let unsaved = self.unsaved_texts_under(root);
+        let root = root.to_path_buf();
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                let _ = std::thread::Builder::new().name("fenix-home-todos".into()).spawn(move || {
+                    let items = home_todo_items(&root, &unsaved);
+                    let _ = proxy.send_event(FenixUserEvent::HomeTodos { root, items });
+                });
+            }
+            None => {
+                let items = home_todo_items(&root, &unsaved);
+                self.home_todos_pending.remove(&root);
+                self.home_todos.insert(root, items);
+            }
+        }
+    }
+
+    /// A sweep landed: Home shows it.
+    pub(super) fn apply_home_todos(&mut self, root: PathBuf, items: Vec<dashboard::TodoItem>) {
+        self.home_todos_pending.remove(&root);
+        if self.home_todos.get(&root) == Some(&items) {
+            return;
+        }
+        self.home_todos.insert(root, items);
+        self.refresh_home_data(false);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// The minute tick: the clock and a running timer move on even when

@@ -18,7 +18,7 @@ pub(super) fn scan_todos(language: Option<LanguageId>, text: &str) -> Vec<TodoIt
     match language {
         Some(LanguageId::Json) => Vec::new(),
         Some(LanguageId::Markdown) | None => fenix_syntax::todo::find_in_plain_text(text),
-        Some(language) => fenix_syntax::SyntaxState::new(language, text).todo_items(text),
+        Some(language) => fenix_syntax::SyntaxState::todo_items_of(language, text),
     }
 }
 
@@ -153,31 +153,54 @@ impl App {
     /// "KIND message"), and how many files they're in -- what `SPC s T`
     /// lists and Home counts. `rg` narrows the tree to candidate files;
     /// each is then read properly (see `picker_project_todos`).
-    pub(super) fn collect_project_todos(&self, root: &Path) -> std::io::Result<(Vec<(TodoKind, fenix_project::GrepMatch)>, usize)> {
-        let files = fenix_project::files_matching(root, fenix_syntax::todo::TODO_SEARCH_PATTERN)?;
-        let mut matches: Vec<(TodoKind, fenix_project::GrepMatch)> = Vec::new();
-        let mut files_with_todos = 0;
-        for path in files {
-            let text = match self.buffers.id_for_path(&path).and_then(|id| self.buffers.get(id)) {
-                Some(ob) => ob.buffer.text(),
-                None => match std::fs::read_to_string(&path) {
-                    Ok(text) => text,
-                    // Not UTF-8 (a binary rg decided to search anyway) or
-                    // gone since the search: nothing to list.
-                    Err(_) => continue,
-                },
-            };
-            let items = scan_todos(fenix_syntax::detect_language_from_path(&path), &text);
-            if !items.is_empty() {
-                files_with_todos += 1;
-            }
-            for item in items {
-                let text = format!("{} {}", item.kind.label(), item.message);
-                matches.push((item.kind, fenix_project::GrepMatch { path: path.clone(), line: item.line + 1, col: item.col + 1, text }));
-            }
-        }
-        Ok((matches, files_with_todos))
+    pub(super) fn collect_project_todos(&self, root: &Path) -> std::io::Result<ProjectTodos> {
+        collect_todos(root, &self.unsaved_texts_under(root))
     }
+
+    /// The text of every open buffer under `root` with unsaved edits --
+    /// what a TODO sweep reads instead of the file on disk.
+    pub(super) fn unsaved_texts_under(&self, root: &Path) -> HashMap<PathBuf, String> {
+        self.buffers
+            .mru()
+            .iter()
+            .filter_map(|&id| self.buffers.get(id))
+            .filter(|ob| ob.buffer.is_dirty())
+            .filter_map(|ob| Some((ob.buffer.path()?.to_path_buf(), ob.buffer.text())))
+            .filter(|(path, _)| path.starts_with(root))
+            .collect()
+    }
+}
+
+/// Every TODO found under `root`, and how many files they're in.
+pub(super) type ProjectTodos = (Vec<(TodoKind, fenix_project::GrepMatch)>, usize);
+
+/// `App::collect_project_todos`, with the open buffers' unsaved text
+/// handed over -- so it can run on another thread (Home's sweep does).
+pub(super) fn collect_todos(root: &Path, unsaved: &HashMap<PathBuf, String>) -> std::io::Result<ProjectTodos> {
+    let _profile = crate::profile::Scope::new("collect project TODOs");
+    let files = fenix_project::files_matching(root, fenix_syntax::todo::TODO_SEARCH_PATTERN)?;
+    let mut matches: Vec<(TodoKind, fenix_project::GrepMatch)> = Vec::new();
+    let mut files_with_todos = 0;
+    for path in files {
+        let text = match unsaved.get(&path) {
+            Some(text) => text.clone(),
+            None => match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                // Not UTF-8 (a binary rg decided to search anyway) or
+                // gone since the search: nothing to list.
+                Err(_) => continue,
+            },
+        };
+        let items = scan_todos(fenix_syntax::detect_language_from_path(&path), &text);
+        if !items.is_empty() {
+            files_with_todos += 1;
+        }
+        for item in items {
+            let text = format!("{} {}", item.kind.label(), item.message);
+            matches.push((item.kind, fenix_project::GrepMatch { path: path.clone(), line: item.line + 1, col: item.col + 1, text }));
+        }
+    }
+    Ok((matches, files_with_todos))
 }
 
 #[cfg(test)]
