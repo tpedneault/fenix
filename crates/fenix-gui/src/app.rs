@@ -3941,9 +3941,20 @@ fn reindent_skip_ranges(language: Option<fenix_syntax::LanguageId>, source: &str
 fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str> {
     use fenix_syntax::LanguageId;
     match language {
-        LanguageId::Rust | LanguageId::C | LanguageId::Cpp | LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some("//"),
+        LanguageId::Rust
+        | LanguageId::C
+        | LanguageId::Cpp
+        | LanguageId::JavaScript
+        | LanguageId::TypeScript
+        | LanguageId::Tsx
+        | LanguageId::Go
+        | LanguageId::Java
+        | LanguageId::CSharp => Some("//"),
         LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
-        LanguageId::Json | LanguageId::Markdown | LanguageId::Batch | LanguageId::Xml | LanguageId::Dtd => None,
+        LanguageId::Sql | LanguageId::Lua => Some("--"),
+        // CSS has only `/* */`, HTML only `<!-- -->` (see
+        // `block_comment_tokens`).
+        LanguageId::Json | LanguageId::Markdown | LanguageId::Batch | LanguageId::Xml | LanguageId::Dtd | LanguageId::Html | LanguageId::Css => None,
     }
 }
 
@@ -3954,7 +3965,8 @@ fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str
 fn block_comment_tokens(language: fenix_syntax::LanguageId) -> Option<(&'static str, &'static str)> {
     use fenix_syntax::LanguageId;
     match language {
-        LanguageId::Xml | LanguageId::Dtd | LanguageId::Markdown => Some(("<!--", "-->")),
+        LanguageId::Xml | LanguageId::Dtd | LanguageId::Markdown | LanguageId::Html => Some(("<!--", "-->")),
+        LanguageId::Css => Some(("/*", "*/")),
         _ => None,
     }
 }

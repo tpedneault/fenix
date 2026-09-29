@@ -80,6 +80,10 @@ pub fn default_server_command(language: LanguageId) -> Option<(String, Vec<Strin
         LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
             Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]))
         }
+        // gopls and lua-language-server speak LSP over stdio with no
+        // arguments, as rust-analyzer does.
+        LanguageId::Go => Some(("gopls".to_string(), Vec::new())),
+        LanguageId::Lua => Some(("lua-language-server".to_string(), Vec::new())),
         _ => None,
     }
 }
@@ -102,6 +106,7 @@ pub fn language_config_name(language: LanguageId) -> String {
         LanguageId::JavaScript => "javascript".to_string(),
         LanguageId::TypeScript => "typescript".to_string(),
         LanguageId::Tsx => "tsx".to_string(),
+        LanguageId::CSharp => "csharp".to_string(),
         other => format!("{other:?}").to_lowercase(),
     }
 }

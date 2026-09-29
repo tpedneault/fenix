@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Highlighting for Go, Java, C#, Lua, SQL, HTML and CSS, with comment
+  toggling and TODOs; `gopls` and `lua-language-server` as the default
+  language servers for Go and Lua.
 - Motion and polish: a launch splash, a key menu that opens after a
   pause on `SPC`, `g`, `z`, `]`, `[` or `SPC m`, animations that show
   what changed (jumps, undo, popups, modeline messages, mode colour,
