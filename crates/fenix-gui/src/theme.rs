@@ -196,15 +196,22 @@ impl Theme {
             // it's not guaranteed which of the two wins the overlap
             // resolution, so both need a real mapping. Same for "spell",
             // which it pairs with "comment".
-            "keyword" | "repeat" | "conditional" => self.syntax_keyword,
+            "keyword" | "repeat" | "conditional" | "storageclass" | "include" => self.syntax_keyword,
+            // Preprocessor lines (C#'s `#region`, `#if`) read as
+            // annotations, like an attribute.
+            "preproc" => self.syntax_attribute,
             "string" => self.syntax_string,
             "escape" => self.syntax_string,
             "comment" | "spell" => self.syntax_comment,
-            "function" => self.syntax_function,
-            "type" => self.syntax_type,
-            "number" => self.syntax_number,
+            "function" | "method" => self.syntax_function,
+            // A namespace or module (C#'s `using`, Lua's `require`d
+            // names) reads as a type does.
+            "type" | "namespace" | "module" => self.syntax_type,
+            "number" | "float" => self.syntax_number,
             "constant" | "boolean" => self.syntax_constant,
-            "variable" | "property" | "label" => self.syntax_variable,
+            // `field`/`parameter`: Go's, Java's and Lua's names for
+            // struct fields and function parameters.
+            "variable" | "property" | "label" | "field" | "parameter" => self.syntax_variable,
             "operator" => self.syntax_operator,
             "punctuation" => self.syntax_punctuation,
             "attribute" | "constructor" => self.syntax_attribute,
@@ -949,6 +956,18 @@ mod tests {
         assert_eq!(ORBIT_DARK.syntax_color("function.method"), ORBIT_DARK.syntax_function);
         assert_eq!(ORBIT_DARK.syntax_color("constant.builtin"), ORBIT_DARK.syntax_constant);
         assert_eq!(ORBIT_DARK.syntax_color("punctuation.bracket"), ORBIT_DARK.syntax_punctuation);
+    }
+
+    #[test]
+    fn the_newer_grammars_capture_names_get_real_colors() {
+        let t = &ORBIT_DARK;
+        assert_eq!(t.syntax_color("field"), t.syntax_variable);
+        assert_eq!(t.syntax_color("parameter"), t.syntax_variable);
+        assert_eq!(t.syntax_color("method.call"), t.syntax_function);
+        assert_eq!(t.syntax_color("float"), t.syntax_number);
+        assert_eq!(t.syntax_color("namespace"), t.syntax_type);
+        assert_eq!(t.syntax_color("storageclass"), t.syntax_keyword);
+        assert_eq!(t.syntax_color("preproc"), t.syntax_attribute);
     }
 
     #[test]

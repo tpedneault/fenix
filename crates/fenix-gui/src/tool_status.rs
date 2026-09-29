@@ -42,7 +42,18 @@ pub struct ToolEntry {
 /// gap" posture `dap::default_adapter_command`'s own doc comment
 /// already takes for languages beyond Python.
 const KNOWN_LANGUAGES: &[LanguageId] =
-    &[LanguageId::Python, LanguageId::Rust, LanguageId::C, LanguageId::Cpp, LanguageId::Bash, LanguageId::JavaScript, LanguageId::TypeScript, LanguageId::Tsx];
+    &[
+        LanguageId::Python,
+        LanguageId::Rust,
+        LanguageId::C,
+        LanguageId::Cpp,
+        LanguageId::Bash,
+        LanguageId::JavaScript,
+        LanguageId::TypeScript,
+        LanguageId::Tsx,
+        LanguageId::Go,
+        LanguageId::Lua,
+    ];
 
 /// The one-line command that installs `command` for `language` -- shown
 /// only when `command` isn't found on `PATH`. Keyed by the *command

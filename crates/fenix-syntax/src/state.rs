@@ -749,6 +749,32 @@ mod tests {
         smoke_test(LanguageId::Bash, "echo \"hello\"\n");
     }
 
+    /// Each newer grammar: its query compiles against the bundled
+    /// tree-sitter, a keyword, a string and a comment come out as such,
+    /// and a TODO in the comment is found.
+    #[test]
+    fn the_newer_grammars_highlight_keywords_strings_and_comments() {
+        for (lang, source, keyword) in [
+            (LanguageId::Go, "package main\n// TODO: go\nfunc main() { println(\"hi\") }\n", "func"),
+            (LanguageId::Java, "// TODO: java\nclass A { String s = \"hi\"; }\n", "class"),
+            (LanguageId::CSharp, "// TODO: cs\nclass A { string s = \"hi\"; }\n", "class"),
+            (LanguageId::Lua, "-- TODO: lua\nlocal s = \"hi\"\n", "local"),
+            (LanguageId::Sql, "-- TODO: sql\nSELECT 'hi' FROM t;\n", "SELECT"),
+            (LanguageId::Css, "/* TODO: css */\na { color: red; }\n@media print { a { content: \"hi\"; } }\n", "@media"),
+            (LanguageId::Html, "<!-- TODO: html -->\n<p class=\"hi\">text</p>\n", "p"),
+        ] {
+            let state = SyntaxState::new(lang, source);
+            let highlights = state.highlights_in_range(source, 0..source.len());
+            let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
+            assert!(name_of(keyword).is_some_and(|n| n.starts_with("keyword") || n == "tag"), "{lang:?}: {keyword} -> {:?}", name_of(keyword));
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("string")), "{lang:?}: a string: {highlights:?}");
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("comment")), "{lang:?}: a comment: {highlights:?}");
+            let todos = state.todo_items(source);
+            assert_eq!(todos.len(), 1, "{lang:?}: {todos:?}");
+            assert_eq!(SyntaxState::todo_items_of(lang, source), todos, "{lang:?}: the sweep finds the same");
+        }
+    }
+
     #[test]
     fn tcl_highlights_something() {
         smoke_test(LanguageId::Tcl, "proc greet {name} {\n    puts \"hello $name\"\n}\n");

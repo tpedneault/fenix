@@ -46,6 +46,15 @@ pub enum LanguageId {
     /// `<!DOCTYPE [...]>` subset is already covered by the XML grammar
     /// itself.
     Dtd,
+    Go,
+    Java,
+    CSharp,
+    /// The markup only: a `<script>` or `<style>` block's contents aren't
+    /// highlighted as JavaScript or CSS (no injections, as for Markdown).
+    Html,
+    Css,
+    Sql,
+    Lua,
 }
 
 /// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
@@ -76,6 +85,13 @@ impl LanguageId {
             LanguageId::Batch => tree_sitter_batch::LANGUAGE.into(),
             LanguageId::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
             LanguageId::Dtd => tree_sitter_xml::LANGUAGE_DTD.into(),
+            LanguageId::Go => tree_sitter_go::LANGUAGE.into(),
+            LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
+            LanguageId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            LanguageId::Html => tree_sitter_html::LANGUAGE.into(),
+            LanguageId::Css => tree_sitter_css::LANGUAGE.into(),
+            LanguageId::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            LanguageId::Lua => tree_sitter_lua::LANGUAGE.into(),
         }
     }
 
@@ -97,6 +113,13 @@ impl LanguageId {
             LanguageId::Batch => tree_sitter_batch::HIGHLIGHTS_QUERY,
             LanguageId::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY,
             LanguageId::Dtd => tree_sitter_xml::DTD_HIGHLIGHT_QUERY,
+            LanguageId::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
+            LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
+            LanguageId::CSharp => tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+            LanguageId::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
+            LanguageId::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+            LanguageId::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
+            LanguageId::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -134,6 +157,13 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         | "gml" | "graphml" | "xliff" | "xlf" | "tmx" | "dita" | "ditamap" | "xmi" | "bpmn" | "dae" | "fxml" | "mxml"
         | "jrxml" | "urdf" | "launch" | "storyboard" | "xib" => Some(LanguageId::Xml),
         "dtd" | "ent" => Some(LanguageId::Dtd),
+        "go" => Some(LanguageId::Go),
+        "java" => Some(LanguageId::Java),
+        "cs" | "csx" => Some(LanguageId::CSharp),
+        "html" | "htm" => Some(LanguageId::Html),
+        "css" => Some(LanguageId::Css),
+        "sql" => Some(LanguageId::Sql),
+        "lua" => Some(LanguageId::Lua),
         _ => None,
     }
 }
@@ -164,6 +194,22 @@ pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_the_newer_languages_by_extension() {
+        for (ext, lang) in [
+            ("go", LanguageId::Go),
+            ("java", LanguageId::Java),
+            ("cs", LanguageId::CSharp),
+            ("html", LanguageId::Html),
+            ("htm", LanguageId::Html),
+            ("css", LanguageId::Css),
+            ("sql", LanguageId::Sql),
+            ("lua", LanguageId::Lua),
+        ] {
+            assert_eq!(detect_language(ext), Some(lang), "{ext}");
+        }
+    }
 
     #[test]
     fn detects_rust_by_extension() {

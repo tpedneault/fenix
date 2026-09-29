@@ -88,8 +88,10 @@ Everything Fenix does, by area. For the keys, see
   to the first error (saving a malformed XML file also says so); `SPC c
   y` copies the element's XPath (`/project/dependencies/dependency[2]`).
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
-  YAML, Python, JavaScript/TypeScript/TSX, C, C++, Bash, Tcl, Dockerfile/
-  Containerfile, Batch (`.bat`/`.cmd`), XML, and DTD. Docker Compose files already
+  YAML, Python, JavaScript/TypeScript/TSX, C, C++, C#, Go, Java, Lua, SQL,
+  HTML, CSS, Bash, Tcl, Dockerfile/Containerfile, Batch (`.bat`/`.cmd`),
+  XML, and DTD. HTML is highlighted as markup only: a `<script>` or
+  `<style>` block's contents aren't read as JavaScript or CSS. Docker Compose files already
   get full highlighting for free via the existing YAML support -- no
   separate grammar needed. `Dockerfile`/`Containerfile` are detected by
   filename (they conventionally have no extension), including per-stage
@@ -916,8 +918,10 @@ Everything Fenix does, by area. For the keys, see
   ([`rust-analyzer`](https://rust-analyzer.github.io/)), C/C++
   ([`clangd`](https://clangd.llvm.org/)), Bash
   ([`bash-language-server`](https://github.com/bash-lsp/bash-language-server)),
-  and JavaScript/TypeScript/TSX
-  ([`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)) --
+  JavaScript/TypeScript/TSX
+  ([`typescript-language-server`](https://github.com/typescript-language-server/typescript-language-server)),
+  Go ([`gopls`](https://pkg.go.dev/golang.org/x/tools/gopls)) and Lua
+  ([`lua-language-server`](https://github.com/LuaLS/lua-language-server)) --
   anything else (or an override for one of these) via a `[lsp]` command
   you configure -- see [Configuration](CONFIGURATION.md). A Python server
   is pointed at the project's environment (uv's `.venv`, Poetry's, a
