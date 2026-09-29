@@ -49,6 +49,39 @@ fn age(modified: Option<std::time::SystemTime>) -> String {
 
 use fenix_project::vcs::git_branch;
 
+/// What Home knows of one recent file, looked at off the UI thread
+/// (`probe_recent`): whether it's still there, when it last changed, and
+/// the project it's in with that project's branch.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecentSeen {
+    is_file: bool,
+    modified: Option<std::time::SystemTime>,
+    project: Option<(String, Option<String>)>,
+}
+
+/// How long what Home saw of the recent files is used before they're
+/// looked at again.
+const RECENT_FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// Each of `paths`, looked at -- except those on a volume that isn't
+/// answering (see `disk_probe::stat`), which are left out.
+fn probe_recent(paths: Vec<PathBuf>) -> HashMap<PathBuf, RecentSeen> {
+    let _profile = crate::profile::Scope::new("probe recent files");
+    let mut seen = HashMap::new();
+    for path in paths {
+        let Some(meta) = super::disk_probe::stat(&path) else { continue };
+        let meta = meta.ok().filter(|m| m.is_file());
+        let project = meta.as_ref().and_then(|_| {
+            let root = fenix_project::find_project_root(&path)?;
+            let name = root.file_name()?.to_string_lossy().into_owned();
+            Some((name, git_branch(&root)))
+        });
+        let entry = RecentSeen { is_file: meta.is_some(), modified: meta.and_then(|m| m.modified().ok()), project };
+        seen.insert(path, entry);
+    }
+    seen
+}
+
 /// The TODO column for `root`, grouped by kind -- what a Home sweep
 /// hands back.
 fn home_todo_items(root: &Path, unsaved: &HashMap<PathBuf, String>) -> Vec<dashboard::TodoItem> {
@@ -90,6 +123,7 @@ impl App {
     /// TODOs until the new one lands (`apply_home_todos`). The minute
     /// tick keeps the last sweep.
     pub(super) fn refresh_home_data(&mut self, with_todos: bool) {
+        self.request_recent_probe();
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
         let reading = self.home_reading(None);
@@ -198,13 +232,57 @@ impl App {
         self.home_project_of(id).and_then(|root| self.home_project_data.get(&root)).unwrap_or(&self.home_data)
     }
 
+    /// Looks at the recent files again, on another thread, when what
+    /// Home saw of them is getting old. Checking them on the UI thread
+    /// froze the window for as long as a share took to answer -- twenty
+    /// seconds a file for one whose server was gone.
+    fn request_recent_probe(&mut self) {
+        let fresh = self.recent_probed.is_some_and(|at| at.elapsed() < RECENT_FRESH_FOR);
+        let out = self.recent_probe_out.is_some_and(|at| at.elapsed() < Duration::from_secs(300));
+        let paths: Vec<PathBuf> = self.recent_files.paths().to_vec();
+        match self.event_proxy.clone() {
+            Some(_) if fresh || out => {}
+            Some(proxy) => {
+                self.recent_probe_out = Some(Instant::now());
+                let _ = std::thread::Builder::new().name("fenix-recent-files".into()).spawn(move || {
+                    let _ = proxy.send_event(FenixUserEvent::RecentProbed(probe_recent(paths)));
+                });
+            }
+            // No event loop (every test): looked at every time, inline.
+            None => {
+                self.recent_seen = probe_recent(paths);
+                self.recent_probed = Some(Instant::now());
+            }
+        }
+    }
+
+    /// What the recent files looked like landed: Home is laid out again.
+    pub(super) fn apply_recent_probed(&mut self, seen: HashMap<PathBuf, RecentSeen>) {
+        self.recent_seen = seen;
+        self.recent_probed = Some(Instant::now());
+        self.recent_probe_out = None;
+        self.refresh_home_data(false);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Whether recent file `path` is shown: it's still there, as last
+    /// looked. Before the first look, every one is.
+    fn recent_shown(&self, path: &Path) -> bool {
+        match self.recent_seen.get(path) {
+            Some(seen) => seen.is_file,
+            None => self.recent_probed.is_none(),
+        }
+    }
+
     /// PDFs read lately, with where you were in each -- Home's Reading.
     fn home_reading(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
         self.recent_files
             .paths()
             .iter()
-            .filter(|p| Self::looks_like_pdf(p) && p.is_file() && under(p))
+            .filter(|p| Self::looks_like_pdf(p) && self.recent_shown(p) && under(p))
             .take(3)
             .map(|path| {
                 let place = self.pdf_places.get(path).or_else(|| self.pdf_places.get(&fenix_project::plain_path(path.clone())));
@@ -225,12 +303,9 @@ impl App {
         // roots normalized, so both are compared normalized.
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
         // PDFs have their own section, `home_reading`.
-        let mut recent_files = self.recent_files.paths().iter().filter(|p| p.is_file() && under(p) && !Self::looks_like_pdf(p));
-        let project_of = |path: &Path| -> Option<(String, Option<String>)> {
-            let root = fenix_project::find_project_root(path)?;
-            let name = root.file_name()?.to_string_lossy().into_owned();
-            Some((name, git_branch(&root)))
-        };
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| self.recent_shown(p) && under(p) && !Self::looks_like_pdf(p));
+        let project_of = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.project.clone());
+        let modified = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.modified);
         let resume = recent_files.next().map(|path| {
             let detail = match project_of(path) {
                 Some((name, Some(branch))) => format!("{name} · {branch}"),
@@ -241,7 +316,7 @@ impl App {
                 path: path.clone(),
                 name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 detail,
-                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
+                age: age(modified(path)),
             }
         });
         let recent = recent_files
@@ -250,7 +325,7 @@ impl App {
                 path: path.clone(),
                 name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 detail: String::new(),
-                age: age(std::fs::metadata(path).and_then(|m| m.modified()).ok()),
+                age: age(modified(path)),
             })
             .collect();
         (resume, recent)

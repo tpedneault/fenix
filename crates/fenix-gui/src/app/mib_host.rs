@@ -122,7 +122,7 @@ impl App {
 
     /// Reads `key`'s MIBs off the UI thread; what was read before stays
     /// in use until the new set arrives.
-    fn mib_load(&mut self, key: MibKey) {
+    pub(super) fn mib_load(&mut self, key: MibKey) {
         let slot = self.mib_sets.entry(key.clone()).or_insert(MibSlot { set: None, loading: false });
         if slot.loading {
             return;

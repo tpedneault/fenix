@@ -355,11 +355,13 @@ impl App {
     /// open.
     pub(super) fn git_page_refresh(&mut self, id: BufferId) {
         let Some(root) = self.git_page(id).map(|g| g.root.clone()) else { return };
-        let base = self.base_branch_for(&root);
+        let fallback = self.config.git_base_branch.clone();
         let Some(g) = self.git_page(id) else { return };
         g.loading = true;
         let expanded = g.expanded_files();
         self.page_spawn(move |send| {
+            // The project's settings are read here, not on the UI thread.
+            let base = super::settings_host::base_branch_in(&root, fallback);
             let snapshot = read_snapshot(&root, base.as_deref());
             send(PageEvent::GitSnapshot { buffer: id, snapshot: Box::new(snapshot) });
             for (section, path) in expanded {

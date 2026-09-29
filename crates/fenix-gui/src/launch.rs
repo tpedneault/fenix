@@ -108,6 +108,7 @@ impl Launcher {
     /// The slow part, behind the splash: the editor itself.
     fn load(&mut self, event_loop: &ActiveEventLoop) {
         let State::Showing(showing) = std::mem::replace(&mut self.state, State::Moving) else { return };
+        let _busy = crate::watchdog::enter("starting up");
         let Showing { proxy, files, queued, window, gpu_context, gpu, splash } = *showing;
         let progress = |p: f32| {
             if let Some(splash) = &splash {

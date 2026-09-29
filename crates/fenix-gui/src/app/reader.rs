@@ -1502,11 +1502,19 @@ impl App {
     /// A PDF rewritten on disk (a build, a download) is read again, each
     /// view keeping its place. From the regular disk poll.
     pub(super) fn pdf_reload_changed(&mut self) {
+        let seen: HashMap<BufferId, Option<std::time::SystemTime>> =
+            self.pdf_docs.iter().map(|(&id, d)| (id, std::fs::metadata(&d.path).and_then(|m| m.modified()).ok())).collect();
+        self.pdf_reload_seen(&seen);
+    }
+
+    /// `pdf_reload_changed`, from when the disk probe saw each PDF last
+    /// changed; one it didn't look at is left as it is.
+    pub(super) fn pdf_reload_seen(&mut self, seen: &HashMap<BufferId, Option<std::time::SystemTime>>) {
         let changed: Vec<(BufferId, Option<std::time::SystemTime>)> = self
             .pdf_docs
             .iter()
             .filter_map(|(&id, d)| {
-                let now = std::fs::metadata(&d.path).and_then(|m| m.modified()).ok();
+                let now = seen.get(&id).copied().flatten();
                 (now.is_some() && now != d.modified).then_some((id, now))
             })
             .collect();

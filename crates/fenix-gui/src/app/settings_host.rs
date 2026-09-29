@@ -9,6 +9,16 @@ use super::*;
 use crate::settings_page::{Action as SettingsAction, Scope, SecretState, SettingsPage, Snapshot};
 use fenix_config::{Kind, Secret};
 
+/// `root`'s base branch: its project's `git.base_branch`, else
+/// `fallback` (yours). Reads the project's settings -- off the UI thread
+/// when called from one of the git pages' background reads.
+pub(super) fn base_branch_in(root: &Path, fallback: Option<String>) -> Option<String> {
+    match fenix_config::ProjectSettings::load(root).get("git.base_branch") {
+        Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+        _ => fallback,
+    }
+}
+
 impl App {
     fn settings_page(&mut self, id: BufferId) -> Option<&mut SettingsPage> {
         match self.pages.get_mut(&id).map(|s| {
@@ -372,6 +382,23 @@ impl App {
         }
     }
 
+    /// The project's settings as the disk probe read them, applied when
+    /// they changed -- and only if it's still the focused project.
+    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) {
+        if self.project_root.as_ref() != Some(&root) {
+            return;
+        }
+        let before = self.project_settings.as_ref().map(|(_, p)| p.values());
+        let same = self.project_settings.as_ref().is_some_and(|(r, _)| *r == root);
+        self.project_settings = Some((root, settings));
+        let after = self.project_settings.as_ref().map(|(_, p)| p.values());
+        if before != after || !same {
+            for key in ["editor.indent_width", "editor.iskeyword_extra"] {
+                self.apply_setting(key);
+            }
+        }
+    }
+
     /// The focused project's own value for `key`, if it sets one.
     fn project_value(&self, key: &str) -> Option<&fenix_config::Value> {
         self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
@@ -404,10 +431,7 @@ impl App {
     /// The base branch for the repository at `root`: its project's, else
     /// yours.
     pub(super) fn base_branch_for(&self, root: &Path) -> Option<String> {
-        match fenix_config::ProjectSettings::load(root).get("git.base_branch") {
-            Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-            _ => self.config.git_base_branch.clone(),
-        }
+        base_branch_in(root, self.config.git_base_branch.clone())
     }
 
     /// Checks a token against its server, off the UI thread.

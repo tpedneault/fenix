@@ -50,6 +50,7 @@ mod merge_view;
 mod pdf_texture;
 mod popup;
 mod profile;
+mod watchdog;
 mod reader;
 mod reader_sidebar;
 mod reader_text;
@@ -74,6 +75,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     profile::launch_mark("main");
+    // This thread is the UI thread: from here on, a freeze on it is
+    // written to the hang log.
+    if let Some(log) = watchdog::log_path() {
+        watchdog::start(log);
+    }
     let event_loop = EventLoop::<FenixUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();

@@ -31,6 +31,7 @@ mod mib_host;
 mod ccsds_host;
 mod stream_host;
 mod file_index;
+mod disk_probe;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -575,7 +576,7 @@ struct CompareSession {
 /// they miss costs nothing, because the save guard reads the file
 /// outright before writing over it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct DiskFingerprint {
+pub(crate) struct DiskFingerprint {
     mtime: Option<std::time::SystemTime>,
     len: u64,
 }
@@ -584,7 +585,12 @@ impl DiskFingerprint {
     /// `None` when the path can't be stat'd at all -- it was deleted,
     /// replaced by a directory, or was never there.
     fn of(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
+        Self::from_meta(std::fs::metadata(path).ok())
+    }
+
+    /// `of`, from a stat already made (off the UI thread, by the disk probe).
+    fn from_meta(meta: Option<std::fs::Metadata>) -> Option<Self> {
+        let meta = meta?;
         if !meta.is_file() {
             return None;
         }
@@ -594,7 +600,7 @@ impl DiskFingerprint {
 
 /// What one sweep of the open files found.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct DiskSweep {
+pub(crate) struct DiskSweep {
     /// Clean buffers whose file had changed; re-read in place.
     reloaded: Vec<String>,
     /// Buffers with unsaved edits whose file also changed. Left exactly
@@ -1933,6 +1939,10 @@ pub enum FenixUserEvent {
     /// The error is a `String`, not an `io::Error`: by the time it
     /// reaches here the only thing anyone can do with it is show it.
     ExplorerListed { target: ExplorerTarget, request: u64, result: Result<fenix_explorer::Listing, String> },
+    /// What the disk poll's worker saw of the open files (`disk_probe`).
+    DiskProbed(Box<disk_probe::ProbeResult>),
+    /// What Home's recent files looked like, looked at off the UI thread.
+    RecentProbed(HashMap<PathBuf, home::RecentSeen>),
     /// A root's files, listed for the find-file picker (`file_index`).
     FilesListed { root: PathBuf, include_ignored: bool, files: Vec<fenix_picker::Candidate<PathBuf>> },
     /// Home's TODO column for a project root, swept off the UI thread.
@@ -2023,6 +2033,50 @@ pub enum FenixUserEvent {
     /// A project page's background job reporting in -- see
     /// `pages::PageEvent`.
     Page(pages::PageEvent),
+}
+
+impl FenixUserEvent {
+    /// Which event this is, for the hang log (`watchdog`).
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Lsp { .. } => "Lsp",
+            Self::Dap { .. } => "Dap",
+            Self::StatsReady { .. } => "StatsReady",
+            Self::LogLine { .. } => "LogLine",
+            Self::LogEnded { .. } => "LogEnded",
+            Self::TaskEvent { .. } => "TaskEvent",
+            Self::GitStatusReady { .. } => "GitStatusReady",
+            Self::GitMainReady { .. } => "GitMainReady",
+            Self::ForgeListReady { .. } => "ForgeListReady",
+            Self::ForgeDetailReady { .. } => "ForgeDetailReady",
+            Self::GitHistoryDetailReady { .. } => "GitHistoryDetailReady",
+            Self::GitHistoryReady { .. } => "GitHistoryReady",
+            Self::GitFetched { .. } => "GitFetched",
+            Self::GitRefreshReady { .. } => "GitRefreshReady",
+            Self::TerminalOutput { .. } => "TerminalOutput",
+            Self::ExplorerListed { .. } => "ExplorerListed",
+            Self::DiskProbed { .. } => "DiskProbed",
+            Self::RecentProbed { .. } => "RecentProbed",
+            Self::FilesListed { .. } => "FilesListed",
+            Self::HomeTodos { .. } => "HomeTodos",
+            Self::ExplorerGitStatus { .. } => "ExplorerGitStatus",
+            Self::ExplorerShares { .. } => "ExplorerShares",
+            Self::ExplorerVolumes { .. } => "ExplorerVolumes",
+            Self::ExplorerJobProgress { .. } => "ExplorerJobProgress",
+            Self::ExplorerJobDone { .. } => "ExplorerJobDone",
+            Self::ExplorerMeasured { .. } => "ExplorerMeasured",
+            Self::TerminalSpawned { .. } => "TerminalSpawned",
+            Self::JiraActionDone { .. } => "JiraActionDone",
+            Self::AgendaSync { .. } => "AgendaSync",
+            Self::OpenFiles { .. } => "OpenFiles",
+            Self::OpenFilesInNewFrame { .. } => "OpenFilesInNewFrame",
+            Self::VncConnected { .. } => "VncConnected",
+            Self::VncFrame { .. } => "VncFrame",
+            Self::PdfResponse { .. } => "PdfResponse",
+            Self::Embedded { .. } => "Embedded",
+            Self::Page { .. } => "Page",
+        }
+    }
 }
 
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
@@ -5471,6 +5525,18 @@ pub struct App {
     home_project_data: HashMap<PathBuf, dashboard::HomeData>,
     /// The find-file picker's listings, per root (`file_index`).
     file_index: file_index::FileIndex,
+    /// When the disk probe now out was sent, and what each buffer's file
+    /// looked like then (`disk_probe`).
+    disk_probe_out: Option<Instant>,
+    disk_probe_basis: HashMap<BufferId, DiskFingerprint>,
+    /// Home's recent files as last looked at, when, and when the look now
+    /// out was sent (`home::request_recent_probe`).
+    recent_seen: HashMap<PathBuf, home::RecentSeen>,
+    recent_probed: Option<Instant>,
+    recent_probe_out: Option<Instant>,
+    /// The modeline's `git status` now out: when it was sent, and whether
+    /// it has finished (`refresh_chrome_git`).
+    chrome_git_out: Option<(Instant, Arc<AtomicBool>)>,
     /// Home's TODO column, per project root, as the last sweep found it,
     /// and the roots being swept now (see `refresh_home_data`).
     home_todos: HashMap<PathBuf, Vec<dashboard::TodoItem>>,
@@ -6602,6 +6668,12 @@ impl App {
             tab_drag: None,
             home_project_data: HashMap::new(),
             file_index: Default::default(),
+            disk_probe_out: None,
+            disk_probe_basis: HashMap::new(),
+            recent_seen: HashMap::new(),
+            recent_probed: None,
+            recent_probe_out: None,
+            chrome_git_out: None,
             home_todos: HashMap::new(),
             home_todos_pending: HashSet::new(),
             home_logo: None,
@@ -9006,7 +9078,7 @@ impl App {
             // sweep runs every couple of seconds, and the write is
             // happening now.
             let mut sweep = DiskSweep::default();
-            self.check_one_file(id, &mut sweep, false);
+            self.check_one_file(id, &mut sweep, false, None);
             if self.externally_changed.contains(&id) {
                 let name = self.buffer_display_name(id);
                 self.set_error(format!("{name} changed on disk since you opened it -- :w! keeps yours, :e! takes theirs"));
@@ -14297,12 +14369,35 @@ impl App {
         // hooking every one of them keeps the bookkeeping in the one
         // place that already walks the list, and is self-healing if a
         // new close path is added later.
+        self.sweep_buffers(None)
+    }
+
+    /// The sweep, from what the disk probe saw. A buffer whose file was
+    /// saved or reloaded while the probe was out is left for the next
+    /// one: what the probe saw of it is older than what Fenix knows.
+    pub(super) fn reload_buffers_seen(&mut self, seen: &HashMap<BufferId, Option<DiskFingerprint>>) -> DiskSweep {
+        let basis = std::mem::take(&mut self.disk_probe_basis);
+        let current: HashMap<BufferId, Option<DiskFingerprint>> =
+            seen.iter().filter(|(id, _)| self.disk_state.get(id) == basis.get(id)).map(|(id, f)| (*id, *f)).collect();
+        self.sweep_buffers(Some(&current))
+    }
+
+    /// Every open file checked: stat'd here (`seen` `None`), or from
+    /// what a probe saw -- a buffer it didn't look at is skipped.
+    fn sweep_buffers(&mut self, seen: Option<&HashMap<BufferId, Option<DiskFingerprint>>>) -> DiskSweep {
         self.disk_state.retain(|id, _| self.buffers.get(*id).is_some());
         self.externally_changed.retain(|id| self.buffers.get(*id).is_some());
 
         let mut sweep = DiskSweep::default();
         for id in self.buffers.ids_sorted_by_path() {
-            self.check_one_file(id, &mut sweep, true);
+            match seen {
+                None => self.check_one_file(id, &mut sweep, true, None),
+                Some(seen) => {
+                    if let Some(fingerprint) = seen.get(&id) {
+                        self.check_one_file(id, &mut sweep, true, Some(*fingerprint));
+                    }
+                }
+            }
         }
         sweep
     }
@@ -14317,7 +14412,9 @@ impl App {
     /// miss a same-length edit made inside the filesystem's timestamp
     /// granularity -- rare, but a write is the one moment where being
     /// approximately right means losing somebody's work.
-    fn check_one_file(&mut self, id: BufferId, sweep: &mut DiskSweep, trust_fingerprint: bool) {
+    /// `seen`: the file's fingerprint as the disk probe saw it, instead
+    /// of a stat here.
+    fn check_one_file(&mut self, id: BufferId, sweep: &mut DiskSweep, trust_fingerprint: bool, seen: Option<Option<DiskFingerprint>>) {
         let Some(ob) = self.buffers.get(id) else { return };
         // Generated panels (Git, Docker, diffs, the graph) have no file
         // behind them, and the host rewrites their contents constantly.
@@ -14327,7 +14424,10 @@ impl App {
         let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
         let name = self.buffer_display_name(id);
 
-        let fingerprint = DiskFingerprint::of(&path);
+        let fingerprint = match seen {
+            Some(seen) => seen,
+            None => DiskFingerprint::of(&path),
+        };
         let Some(fingerprint) = fingerprint else {
             // Gone, or no longer a regular file. Never reloaded to
             // empty: an editor that blanks your buffer because
@@ -14500,22 +14600,11 @@ impl App {
         self.refresh_python_environments();
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
-        self.refresh_project_settings(true);
-        self.mib_poll();
         self.mib_check_scripts();
         self.pdf_save_places();
-        if !self.config.watch_files.unwrap_or(true) {
-            return;
-        }
-        self.pdf_reload_changed();
-        let sweep = self.reload_buffers_changed_on_disk();
-        let Some(message) = sweep.message() else { return };
-        if sweep.is_bad() {
-            self.set_error(message);
-        } else {
-            self.set_message(message);
-        }
-        self.wake_caret();
+        // The files themselves -- open buffers, PDFs, the MIBs, the
+        // project's settings -- are looked at off the UI thread.
+        self.start_disk_probe();
     }
 
     /// Writes every dirty buffer that has changed since its last
@@ -19233,6 +19322,8 @@ impl App {
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
+            FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
+            FenixUserEvent::RecentProbed(seen) => self.apply_recent_probed(seen),
             FenixUserEvent::HomeTodos { root, items } => self.apply_home_todos(root, items),
             FenixUserEvent::ExplorerGitStatus { target, request, statuses } => self.apply_explorer_git_status(target, request, statuses),
             FenixUserEvent::ExplorerShares { host, result } => self.apply_explorer_shares(host, result),
@@ -25311,6 +25402,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
     /// part so it's directly testable" reasoning `handle_key`/
     /// `test_vim_key` already established for keyboard input).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
+        let _busy = crate::watchdog::enter(event.label());
         self.handle_user_event(event);
     }
 
@@ -25338,6 +25430,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let _busy = crate::watchdog::enter(match &event {
+            WindowEvent::RedrawRequested => "redraw",
+            WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Ime(_) => "a key",
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::CursorMoved { .. } => "the mouse",
+            WindowEvent::Focused(_) => "the window's focus",
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => "the window's size",
+            _ => "a window event",
+        });
         let Some(frame) = self.frame_index_of(id) else { return };
         // Every event is handled with the frame it arrived from active,
         // so the handlers below -- all written against one implicit

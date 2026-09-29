@@ -176,7 +176,8 @@ pub enum PageEvent {
     GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
     GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
     /// Where the focused file's repository stands, for the modeline.
-    ChromeGit(Box<super::git_editor::ChromeGit>),
+    /// `None`: the focused file isn't in a repository.
+    ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
     /// A background fetch finished.
     AutoFetched { ok: bool },
     InboxData { buffer: BufferId, result: Result<Vec<review_inbox::Entry>, String> },
@@ -741,7 +742,7 @@ impl App {
             }
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
-            PageEvent::ChromeGit(state) => self.chrome_git = Some(*state),
+            PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
             event @ PageEvent::SettingsNote { .. } => self.apply_settings_event(event),
             event @ (PageEvent::JiraIssues { .. }
             | PageEvent::JiraDetail { .. }
