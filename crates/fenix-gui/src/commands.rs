@@ -219,6 +219,10 @@ impl CommandRegistry {
         registry.register("notebook.find", "Find a note or diagram by name", |ctx| ctx.app.notebook_find());
         registry.register("notebook.recent", "Reopen the note or diagram you touched last", |ctx| ctx.app.notebook_reopen());
         registry.register("notebook.journal", "Today's journal day", |ctx| ctx.app.notebook_today());
+        registry.register("notebook.backlinks", "What links to this note, beside it", |ctx| ctx.app.notebook_backlinks());
+        registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
+        registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());
+        registry.register("notebook.paste_image", "Paste the clipboard's picture into the note", |ctx| ctx.app.notebook_paste_image());
         registry.register("agenda.open", "Open the agenda page where it was left", cmd_agenda_open);
         registry.register("agenda.board", "Open the agenda on its board", cmd_agenda_board);
         registry.register("agenda.list", "Open the agenda on its list", cmd_agenda_list);

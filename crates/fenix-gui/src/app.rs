@@ -33,6 +33,7 @@ mod stream_host;
 mod file_index;
 mod disk_probe;
 mod notebook_host;
+mod notebook_links;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -8680,6 +8681,10 @@ impl App {
     fn completion_at_cursor(&mut self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
         if let Some(option) = self.tcl_option_completion() {
             return Some(option);
+        }
+        // `[[` in Markdown: the notebook's names.
+        if let Some(links) = self.notebook_link_completion() {
+            return Some(links);
         }
         let cursor = self.cursor();
         match completion::prefix_at_cursor(&self.open().buffer, &cursor) {
@@ -20666,10 +20671,18 @@ impl App {
                 self.play_macro(register, count, event_loop);
             }
             VimEvent::RequestLsp(kind) => match kind {
-                fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
+                fenix_vim::LspRequestKind::GoToDefinition => {
+                    if !self.notebook_follow_link_under_cursor() {
+                        self.request_goto_definition();
+                    }
+                }
                 fenix_vim::LspRequestKind::References => self.request_references(),
                 fenix_vim::LspRequestKind::Hover => self.request_hover(),
-                fenix_vim::LspRequestKind::FileUnderCursor => self.follow_link_under_cursor(),
+                fenix_vim::LspRequestKind::FileUnderCursor => {
+                    if !self.notebook_follow_link_under_cursor() {
+                        self.follow_link_under_cursor();
+                    }
+                }
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),

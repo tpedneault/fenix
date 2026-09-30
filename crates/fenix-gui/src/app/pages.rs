@@ -25,6 +25,7 @@ use crate::standards_page::{self, StandardsPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::notebook_page::NotebookPage;
+use crate::backlinks_page::{self, BacklinksPage};
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -62,6 +63,7 @@ pub(super) enum PageModel {
     Stream(Box<StreamPage>),
     Standards(Box<StandardsPage>),
     Notebook(Box<NotebookPage>),
+    Backlinks(Box<BacklinksPage>),
 }
 
 pub(super) struct PageState {
@@ -109,7 +111,7 @@ impl PageState {
             PageModel::Packet(p) => p.typing(),
             PageModel::Standards(p) => p.typing(),
             PageModel::Notebook(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) => false,
         }
     }
 
@@ -155,7 +157,7 @@ impl PageState {
             PageModel::Packet(p) => p.paste(text),
             PageModel::Standards(p) => p.query.paste(text),
             PageModel::Notebook(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) => {}
         }
         self.stale = true;
     }
@@ -335,6 +337,7 @@ impl App {
             Some(PageModel::Stream(p)) => stream_page::title(p),
             Some(PageModel::Standards(_)) => "*standards*".to_string(),
             Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
+            Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
         }
     }
 
@@ -509,6 +512,7 @@ impl App {
             PageModel::Stream(p) => stream_page::layout(p, cols),
             PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Notebook(_) => precomputed.unwrap_or_default(),
+            PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -679,6 +683,10 @@ impl App {
             PageModel::Notebook(p) => {
                 let action = p.key(key);
                 self.notebook_action(id, action);
+            }
+            PageModel::Backlinks(p) => {
+                let action = p.key(key);
+                self.backlinks_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();

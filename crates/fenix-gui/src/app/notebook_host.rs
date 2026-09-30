@@ -25,6 +25,8 @@ pub(crate) enum NotebookPick {
     Template { name: String, body: String },
     /// Open the journal day.
     Day(chrono::NaiveDate),
+    /// Type `[[name]]` at the cursor.
+    InsertLink(String),
 }
 
 /// What the notebook's modeline prompt is typing.
@@ -51,6 +53,8 @@ pub(super) struct NotebookState {
     pub(super) prompt: Option<NotebookPrompt>,
     /// Picture sizes known so far, for the reading layout.
     pub(super) image_sizes: HashMap<ImageKey, (u32, u32)>,
+    /// The pane the backlinks sidebar's note is in.
+    pub(super) sidebar_origin: Option<fenix_window::WindowId>,
 }
 
 /// A capture name from `fenix-syntax` as one the page roles can hold.
@@ -386,6 +390,7 @@ impl App {
                 self.wake_caret();
             }
             NotebookPick::Day(date) => self.open_journal_day(date),
+            NotebookPick::InsertLink(name) => self.notebook_insert_text(&format!("[[{name}]]")),
         }
     }
 
@@ -793,6 +798,7 @@ impl App {
         }
         if saved {
             self.refresh_notebook_pages();
+            self.refresh_backlinks();
             if let Some(window) = &self.window {
                 window.request_redraw();
             }

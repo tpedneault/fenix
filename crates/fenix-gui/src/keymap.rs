@@ -441,6 +441,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('f')], "find by name", "notebook.find");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('r')], "reopen the last one", "notebook.recent");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('j')], "today's journal", "notebook.journal");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('b')], "links here (sidebar)", "notebook.backlinks");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('l')], "insert a link", "notebook.insert_link");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('y')], "copy a link to this line", "notebook.copy_link");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('v')], "paste a picture", "notebook.paste_image");
 
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");

@@ -20,6 +20,8 @@ pub enum Source {
     Snippet,
     /// A name from the project's MIBs.
     Mib,
+    /// A note or diagram's name, after `[[`.
+    Note,
 }
 
 impl Source {
@@ -31,6 +33,7 @@ impl Source {
             Self::Lsp => "LSP",
             Self::Snippet => "snippet",
             Self::Mib => "MIB",
+            Self::Note => "note",
         }
     }
 }
