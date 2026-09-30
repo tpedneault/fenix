@@ -35,7 +35,7 @@ impl App {
         let contexts = self.local_contexts();
         if contexts.is_empty() {
             self.local_matcher = None;
-            self.set_message("SPC m has nothing for this buffer -- it has menus in PDFs, Arduino sketches and Tcl files");
+            self.set_message("SPC m has nothing for this buffer -- it has menus in PDFs, Markdown, Arduino sketches and Tcl files");
             return;
         }
         let names: Vec<&str> = contexts.iter().map(|c| c.name()).collect();
@@ -127,8 +127,8 @@ mod tests {
     #[test]
     fn a_buffer_with_no_menu_says_so_and_opens_nothing() {
         let dir = temp("plain");
-        let file = dir.join("notes.md");
-        std::fs::write(&file, "# notes\n").unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "notes\n").unwrap();
         let mut app = open(&file);
         app.start_local_leader();
         assert!(app.local_matcher.is_none());
