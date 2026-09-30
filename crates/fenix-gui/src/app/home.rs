@@ -30,7 +30,10 @@ pub(super) struct HomeOverlay {
     pub(super) rule_color: [f32; 4],
     /// Pictures a page shows: (first row, which may be above the pane
     /// when it's partly scrolled off; cell; rows; cells; which picture).
-    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey)>,
+    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey, Option<(f32, f32, f32)>)>,
+    /// Boxes outlined on a picture: (which of `images`, the box as
+    /// fractions of the picture, whether it's the selected one).
+    pub(super) marks: Vec<(usize, (f32, f32, f32, f32), bool)>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s

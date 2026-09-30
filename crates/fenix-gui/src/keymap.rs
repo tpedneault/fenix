@@ -92,6 +92,8 @@ pub enum LocalContext {
     Reader,
     /// Markdown (notes, READMEs): the reading view.
     Markdown,
+    /// A Mermaid diagram (`.mmd`) or its preview.
+    Mermaid,
 }
 
 impl LocalContext {
@@ -102,6 +104,7 @@ impl LocalContext {
             LocalContext::Tcl => "tcl",
             LocalContext::Reader => "reader",
             LocalContext::Markdown => "markdown",
+            LocalContext::Mermaid => "diagram",
         }
     }
 
@@ -142,6 +145,12 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
                 t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
                 t.insert(&[KeyPress::char('b')], "links here", "notebook.backlinks");
+            }
+            LocalContext::Mermaid => {
+                t.insert(&[KeyPress::char('p')], "preview beside", "diagram.preview");
+                t.insert(&[KeyPress::char('v')], "view it on its own", "diagram.viewer");
+                t.insert(&[KeyPress::char('t')], "set its theme", "diagram.theme");
+                t.insert(&[KeyPress::char('e')], "export", "diagram.export");
             }
             LocalContext::Tcl => {
                 t.insert(&[KeyPress::char('i')], "insert a telecommand", "mib.insert");

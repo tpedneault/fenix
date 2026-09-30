@@ -35,6 +35,7 @@ mod disk_probe;
 mod notebook_host;
 mod notebook_links;
 mod reading_host;
+mod diagram_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -3975,6 +3976,7 @@ fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str
         | LanguageId::CSharp => Some("//"),
         LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
         LanguageId::Sql | LanguageId::Lua => Some("--"),
+        LanguageId::Mermaid => Some("%%"),
         // CSS has only `/* */`, HTML only `<!-- -->` (see
         // `block_comment_tokens`).
         LanguageId::Json | LanguageId::Markdown | LanguageId::Batch | LanguageId::Xml | LanguageId::Dtd | LanguageId::Html | LanguageId::Css => None,
@@ -7855,6 +7857,7 @@ impl App {
     fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
         let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
         all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
+        all.extend(self.notebook.diagrams.diagnostics.get(path).cloned().unwrap_or_default());
         all
     }
 
@@ -23845,6 +23848,7 @@ impl App {
             // its own selection, no caret.
             let is_page = self.is_page_buffer(buffer_id);
             if is_page {
+                self.note_page_rows(buffer_id, pane_visible_lines);
                 self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
                 self.page_scroll_to_top(buffer_id, pane, pane_visible_lines);
             }
@@ -24945,6 +24949,39 @@ impl App {
         for &((x, y, w, h), color) in &pdf_highlights {
             overlay.push_rect(gpu, x, y, w, h, color);
         }
+        // A diagram's node: the selected one outlined in the accent, the
+        // source cursor's tinted.
+        for pane in &panes_render {
+            for &(i, (fx, fy, fw, fh), strong) in &pane.home.marks {
+                let Some((row, col, rows, cols, key, view)) = pane.home.images.get(i) else { continue };
+                let Some(tex) = self.notebook.textures.get(key).filter(|t| t.texture.is_some()) else { continue };
+                let cell_box = (
+                    pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
+                    pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
+                    *cols as f32 * char_width,
+                    *rows as f32 * line_height,
+                );
+                let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
+                let Some((shown, _, (x, y, w, h))) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
+                let (mx, my, mw, mh) = (x + fx * w - 3.0, y + fy * h - 3.0, fw * w + 6.0, fh * h + 6.0);
+                let (x0, y0) = (mx.max(shown.0), my.max(shown.1));
+                let (x1, y1) = ((mx + mw).min(shown.0 + shown.2), (my + mh).min(shown.1 + shown.3));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let accent = theme.caret;
+                let fill = if strong { [accent[0], accent[1], accent[2], 0.16] } else { [accent[0], accent[1], accent[2], 0.08] };
+                overlay.push_rect(gpu, x0, y0, x1 - x0, y1 - y0, fill);
+                if strong {
+                    let t = 2.0;
+                    let edge = [accent[0], accent[1], accent[2], 0.9];
+                    overlay.push_rect(gpu, x0, y0, x1 - x0, t, edge);
+                    overlay.push_rect(gpu, x0, y1 - t, x1 - x0, t, edge);
+                    overlay.push_rect(gpu, x0, y0, t, y1 - y0, edge);
+                    overlay.push_rect(gpu, x1 - t, y0, t, y1 - y0, edge);
+                }
+            }
+        }
         overlay.flush(gpu);
 
         // The spinner: the mark's blades lit in turn, just left of the
@@ -25250,25 +25287,18 @@ impl App {
             if let Some(pipeline) = self.logo_pipeline.as_ref() {
                 let mut slot = 1;
                 for pane in &panes_render {
-                    for (row, col, rows, cols, key) in &pane.home.images {
+                    for (row, col, rows, cols, key, view) in &pane.home.images {
                         let Some(tex) = self.notebook.textures.get(key) else { continue };
                         let Some(texture) = &tex.texture else { continue };
-                        let (bw, bh) = (*cols as f32 * char_width, *rows as f32 * line_height);
-                        let scale = (bw / tex.w as f32).min(bh / tex.h as f32).min(1.0);
-                        let (w, h) = (tex.w as f32 * scale, tex.h as f32 * scale);
-                        let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width;
-                        let top = pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height;
-                        let y = top + (bh - h) / 2.0;
-                        // Cut to the pane's content, top and bottom.
-                        let clip_top = pane.rect.y + text::PAD_TOP;
-                        let clip_bottom = pane.rect.y + pane.rect.h;
-                        let (y0, y1) = (y.max(clip_top), (y + h).min(clip_bottom));
-                        let x1 = (x + w).min(pane.rect.x + pane.rect.w);
-                        if y1 <= y0 || x1 <= x {
-                            continue;
-                        }
-                        let uv = (0.0, (y0 - y) / h, (x1 - x) / w, (y1 - y) / h);
-                        pipeline.draw_region(gpu, &mut pass, texture, slot, (x.round(), y0.round(), (x1 - x).round(), (y1 - y0).round()), uv, None);
+                        let cell_box = (
+                            pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
+                            pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
+                            *cols as f32 * char_width,
+                            *rows as f32 * line_height,
+                        );
+                        let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
+                        let Some((dest, uv, _)) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
+                        pipeline.draw_region(gpu, &mut pass, texture, slot, (dest.0.round(), dest.1.round(), dest.2.round(), dest.3.round()), uv, None);
                         slot += 1;
                     }
                 }

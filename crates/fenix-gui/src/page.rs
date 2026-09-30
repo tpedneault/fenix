@@ -70,6 +70,9 @@ pub struct PageImage {
     pub rows: usize,
     pub cols: usize,
     pub key: ImageKey,
+    /// Zoomed and panned: (zoom, 1 = fit; the centre shown, as fractions
+    /// of the picture). `None`: fitted, no bigger than it is.
+    pub view: Option<(f32, f32, f32)>,
 }
 
 /// Which picture: a file on disk, or a diagram's source in a theme.
@@ -443,7 +446,7 @@ impl Grid {
         if self.lines.len() < line + rows {
             self.lines.resize(line + rows, Vec::new());
         }
-        self.images.push(PageImage { line, col, rows, cols, key });
+        self.images.push(PageImage { line, col, rows, cols, key, view: None });
     }
 
     /// Tints `cols` of `line` as a panel.

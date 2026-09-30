@@ -221,6 +221,10 @@ impl CommandRegistry {
         registry.register("notebook.journal", "Today's journal day", |ctx| ctx.app.notebook_today());
         registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
         registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));
+        registry.register("diagram.preview", "The diagram drawn beside its source (again closes it)", |ctx| ctx.app.toggle_diagram_preview());
+        registry.register("diagram.viewer", "The diagram on its own: zoom, pan, walk its nodes", |ctx| ctx.app.open_diagram_viewer());
+        registry.register("diagram.theme", "Set the diagram's theme", |ctx| ctx.app.diagram_pick_theme_here());
+        registry.register("diagram.export", "Export the diagram", |ctx| ctx.app.diagram_export_here());
         registry.register("notebook.backlinks", "What links to this note, beside it", |ctx| ctx.app.notebook_backlinks());
         registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
         registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());

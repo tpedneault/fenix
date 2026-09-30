@@ -27,6 +27,12 @@ pub(crate) enum NotebookPick {
     Day(chrono::NaiveDate),
     /// Type `[[name]]` at the cursor.
     InsertLink(String),
+    /// A new diagram of `fenix_diagram::KINDS[i]`: its starter next.
+    DiagramKind(usize),
+    /// A new diagram from this text: its name next.
+    Starter(String),
+    /// Write theme `name` into the diagram in `buffer`.
+    Theme { buffer: BufferId, name: String },
 }
 
 /// What the notebook's modeline prompt is typing.
@@ -34,6 +40,8 @@ pub(crate) enum NotebookPick {
 pub(super) enum NotebookPromptKind {
     /// The new note's name, then it's made from `body`.
     NoteName { template: String, body: String },
+    /// The new diagram's name, then it's made from `text`.
+    DiagramName { text: String },
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +67,8 @@ pub(super) struct NotebookState {
     pub(super) textures: HashMap<ImageKey, super::reading_host::PageTex>,
     /// Pictures being read.
     pub(super) pending: std::collections::HashSet<ImageKey>,
+    /// Diagrams drawn and being drawn.
+    pub(super) diagrams: super::diagram_host::DiagramState,
 }
 
 /// A capture name from `fenix-syntax` as one the page roles can hold.
@@ -167,7 +177,10 @@ impl App {
     fn notebook_rows(&mut self) -> Vec<NbRow> {
         let project_files = self.config.notebook_project_files.unwrap_or(false);
         let project_root = self.project_root.clone();
-        let Some(nb) = self.notebook() else { return Vec::new() };
+        if self.notebook().is_none() {
+            return Vec::new();
+        }
+        let nb = self.notebook.book.as_ref().expect("opened above");
         let mut rows: Vec<NbRow> = nb
             .entries()
             .iter()
@@ -188,6 +201,9 @@ impl App {
                 project_file: None,
             })
             .collect();
+        for row in rows.iter_mut().filter(|r| r.kind == NbKind::Diagram) {
+            row.problem = self.diagram_problem(&row.text);
+        }
         if let (true, Some(root)) = (project_files, project_root) {
             let mut files = Vec::new();
             collect_docs(&root, &mut files, 0);
@@ -275,8 +291,8 @@ impl App {
         let base_file = base.map(Path::to_path_buf);
         let highlight = |lang: &str, text: &str| highlight_block(lang, text);
         let image_size = |key: &ImageKey| sizes.get(key).copied();
-        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_hash(source));
-        let diagram_error = |source: &str| self.diagram_error(source);
+        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_key(source, None));
+        let diagram_error = |source: &str| self.diagram_problem(source);
         let image_path = |src: &str| {
             if src.contains("://") {
                 return None;
@@ -314,25 +330,12 @@ impl App {
         f(&ctx)
     }
 
-    /// A diagram's key: its source and the theme it's drawn in.
-    pub(super) fn diagram_hash(&self, source: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        source.hash(&mut h);
-        self.theme.name.hash(&mut h);
-        self.config.diagrams_theme.hash(&mut h);
-        h.finish()
-    }
-
-    /// Why a diagram's source doesn't draw (filled in with the engine).
-    pub(super) fn diagram_error(&self, _source: &str) -> Option<String> {
-        None
-    }
-
     /// The notebook page's layout for a pane `cols` wide.
     pub(super) fn notebook_page_layout(&self, id: BufferId, cols: usize) -> Option<crate::page::Page> {
         let Some(PageModel::Notebook(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
-        Some(self.with_reading_ctx(None, |ctx| crate::notebook_page::layout(p, cols, ctx)))
+        // The selected entry's links and pictures are relative to its file.
+        let base = p.selected().and_then(|r| r.project_file.clone().or_else(|| self.notebook.book.as_ref().and_then(|nb| nb.get(&r.id)).map(|e| e.path.clone())));
+        Some(self.with_reading_ctx(base.as_deref(), |ctx| crate::notebook_page::layout(p, cols, ctx)))
     }
 
     /// The entry a buffer is, if it's a notebook file.
@@ -348,6 +351,9 @@ impl App {
             return;
         };
         self.open_file_from_picker(&path);
+        if path.extension().is_some_and(|e| e == "mmd" || e == "mermaid") {
+            self.open_diagram_preview(self.focused_buffer_id());
+        }
     }
 
     /// Puts the cursor at (line, col) in the focused buffer.
@@ -395,6 +401,9 @@ impl App {
             }
             NotebookPick::Day(date) => self.open_journal_day(date),
             NotebookPick::InsertLink(name) => self.notebook_insert_text(&format!("[[{name}]]")),
+            NotebookPick::DiagramKind(i) => self.diagram_kind_picked(i),
+            NotebookPick::Starter(text) => self.diagram_starter_picked(text),
+            NotebookPick::Theme { buffer, name } => self.diagram_set_theme(buffer, &name),
         }
     }
 
@@ -402,6 +411,7 @@ impl App {
         let p = self.notebook.prompt.as_ref()?;
         Some(match &p.kind {
             NotebookPromptKind::NoteName { template, .. } => format!("New note ({template}) -- name: {}▏", p.input),
+            NotebookPromptKind::DiagramName { .. } => format!("New diagram -- name: {}▏", p.input),
         })
     }
 
@@ -442,6 +452,14 @@ impl App {
                     return;
                 }
                 self.notebook_create_note(&name, &body);
+            }
+            NotebookPromptKind::DiagramName { text } => {
+                if name.is_empty() {
+                    self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input });
+                    self.set_error("a diagram needs a name");
+                    return;
+                }
+                self.notebook_create_diagram(&name, &text);
             }
         }
     }
@@ -648,6 +666,7 @@ impl App {
             }
             NbAction::Export(id) => self.notebook_export(&id),
             NbAction::Theme(id) => self.diagram_pick_theme(Some(id)),
+            NbAction::View(id) => self.open_entry_viewer(&id),
         }
     }
 
@@ -814,13 +833,6 @@ impl App {
     // Later phases fill these in.
     // ------------------------------------------------------------------
 
-    /// A diagram's picture (the diagram engine fills this in).
-    pub(super) fn request_diagram_image(&mut self, _key: ImageKey) {}
-
-    pub(crate) fn notebook_new_diagram(&mut self) {
-        self.set_message("diagrams come with the diagram engine");
-    }
-
     pub(crate) fn notebook_import(&mut self) {
         self.set_message("import comes with export");
     }
@@ -829,8 +841,17 @@ impl App {
         self.set_message("export comes later");
     }
 
-    pub(super) fn diagram_pick_theme(&mut self, _id: Option<String>) {
-        self.set_message("themes come with the diagram engine");
+    pub(super) fn diagram_export_buffer(&mut self, _source: BufferId) {
+        self.set_message("export comes later");
+    }
+
+    pub(crate) fn diagram_export_here(&mut self) {
+        self.set_message("export comes later");
+    }
+
+    /// `SPC n d`.
+    pub(crate) fn notebook_new_diagram(&mut self) {
+        self.notebook_new_diagram_flow();
     }
 
     /// `SPC n f`: every entry by name.

@@ -38,6 +38,45 @@ pub(super) fn rgba_to_bgra(mut px: Vec<u8>) -> Vec<u8> {
     px
 }
 
+/// Where a page's picture goes: `cell_box` is the cells the page left
+/// for it and `clip` what of the pane is showing (x0, y0, x1, y1), both
+/// in pixels. Fitted and no bigger than it is, or -- with a `view` --
+/// fitted, times its zoom, around its centre. Returns the rect drawn
+/// into, the part of the picture it shows (u0, v0, u1, v1), and where
+/// the whole picture sits (partly off-screen when zoomed).
+pub(super) type Placed = ((f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32));
+
+pub(super) fn place_picture(cell_box: (f32, f32, f32, f32), clip: (f32, f32, f32, f32), tex: (u32, u32), view: Option<(f32, f32, f32)>) -> Option<Placed> {
+    let (bx, by, bw, bh) = cell_box;
+    let (tw, th) = (tex.0 as f32, tex.1 as f32);
+    if tw <= 0.0 || th <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    let fit = (bw / tw).min(bh / th);
+    let (x, y, w, h) = match view {
+        None => {
+            let s = fit.min(1.0);
+            let (w, h) = (tw * s, th * s);
+            (bx, by + (bh - h) / 2.0, w, h)
+        }
+        Some((zoom, cx, cy)) => {
+            let s = fit * zoom.max(0.1);
+            let (w, h) = (tw * s, th * s);
+            let place = |b: f32, bl: f32, len: f32, c: f32| if len <= bl { b + (bl - len) / 2.0 } else { (b + bl / 2.0 - c * len).clamp(b + bl - len, b) };
+            (place(bx, bw, w, cx), place(by, bh, h, cy), w, h)
+        }
+    };
+    let x0 = x.max(bx).max(clip.0);
+    let y0 = y.max(by).max(clip.1);
+    let x1 = (x + w).min(bx + bw).min(clip.2);
+    let y1 = (y + h).min(by + bh).min(clip.3);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let uv = ((x0 - x) / w, (y0 - y) / h, (x1 - x) / w, (y1 - y) / h);
+    Some(((x0, y0, x1 - x0, y1 - y0), uv, (x, y, w, h)))
+}
+
 /// What laying a reading page out found, before the page is borrowed.
 pub(super) struct ReadingPre {
     rendered: Option<reading::Rendered>,
@@ -311,5 +350,24 @@ mod tests {
         let file = dir.path().join("a.png");
         image::RgbaImage::from_raw(1, 1, vec![10, 20, 30, 255]).unwrap().save(&file).unwrap();
         assert_eq!(decode_picture(&file).unwrap(), (1, 1, vec![30, 20, 10, 255]));
+    }
+
+    #[test]
+    fn pictures_fit_or_zoom_and_are_cut_to_the_pane() {
+        // 200x100 into a 100x100 box: half size, centred vertically.
+        let (dest, uv, whole) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (200, 100), None).unwrap();
+        assert_eq!(whole, (0.0, 25.0, 100.0, 50.0));
+        assert_eq!(dest, (0.0, 25.0, 100.0, 50.0));
+        assert_eq!(uv, (0.0, 0.0, 1.0, 1.0));
+        // Small pictures aren't blown up...
+        let (_, _, whole) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (50, 50), None).unwrap();
+        assert_eq!((whole.2, whole.3), (50.0, 50.0));
+        // ...unless zoomed; at 2x on the left edge, half is shown.
+        let (dest, uv, _) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (100, 100), Some((2.0, 0.0, 0.5))).unwrap();
+        assert_eq!(dest, (0.0, 0.0, 100.0, 100.0));
+        assert_eq!(uv, (0.0, 0.25, 0.5, 0.75));
+        // Cut by the pane.
+        let (dest, uv, _) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 50.0, 1000.0, 1000.0), (100, 100), None).unwrap();
+        assert_eq!((dest.1, dest.3, uv.1), (50.0, 50.0, 0.5));
     }
 }

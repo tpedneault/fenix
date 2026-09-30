@@ -57,6 +57,8 @@ pub enum Action {
     ToProject(String),
     Export(String),
     Theme(String),
+    /// A diagram on its own.
+    View(String),
     /// Open the journal day `n` days from the selected one (or today).
     Day(chrono::NaiveDate),
     PinSearch(String),
@@ -422,6 +424,12 @@ impl NotebookPage {
             Key::Char('D') => return Action::Duplicate(id.unwrap()),
             Key::Char('h') => return Action::History(id.unwrap()),
             Key::Char('p') => return Action::ToProject(id.unwrap()),
+            Key::Char('v') => {
+                if sel.unwrap().kind == Kind::Diagram {
+                    return Action::View(id.unwrap());
+                }
+                return Action::Read(id.unwrap());
+            }
             Key::Char('T') => {
                 if sel.unwrap().kind == Kind::Diagram {
                     return Action::Theme(id.unwrap());
@@ -690,6 +698,7 @@ pub fn layout(page: &NotebookPage, cols: usize, ctx: &reading::Ctx) -> Page {
             Mode::List => vec![
                 ("Enter", "edit"),
                 ("o", "read"),
+                ("v", "view"),
                 ("N", "note"),
                 ("d", "diagram"),
                 ("e", "export"),
