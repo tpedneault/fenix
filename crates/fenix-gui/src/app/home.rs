@@ -28,6 +28,9 @@ pub(super) struct HomeOverlay {
     /// (row, first cell, end cell) for each visible rule.
     pub(super) rules: Vec<(usize, usize, usize)>,
     pub(super) rule_color: [f32; 4],
+    /// Pictures a page shows: (first row, which may be above the pane
+    /// when it's partly scrolled off; cell; rows; cells; which picture).
+    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey)>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s

@@ -219,6 +219,8 @@ impl CommandRegistry {
         registry.register("notebook.find", "Find a note or diagram by name", |ctx| ctx.app.notebook_find());
         registry.register("notebook.recent", "Reopen the note or diagram you touched last", |ctx| ctx.app.notebook_reopen());
         registry.register("notebook.journal", "Today's journal day", |ctx| ctx.app.notebook_today());
+        registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
+        registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));
         registry.register("notebook.backlinks", "What links to this note, beside it", |ctx| ctx.app.notebook_backlinks());
         registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
         registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());

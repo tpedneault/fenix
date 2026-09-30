@@ -39,6 +39,7 @@ mod snippets_page;
 mod notebook_page;
 mod backlinks_page;
 mod reading;
+mod reading_page;
 mod graph_view;
 mod gpu;
 mod icon;

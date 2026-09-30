@@ -34,6 +34,7 @@ mod file_index;
 mod disk_probe;
 mod notebook_host;
 mod notebook_links;
+mod reading_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -25127,6 +25128,19 @@ impl App {
             }
         }
 
+        // Pictures pages show, read since the last frame: uploaded once.
+        if let Some(pipeline) = self.logo_pipeline.as_ref() {
+            for tex in self.notebook.textures.values_mut() {
+                if let Some(bgra) = tex.bgra.take() {
+                    if tex.w > 0 && tex.h > 0 {
+                        let texture = pipeline.create_texture(gpu, tex.w, tex.h);
+                        pipeline.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, &bgra);
+                        tex.texture = Some(texture);
+                    }
+                }
+            }
+        }
+
         // Home's logo: drawn (by fenix-brand) at exactly the pixel height
         // its rows give it, so it's crisp at any font size, and uploaded
         // only when that height or the theme's text colour changes.
@@ -25228,6 +25242,34 @@ impl App {
                         let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
                         let y = top + (lines as f32 * line_height - h) / 2.0;
                         pipeline.draw(gpu, &mut pass, texture, 0, x.round(), y.round(), w, h);
+                    }
+                }
+            }
+            // Pictures on pages (a note's images, diagrams): each fitted
+            // into the cells the page left for it, cut to its pane.
+            if let Some(pipeline) = self.logo_pipeline.as_ref() {
+                let mut slot = 1;
+                for pane in &panes_render {
+                    for (row, col, rows, cols, key) in &pane.home.images {
+                        let Some(tex) = self.notebook.textures.get(key) else { continue };
+                        let Some(texture) = &tex.texture else { continue };
+                        let (bw, bh) = (*cols as f32 * char_width, *rows as f32 * line_height);
+                        let scale = (bw / tex.w as f32).min(bh / tex.h as f32).min(1.0);
+                        let (w, h) = (tex.w as f32 * scale, tex.h as f32 * scale);
+                        let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width;
+                        let top = pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height;
+                        let y = top + (bh - h) / 2.0;
+                        // Cut to the pane's content, top and bottom.
+                        let clip_top = pane.rect.y + text::PAD_TOP;
+                        let clip_bottom = pane.rect.y + pane.rect.h;
+                        let (y0, y1) = (y.max(clip_top), (y + h).min(clip_bottom));
+                        let x1 = (x + w).min(pane.rect.x + pane.rect.w);
+                        if y1 <= y0 || x1 <= x {
+                            continue;
+                        }
+                        let uv = (0.0, (y0 - y) / h, (x1 - x) / w, (y1 - y) / h);
+                        pipeline.draw_region(gpu, &mut pass, texture, slot, (x.round(), y0.round(), (x1 - x).round(), (y1 - y0).round()), uv, None);
+                        slot += 1;
                     }
                 }
             }

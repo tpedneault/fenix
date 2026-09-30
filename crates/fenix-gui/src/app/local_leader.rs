@@ -22,6 +22,10 @@ impl App {
         if language == Some(fenix_syntax::LanguageId::Tcl) {
             contexts.push(LocalContext::Tcl);
         }
+        let reading = matches!(self.pages.get(&self.focused_buffer_id()).map(|s| &s.model), Some(super::pages::PageModel::Reading(_)));
+        if language == Some(fenix_syntax::LanguageId::Markdown) || reading {
+            contexts.push(LocalContext::Markdown);
+        }
         contexts
     }
 

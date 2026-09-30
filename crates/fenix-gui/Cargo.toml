@@ -53,7 +53,7 @@ fenix-vim = { path = "../fenix-vim" }
 fenix-vnc = { path = "../fenix-vnc" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
-image = { version = "0.25", default-features = false, features = ["ico", "png"] }
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg", "gif", "webp", "bmp"] }
 lsp-types = "0.97"
 pollster = "1.0.1"
 pulldown-cmark = { version = "0.13", default-features = false }

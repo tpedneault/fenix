@@ -55,6 +55,10 @@ pub(super) struct NotebookState {
     pub(super) image_sizes: HashMap<ImageKey, (u32, u32)>,
     /// The pane the backlinks sidebar's note is in.
     pub(super) sidebar_origin: Option<fenix_window::WindowId>,
+    /// Pictures pages draw, read and (once drawn) uploaded.
+    pub(super) textures: HashMap<ImageKey, super::reading_host::PageTex>,
+    /// Pictures being read.
+    pub(super) pending: std::collections::HashSet<ImageKey>,
 }
 
 /// A capture name from `fenix-syntax` as one the page roles can hold.
@@ -810,6 +814,9 @@ impl App {
     // Later phases fill these in.
     // ------------------------------------------------------------------
 
+    /// A diagram's picture (the diagram engine fills this in).
+    pub(super) fn request_diagram_image(&mut self, _key: ImageKey) {}
+
     pub(crate) fn notebook_new_diagram(&mut self) {
         self.set_message("diagrams come with the diagram engine");
     }
@@ -824,10 +831,6 @@ impl App {
 
     pub(super) fn diagram_pick_theme(&mut self, _id: Option<String>) {
         self.set_message("themes come with the diagram engine");
-    }
-
-    pub(crate) fn open_reading_view(&mut self, _replace: bool) {
-        self.set_message("the reading view comes next");
     }
 
     /// `SPC n f`: every entry by name.

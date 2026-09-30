@@ -26,6 +26,7 @@ use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::notebook_page::NotebookPage;
 use crate::backlinks_page::{self, BacklinksPage};
+use crate::reading_page::ReadingPage;
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -64,6 +65,7 @@ pub(super) enum PageModel {
     Standards(Box<StandardsPage>),
     Notebook(Box<NotebookPage>),
     Backlinks(Box<BacklinksPage>),
+    Reading(Box<ReadingPage>),
 }
 
 pub(super) struct PageState {
@@ -111,7 +113,7 @@ impl PageState {
             PageModel::Packet(p) => p.typing(),
             PageModel::Standards(p) => p.typing(),
             PageModel::Notebook(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) => false,
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => false,
         }
     }
 
@@ -157,7 +159,7 @@ impl PageState {
             PageModel::Packet(p) => p.paste(text),
             PageModel::Standards(p) => p.query.paste(text),
             PageModel::Notebook(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) => {}
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => {}
         }
         self.stale = true;
     }
@@ -217,6 +219,8 @@ pub enum PageEvent {
     StreamRows { buffer: BufferId, rows: Vec<stream_page::Row>, lost: Vec<(usize, u8, u64)>, junk: Vec<(usize, usize, String)>, done: bool },
     StreamInfo { buffer: BufferId, framing: String },
     StreamStatus { buffer: BufferId, text: String, ok: bool },
+    /// A picture a page shows, read: its size and BGRA pixels.
+    PageImage { key: crate::page::ImageKey, result: Result<(u32, u32, Vec<u8>), String> },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -338,6 +342,7 @@ impl App {
             Some(PageModel::Standards(_)) => "*standards*".to_string(),
             Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
             Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
+            Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         }
     }
 
@@ -471,7 +476,11 @@ impl App {
             Some(s) if s.stale || s.cols != cols => self.notebook_page_layout(id, cols),
             _ => None,
         };
+        let reading = self.reading_precompute(id, cols, false);
         let Some(state) = self.pages.get_mut(&id) else { return };
+        if reading.as_ref().is_some_and(|r| r.changed()) {
+            state.stale = true;
+        }
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
         if agenda.is_some() && self.agenda_store.active_timer.is_some() && state.minute != minute {
@@ -513,6 +522,7 @@ impl App {
             PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Notebook(_) => precomputed.unwrap_or_default(),
             PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
+            PageModel::Reading(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -525,6 +535,12 @@ impl App {
             PageModel::Inbox(i) => review_inbox::layout(i, cols),
             PageModel::Review(r) => review_page::layout(r, cols),
         };
+        if let PageModel::Reading(p) = &mut state.model {
+            state.page = match reading {
+                Some(pre) => Self::reading_apply(p, pre, cols),
+                None => crate::reading_page::layout(p, cols),
+            };
+        }
         state.cols = cols;
         state.stale = false;
         let text = state.page.text.clone();
@@ -538,6 +554,7 @@ impl App {
             ob.buffer.drain_edits();
         }
         self.home_place_cursor(id, pane, line, col);
+        self.request_page_images(id);
     }
 
     /// Keys a page claims while it's focused. While a field has the
@@ -688,6 +705,10 @@ impl App {
                 let action = p.key(key);
                 self.backlinks_action(id, action);
             }
+            PageModel::Reading(p) => {
+                let action = p.key(key);
+                self.reading_action(id, action);
+            }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
                 let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
@@ -776,6 +797,7 @@ impl App {
             | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
             PageEvent::MibLoaded { key, set } => self.apply_mib_loaded(key, set),
             event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
+            PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)
@@ -918,6 +940,14 @@ impl App {
             .filter(|(r, _)| r.start < r.end)
             .collect();
         ranges.sort_by_key(|(r, _)| r.start);
+        // A character is one colour: a range that overlaps the one before
+        // it is cut to start after it (the renderer would draw it twice).
+        let mut end = 0;
+        ranges.retain_mut(|(r, _)| {
+            r.start = r.start.max(end);
+            end = end.max(r.end);
+            r.start < r.end
+        });
         ranges
     }
 
@@ -943,6 +973,13 @@ impl App {
         }
         overlay.rules = state.page.rules.iter().filter_map(|(line, cols)| visible(*line).map(|row| (row, cols.start, cols.end))).collect();
         overlay.rule_color = home::home_rule(theme);
+        overlay.images = state
+            .page
+            .images
+            .iter()
+            .filter(|i| i.line + i.rows > first_line && i.line <= first_line + rows)
+            .map(|i| (i.line as isize - first_line as isize, i.col, i.rows, i.cols, i.key.clone()))
+            .collect();
         (segments, overlay)
     }
 

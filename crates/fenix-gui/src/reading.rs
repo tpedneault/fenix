@@ -377,14 +377,25 @@ impl Writer {
             self.bars(quote);
             let shown: String = line.chars().take(self.width.saturating_sub(x0 + 2)).collect();
             self.g.panel(self.y, x0..self.width);
-            self.g.put(self.y, x0 + 1, &shown, Role::Text);
-            if let Some(spans) = colours.get(i) {
-                for (cols, name) in spans {
-                    let piece: String = shown.chars().skip(cols.start).take(cols.len()).collect();
-                    if !piece.is_empty() {
-                        self.g.put(self.y, x0 + 1 + cols.start, &piece, Role::Syntax(name));
-                    }
+            // Coloured pieces and plain gaps, never overlapping: a run
+            // of text is one colour.
+            let chars: Vec<char> = shown.chars().collect();
+            let mut at = 0;
+            let mut spans: Vec<(Range<usize>, &'static str)> = colours.get(i).cloned().unwrap_or_default();
+            spans.sort_by_key(|(r, _)| r.start);
+            for (cols, name) in spans {
+                let (start, end) = (cols.start.max(at).min(chars.len()), cols.end.min(chars.len()));
+                if start >= end {
+                    continue;
                 }
+                if start > at {
+                    self.g.put(self.y, x0 + 1 + at, &chars[at..start].iter().collect::<String>(), Role::Text);
+                }
+                self.g.put(self.y, x0 + 1 + start, &chars[start..end].iter().collect::<String>(), Role::Syntax(name));
+                at = end;
+            }
+            if at < chars.len() {
+                self.g.put(self.y, x0 + 1 + at, &chars[at..].iter().collect::<String>(), Role::Text);
             }
             if i == 0 && !lang.is_empty() && shown.chars().count() + lang.len() + 3 < self.width - x0 {
                 self.g.put(self.y, self.width - lang.len(), lang, Role::Muted);
@@ -491,7 +502,11 @@ impl Writer {
             me.y += 1;
         };
         write_row(self, header, true);
-        self.g.rule(self.y - 1, x0..x0 + total);
+        // The rule under the header gets a row of its own: hairlines are
+        // drawn through a row's middle.
+        self.bars(quote);
+        self.g.rule(self.y, x0..x0 + total);
+        self.y += 1;
         for row in rows {
             write_row(self, row, false);
         }
@@ -525,12 +540,13 @@ mod tests {
         let r = layout(text, 40, &Ctx::plain());
         let lines: Vec<&str> = r.page.text.lines().collect();
         assert_eq!(lines[0], "A │ Long header");
-        assert_eq!(lines[1], "1 │           2");
-        assert_eq!(lines[3], " int x;                                c");
-        assert!(r.page.panels.iter().any(|(l, _)| *l == 3));
+        assert_eq!(lines[2], "1 │           2");
+        assert!(r.page.rules.iter().any(|(l, _)| *l == 1));
+        assert_eq!(lines[4], " int x;                                c");
+        assert!(r.page.panels.iter().any(|(l, _)| *l == 4));
         let image = &r.page.images[0];
-        assert_eq!((image.line, image.rows), (5, 10));
-        assert_eq!(lines[15], "diagram");
+        assert_eq!((image.line, image.rows), (6, 10));
+        assert_eq!(lines[16], "diagram");
     }
 
     #[test]

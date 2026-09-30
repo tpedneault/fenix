@@ -90,6 +90,8 @@ pub enum LocalContext {
     /// A PDF pane: the reader's commands, for finding them without
     /// knowing its keys.
     Reader,
+    /// Markdown (notes, READMEs): the reading view.
+    Markdown,
 }
 
 impl LocalContext {
@@ -99,6 +101,7 @@ impl LocalContext {
             LocalContext::Arduino => "arduino",
             LocalContext::Tcl => "tcl",
             LocalContext::Reader => "reader",
+            LocalContext::Markdown => "markdown",
         }
     }
 
@@ -134,6 +137,11 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('y')], "copy a link to this page (yp)", "pdf.copy_link");
                 t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
                 t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
+            }
+            LocalContext::Markdown => {
+                t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
+                t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
+                t.insert(&[KeyPress::char('b')], "links here", "notebook.backlinks");
             }
             LocalContext::Tcl => {
                 t.insert(&[KeyPress::char('i')], "insert a telecommand", "mib.insert");
