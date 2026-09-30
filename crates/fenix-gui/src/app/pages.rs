@@ -24,6 +24,7 @@ use crate::stream_page::{self, StreamPage};
 use crate::standards_page::{self, StandardsPage};
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
+use crate::notebook_page::NotebookPage;
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -60,6 +61,7 @@ pub(super) enum PageModel {
     Hex(Box<HexPage>),
     Stream(Box<StreamPage>),
     Standards(Box<StandardsPage>),
+    Notebook(Box<NotebookPage>),
 }
 
 pub(super) struct PageState {
@@ -106,6 +108,7 @@ impl PageState {
             PageModel::MibDef(p) => p.typing(),
             PageModel::Packet(p) => p.typing(),
             PageModel::Standards(p) => p.typing(),
+            PageModel::Notebook(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => false,
         }
     }
@@ -151,6 +154,7 @@ impl PageState {
             PageModel::MibDef(p) => p.paste(text),
             PageModel::Packet(p) => p.paste(text),
             PageModel::Standards(p) => p.query.paste(text),
+            PageModel::Notebook(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) => {}
         }
         self.stale = true;
@@ -330,6 +334,7 @@ impl App {
             Some(PageModel::Hex(p)) => hex_page::title(p),
             Some(PageModel::Stream(p)) => stream_page::title(p),
             Some(PageModel::Standards(_)) => "*standards*".to_string(),
+            Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
         }
     }
 
@@ -457,6 +462,12 @@ impl App {
             Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib_form_bytes(f)),
             _ => None,
         };
+        // Pages drawn with the reading layout borrow the app while they're
+        // laid out, so they're laid out before the page is borrowed.
+        let precomputed = match self.pages.get(&id) {
+            Some(s) if s.stale || s.cols != cols => self.notebook_page_layout(id, cols),
+            _ => None,
+        };
         let Some(state) = self.pages.get_mut(&id) else { return };
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
@@ -497,6 +508,7 @@ impl App {
             PageModel::Hex(p) => hex_page::layout(p, cols),
             PageModel::Stream(p) => stream_page::layout(p, cols),
             PageModel::Standards(p) => standards_page::layout(p, cols),
+            PageModel::Notebook(_) => precomputed.unwrap_or_default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -663,6 +675,10 @@ impl App {
             PageModel::Standards(p) => {
                 let action = p.key(key);
                 self.standards_action(id, action);
+            }
+            PageModel::Notebook(p) => {
+                let action = p.key(key);
+                self.notebook_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
@@ -876,6 +892,7 @@ impl App {
             PageRole::Warn => theme.git_modified,
             PageRole::Bad => theme.git_conflicted,
             PageRole::Kind(kind) => kind_color(kind, theme),
+            PageRole::Syntax(name) => theme.syntax_color(name),
         };
         let last = first_line + rows;
         let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = state

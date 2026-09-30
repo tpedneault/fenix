@@ -80,12 +80,13 @@ pub enum Category {
     Mib,
     Ccsds,
     Vnc,
+    Notebook,
     Documents,
     Session,
 }
 
 impl Category {
-    pub const ALL: [Category; 15] = [
+    pub const ALL: [Category; 16] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -99,6 +100,7 @@ impl Category {
         Category::Mib,
         Category::Ccsds,
         Category::Vnc,
+        Category::Notebook,
         Category::Documents,
         Category::Session,
     ];
@@ -118,6 +120,7 @@ impl Category {
             Category::Mib => "SCOS-2000 MIB",
             Category::Ccsds => "CCSDS & PUS",
             Category::Vnc => "VNC",
+            Category::Notebook => "Notebook & diagrams",
             Category::Documents => "Workspaces",
             Category::Session => "Windows & session",
         }
@@ -327,6 +330,17 @@ const SOURCE: &[Field] = &[
     Field { name: "header", label: "Record header", range: Some((0, 64)), default: Some("0"), choices: &[] },
 ];
 
+const DIAGRAM_THEME: &[Field] = &[
+    Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+    Field { name: "base", label: "Starts from", range: None, default: Some("base"), choices: &["base", "default", "neutral", "dark", "forest", "fenix"] },
+    Field { name: "primaryColor", label: "Node fill", range: None, default: Some(""), choices: &[] },
+    Field { name: "primaryBorderColor", label: "Node border", range: None, default: Some(""), choices: &[] },
+    Field { name: "primaryTextColor", label: "Text", range: None, default: Some(""), choices: &[] },
+    Field { name: "lineColor", label: "Lines", range: None, default: Some(""), choices: &[] },
+    Field { name: "secondaryColor", label: "Second fill", range: None, default: Some(""), choices: &[] },
+    Field { name: "background", label: "Background", range: None, default: Some(""), choices: &[] },
+];
+
 const HOST: &[Field] = &[
     Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
     Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
@@ -495,6 +509,24 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         })).project(),
         s("ccsds.library", Ccsds, "Standards folder", Kind::Path, "The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading.", field!(ccsds_library, path_get, path_set)),
         s("ccsds.leap_seconds", Ccsds, "Leap seconds", Kind::Path, "A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has.", field!(ccsds_leap_seconds, path_get, path_set)).default("built in"),
+        // Notebook
+        s("notebook.folder", Notebook, "Folder", Kind::Path, "Where your notes, journal and diagrams are kept. Point it at a synced folder or an Obsidian vault to use that instead.", field!(notebook_folder, path_get, path_set)).default("Fenix's data folder"),
+        s("notebook.history", Notebook, "Versions kept", Kind::Int { min: 1, max: 500 }, "How many earlier versions of each note and diagram are kept; h on the notebook page lists them.", field!(notebook_history, usize_get, usize_set)).default("50"),
+        s("notebook.journal", Notebook, "Journal", Kind::Bool, "Keep a note per day (SPC n j). Captures go to today's; turned off, they go to the Inbox note.", field!(notebook_journal, bool_get, bool_set)).default("on"),
+        s("notebook.show_project_files", Notebook, "List project files", Kind::Bool, "Also list the project's own .md and .mmd files at the bottom of the notebook page.", field!(notebook_project_files, bool_get, bool_set)).default("off"),
+        s("diagrams.theme", Notebook, "Diagram theme", Kind::Text, "The theme a diagram is drawn in when it doesn't name one: fenix (follows the editor theme), default, neutral, dark, forest, base, or one of yours below.", field!(diagrams_theme, text_get, text_set)).default("fenix"),
+        s("diagrams.export_theme", Notebook, "Export theme", Kind::Text, "The theme exports are drawn in: same (as shown), or a theme's name.", field!(diagrams_export_theme, text_get, text_set)).default("same"),
+        s("diagrams.background", Notebook, "Export background", Kind::Choice(&["theme", "transparent", "white"]), "What's behind an exported diagram.", field!(diagrams_background, text_get, text_set)).default("theme"),
+        s("diagrams.themes", Notebook, "Your themes", Kind::Records(DIAGRAM_THEME), "Themes of your own: Mermaid theme variables over a theme to start from. Colours as #rrggbb; empty ones keep the starting theme's.", (|c: &Config| (!c.diagrams_themes.is_empty()).then(|| Value::Records(c.diagrams_themes.clone())), |c: &mut Config, v| {
+            c.diagrams_themes = match v {
+                None => Vec::new(),
+                Some(Value::Records(rows)) => rows,
+                Some(other) => return Err(format!("expected themes, got {}", other.describe())),
+            };
+            Ok(())
+        })),
+        s("diagrams.export_with", Notebook, "Export with", Kind::Choice(&["fenix", "mmdc"]), "What draws exported files: Fenix, or mermaid-cli (mmdc, when it's installed) for output identical to mermaid.js.", field!(diagrams_export_with, text_get, text_set)).default("fenix"),
+        s("diagrams.font", Notebook, "Diagram font", Kind::Font, "The font diagrams are drawn with.", field!(diagrams_font, text_get, text_set)).default("the renderer's"),
         // VNC
         s("vnc.hosts", Vnc, "Hosts", Kind::Records(HOST), "Machines SPC v connects to. No passwords: every host is taken to be on a trusted network.", (|c: &Config| (!c.vnc_hosts.is_empty()).then(|| Value::Records(c.vnc_hosts.iter().map(|(n, h, p)| vec![n.clone(), h.clone(), p.to_string()]).collect())), |c: &mut Config, v| {
             c.vnc_hosts = match v {

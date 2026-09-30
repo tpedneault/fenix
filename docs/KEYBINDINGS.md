@@ -4,6 +4,9 @@ Fenix follows real Vim for editing and a Doom-Emacs-style `SPC` leader
 for everything else. `SPC` starts a leader sequence from Normal mode; a
 popup shows what keys continue it.
 
+`Ctrl+Alt+Q` does everything `Esc` does, for when Escape doesn't reach
+Fenix (some remote-desktop and UI-automation tools don't send it).
+
 ## Leader (`SPC ...`)
 
 | Keys | Action |

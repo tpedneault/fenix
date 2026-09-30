@@ -32,6 +32,7 @@ mod ccsds_host;
 mod stream_host;
 mod file_index;
 mod disk_probe;
+mod notebook_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2307,6 +2308,10 @@ enum ActivePicker {
     /// `SPC r t`: a PDF's headings, by name; confirming goes to the
     /// heading's page.
     PdfHeading(fenix_picker::PickerState<u32>),
+    /// Every notebook picker (`SPC n f`, templates, diagram types, tags,
+    /// search hits, links to insert, themes...): what confirming does is
+    /// in the payload. `title` names it in the modeline.
+    Notebook { title: &'static str, picker: fenix_picker::PickerState<notebook_host::NotebookPick> },
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2429,6 +2434,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
         ActivePicker::PdfHeading(picker) => picker.push_char(c),
+
+        ActivePicker::Notebook { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2468,6 +2475,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
         ActivePicker::PdfHeading(picker) => picker.backspace(),
+
+        ActivePicker::Notebook { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2507,6 +2516,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
         ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
+
+        ActivePicker::Notebook { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2549,6 +2560,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
         ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
+
+        ActivePicker::Notebook { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2588,6 +2601,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::CompareHead { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
         ActivePicker::PdfHeading(picker) => picker.query(),
+
+        ActivePicker::Notebook { picker, .. } => picker.query(),
     }
 }
 
@@ -2627,6 +2642,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::CompareHead { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
         ActivePicker::PdfHeading(picker) => picker.len(),
+
+        ActivePicker::Notebook { picker, .. } => picker.len(),
     }
 }
 
@@ -2666,6 +2683,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
         ActivePicker::PdfHeading(picker) => picker.selected_row(),
+
+        ActivePicker::Notebook { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2709,6 +2728,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+
+        ActivePicker::Notebook { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -5739,6 +5760,8 @@ pub struct App {
     /// Linking a task to an issue typed by key, or naming the issue type
     /// of one being created from it.
     agenda_prompt: Option<AgendaPrompt>,
+    /// The notebook: notes, journal days and diagrams (`SPC n`).
+    notebook: notebook_host::NotebookState,
     /// What `SPC a h` captured for the new-task form it opened.
     agenda_capture: Option<agenda_host::Capture>,
     /// The clock picker open is asking about time away, not switching.
@@ -6741,6 +6764,7 @@ impl App {
             agenda_store,
             agenda_path,
             agenda_prompt: None,
+            notebook: Default::default(),
             agenda_capture: None,
             agenda_gap_asked: false,
             agenda_seen_saved: None,
@@ -17042,6 +17066,13 @@ impl App {
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
             }
+            Some(ActivePicker::Notebook { picker, .. }) => {
+                let Some(choice) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let query = picker.query().to_string();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.notebook_picked(choice, query);
+            }
             Some(ActivePicker::PdfHeading(picker)) => {
                 let Some(page) = picker.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -19598,6 +19629,11 @@ impl App {
             self.agenda_prompt_key(keypress);
             return;
         }
+        // A new note's name, a capture, a diagram's name.
+        if self.notebook.prompt.is_some() {
+            self.notebook_prompt_key(keypress);
+            return;
+        }
         // `SPC m n`'s sketch-name prompt.
         if self.embedded.prompt.is_some() {
             self.embedded_prompt_key(keypress);
@@ -21034,6 +21070,7 @@ impl App {
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
+                Some(picker @ ActivePicker::Notebook { title, .. }) => (*title, picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
@@ -21201,6 +21238,7 @@ impl App {
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.agenda_prompt_text())
+            .or_else(|| self.notebook_prompt_text())
             .or_else(|| self.embedded_prompt_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
@@ -22325,6 +22363,7 @@ impl App {
             crate::page::Role::Warn => theme.git_modified,
             crate::page::Role::Bad => theme.git_conflicted,
             crate::page::Role::Kind(kind) => projects::kind_color(kind, &theme),
+            crate::page::Role::Syntax(name) => theme.syntax_color(name),
         };
         let bottom = modeline_top.min(at.pane.y + at.pane.h);
         let shown = popup::max_rows(bottom - at.pane.y, 0.0, line_height, WHICH_KEY_PADDING).min(popup.rows.len());
@@ -25681,6 +25720,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             .filter(|r| !r.done)
             .map(|r| r.started + SLOW_LISTING_AFTER)
             .fold(wait_until, |acc, deadline| acc.min(deadline));
+        // Notebook files write themselves a moment after typing stops.
+        let wait_until = match self.notebook_autosave(now) {
+            Some(at) => wait_until.min(at),
+            None => wait_until,
+        };
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }

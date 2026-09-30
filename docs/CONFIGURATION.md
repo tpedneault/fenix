@@ -243,6 +243,17 @@ when it's out of date).
 | `ccsds.leap_seconds` | a path | built in | A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has. |
 | **VNC** | | | |
 | `vnc.hosts` | [[tables]] of name, host, port | – | Machines SPC v connects to. No passwords: every host is taken to be on a trusted network. |
+| **Notebook & diagrams** | | | |
+| `notebook.folder` | a path | Fenix's data folder | Where your notes, journal and diagrams are kept. Point it at a synced folder or an Obsidian vault to use that instead. |
+| `notebook.history` | 1–500 | 50 | How many earlier versions of each note and diagram are kept; h on the notebook page lists them. |
+| `notebook.journal` | true / false | on | Keep a note per day (SPC n j). Captures go to today's; turned off, they go to the Inbox note. |
+| `notebook.show_project_files` | true / false | off | Also list the project's own .md and .mmd files at the bottom of the notebook page. |
+| `diagrams.theme` | text | fenix | The theme a diagram is drawn in when it doesn't name one: fenix (follows the editor theme), default, neutral, dark, forest, base, or one of yours below. |
+| `diagrams.export_theme` | text | same | The theme exports are drawn in: same (as shown), or a theme's name. |
+| `diagrams.background` | theme / transparent / white | theme | What's behind an exported diagram. |
+| `diagrams.themes` | [[tables]] of name, base, primaryColor, primaryBorderColor, primaryTextColor, lineColor, secondaryColor, background | – | Themes of your own: Mermaid theme variables over a theme to start from. Colours as #rrggbb; empty ones keep the starting theme's. |
+| `diagrams.export_with` | fenix / mmdc | fenix | What draws exported files: Fenix, or mermaid-cli (mmdc, when it's installed) for output identical to mermaid.js. |
+| `diagrams.font` | text | the renderer's | The font diagrams are drawn with. |
 | **Workspaces** | | | |
 | `workspaces` | name = opens | – | SPC TAB f: git, jira, docker, vnc:HOST, project:PATH, or nothing. |
 | **Windows & session** | | | |

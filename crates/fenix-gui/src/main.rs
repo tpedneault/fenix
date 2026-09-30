@@ -36,6 +36,8 @@ mod review_page;
 mod review_store;
 mod settings_page;
 mod snippets_page;
+mod notebook_page;
+mod reading;
 mod graph_view;
 mod gpu;
 mod icon;

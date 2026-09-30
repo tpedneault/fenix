@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use fenix_keymap::{KeyCode, KeyPress, KeyTrie, Mods, NamedKey as FenixNamedKey};
 use winit::event::KeyEvent;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
 /// Translates a winit key event into fenix-keymap's UI-agnostic `KeyPress`.
 /// Named `Space` is normalized to `KeyCode::Char(' ')` -- treating it like
@@ -11,6 +11,13 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 /// Returns `None` for keys with nothing sensible to bind (F-keys, media
 /// keys, ...).
 pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
+    // Ctrl+Alt+Q is a second Escape. Synthetic input (UI automation,
+    // some remote-desktop tools) can fail to deliver Escape itself; this
+    // combination is bound to nothing else. Matched on the physical key
+    // so the layout's idea of Ctrl+Alt+Q (AltGr on some) doesn't matter.
+    if mods.control_key() && mods.alt_key() && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) {
+        return Some(KeyPress { code: KeyCode::Named(FenixNamedKey::Escape), mods: Mods::default() });
+    }
     let code = match &event.logical_key {
         Key::Named(NamedKey::Space) => KeyCode::Char(' '),
         Key::Named(NamedKey::Escape) => KeyCode::Named(FenixNamedKey::Escape),
@@ -426,6 +433,15 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // The agenda: the page and its tabs, and what you reach for from
         // a file -- a new task, a task from here, the clock. A task's own
         // keys (status, priority, clock, ...) are on the page.
+        // The notebook: notes, journal days and diagrams Fenix keeps.
+        t.label_group(&[spc, KeyPress::char('n')], "notebook");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('n')], "notebook page", "notebook.open");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('N')], "new note", "notebook.new_note");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('d')], "new diagram", "notebook.new_diagram");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('f')], "find by name", "notebook.find");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('r')], "reopen the last one", "notebook.recent");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('j')], "today's journal", "notebook.journal");
+
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('b')], "agenda: board", "agenda.board");

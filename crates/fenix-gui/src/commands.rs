@@ -213,6 +213,12 @@ impl CommandRegistry {
         registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
         registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
         registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
+        registry.register("notebook.open", "The notebook: every note, journal day and diagram", |ctx| ctx.app.open_notebook_page());
+        registry.register("notebook.new_note", "A new note, from a template", |ctx| ctx.app.notebook_new_note());
+        registry.register("notebook.new_diagram", "A new Mermaid diagram", |ctx| ctx.app.notebook_new_diagram());
+        registry.register("notebook.find", "Find a note or diagram by name", |ctx| ctx.app.notebook_find());
+        registry.register("notebook.recent", "Reopen the note or diagram you touched last", |ctx| ctx.app.notebook_reopen());
+        registry.register("notebook.journal", "Today's journal day", |ctx| ctx.app.notebook_today());
         registry.register("agenda.open", "Open the agenda page where it was left", cmd_agenda_open);
         registry.register("agenda.board", "Open the agenda on its board", cmd_agenda_board);
         registry.register("agenda.list", "Open the agenda on its list", cmd_agenda_list);
