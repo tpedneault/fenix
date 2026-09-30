@@ -7621,13 +7621,11 @@ impl App {
                 }
             }
             fenix_lsp::LspEvent::ServerRequest { id, method, .. } => {
-                // Not yet answering any server-initiated request (e.g.
-                // `workspace/configuration`) -- replying with a generic
-                // "method not found" error at least resolves it, rather
-                // than leaving a spec-compliant server waiting forever
-                // for a response it's entitled to.
+                // Only bookkeeping requests (progress tokens, capability
+                // registration) are accepted; everything else is refused
+                // with "method not found" rather than left unanswered.
                 if let Some(session) = self.lsp_sessions.get(&language) {
-                    let _ = session.client.respond(id, Err(fenix_lsp::ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }));
+                    let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
                 }
             }
             fenix_lsp::LspEvent::Disconnected(reason) => {

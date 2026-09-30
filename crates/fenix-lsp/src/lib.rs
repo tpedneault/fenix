@@ -31,7 +31,7 @@ mod sync;
 mod uri;
 
 pub use client::{LspClient, LspEvent};
-pub use envelope::ResponseError;
+pub use envelope::{server_request_reply, ResponseError};
 pub use position::{char_offset_to_position, position_to_char_offset};
 pub use sync::{change_event, wants_incremental};
 pub use uri::{normalize, path_to_uri, uri_to_path};

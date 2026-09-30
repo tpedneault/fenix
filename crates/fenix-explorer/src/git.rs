@@ -12,9 +12,14 @@ use crate::entry::{Entry, GitStatus};
 /// or without `git` on `PATH`; git status is an annotation on top of the
 /// listing, not something the listing should fail over.
 pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
-    let Ok(output) =
-        Command::new("git").args(["status", "--porcelain=v1", "--ignored", "--", "."]).current_dir(dir).output()
-    else {
+    let mut git = Command::new("git");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        git.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(output) = git.args(["status", "--porcelain=v1", "--ignored", "--", "."]).current_dir(dir).output() else {
         return HashMap::new();
     };
     if !output.status.success() {
