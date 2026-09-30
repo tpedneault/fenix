@@ -145,6 +145,8 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
                 t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
                 t.insert(&[KeyPress::char('b')], "links here", "notebook.backlinks");
+                t.insert(&[KeyPress::char('a')], "journal: refresh the agenda list", "notebook.journal_agenda");
+                t.insert(&[KeyPress::char('g')], "journal: add today's commits", "notebook.journal_commits");
             }
             LocalContext::Mermaid => {
                 t.insert(&[KeyPress::char('p')], "preview beside", "diagram.preview");
@@ -459,6 +461,11 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('r')], "reopen the last one", "notebook.recent");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('j')], "today's journal", "notebook.journal");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('b')], "links here (sidebar)", "notebook.backlinks");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('c')], "capture a line", "notebook.capture");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('/')], "search the notebook", "notebook.search");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('#')], "tags", "notebook.tags");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('p')], "this project's notes", "notebook.project");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('t')], "checkbox to the agenda", "notebook.to_agenda");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('l')], "insert a link", "notebook.insert_link");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('y')], "copy a link to this line", "notebook.copy_link");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('v')], "paste a picture", "notebook.paste_image");

@@ -34,6 +34,7 @@ mod file_index;
 mod disk_probe;
 mod notebook_host;
 mod notebook_links;
+mod notebook_capture;
 mod reading_host;
 mod diagram_host;
 use tool_sessions::LspKey;

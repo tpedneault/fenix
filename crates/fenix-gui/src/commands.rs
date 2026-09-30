@@ -225,6 +225,13 @@ impl CommandRegistry {
         registry.register("diagram.viewer", "The diagram on its own: zoom, pan, walk its nodes", |ctx| ctx.app.open_diagram_viewer());
         registry.register("diagram.theme", "Set the diagram's theme", |ctx| ctx.app.diagram_pick_theme_here());
         registry.register("diagram.export", "Export the diagram", |ctx| ctx.app.diagram_export_here());
+        registry.register("notebook.capture", "Capture a line into the journal or the Inbox", |ctx| ctx.app.notebook_capture());
+        registry.register("notebook.search", "Search every note and diagram", |ctx| ctx.app.notebook_search());
+        registry.register("notebook.tags", "Every tag in the notebook", |ctx| ctx.app.notebook_tags());
+        registry.register("notebook.project", "The notes about this project", |ctx| ctx.app.notebook_project_notes());
+        registry.register("notebook.to_agenda", "Send the checkbox under the cursor to the agenda", |ctx| ctx.app.notebook_to_agenda());
+        registry.register("notebook.journal_agenda", "Refresh a journal day's agenda list", |ctx| ctx.app.journal_refresh_agenda());
+        registry.register("notebook.journal_commits", "Add today's commits to a journal day", |ctx| ctx.app.journal_commits());
         registry.register("notebook.backlinks", "What links to this note, beside it", |ctx| ctx.app.notebook_backlinks());
         registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
         registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());

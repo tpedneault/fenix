@@ -33,6 +33,10 @@ pub(crate) enum NotebookPick {
     Starter(String),
     /// Write theme `name` into the diagram in `buffer`.
     Theme { buffer: BufferId, name: String },
+    /// A search hit: an entry, at a line.
+    Hit { id: String, line: Option<usize> },
+    /// The notebook page, with this filter.
+    Filter(String),
 }
 
 /// What the notebook's modeline prompt is typing.
@@ -42,6 +46,11 @@ pub(super) enum NotebookPromptKind {
     NoteName { template: String, body: String },
     /// The new diagram's name, then it's made from `text`.
     DiagramName { text: String },
+    /// A line to capture, where it goes, whether it's a task, and the
+    /// link back to where it was captured from.
+    Capture { to: super::notebook_capture::CaptureTo, task: bool, link: Option<String> },
+    /// A notebook search.
+    Search,
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +413,8 @@ impl App {
             NotebookPick::DiagramKind(i) => self.diagram_kind_picked(i),
             NotebookPick::Starter(text) => self.diagram_starter_picked(text),
             NotebookPick::Theme { buffer, name } => self.diagram_set_theme(buffer, &name),
+            NotebookPick::Hit { id, line } => self.notebook_open_at(&id, line),
+            NotebookPick::Filter(filter) => self.notebook_page_filtered(&filter),
         }
     }
 
@@ -412,6 +423,12 @@ impl App {
         Some(match &p.kind {
             NotebookPromptKind::NoteName { template, .. } => format!("New note ({template}) -- name: {}▏", p.input),
             NotebookPromptKind::DiagramName { .. } => format!("New diagram -- name: {}▏", p.input),
+            NotebookPromptKind::Capture { to, task, link } => {
+                let what = if *task { "task" } else { "note" };
+                let link = link.as_deref().map(|l| format!(" · links {l} (C-l drops)")).unwrap_or_default();
+                format!("Capture a {what} → {} (Tab changes, C-t task){link}: {}▏", to.label(), p.input)
+            }
+            NotebookPromptKind::Search => format!("Search the notebook (words, tag:, type:, project:, is:todo): {}▏", p.input),
         })
     }
 
@@ -423,6 +440,10 @@ impl App {
                     p.input.push_str(&text);
                 }
             }
+            self.wake_caret();
+            return;
+        }
+        if self.notebook_capture_key(keypress) {
             self.wake_caret();
             return;
         }
@@ -460,6 +481,12 @@ impl App {
                     return;
                 }
                 self.notebook_create_diagram(&name, &text);
+            }
+            NotebookPromptKind::Capture { to, task, link } => self.notebook_capture_done(to, task, link, &input),
+            NotebookPromptKind::Search => {
+                if !name.is_empty() {
+                    self.notebook_search_results(&name);
+                }
             }
         }
     }
