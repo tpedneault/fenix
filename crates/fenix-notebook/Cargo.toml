@@ -11,7 +11,7 @@ publish.workspace = true
 chrono = "0.4"
 fenix-fs = { path = "../fenix-fs" }
 fenix-storage = { path = "../fenix-storage" }
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 

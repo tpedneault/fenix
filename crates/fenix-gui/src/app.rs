@@ -35,6 +35,7 @@ mod disk_probe;
 mod notebook_host;
 mod notebook_links;
 mod notebook_capture;
+mod notebook_export;
 mod reading_host;
 mod diagram_host;
 use tool_sessions::LspKey;
@@ -20682,7 +20683,12 @@ impl App {
                     }
                 }
                 fenix_vim::LspRequestKind::References => self.request_references(),
-                fenix_vim::LspRequestKind::Hover => self.request_hover(),
+                fenix_vim::LspRequestKind::Hover => {
+                    // `K` in a ```mermaid block: it, drawn, beside.
+                    if !self.mermaid_block_hover() {
+                        self.request_hover();
+                    }
+                }
                 fenix_vim::LspRequestKind::FileUnderCursor => {
                     if !self.notebook_follow_link_under_cursor() {
                         self.follow_link_under_cursor();

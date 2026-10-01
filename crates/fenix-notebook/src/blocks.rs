@@ -118,6 +118,10 @@ fn split_text(text: &str, style: Style, line: usize, out: &mut Vec<Span>) {
     push_plain(at, chars.len(), out);
 }
 
+/// A table being read: alignments, header cells, rows, first line, and
+/// whether the header is still being read.
+type TableBuild = (Vec<Alignment>, Vec<Vec<Span>>, Vec<Vec<Vec<Span>>>, usize, bool);
+
 /// `text` as blocks.
 pub fn parse(text: &str) -> Vec<Blk> {
     let fm = FrontMatter::parse(text);
@@ -154,7 +158,7 @@ pub fn parse(text: &str) -> Vec<Blk> {
     let mut code: Option<(String, String, usize)> = None;
     let mut heading: Option<(usize, usize)> = None;
     let mut para_line: Option<usize> = None;
-    let mut table: Option<(Vec<Alignment>, Vec<Vec<Span>>, Vec<Vec<Vec<Span>>>, usize, bool)> = None;
+    let mut table: Option<TableBuild> = None;
     let mut row: Vec<Vec<Span>> = Vec::new();
     let mut image: Option<(String, String, usize)> = None;
     let mut footnote: Option<(String, usize)> = None;
@@ -162,7 +166,7 @@ pub fn parse(text: &str) -> Vec<Blk> {
     let mut text_buf = String::new();
     let mut text_line = 0usize;
 
-    let mut events = Parser::new_ext(body, opts).into_offset_iter().peekable();
+    let events = Parser::new_ext(body, opts).into_offset_iter();
 
     macro_rules! flush_text {
         () => {
@@ -176,7 +180,7 @@ pub fn parse(text: &str) -> Vec<Blk> {
         };
     }
 
-    while let Some((event, range)) = events.next() {
+    for (event, range) in events {
         let line = line_of(&starts, body_from + range.start);
         match event {
             Event::Start(tag) => {
@@ -409,13 +413,11 @@ pub fn parse(text: &str) -> Vec<Blk> {
                 flush_text!();
                 spans.push(Span::plain(format!("[{label}]"), Style { tag: true, ..style }));
             }
-            Event::Html(h) | Event::InlineHtml(h) => {
-                if code.is_none() {
-                    let h = h.trim_end_matches('\n');
-                    if !h.trim_start().starts_with("<!--") {
-                        flush_text!();
-                        spans.push(Span::plain(h.to_string(), Style { code: true, ..style }));
-                    }
+            Event::Html(h) | Event::InlineHtml(h) if code.is_none() => {
+                let h = h.trim_end_matches('\n');
+                if !h.trim_start().starts_with("<!--") {
+                    flush_text!();
+                    spans.push(Span::plain(h.to_string(), Style { code: true, ..style }));
                 }
             }
             _ => {}

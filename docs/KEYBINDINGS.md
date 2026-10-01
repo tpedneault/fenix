@@ -127,6 +127,21 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC a /` | Search every task |
 | `SPC a t` / `SPC a T` | Clock: stop, resume or switch / resume the last task |
 | `SPC a i` / `SPC a s` / `SPC a w` | Bring in Jira issues / sync with Jira / review and send worklogs |
+| `SPC n n` | The notebook page |
+| `SPC n N` / `SPC n d` | A new note (from a template) / a new diagram |
+| `SPC n j` | Today's journal day |
+| `SPC n c` | Capture a line into the journal or the Inbox |
+| `SPC n f` / `SPC n r` | Find a note or diagram by name / reopen the last one |
+| `SPC n /` / `SPC n #` / `SPC n p` | Search the notebook / tags / this project's notes |
+| `SPC n b` | What links to this note, beside it |
+| `SPC n l` / `SPC n y` | Insert a link to a note / copy a link to this line |
+| `SPC n v` | Paste the clipboard's picture into the note |
+| `SPC n t` | Send the checkbox under the cursor to the agenda |
+| `SPC n s` / `SPC n i` / `SPC n e` | Save the ```` ```mermaid ```` block here / import a file / export |
+| `SPC i D` | Insert a notebook diagram (its block, or an SVG and a link) |
+| `SPC m p` / `SPC m r` | Markdown: the reading view beside / in place; a diagram: its preview |
+| `SPC m v` / `SPC m t` / `SPC m e` | A diagram: view it on its own / set its theme / export |
+| `SPC m a` / `SPC m g` | A journal day: refresh its agenda list / add the day's commits |
 | `SPC j j` | Open the Jira page |
 | `SPC j /` | Search Jira (words, or JQL after `:`) |
 | `SPC j g` | Open an issue by key |
@@ -473,6 +488,23 @@ and for the followed parameter `value:` `raw:` `limits:out` (`in`,
 |---|---|
 | `Enter` / `o` / `f` | Open the standard / where to get it / the folder setting |
 | `/` | Search every standard's text; `Enter` on a match opens it at its page, `Esc` goes back |
+
+## Notebook (`SPC n n`), reading view and diagrams
+
+| Key | Where | What |
+|---|---|---|
+| `Enter` / `o` / `v` | notebook page | Edit / read / view a diagram |
+| `N` / `d` / `i` | notebook page | New note / new diagram / import |
+| `t` / `r` / `P` / `D` | notebook page | Tags / rename / pin / duplicate |
+| `h` / `p` / `x x` / `e` / `T` | notebook page | Earlier versions / to the project / delete / export / a diagram's theme |
+| `/` / `Tab` / `s` / `[` `]` | notebook page | Filter / chips / pin the search / journal days |
+| `[[` | Markdown, Insert | Complete a note's name |
+| `gd` / `gf` | on a `[[link]]` | Follow it (a missing note is made) |
+| `K` | in a ```` ```mermaid ```` block | The reading view beside, on it |
+| `j` `k` / `Tab` / `Enter` / `x` / `i` | reading view | Move / next link / follow / tick / edit here |
+| `+` `-` `0` / `hjkl` / `Tab` / `/` / `Enter` | diagram preview | Zoom / pan / walk nodes / find one / its line |
+| `t` / `T` / `e` | diagram preview | Set its theme / try one / export |
+| `Tab` / `C-t` / `C-l` | capture prompt | Journal or Inbox / as a task / drop the link back |
 
 ## Agenda (`SPC a a`) and Jira (`SPC j j`)
 

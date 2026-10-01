@@ -225,6 +225,8 @@ pub enum PageEvent {
     StreamStatus { buffer: BufferId, text: String, ok: bool },
     /// A picture a page shows, read: its size and BGRA pixels.
     PageImage { key: crate::page::ImageKey, result: Result<(u32, u32, Vec<u8>), String> },
+    /// The notebook, read off the UI thread.
+    NotebookOpened(Box<fenix_notebook::Notebook>),
     /// A diagram, drawn (or why it couldn't be).
     DiagramDrawn { key: u64, result: Result<(crate::diagram_page::Drawn, u32, u32, Vec<u8>), (usize, String)> },
 }
@@ -820,6 +822,7 @@ impl App {
             event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
             PageEvent::DiagramDrawn { key, result } => self.apply_diagram_drawn(key, result),
+            PageEvent::NotebookOpened(nb) => self.apply_notebook_opened(*nb),
             event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
             event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
                 self.apply_review_event(event)

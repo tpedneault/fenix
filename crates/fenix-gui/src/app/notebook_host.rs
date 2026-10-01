@@ -37,6 +37,10 @@ pub(crate) enum NotebookPick {
     Hit { id: String, line: Option<usize> },
     /// The notebook page, with this filter.
     Filter(String),
+    /// Export `what` this way.
+    Export { what: super::notebook_export::ExportWhat, how: super::notebook_export::ExportHow },
+    /// A notebook diagram into the buffer: its block, or an SVG and a link.
+    InsertDiagram { id: String, svg: bool },
 }
 
 /// What the notebook's modeline prompt is typing.
@@ -51,6 +55,12 @@ pub(super) enum NotebookPromptKind {
     Capture { to: super::notebook_capture::CaptureTo, task: bool, link: Option<String> },
     /// A notebook search.
     Search,
+    /// Where a file export goes.
+    ExportPath { what: super::notebook_export::ExportWhat, how: super::notebook_export::ExportHow },
+    /// The name a ```mermaid block is saved to the notebook under.
+    SaveBlock { text: String },
+    /// A file to copy into the notebook.
+    Import,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +88,8 @@ pub(super) struct NotebookState {
     pub(super) pending: std::collections::HashSet<ImageKey>,
     /// Diagrams drawn and being drawn.
     pub(super) diagrams: super::diagram_host::DiagramState,
+    /// The notebook is being read off the UI thread (for Home).
+    pub(super) opening: bool,
 }
 
 /// A capture name from `fenix-syntax` as one the page roles can hold.
@@ -175,6 +187,38 @@ impl App {
             }
         }
         self.notebook.book.as_mut()
+    }
+
+    /// Reads the notebook off the UI thread, if its folder exists and it
+    /// isn't open: Home lists it without the launch waiting on it.
+    pub(super) fn notebook_open_in_background(&mut self) {
+        if self.notebook.book.is_some() || self.notebook.opening {
+            return;
+        }
+        // Tests never read the notebook of the Fenix you use.
+        if cfg!(test) && self.config.notebook_folder.is_none() {
+            return;
+        }
+        let root = self.notebook_root();
+        if !root.is_dir() {
+            return;
+        }
+        self.notebook.opening = true;
+        self.page_spawn(move |send| {
+            if let Ok(nb) = Notebook::open(&root) {
+                send(super::pages::PageEvent::NotebookOpened(Box::new(nb)));
+            }
+        });
+    }
+
+    /// The notebook, read in the background, arrived.
+    pub(super) fn apply_notebook_opened(&mut self, mut nb: Notebook) {
+        self.notebook.opening = false;
+        if self.notebook.book.is_none() {
+            nb.history_limit = self.config.notebook_history.unwrap_or(50);
+            self.notebook.book = Some(nb);
+            self.refresh_home_data(false);
+        }
     }
 
     /// The project a note made now is about: the focused project's name.
@@ -415,6 +459,8 @@ impl App {
             NotebookPick::Theme { buffer, name } => self.diagram_set_theme(buffer, &name),
             NotebookPick::Hit { id, line } => self.notebook_open_at(&id, line),
             NotebookPick::Filter(filter) => self.notebook_page_filtered(&filter),
+            NotebookPick::Export { what, how } => self.export_picked(what, how),
+            NotebookPick::InsertDiagram { id, svg } => self.insert_diagram_picked(&id, svg),
         }
     }
 
@@ -429,6 +475,9 @@ impl App {
                 format!("Capture a {what} → {} (Tab changes, C-t task){link}: {}▏", to.label(), p.input)
             }
             NotebookPromptKind::Search => format!("Search the notebook (words, tag:, type:, project:, is:todo): {}▏", p.input),
+            NotebookPromptKind::ExportPath { .. } => format!("Export to: {}▏", p.input),
+            NotebookPromptKind::SaveBlock { .. } => format!("Save the diagram to the notebook as: {}▏", p.input),
+            NotebookPromptKind::Import => format!("Import (a .md or .mmd file): {}▏", p.input),
         })
     }
 
@@ -486,6 +535,21 @@ impl App {
             NotebookPromptKind::Search => {
                 if !name.is_empty() {
                     self.notebook_search_results(&name);
+                }
+            }
+            NotebookPromptKind::ExportPath { what, how } => {
+                if !name.is_empty() {
+                    self.export_to_path(what, how, &name);
+                }
+            }
+            NotebookPromptKind::SaveBlock { text } => {
+                if !name.is_empty() {
+                    self.notebook_create_diagram(&name, &text);
+                }
+            }
+            NotebookPromptKind::Import => {
+                if !name.is_empty() {
+                    self.notebook_import_path(&name);
                 }
             }
         }
@@ -860,21 +924,6 @@ impl App {
     // Later phases fill these in.
     // ------------------------------------------------------------------
 
-    pub(crate) fn notebook_import(&mut self) {
-        self.set_message("import comes with export");
-    }
-
-    pub(super) fn notebook_export(&mut self, _id: &str) {
-        self.set_message("export comes later");
-    }
-
-    pub(super) fn diagram_export_buffer(&mut self, _source: BufferId) {
-        self.set_message("export comes later");
-    }
-
-    pub(crate) fn diagram_export_here(&mut self) {
-        self.set_message("export comes later");
-    }
 
     /// `SPC n d`.
     pub(crate) fn notebook_new_diagram(&mut self) {

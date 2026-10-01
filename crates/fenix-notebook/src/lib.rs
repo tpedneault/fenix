@@ -680,7 +680,7 @@ impl Notebook {
             let mut lines: Vec<String> = e.text.lines().map(str::to_string).collect();
             // Right to left, so earlier columns stay put.
             let mut hits = hits;
-            hits.sort_by(|a, b| (b.line, b.cols.start).cmp(&(a.line, a.cols.start)));
+            hits.sort_by_key(|l| std::cmp::Reverse((l.line, l.cols.start)));
             for l in hits {
                 let Some(line) = lines.get_mut(l.line) else { continue };
                 let chars: Vec<char> = line.chars().collect();

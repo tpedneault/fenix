@@ -192,13 +192,24 @@ pub fn render(source: &str, themes: &Themes, theme: Option<&str>) -> Result<Rend
         .map_err(|_| Diagnostic { line: 0, col: 0, message: "the renderer couldn't lay this diagram out".into() })?;
     let svg = render_svg(&layout, &mermaid_theme, &config);
     let (width, height) = svg_size(&svg).unwrap_or((layout.width, layout.height));
+    // Node boxes in the picture's own coordinates: the SVG's view box
+    // can start left of or above 0 (a sequence diagram's does).
+    let (ox, oy) = view_origin(&svg);
     let nodes = layout
         .nodes
         .values()
         .filter(|n| !n.hidden)
-        .map(|n| NodeBox { id: n.id.clone(), label: n.label.lines.join(" "), x: n.x, y: n.y, w: n.width, h: n.height, line: node_line(source, &n.id) })
+        .map(|n| NodeBox { id: n.id.clone(), label: n.label.lines.join(" "), x: n.x - ox, y: n.y - oy, w: n.width, h: n.height, line: node_line(source, &n.id) })
         .collect();
     Ok(Rendered { svg, width, height, nodes, theme: name })
+}
+
+/// Where the SVG's view box starts.
+fn view_origin(svg: &str) -> (f32, f32) {
+    let head = &svg[..svg.find('>').unwrap_or(0)];
+    let Some(at) = head.find(" viewBox=\"").map(|a| a + 10) else { return (0.0, 0.0) };
+    let mut parts = head[at..].split('"').next().unwrap_or("").split([' ', ',']).filter_map(|p| p.parse::<f32>().ok());
+    (parts.next().unwrap_or(0.0), parts.next().unwrap_or(0.0))
 }
 
 fn svg_size(svg: &str) -> Option<(f32, f32)> {
@@ -226,30 +237,8 @@ pub enum Background {
 }
 
 fn tree(svg: &str, background: Background) -> Result<resvg::usvg::Tree, String> {
-    let svg = match background {
-        Background::Theme => svg.to_string(),
-        // The renderer paints a full-size rect first: replaced.
-        Background::Transparent | Background::White => {
-            let fill = if background == Background::White { "#ffffff" } else { "none" };
-            match (svg.find("<rect x=\"0\" y=\"0\""), svg.find("<svg")) {
-                (Some(at), Some(open)) if at < svg.find("<defs").unwrap_or(usize::MAX) && at > open => {
-                    let end = svg[at..].find("/>").map(|e| at + e).unwrap_or(at);
-                    let rect = &svg[at..end];
-                    let replaced = match rect.find("fill=\"") {
-                        Some(f) => {
-                            let close = rect[f + 6..].find('"').map(|c| f + 6 + c).unwrap_or(rect.len());
-                            format!("{}fill=\"{fill}\"{}", &rect[..f], &rect[close + 1..])
-                        }
-                        None => rect.to_string(),
-                    };
-                    format!("{}{}{}", &svg[..at], replaced, &svg[end..])
-                }
-                _ => svg.to_string(),
-            }
-        }
-    };
-    let mut opt = resvg::usvg::Options::default();
-    opt.fontdb = FONTS.clone();
+    let svg = svg_with(svg, background);
+    let opt = resvg::usvg::Options { fontdb: FONTS.clone(), ..Default::default() };
     resvg::usvg::Tree::from_str(&svg, &opt).map_err(|e| e.to_string())
 }
 
@@ -267,7 +256,7 @@ pub fn rasterize(svg: &str, scale: f32, background: Background) -> Result<(u32, 
     resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
     // tiny-skia keeps premultiplied alpha; straight alpha is wanted.
     let mut px = pixmap.take();
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         let a = p[3] as u32;
         if a > 0 && a < 255 {
             for c in &mut p[..3] {
@@ -289,22 +278,24 @@ pub fn png(svg: &str, scale: f32, background: Background) -> Result<Vec<u8>, Str
     pixmap.encode_png().map_err(|e| e.to_string())
 }
 
-/// The SVG with its background as asked.
+/// The SVG with its background as asked: the renderer paints a
+/// backdrop rect first (before its `<defs>`), whose fill is replaced.
 pub fn svg_with(svg: &str, background: Background) -> String {
-    match background {
-        Background::Theme => svg.to_string(),
-        _ => {
-            // Rebuilt through `tree` only to find the rect; simpler to
-            // redo the substitution here.
-            let fill = if background == Background::White { "#ffffff" } else { "none" };
-            let Some(at) = svg.find("<rect x=\"0\" y=\"0\"") else { return svg.to_string() };
-            let Some(end) = svg[at..].find("/>").map(|e| at + e) else { return svg.to_string() };
-            let rect = &svg[at..end];
-            let Some(f) = rect.find("fill=\"") else { return svg.to_string() };
-            let close = rect[f + 6..].find('"').map(|c| f + 6 + c).unwrap_or(rect.len());
-            format!("{}{}fill=\"{fill}\"{}{}", &svg[..at], &rect[..f], &rect[close + 1..], &svg[end..])
-        }
+    let fill = match background {
+        Background::Theme => return svg.to_string(),
+        Background::White => "#ffffff",
+        Background::Transparent => "none",
+    };
+    let Some(open) = svg.find("<svg") else { return svg.to_string() };
+    let Some(at) = svg[open..].find("<rect ").map(|a| a + open) else { return svg.to_string() };
+    if svg.find("<defs").is_some_and(|d| d < at) {
+        return svg.to_string();
     }
+    let Some(end) = svg[at..].find("/>").map(|e| at + e) else { return svg.to_string() };
+    let rect = &svg[at..end];
+    let Some(f) = rect.find(" fill=\"") else { return svg.to_string() };
+    let close = rect[f + 7..].find('"').map(|c| f + 7 + c).unwrap_or(rect.len());
+    format!("{}{} fill=\"{fill}\"{}{}", &svg[..at], &rect[..f], &rect[close + 1..], &svg[end..])
 }
 
 /// The front matter lines' range, fences included.
@@ -447,6 +438,17 @@ mod tests {
     }
 
     #[test]
+    fn node_boxes_are_in_the_pictures_coordinates() {
+        let r = render("sequenceDiagram
+    Ground->>OBC: hi
+", &Themes::default(), None).unwrap();
+        let g = r.nodes.iter().find(|n| n.id == "Ground").unwrap();
+        // The view box starts at -50: the first actor sits 50 in.
+        assert!(r.svg.contains("viewBox=\"-50 "));
+        assert_eq!(g.x, 50.0);
+    }
+
+    #[test]
     fn errors_point_at_the_line_that_caused_them() {
         let e = render("flowchart TD\n  a --> b\n  b -->\n", &Themes::default(), None).unwrap_err();
         assert_eq!(e.line, 2);
@@ -486,6 +488,11 @@ mod tests {
         let r = render(FLOW, &Themes::default(), None).unwrap();
         let clear = svg_with(&r.svg, Background::Transparent);
         assert!(clear.contains("fill=\"none\""));
+        let seq = render("sequenceDiagram
+    A->>B: hi
+", &Themes::default(), None).unwrap();
+        assert!(svg_with(&seq.svg, Background::White).contains("<rect x=\"-50\" y=\"-10\" width=\"450\""), "the backdrop at -50 too");
+        assert!(svg_with(&seq.svg, Background::White).split("<defs").next().unwrap().contains("fill=\"#ffffff\""));
         let (_, _, px) = rasterize(&r.svg, 1.0, Background::Transparent).unwrap();
         assert_eq!(px[3], 0, "the corner is see-through");
     }

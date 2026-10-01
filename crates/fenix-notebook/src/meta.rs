@@ -303,7 +303,7 @@ pub fn fenced_blocks(text: &str) -> Vec<(String, Range<usize>, String)> {
             continue;
         }
         match &open {
-            None => open = Some((m, run, trimmed[run..].trim().split_whitespace().next().unwrap_or("").to_lowercase(), n + 1)),
+            None => open = Some((m, run, trimmed[run..].split_whitespace().next().unwrap_or("").to_lowercase(), n + 1)),
             Some((om, or, lang, start)) if *om == m && run >= *or && trimmed[run..].trim().is_empty() => {
                 out.push((lang.clone(), *start..n, lines[*start..n].join("\n")));
                 open = None;

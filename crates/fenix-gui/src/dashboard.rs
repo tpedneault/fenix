@@ -28,6 +28,9 @@ pub struct HomeData {
     pub recent: Vec<FileItem>,
     /// PDFs read lately; `detail` is where you were ("p. 38 / 212").
     pub reading: Vec<FileItem>,
+    /// The notebook: pinned entries, today's journal day, the last few
+    /// touched; `detail` is what it is ("note", "diagram", "today").
+    pub notebook: Vec<FileItem>,
     pub projects: Vec<ProjectItem>,
     pub today: Vec<TaskItem>,
     pub todos: Vec<TodoItem>,
@@ -273,6 +276,7 @@ impl Grid {
 enum Section {
     Resume,
     Reading,
+    Notebook,
     Recent,
     Projects,
     Today,
@@ -321,9 +325,9 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     let columns = if width >= 96 { 3 } else if width >= 60 { 2 } else { 1 };
     let col_width = (width - GAP * (columns - 1)) / columns;
     let groups: Vec<Vec<Section>> = match columns {
-        3 => vec![vec![Section::Resume, Section::Reading, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
-        2 => vec![vec![Section::Resume, Section::Reading, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
-        _ => vec![vec![Section::Resume, Section::Reading, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
+        3 => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
+        2 => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
+        _ => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
     };
     let body = find + 5;
     let mut content_end = body;
@@ -350,6 +354,18 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     g.header(y, x, col_width, "reading", Some(data.reading.len()), "SPC r f");
                     y += 1;
                     for item in &data.reading {
+                        g.row(y, x + 2, col_width - 2, &item.name, Role::Text, &item.detail, Role::Muted);
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::RecentFile(item.path.clone()) });
+                        y += 1;
+                    }
+                }
+                Section::Notebook => {
+                    if data.notebook.is_empty() {
+                        continue;
+                    }
+                    g.header(y, x, col_width, "notebook", Some(data.notebook.len()), "SPC n n");
+                    y += 1;
+                    for item in &data.notebook {
                         g.row(y, x + 2, col_width - 2, &item.name, Role::Text, &item.detail, Role::Muted);
                         slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::RecentFile(item.path.clone()) });
                         y += 1;
@@ -568,6 +584,7 @@ mod tests {
                 FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
             reading: Vec::new(),
+            notebook: Vec::new(),
             projects: vec![
                 ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
                 ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
@@ -583,6 +600,14 @@ mod tests {
 
     fn line_of(view: &HomeView, needle: &str) -> usize {
         view.text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle:?} not in:\n{}", view.text))
+    }
+
+    #[test]
+    fn the_notebook_has_a_section_when_it_has_entries() {
+        let data = HomeData { notebook: vec![FileItem { path: "/nb/journal/2026/2026-09-30.md".into(), name: "Today's journal".into(), detail: "today".into(), age: String::new() }], ..HomeData::default() };
+        let view = layout(&data, 140, 45);
+        assert!(view.text.contains("notebook") && view.text.contains("Today's journal"), "{}", view.text);
+        assert!(!layout(&HomeData::default(), 140, 45).text.contains("notebook"));
     }
 
     #[test]

@@ -205,6 +205,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('s')], "snippet", "insert.snippet");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('S')], "manage snippets", "snippets.open");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('n')], "snippet from the selection", "snippets.from_selection");
+        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('D')], "a notebook diagram", "insert.diagram");
         // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
         // single most-used action" convention -- here, the same fuzzy
         // find-file-in-project picker as `SPC p f`.
@@ -466,6 +467,9 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('#')], "tags", "notebook.tags");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('p')], "this project's notes", "notebook.project");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('t')], "checkbox to the agenda", "notebook.to_agenda");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('e')], "export", "notebook.export");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('s')], "save the ```mermaid block", "notebook.save_block");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('i')], "import a file", "notebook.import");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('l')], "insert a link", "notebook.insert_link");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('y')], "copy a link to this line", "notebook.copy_link");
         t.insert(&[spc, KeyPress::char('n'), KeyPress::char('v')], "paste a picture", "notebook.paste_image");

@@ -232,6 +232,10 @@ impl CommandRegistry {
         registry.register("notebook.to_agenda", "Send the checkbox under the cursor to the agenda", |ctx| ctx.app.notebook_to_agenda());
         registry.register("notebook.journal_agenda", "Refresh a journal day's agenda list", |ctx| ctx.app.journal_refresh_agenda());
         registry.register("notebook.journal_commits", "Add today's commits to a journal day", |ctx| ctx.app.journal_commits());
+        registry.register("notebook.export", "Export this diagram or note", |ctx| ctx.app.diagram_export_here());
+        registry.register("notebook.save_block", "Save the ```mermaid block here to the notebook", |ctx| ctx.app.notebook_save_block());
+        registry.register("notebook.import", "Copy a .md or .mmd file into the notebook", |ctx| ctx.app.notebook_import());
+        registry.register("insert.diagram", "Insert a notebook diagram: its block, or an SVG and a link", |ctx| ctx.app.notebook_insert_diagram());
         registry.register("notebook.backlinks", "What links to this note, beside it", |ctx| ctx.app.notebook_backlinks());
         registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
         registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());
