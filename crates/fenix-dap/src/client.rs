@@ -78,6 +78,14 @@ impl DapClient {
 
     /// Spawn a configured process, preserving its explicit arguments, cwd and environment.
     pub fn spawn_command(mut process: Command) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // Fenix is a windowed app: without this every server (and every
+            // tool it starts in turn) opens a console window on Windows.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            process.creation_flags(CREATE_NO_WINDOW);
+        }
         let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
         let stdin = child.stdin.take().expect("stdin was requested as piped");

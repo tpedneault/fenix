@@ -56,6 +56,19 @@ pub struct ResponseError {
     pub data: Option<Value>,
 }
 
+/// The reply to a server-initiated request Fenix has no feature for.
+/// Requests that only ask the client to accept bookkeeping -- a progress
+/// token, a capability registration -- succeed with a null result:
+/// `arduino-language-server` crashes ("unlock of unlocked mutex") when its
+/// `window/workDoneProgress/create` is refused. Anything else gets
+/// "method not found", so a spec-compliant server isn't left waiting.
+pub fn server_request_reply(method: &str) -> Result<Value, ResponseError> {
+    match method {
+        "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" => Ok(Value::Null),
+        _ => Err(ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +114,12 @@ mod tests {
         let raw = br#"{"id":1,"result":{}}"#;
         let msg: RawMessage = serde_json::from_slice(raw).unwrap();
         assert_eq!(msg.jsonrpc, JSONRPC_VERSION);
+    }
+
+    #[test]
+    fn progress_and_registration_requests_succeed_and_the_rest_are_refused() {
+        assert_eq!(server_request_reply("window/workDoneProgress/create"), Ok(Value::Null));
+        assert_eq!(server_request_reply("client/registerCapability"), Ok(Value::Null));
+        assert_eq!(server_request_reply("workspace/applyEdit").unwrap_err().code, -32601);
     }
 }

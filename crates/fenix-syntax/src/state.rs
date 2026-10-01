@@ -582,6 +582,20 @@ mod tests {
     }
 
     #[test]
+    fn cpp_inherits_the_c_highlights_for_keywords_numbers_and_comments() {
+        let source = "// blink\nvoid setup() { delay(500); }\n";
+        let state = SyntaxState::new(LanguageId::Cpp, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let captured = |text: &str| {
+            let start = source.find(text).unwrap();
+            highlights.iter().any(|(range, _)| range.start <= start && start < range.end)
+        };
+        assert!(captured("// blink"), "comment: {highlights:?}");
+        assert!(captured("void"), "primitive type: {highlights:?}");
+        assert!(captured("500"), "number: {highlights:?}");
+    }
+
+    #[test]
     fn toml_highlights_something() {
         smoke_test(LanguageId::Toml, "[package]\nname = \"fenix\"\nversion = \"0.0.1\"\n");
     }

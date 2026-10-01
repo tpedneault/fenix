@@ -106,7 +106,7 @@ impl LanguageId {
             LanguageId::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
             LanguageId::TypeScript | LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
             LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
-            LanguageId::Cpp => tree_sitter_cpp::HIGHLIGHT_QUERY,
+            LanguageId::Cpp => cpp_highlights_query(),
             LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
             LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
             LanguageId::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY,
@@ -122,6 +122,14 @@ impl LanguageId {
             LanguageId::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
         }
     }
+}
+
+/// tree-sitter-cpp's query only holds the C++ additions and inherits the
+/// rest from C (`; inherits: c`), so on its own `void`, numbers, strings and
+/// comments stay uncoloured. Layer C underneath, once.
+fn cpp_highlights_query() -> &'static str {
+    static QUERY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    QUERY.get_or_init(|| format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY))
 }
 
 /// Detects a language from a file extension (no leading dot, e.g. `"rs"`).

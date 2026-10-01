@@ -101,6 +101,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Arduino completion no longer stops after the first edit: Fenix now
+  accepts the language server's progress-token request, whose refusal
+  crashed `arduino-language-server`, so suggestions come from the
+  server instead of falling back to words in the file.
+- C++ and Arduino sketches are highlighted properly (keywords, types,
+  numbers, comments); the C++ grammar's rules were used without the C
+  rules they build on.
+- Language servers, debug adapters and the explorer's git status no
+  longer flash a console window on Windows.
 - Inserting a telecommand no longer freezes Fenix when the project's
   argument template doesn't name the argument before its value
   (`{value}`): such calls are read back by position.
