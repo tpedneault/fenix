@@ -68,6 +68,8 @@ that's practical.
 | Crate | Role |
 |---|---|
 | `fenix-agenda` | The personal task and time-tracking model behind `SPC a`, and its sync with Jira |
+| `fenix-notebook` | The notebook behind `SPC n`: notes, journal days and diagrams as plain files with an index, history, `[[links]]` and backlinks, tags, search, templates, Markdown parsed into blocks for the reading view, and export to Markdown and HTML |
+| `fenix-diagram` | Mermaid diagrams drawn natively (`mermaid-rs-renderer` for SVG, `resvg` for pixels): themes, errors on their line, each node's source line, starters, portable sources, mermaid-cli export |
 | `fenix-jira` | A Jira Server/Data Center REST API client (`ureq`, PAT auth) — issue search and single-issue fetch, no thread/event-loop knowledge of its own |
 | `fenix-docker` | Docker/Podman CLI shelling (auto-detected): container/image listing, start/stop/restart/remove/run/build |
 | `fenix-embedded` | Microcontroller projects behind a `Platform` trait (Arduino, via `arduino-cli`, today): sketch detection, build/upload/monitor/language-server commands, board/port/library/package queries, tool discovery — no thread/event-loop knowledge of its own |

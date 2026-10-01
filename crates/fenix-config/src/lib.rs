@@ -187,6 +187,26 @@ pub struct Config {
     /// Whether the snippets that come with Fenix are offered; yours and
     /// a project's always are.
     pub snippets_builtin: Option<bool>,
+    /// The notebook's folder; `None` means Fenix's data folder.
+    pub notebook_folder: Option<PathBuf>,
+    /// Versions kept per note or diagram.
+    pub notebook_history: Option<usize>,
+    /// Whether captures go to a journal day (on) or the Inbox note.
+    pub notebook_journal: Option<bool>,
+    /// Whether the notebook page lists the project's own `.md`/`.mmd`.
+    pub notebook_project_files: Option<bool>,
+    /// The theme diagrams are drawn in when they don't name one.
+    pub diagrams_theme: Option<String>,
+    /// The theme exports use: `same`, or a theme's name.
+    pub diagrams_export_theme: Option<String>,
+    /// `theme`, `transparent` or `white`, behind an export.
+    pub diagrams_background: Option<String>,
+    /// Your own themes: name, then colours.
+    pub diagrams_themes: Vec<Vec<String>>,
+    /// `fenix` or `mmdc`: what writes exported files.
+    pub diagrams_export_with: Option<String>,
+    /// The font diagrams are drawn with.
+    pub diagrams_font: Option<String>,
     /// Configured language server commands, `(language, command_line)`
     /// -- `[lsp]`'s `serverN = LANGUAGE|COMMAND_LINE`, same numbered-key
     /// list convention `mib_roots`/`jira_projects` already established.
@@ -541,6 +561,16 @@ impl Config {
             preview_tab: None,
             completion_symbols_file: None,
             snippets_builtin: None,
+            notebook_folder: None,
+            notebook_history: None,
+            notebook_journal: None,
+            notebook_project_files: None,
+            diagrams_theme: None,
+            diagrams_export_theme: None,
+            diagrams_background: None,
+            diagrams_themes: Vec::new(),
+            diagrams_export_with: None,
+            diagrams_font: None,
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),

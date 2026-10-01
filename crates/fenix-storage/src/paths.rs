@@ -4,7 +4,7 @@
 //! - **settings** -- what you chose (`settings.toml`), your snippets and
 //!   your project templates. Roams with your profile on Windows
 //!   (`%AppData%\fenix`); `~/.config/fenix` on Linux.
-//! - **data** -- what you made in Fenix (the agenda). Beside the settings
+//! - **data** -- what you made in Fenix (the agenda, the notebook). Beside the settings
 //!   on Windows (`%AppData%\fenix\data`), `~/.local/share/fenix` on Linux.
 //! - **state** -- what Fenix noticed about this machine: the session,
 //!   window placement, recent files, known projects. Never roams
@@ -84,6 +84,16 @@ impl Roots {
     pub fn backup(&self) -> PathBuf {
         self.local.join("backup")
     }
+
+    /// Your notebook: notes, journal days and diagrams.
+    pub fn notebook(&self) -> PathBuf {
+        self.data.join("notebook")
+    }
+
+    /// What can be made again: thumbnails, rendered diagrams.
+    pub fn cache(&self) -> PathBuf {
+        self.local.join("cache")
+    }
 }
 
 /// `settings.toml`.
@@ -124,6 +134,16 @@ pub fn tools_dir() -> Option<PathBuf> {
 /// Files a migration replaced, kept as they were.
 pub fn backup_dir() -> Option<PathBuf> {
     Roots::current().map(|r| r.backup())
+}
+
+/// Your notebook's folder.
+pub fn notebook_dir() -> Option<PathBuf> {
+    Roots::current().map(|r| r.notebook())
+}
+
+/// Throwaway files that can be made again.
+pub fn cache_dir() -> Option<PathBuf> {
+    Roots::current().map(|r| r.cache())
 }
 
 /// Where everything lived before this layout: `config_dir()/fenix`, or

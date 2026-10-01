@@ -56,6 +56,31 @@ pub enum Role {
     Warn,
     Bad,
     Kind(ProjectKind),
+    /// A syntax capture's colour (`"keyword"`, `"text.title"`), for
+    /// highlighted code and rendered Markdown.
+    Syntax(&'static str),
+}
+
+/// An image drawn over a page's cells: a rendered diagram or a picture
+/// in a note. The page leaves the cells blank; `App` draws the texture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageImage {
+    pub line: usize,
+    pub col: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub key: ImageKey,
+    /// Zoomed and panned: (zoom, 1 = fit; the centre shown, as fractions
+    /// of the picture). `None`: fitted, no bigger than it is.
+    pub view: Option<(f32, f32, f32)>,
+}
+
+/// Which picture: a file on disk, or a diagram's source in a theme.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ImageKey {
+    File(std::path::PathBuf),
+    /// A hash of the diagram's source and the theme it's drawn in.
+    Diagram(u64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +102,8 @@ pub struct Page {
     pub panels: Vec<(usize, Range<usize>)>,
     /// A menu, field or question floating over the page.
     pub popup: Option<Popup>,
+    /// Pictures drawn over blank cells.
+    pub images: Vec<PageImage>,
 }
 
 /// A menu, field or question drawn over a page in the editor's own
@@ -130,6 +157,7 @@ pub struct Grid {
     pub panels: Vec<(usize, Range<usize>)>,
     pub focus: Option<(usize, Range<usize>)>,
     pub popup: Option<Popup>,
+    pub images: Vec<PageImage>,
 }
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.
@@ -388,7 +416,7 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None }
+        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new() }
     }
 
     /// Draws `page` with its top-left at (`line`, `col`): its text, its
@@ -410,6 +438,28 @@ impl Grid {
         if let Some(popup) = &page.popup {
             self.popup = Some(Popup { line: popup.line + line, col: popup.col + col, ..popup.clone() });
         }
+        self.images.extend(page.images.iter().map(|i| PageImage { line: i.line + line, col: i.col + col, ..i.clone() }));
+    }
+
+    /// Leaves `rows` lines for a picture `cols` wide at (`line`, `col`).
+    pub fn image(&mut self, line: usize, col: usize, rows: usize, cols: usize, key: ImageKey) {
+        if self.lines.len() < line + rows {
+            self.lines.resize(line + rows, Vec::new());
+        }
+        self.images.push(PageImage { line, col, rows, cols, key, view: None });
+    }
+
+    /// Tints `cols` of `line` as a panel.
+    pub fn panel(&mut self, line: usize, cols: Range<usize>) {
+        if self.lines.len() <= line {
+            self.lines.resize(line + 1, Vec::new());
+        }
+        self.panels.push((line, cols));
+    }
+
+    /// How many lines have been written.
+    pub fn height(&self) -> usize {
+        self.lines.len()
     }
 
     /// Writes `text` at (`line`, `col`) without colouring it.
@@ -487,7 +537,7 @@ impl Grid {
 
     pub fn finish(self) -> Page {
         let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup }
+        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images }
     }
 }
 

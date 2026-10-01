@@ -8,6 +8,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The notebook (`SPC n`): notes, journal days and Mermaid diagrams Fenix
+  keeps for you without asking where -- plain files in the data folder
+  (or any folder, an Obsidian vault included), saved as you type with
+  earlier versions kept. A page to find, tag, pin, rename and move them;
+  templates; `[[links]]` with completion, following and backlinks; a
+  daily journal with the agenda and your commits; quick capture from
+  anywhere; search with `tag:`, `type:`, `project:` and `is:todo`;
+  checkboxes to the agenda; and a Notebook list on Home.
+- A reading view for any Markdown file (`SPC m p` beside, `SPC m r` in
+  place): tables, highlighted code, callouts, checkboxes you can tick,
+  pictures and diagrams.
+- Mermaid diagrams drawn as you type, natively: errors on their line,
+  the last good drawing kept, zoom, pan and node walking, Mermaid's
+  themes plus one from the editor theme and your own, `.mmd`
+  highlighting, `K` on a ```` ```mermaid ```` block, and export to SVG, PNG, the
+  clipboard or Markdown (optionally through mermaid-cli). Notes export
+  to Markdown or one HTML page.
+- `Ctrl+Alt+Q` does what `Esc` does, for tools that can't send Escape;
+  `FENIX_STANDALONE=1` runs a second Fenix (a test run) beside yours.
+
 - Highlighting for Go, Java, C#, Lua, SQL, HTML and CSS, with comment
   toggling and TODOs; `gopls` and `lua-language-server` as the default
   language servers for Go and Lua.

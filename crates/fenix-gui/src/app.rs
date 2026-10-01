@@ -32,6 +32,12 @@ mod ccsds_host;
 mod stream_host;
 mod file_index;
 mod disk_probe;
+mod notebook_host;
+mod notebook_links;
+mod notebook_capture;
+mod notebook_export;
+mod reading_host;
+mod diagram_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -2307,6 +2313,10 @@ enum ActivePicker {
     /// `SPC r t`: a PDF's headings, by name; confirming goes to the
     /// heading's page.
     PdfHeading(fenix_picker::PickerState<u32>),
+    /// Every notebook picker (`SPC n f`, templates, diagram types, tags,
+    /// search hits, links to insert, themes...): what confirming does is
+    /// in the payload. `title` names it in the modeline.
+    Notebook { title: &'static str, picker: fenix_picker::PickerState<notebook_host::NotebookPick> },
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2429,6 +2439,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
         ActivePicker::PdfHeading(picker) => picker.push_char(c),
+
+        ActivePicker::Notebook { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2468,6 +2480,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::CompareHead { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
         ActivePicker::PdfHeading(picker) => picker.backspace(),
+
+        ActivePicker::Notebook { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2507,6 +2521,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
         ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
+
+        ActivePicker::Notebook { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2549,6 +2565,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
         ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
+
+        ActivePicker::Notebook { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2588,6 +2606,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::CompareHead { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
         ActivePicker::PdfHeading(picker) => picker.query(),
+
+        ActivePicker::Notebook { picker, .. } => picker.query(),
     }
 }
 
@@ -2627,6 +2647,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::CompareHead { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
         ActivePicker::PdfHeading(picker) => picker.len(),
+
+        ActivePicker::Notebook { picker, .. } => picker.len(),
     }
 }
 
@@ -2666,6 +2688,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
         ActivePicker::PdfHeading(picker) => picker.selected_row(),
+
+        ActivePicker::Notebook { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2709,6 +2733,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+
+        ActivePicker::Notebook { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -3952,6 +3978,7 @@ fn line_comment_token(language: fenix_syntax::LanguageId) -> Option<&'static str
         | LanguageId::CSharp => Some("//"),
         LanguageId::Toml | LanguageId::Yaml | LanguageId::Python | LanguageId::Bash | LanguageId::Tcl | LanguageId::Dockerfile => Some("#"),
         LanguageId::Sql | LanguageId::Lua => Some("--"),
+        LanguageId::Mermaid => Some("%%"),
         // CSS has only `/* */`, HTML only `<!-- -->` (see
         // `block_comment_tokens`).
         LanguageId::Json | LanguageId::Markdown | LanguageId::Batch | LanguageId::Xml | LanguageId::Dtd | LanguageId::Html | LanguageId::Css => None,
@@ -5739,6 +5766,8 @@ pub struct App {
     /// Linking a task to an issue typed by key, or naming the issue type
     /// of one being created from it.
     agenda_prompt: Option<AgendaPrompt>,
+    /// The notebook: notes, journal days and diagrams (`SPC n`).
+    notebook: notebook_host::NotebookState,
     /// What `SPC a h` captured for the new-task form it opened.
     agenda_capture: Option<agenda_host::Capture>,
     /// The clock picker open is asking about time away, not switching.
@@ -6741,6 +6770,7 @@ impl App {
             agenda_store,
             agenda_path,
             agenda_prompt: None,
+            notebook: Default::default(),
             agenda_capture: None,
             agenda_gap_asked: false,
             agenda_seen_saved: None,
@@ -7827,6 +7857,7 @@ impl App {
     fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
         let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
         all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
+        all.extend(self.notebook.diagrams.diagnostics.get(path).cloned().unwrap_or_default());
         all
     }
 
@@ -8654,6 +8685,10 @@ impl App {
     fn completion_at_cursor(&mut self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
         if let Some(option) = self.tcl_option_completion() {
             return Some(option);
+        }
+        // `[[` in Markdown: the notebook's names.
+        if let Some(links) = self.notebook_link_completion() {
+            return Some(links);
         }
         let cursor = self.cursor();
         match completion::prefix_at_cursor(&self.open().buffer, &cursor) {
@@ -17040,6 +17075,13 @@ impl App {
                 // two-step interaction rather than two separate ones.
                 self.compare_pick_head(base);
             }
+            Some(ActivePicker::Notebook { picker, .. }) => {
+                let Some(choice) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let query = picker.query().to_string();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.notebook_picked(choice, query);
+            }
             Some(ActivePicker::PdfHeading(picker)) => {
                 let Some(page) = picker.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -19596,6 +19638,11 @@ impl App {
             self.agenda_prompt_key(keypress);
             return;
         }
+        // A new note's name, a capture, a diagram's name.
+        if self.notebook.prompt.is_some() {
+            self.notebook_prompt_key(keypress);
+            return;
+        }
         // `SPC m n`'s sketch-name prompt.
         if self.embedded.prompt.is_some() {
             self.embedded_prompt_key(keypress);
@@ -20628,10 +20675,23 @@ impl App {
                 self.play_macro(register, count, event_loop);
             }
             VimEvent::RequestLsp(kind) => match kind {
-                fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
+                fenix_vim::LspRequestKind::GoToDefinition => {
+                    if !self.notebook_follow_link_under_cursor() {
+                        self.request_goto_definition();
+                    }
+                }
                 fenix_vim::LspRequestKind::References => self.request_references(),
-                fenix_vim::LspRequestKind::Hover => self.request_hover(),
-                fenix_vim::LspRequestKind::FileUnderCursor => self.follow_link_under_cursor(),
+                fenix_vim::LspRequestKind::Hover => {
+                    // `K` in a ```mermaid block: it, drawn, beside.
+                    if !self.mermaid_block_hover() {
+                        self.request_hover();
+                    }
+                }
+                fenix_vim::LspRequestKind::FileUnderCursor => {
+                    if !self.notebook_follow_link_under_cursor() {
+                        self.follow_link_under_cursor();
+                    }
+                }
             },
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
@@ -21032,6 +21092,7 @@ impl App {
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
+                Some(picker @ ActivePicker::Notebook { title, .. }) => (*title, picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::MibDef(_)) => ("MIB", picker_len(picker)),
@@ -21199,6 +21260,7 @@ impl App {
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.agenda_prompt_text())
+            .or_else(|| self.notebook_prompt_text())
             .or_else(|| self.embedded_prompt_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
@@ -22323,6 +22385,7 @@ impl App {
             crate::page::Role::Warn => theme.git_modified,
             crate::page::Role::Bad => theme.git_conflicted,
             crate::page::Role::Kind(kind) => projects::kind_color(kind, &theme),
+            crate::page::Role::Syntax(name) => theme.syntax_color(name),
         };
         let bottom = modeline_top.min(at.pane.y + at.pane.h);
         let shown = popup::max_rows(bottom - at.pane.y, 0.0, line_height, WHICH_KEY_PADDING).min(popup.rows.len());
@@ -23790,6 +23853,7 @@ impl App {
             // its own selection, no caret.
             let is_page = self.is_page_buffer(buffer_id);
             if is_page {
+                self.note_page_rows(buffer_id, pane_visible_lines);
                 self.ensure_page_layout(buffer_id, pane, text::cols_that_fit(rect.w, char_width));
                 self.page_scroll_to_top(buffer_id, pane, pane_visible_lines);
             }
@@ -24890,6 +24954,39 @@ impl App {
         for &((x, y, w, h), color) in &pdf_highlights {
             overlay.push_rect(gpu, x, y, w, h, color);
         }
+        // A diagram's node: the selected one outlined in the accent, the
+        // source cursor's tinted.
+        for pane in &panes_render {
+            for &(i, (fx, fy, fw, fh), strong) in &pane.home.marks {
+                let Some((row, col, rows, cols, key, view)) = pane.home.images.get(i) else { continue };
+                let Some(tex) = self.notebook.textures.get(key).filter(|t| t.texture.is_some()) else { continue };
+                let cell_box = (
+                    pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
+                    pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
+                    *cols as f32 * char_width,
+                    *rows as f32 * line_height,
+                );
+                let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
+                let Some((shown, _, (x, y, w, h))) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
+                let (mx, my, mw, mh) = (x + fx * w - 3.0, y + fy * h - 3.0, fw * w + 6.0, fh * h + 6.0);
+                let (x0, y0) = (mx.max(shown.0), my.max(shown.1));
+                let (x1, y1) = ((mx + mw).min(shown.0 + shown.2), (my + mh).min(shown.1 + shown.3));
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let accent = theme.caret;
+                let fill = if strong { [accent[0], accent[1], accent[2], 0.16] } else { [accent[0], accent[1], accent[2], 0.08] };
+                overlay.push_rect(gpu, x0, y0, x1 - x0, y1 - y0, fill);
+                if strong {
+                    let t = 2.0;
+                    let edge = [accent[0], accent[1], accent[2], 0.9];
+                    overlay.push_rect(gpu, x0, y0, x1 - x0, t, edge);
+                    overlay.push_rect(gpu, x0, y1 - t, x1 - x0, t, edge);
+                    overlay.push_rect(gpu, x0, y0, t, y1 - y0, edge);
+                    overlay.push_rect(gpu, x1 - t, y0, t, y1 - y0, edge);
+                }
+            }
+        }
         overlay.flush(gpu);
 
         // The spinner: the mark's blades lit in turn, just left of the
@@ -25073,6 +25170,19 @@ impl App {
             }
         }
 
+        // Pictures pages show, read since the last frame: uploaded once.
+        if let Some(pipeline) = self.logo_pipeline.as_ref() {
+            for tex in self.notebook.textures.values_mut() {
+                if let Some(bgra) = tex.bgra.take() {
+                    if tex.w > 0 && tex.h > 0 {
+                        let texture = pipeline.create_texture(gpu, tex.w, tex.h);
+                        pipeline.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, &bgra);
+                        tex.texture = Some(texture);
+                    }
+                }
+            }
+        }
+
         // Home's logo: drawn (by fenix-brand) at exactly the pixel height
         // its rows give it, so it's crisp at any font size, and uploaded
         // only when that height or the theme's text colour changes.
@@ -25174,6 +25284,27 @@ impl App {
                         let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
                         let y = top + (lines as f32 * line_height - h) / 2.0;
                         pipeline.draw(gpu, &mut pass, texture, 0, x.round(), y.round(), w, h);
+                    }
+                }
+            }
+            // Pictures on pages (a note's images, diagrams): each fitted
+            // into the cells the page left for it, cut to its pane.
+            if let Some(pipeline) = self.logo_pipeline.as_ref() {
+                let mut slot = 1;
+                for pane in &panes_render {
+                    for (row, col, rows, cols, key, view) in &pane.home.images {
+                        let Some(tex) = self.notebook.textures.get(key) else { continue };
+                        let Some(texture) = &tex.texture else { continue };
+                        let cell_box = (
+                            pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
+                            pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
+                            *cols as f32 * char_width,
+                            *rows as f32 * line_height,
+                        );
+                        let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
+                        let Some((dest, uv, _)) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
+                        pipeline.draw_region(gpu, &mut pass, texture, slot, (dest.0.round(), dest.1.round(), dest.2.round(), dest.3.round()), uv, None);
+                        slot += 1;
                     }
                 }
             }
@@ -25679,6 +25810,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             .filter(|r| !r.done)
             .map(|r| r.started + SLOW_LISTING_AFTER)
             .fold(wait_until, |acc, deadline| acc.min(deadline));
+        // Notebook files write themselves a moment after typing stops.
+        let wait_until = match self.notebook_autosave(now) {
+            Some(at) => wait_until.min(at),
+            None => wait_until,
+        };
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }

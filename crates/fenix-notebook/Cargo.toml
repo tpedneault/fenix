@@ -1,0 +1,19 @@
+[package]
+name = "fenix-notebook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = "0.4"
+fenix-fs = { path = "../fenix-fs" }
+fenix-storage = { path = "../fenix-storage" }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3"

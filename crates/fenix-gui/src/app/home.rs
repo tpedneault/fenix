@@ -28,6 +28,12 @@ pub(super) struct HomeOverlay {
     /// (row, first cell, end cell) for each visible rule.
     pub(super) rules: Vec<(usize, usize, usize)>,
     pub(super) rule_color: [f32; 4],
+    /// Pictures a page shows: (first row, which may be above the pane
+    /// when it's partly scrolled off; cell; rows; cells; which picture).
+    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey, Option<(f32, f32, f32)>)>,
+    /// Boxes outlined on a picture: (which of `images`, the box as
+    /// fractions of the picture, whether it's the selected one).
+    pub(super) marks: Vec<(usize, (f32, f32, f32, f32), bool)>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s
@@ -127,6 +133,8 @@ impl App {
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
         let reading = self.home_reading(None);
+        self.notebook_open_in_background();
+        let notebook = self.home_notebook(None);
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
@@ -203,6 +211,7 @@ impl App {
         for root in scoped_roots {
             let (resume, recent) = self.home_recent_files(Some(&root));
             let reading = self.home_reading(Some(&root));
+            let notebook = self.home_notebook(Some(&root));
             let todos = self.home_todos.get(&root).cloned().unwrap_or_default();
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
             let data = HomeData {
@@ -210,6 +219,7 @@ impl App {
                 resume,
                 recent,
                 reading,
+                notebook,
                 projects: projects.clone(),
                 today: today.clone(),
                 todos,
@@ -217,7 +227,7 @@ impl App {
             };
             scoped.insert(root, data);
         }
-        let data = HomeData { date, resume, recent, reading, projects, today, todos, recovery };
+        let data = HomeData { date, resume, recent, reading, notebook, projects, today, todos, recovery };
         if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
             self.home_project_data = scoped;
@@ -277,6 +287,41 @@ impl App {
     }
 
     /// PDFs read lately, with where you were in each -- Home's Reading.
+    /// Home's notebook list: today's journal day, the pinned entries,
+    /// then the last touched -- a project's Home, the notes about it.
+    /// Only once the notebook has been opened (it's never read for Home).
+    fn home_notebook(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
+        let Some(nb) = self.notebook.book.as_ref() else { return Vec::new() };
+        let project = scope.and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string());
+        let today = chrono::Local::now().date_naive();
+        let mut out = Vec::new();
+        if project.is_none() {
+            if let Some(day) = nb.day(today) {
+                out.push(dashboard::FileItem { path: day.path.clone(), name: "Today's journal".into(), detail: "today".into(), age: String::new() });
+            }
+        }
+        for e in nb.recent() {
+            if out.len() >= 5 {
+                break;
+            }
+            if e.kind == fenix_notebook::Kind::Day || out.iter().any(|i| i.path == e.path) {
+                continue;
+            }
+            if let Some(p) = &project {
+                if !e.about.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(p)) {
+                    continue;
+                }
+            }
+            let kind = match e.kind {
+                fenix_notebook::Kind::Diagram => "diagram",
+                _ if e.pinned => "pinned",
+                _ => "note",
+            };
+            out.push(dashboard::FileItem { path: e.path.clone(), name: e.display_name(), detail: kind.into(), age: String::new() });
+        }
+        out
+    }
+
     fn home_reading(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
         self.recent_files

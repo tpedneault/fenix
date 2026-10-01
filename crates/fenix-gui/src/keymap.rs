@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use fenix_keymap::{KeyCode, KeyPress, KeyTrie, Mods, NamedKey as FenixNamedKey};
 use winit::event::KeyEvent;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
 /// Translates a winit key event into fenix-keymap's UI-agnostic `KeyPress`.
 /// Named `Space` is normalized to `KeyCode::Char(' ')` -- treating it like
@@ -11,6 +11,13 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 /// Returns `None` for keys with nothing sensible to bind (F-keys, media
 /// keys, ...).
 pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
+    // Ctrl+Alt+Q is a second Escape. Synthetic input (UI automation,
+    // some remote-desktop tools) can fail to deliver Escape itself; this
+    // combination is bound to nothing else. Matched on the physical key
+    // so the layout's idea of Ctrl+Alt+Q (AltGr on some) doesn't matter.
+    if mods.control_key() && mods.alt_key() && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) {
+        return Some(KeyPress { code: KeyCode::Named(FenixNamedKey::Escape), mods: Mods::default() });
+    }
     let code = match &event.logical_key {
         Key::Named(NamedKey::Space) => KeyCode::Char(' '),
         Key::Named(NamedKey::Escape) => KeyCode::Named(FenixNamedKey::Escape),
@@ -83,6 +90,10 @@ pub enum LocalContext {
     /// A PDF pane: the reader's commands, for finding them without
     /// knowing its keys.
     Reader,
+    /// Markdown (notes, READMEs): the reading view.
+    Markdown,
+    /// A Mermaid diagram (`.mmd`) or its preview.
+    Mermaid,
 }
 
 impl LocalContext {
@@ -92,6 +103,8 @@ impl LocalContext {
             LocalContext::Arduino => "arduino",
             LocalContext::Tcl => "tcl",
             LocalContext::Reader => "reader",
+            LocalContext::Markdown => "markdown",
+            LocalContext::Mermaid => "diagram",
         }
     }
 
@@ -127,6 +140,19 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('y')], "copy a link to this page (yp)", "pdf.copy_link");
                 t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
                 t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
+            }
+            LocalContext::Markdown => {
+                t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
+                t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
+                t.insert(&[KeyPress::char('b')], "links here", "notebook.backlinks");
+                t.insert(&[KeyPress::char('a')], "journal: refresh the agenda list", "notebook.journal_agenda");
+                t.insert(&[KeyPress::char('g')], "journal: add today's commits", "notebook.journal_commits");
+            }
+            LocalContext::Mermaid => {
+                t.insert(&[KeyPress::char('p')], "preview beside", "diagram.preview");
+                t.insert(&[KeyPress::char('v')], "view it on its own", "diagram.viewer");
+                t.insert(&[KeyPress::char('t')], "set its theme", "diagram.theme");
+                t.insert(&[KeyPress::char('e')], "export", "diagram.export");
             }
             LocalContext::Tcl => {
                 t.insert(&[KeyPress::char('i')], "insert a telecommand", "mib.insert");
@@ -179,6 +205,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('s')], "snippet", "insert.snippet");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('S')], "manage snippets", "snippets.open");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('n')], "snippet from the selection", "snippets.from_selection");
+        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('D')], "a notebook diagram", "insert.diagram");
         // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
         // single most-used action" convention -- here, the same fuzzy
         // find-file-in-project picker as `SPC p f`.
@@ -426,6 +453,27 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // The agenda: the page and its tabs, and what you reach for from
         // a file -- a new task, a task from here, the clock. A task's own
         // keys (status, priority, clock, ...) are on the page.
+        // The notebook: notes, journal days and diagrams Fenix keeps.
+        t.label_group(&[spc, KeyPress::char('n')], "notebook");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('n')], "notebook page", "notebook.open");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('N')], "new note", "notebook.new_note");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('d')], "new diagram", "notebook.new_diagram");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('f')], "find by name", "notebook.find");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('r')], "reopen the last one", "notebook.recent");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('j')], "today's journal", "notebook.journal");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('b')], "links here (sidebar)", "notebook.backlinks");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('c')], "capture a line", "notebook.capture");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('/')], "search the notebook", "notebook.search");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('#')], "tags", "notebook.tags");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('p')], "this project's notes", "notebook.project");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('t')], "checkbox to the agenda", "notebook.to_agenda");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('e')], "export", "notebook.export");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('s')], "save the ```mermaid block", "notebook.save_block");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('i')], "import a file", "notebook.import");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('l')], "insert a link", "notebook.insert_link");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('y')], "copy a link to this line", "notebook.copy_link");
+        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('v')], "paste a picture", "notebook.paste_image");
+
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('b')], "agenda: board", "agenda.board");

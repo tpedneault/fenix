@@ -776,6 +776,7 @@ mod tests {
             (LanguageId::Sql, "-- TODO: sql\nSELECT 'hi' FROM t;\n", "SELECT"),
             (LanguageId::Css, "/* TODO: css */\na { color: red; }\n@media print { a { content: \"hi\"; } }\n", "@media"),
             (LanguageId::Html, "<!-- TODO: html -->\n<p class=\"hi\">text</p>\n", "p"),
+            (LanguageId::Mermaid, "%% TODO: mmd\nflowchart TD\n    a[\"hi\"] --> b\n", "flowchart"),
         ] {
             let state = SyntaxState::new(lang, source);
             let highlights = state.highlights_in_range(source, 0..source.len());

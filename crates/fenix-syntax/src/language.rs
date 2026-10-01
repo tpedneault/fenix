@@ -55,6 +55,9 @@ pub enum LanguageId {
     Css,
     Sql,
     Lua,
+    /// Mermaid diagrams (`.mmd`), `tree-sitter-mermaid`'s tolerant
+    /// grammar -- half-typed diagrams still highlight.
+    Mermaid,
 }
 
 /// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
@@ -92,6 +95,7 @@ impl LanguageId {
             LanguageId::Css => tree_sitter_css::LANGUAGE.into(),
             LanguageId::Sql => tree_sitter_sequel::LANGUAGE.into(),
             LanguageId::Lua => tree_sitter_lua::LANGUAGE.into(),
+            LanguageId::Mermaid => tree_sitter_mermaid::LANGUAGE.into(),
         }
     }
 
@@ -120,6 +124,7 @@ impl LanguageId {
             LanguageId::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
             LanguageId::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
             LanguageId::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
+            LanguageId::Mermaid => tree_sitter_mermaid::HIGHLIGHTS_QUERY,
         }
     }
 }
@@ -172,6 +177,7 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "css" => Some(LanguageId::Css),
         "sql" => Some(LanguageId::Sql),
         "lua" => Some(LanguageId::Lua),
+        "mmd" | "mermaid" => Some(LanguageId::Mermaid),
         _ => None,
     }
 }
@@ -214,6 +220,8 @@ mod tests {
             ("css", LanguageId::Css),
             ("sql", LanguageId::Sql),
             ("lua", LanguageId::Lua),
+            ("mmd", LanguageId::Mermaid),
+            ("mermaid", LanguageId::Mermaid),
         ] {
             assert_eq!(detect_language(ext), Some(lang), "{ext}");
         }

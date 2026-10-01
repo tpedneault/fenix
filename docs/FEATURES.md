@@ -859,6 +859,70 @@ Everything Fenix does, by area. For the keys, see
   opens a key. Talks to a self-hosted Jira Server/Data Center through a
   personal access token (see [Configuration](CONFIGURATION.md)).
 
+## Notebook and diagrams
+
+- **Notebook** (`SPC n n`): notes, journal days and Mermaid diagrams
+  Fenix keeps for you -- making one means giving it a name, never a
+  folder. They're plain `.md` and `.mmd` files in the data folder (or
+  `notebook.folder`, which can be an Obsidian vault). The page lists them
+  pinned first, then newest, with the selected one rendered beside the
+  list; `/` filters with words, `tag:`, `type:`, `project:`, `is:todo`,
+  `after:`/`before:`; `Tab` steps through chips (notes, diagrams,
+  journal, pinned, to do, your top tags, searches you pinned with `s`).
+  `t` tags, `r` renames (and every link to it), `P` pins, `D` duplicates,
+  `h` lists earlier versions to put back, `p` moves it into the project's
+  `docs/`, `x x` deletes to the Recycle Bin, `e` exports, `[`/`]` step
+  through journal days. Home lists today's journal, pinned and recent
+  entries.
+- **Writing**: `SPC n N` makes a note from a template (bench session,
+  meeting, decision record, anomaly report, how-to, or your own Markdown
+  snippets named `note-...`). Notebook files save themselves a second
+  after you stop typing, and the version before each editing session is
+  kept. `[[` completes a note's name; `gd` on a link follows it -- to a
+  note (and `#heading`), `project:path:line`, a PDF page, `mib:NAME`, an
+  agenda task or a URL -- and a link to a note that doesn't exist makes
+  it. `SPC n b` shows what links here (and where the name appears
+  unlinked, `l` to link it), the outline and the links out. `SPC n l`
+  inserts a link, `SPC n y` copies one to the line you're on, `SPC n v`
+  pastes the clipboard's picture beside the note.
+- **Journal** (`SPC n j`): a note per day, made with what's due in the
+  agenda and yesterday's open checkboxes; `SPC m a` refreshes the agenda
+  list, `SPC m g` adds the day's commits from your projects. `SPC n c`
+  captures a line from anywhere into today's log (or the Inbox, `Tab`),
+  as a task with `C-t`, with a link back to where you were. `SPC n t`
+  sends a checkbox to the agenda.
+- **Finding**: `SPC n /` searches every note and diagram with the same
+  syntax as the page's filter; `SPC n #` lists tags; `SPC n p` the notes
+  about the project you're in.
+- **Reading view** (`SPC m p` beside, `SPC m r` in place): any Markdown
+  file rendered -- headings, emphasis, links, tags, lists and checkboxes
+  (`x` ticks one in the source), highlighted code, tables, callouts,
+  quotes, pictures and diagrams. Beside the source it follows your
+  cursor. `K` in a ```` ```mermaid ```` block opens it on the block.
+- **Diagrams** (`SPC n d`, or any `.mmd`): pick a type and a starter,
+  name it, and it's drawn beside its source as you type (`SPC m p`
+  toggles the preview on a `.mmd`). An error is shown on its line and
+  the last drawing that worked stays up. The node under the source
+  cursor is tinted; in the preview `+`/`-`/`0` zoom, `hjkl` pan, `Tab`
+  walks the nodes, `/` finds one, `Enter` goes to its line. `v` on the
+  notebook page (or `SPC m v`) opens it on its own. Themes: Mermaid's
+  `default`, `neutral`, `dark`, `forest` and `base`, `fenix` (the
+  editor theme's colours, the default) and your own
+  (`diagrams.themes`); `t`/`SPC m t` writes one into the diagram, `T`
+  tries one without writing it. Rendering is native (no browser or
+  Node). `![[Diagram]]` embeds one in a note; `SPC n s` saves a
+  ```` ```mermaid ```` block to the notebook; `SPC i D` inserts a notebook diagram
+  as a block or as an exported SVG and a link.
+- **Export** (`e`, `SPC n e`, `SPC m e`): a diagram to the clipboard
+  (PNG, SVG, a ```` ```mermaid ```` block, its source) or to SVG, PNG or a `.mmd`
+  file; a note to Markdown (links and embeds made to render anywhere,
+  pictures copied beside it) or one HTML page (diagrams drawn in,
+  pictures inside), or to the clipboard as Markdown or rich text.
+  `fenix` and your own themes are written out as `base` and its
+  variables. `diagrams.export_with = "mmdc"` hands files to mermaid-cli
+  for output identical to mermaid.js. Files are remembered: `again`
+  writes them all after an edit.
+
 ## VNC and PDF
 
 - **VNC console panes** (`SPC v ...`): configure VM hosts by hand under

@@ -46,7 +46,7 @@ try {
     Invoke-Gate 'tests' 'cargo' $testArgs
     # Start strict linting with the newly hardened libraries. The rest of the
     # repository has existing warnings; it remains covered by tests and build.
-    Invoke-Gate 'clippy' 'cargo' @('clippy', '--locked', '-p', 'fenix-storage', '-p', 'fenix-tasks', '-p', 'fenix-lsp', '-p', 'fenix-project', '--all-targets', '--', '-D', 'warnings')
+    Invoke-Gate 'clippy' 'cargo' @('clippy', '--locked', '-p', 'fenix-storage', '-p', 'fenix-tasks', '-p', 'fenix-lsp', '-p', 'fenix-project', '-p', 'fenix-notebook', '-p', 'fenix-diagram', '--all-targets', '--', '-D', 'warnings')
     if ($Suite -eq 'Workspace') {
         Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui')
     }
