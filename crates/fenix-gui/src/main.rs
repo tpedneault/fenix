@@ -94,7 +94,11 @@ fn main() -> anyhow::Result<()> {
     // its file arguments to whichever instance is already running
     // instead of opening a second window -- see `ipc`'s own doc
     // comment for the mechanism and its one disclosed tradeoff.
-    match ipc::negotiate(&args) {
+    // `FENIX_STANDALONE=1` opts out, for a test instance (usually with
+    // its own `FENIX_HOME`) beside a Fenix someone is using.
+    let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0");
+    let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&args) };
+    match role {
         ipc::Role::HandedOff => return Ok(()),
         ipc::Role::Server(listener) => ipc::spawn_accept_loop(listener, proxy.clone()),
         ipc::Role::Standalone => {}
