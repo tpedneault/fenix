@@ -27,6 +27,7 @@ mod diff_view;
 mod docker_panel;
 mod forge_panel;
 mod git_panel;
+mod git_compare;
 mod git_log;
 mod git_rebase;
 mod git_request;

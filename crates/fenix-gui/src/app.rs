@@ -17,6 +17,7 @@ mod projects;
 mod pages;
 mod git_page;
 mod git_editor;
+mod git_compare_page;
 mod git_log_page;
 mod git_rebase_page;
 mod git_request_page;
@@ -553,22 +554,6 @@ impl HistoryData {
             fetch_age: fenix_git::seconds_since_fetch(repo_root),
         }
     }
-}
-
-/// The Compare view's session (`SPC g c`) -- two refs, the commits
-/// between them, and their diff.
-struct CompareSession {
-    workspace_index: usize,
-    commits_pane: fenix_window::WindowId,
-    diff_pane: fenix_window::WindowId,
-    commits_buffer: BufferId,
-    diff_buffer: BufferId,
-    repo_root: PathBuf,
-    base: String,
-    head: String,
-    /// `base...head` (merge-base) vs. `base..head` -- `t` toggles. See
-    /// `fenix_git::diff_refs` for why three-dot is the default.
-    three_dot: bool,
 }
 
 /// A cheap "has this file moved under us" check: modification time and
@@ -2299,13 +2284,11 @@ enum ActivePicker {
     /// `.fenix/project.ini` `[tasks]` overrides) -- confirming runs it
     /// (`App::run_task`) in the Task Output panel.
     Task(fenix_picker::PickerState<fenix_tasks::TaskDef>),
-    /// `SPC g c`, step one: pick the ref to compare *against* (the
-    /// base). Confirming chains straight into `CompareHead`, so the two
-    /// halves of "compare A to B" are two pickers rather than a form.
-    CompareBase(fenix_picker::PickerState<String>),
-    /// `SPC g c`, step two: pick the ref being compared. Carries the
-    /// already-chosen base, since confirming needs both.
-    CompareHead { base: String, picker: fenix_picker::PickerState<String> },
+    /// `SPC g c`: the ref to compare HEAD with (the Compare page).
+    CompareTarget(fenix_picker::PickerState<String>),
+    /// `R` on the Compare page: your own side, other than HEAD. Carries
+    /// the ref it's compared with, since confirming needs both.
+    CompareOwn { target: String, picker: fenix_picker::PickerState<String> },
     /// Enter on a settings-page row with more choices than `h`/`l` should
     /// step through (the installed fonts): one of them, by name. What
     /// it's for is `key`; confirming hands the choice back to the page.
@@ -2429,14 +2412,14 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
         ActivePicker::Task(s) => s.push_char(c),
-        ActivePicker::CompareBase(s) => s.push_char(c),
+        ActivePicker::CompareTarget(s) => s.push_char(c),
         ActivePicker::RebaseOnto(s) => s.push_char(c),
         ActivePicker::MergeFrom(s) => s.push_char(c),
         ActivePicker::SwitchBranch(s) => s.push_char(c),
         ActivePicker::AgendaClockIn(s) => s.push_char(c),
         ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Embedded(s) => s.push_char(c),
-        ActivePicker::CompareHead { picker, .. } => picker.push_char(c),
+        ActivePicker::CompareOwn { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
         ActivePicker::PdfHeading(picker) => picker.push_char(c),
 
@@ -2470,14 +2453,14 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
         ActivePicker::Task(s) => s.backspace(),
-        ActivePicker::CompareBase(s) => s.backspace(),
+        ActivePicker::CompareTarget(s) => s.backspace(),
         ActivePicker::RebaseOnto(s) => s.backspace(),
         ActivePicker::MergeFrom(s) => s.backspace(),
         ActivePicker::SwitchBranch(s) => s.backspace(),
         ActivePicker::AgendaClockIn(s) => s.backspace(),
         ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Embedded(s) => s.backspace(),
-        ActivePicker::CompareHead { picker, .. } => picker.backspace(),
+        ActivePicker::CompareOwn { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
         ActivePicker::PdfHeading(picker) => picker.backspace(),
 
@@ -2511,14 +2494,14 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
         ActivePicker::Task(s) => s.move_selection(delta),
-        ActivePicker::CompareBase(s) => s.move_selection(delta),
+        ActivePicker::CompareTarget(s) => s.move_selection(delta),
         ActivePicker::RebaseOnto(s) => s.move_selection(delta),
         ActivePicker::MergeFrom(s) => s.move_selection(delta),
         ActivePicker::SwitchBranch(s) => s.move_selection(delta),
         ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
         ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Embedded(s) => s.move_selection(delta),
-        ActivePicker::CompareHead { picker, .. } => picker.move_selection(delta),
+        ActivePicker::CompareOwn { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
         ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
 
@@ -2555,14 +2538,14 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
         ActivePicker::Task(s) => s.toggle_mark(),
-        ActivePicker::CompareBase(s) => s.toggle_mark(),
+        ActivePicker::CompareTarget(s) => s.toggle_mark(),
         ActivePicker::RebaseOnto(s) => s.toggle_mark(),
         ActivePicker::MergeFrom(s) => s.toggle_mark(),
         ActivePicker::SwitchBranch(s) => s.toggle_mark(),
         ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
         ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Embedded(s) => s.toggle_mark(),
-        ActivePicker::CompareHead { picker, .. } => picker.toggle_mark(),
+        ActivePicker::CompareOwn { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
         ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
 
@@ -2596,14 +2579,14 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
         ActivePicker::Task(s) => s.query(),
-        ActivePicker::CompareBase(s) => s.query(),
+        ActivePicker::CompareTarget(s) => s.query(),
         ActivePicker::RebaseOnto(s) => s.query(),
         ActivePicker::MergeFrom(s) => s.query(),
         ActivePicker::SwitchBranch(s) => s.query(),
         ActivePicker::AgendaClockIn(s) => s.query(),
         ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Embedded(s) => s.query(),
-        ActivePicker::CompareHead { picker, .. } => picker.query(),
+        ActivePicker::CompareOwn { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
         ActivePicker::PdfHeading(picker) => picker.query(),
 
@@ -2637,14 +2620,14 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
         ActivePicker::Task(s) => s.len(),
-        ActivePicker::CompareBase(s) => s.len(),
+        ActivePicker::CompareTarget(s) => s.len(),
         ActivePicker::RebaseOnto(s) => s.len(),
         ActivePicker::MergeFrom(s) => s.len(),
         ActivePicker::SwitchBranch(s) => s.len(),
         ActivePicker::AgendaClockIn(s) => s.len(),
         ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Embedded(s) => s.len(),
-        ActivePicker::CompareHead { picker, .. } => picker.len(),
+        ActivePicker::CompareOwn { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
         ActivePicker::PdfHeading(picker) => picker.len(),
 
@@ -2678,14 +2661,14 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
         ActivePicker::Task(s) => s.selected_row(),
-        ActivePicker::CompareBase(s) => s.selected_row(),
+        ActivePicker::CompareTarget(s) => s.selected_row(),
         ActivePicker::RebaseOnto(s) => s.selected_row(),
         ActivePicker::MergeFrom(s) => s.selected_row(),
         ActivePicker::SwitchBranch(s) => s.selected_row(),
         ActivePicker::AgendaClockIn(s) => s.selected_row(),
         ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Embedded(s) => s.selected_row(),
-        ActivePicker::CompareHead { picker, .. } => picker.selected_row(),
+        ActivePicker::CompareOwn { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
         ActivePicker::PdfHeading(picker) => picker.selected_row(),
 
@@ -2723,14 +2706,14 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Task(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::CompareBase(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CompareTarget(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBranch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::CompareHead { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::CompareOwn { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
 
@@ -5716,8 +5699,8 @@ pub struct App {
     git_confirm: Option<GitConfirmAction>,
     /// The History view (`SPC g l`), if open -- see `HistorySession`.
     history_session: Option<HistorySession>,
-    /// The Compare view (`SPC g c`), if open -- see `CompareSession`.
-    compare_session: Option<CompareSession>,
+    /// What a pathless view of a file at a ref is called (`main:src/a.rs`).
+    ref_view_names: HashMap<BufferId, String>,
     merge_session: Option<MergeSession>,
     forge_session: Option<ForgeSession>,
     compose: Option<ComposeSession>,
@@ -6741,7 +6724,7 @@ impl App {
             tool_status_session: None,
             git_lines: HashMap::new(),
             history_session: None,
-            compare_session: None,
+            ref_view_names: HashMap::new(),
             merge_session: None,
             forge_session: None,
             compose: None,
@@ -7493,7 +7476,6 @@ impl App {
                 .history_session
                 .as_ref()
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
-            || self.compare_session.as_ref().is_some_and(|s| focused == s.commits_pane || focused == s.diff_pane)
             || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
             || self.forge_session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane || focused == s.review_pane)
             || self.compose.as_ref().is_some_and(|c| focused == c.pane)
@@ -14372,7 +14354,6 @@ impl App {
             .as_ref()
             .map(|s| s.repo_root.clone())
             .or_else(|| self.history_session.as_ref().map(|s| s.repo_root.clone()))
-            .or_else(|| self.compare_session.as_ref().map(|s| s.repo_root.clone()))
             .or_else(|| self.project_root.clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
@@ -14854,9 +14835,6 @@ impl App {
         }
         if self.history_session.is_some() {
             self.history_refresh();
-        }
-        if self.compare_session.is_some() {
-            self.compare_refresh();
         }
         if self.merge_session.is_some() {
             self.merge_refresh();
@@ -16307,15 +16285,6 @@ impl App {
         }
     }
 
-    fn compare_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
-        let session = self.compare_session.as_ref()?;
-        match n {
-            1 => Some(session.commits_pane),
-            2 => Some(session.diff_pane),
-            _ => None,
-        }
-    }
-
     /// Whether the focused diff is one with no index relationship to
     /// change -- a commit, a stash, or a ref comparison.
     fn focused_diff_is_read_only(&self) -> bool {
@@ -16449,153 +16418,11 @@ impl App {
     }
 
     fn compare_repo_root(&self) -> PathBuf {
-        self.compare_session
+        self.git_session
             .as_ref()
             .map(|s| s.repo_root.clone())
-            .or_else(|| self.git_session.as_ref().map(|s| s.repo_root.clone()))
             .or_else(|| self.project_root.clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    }
-
-    /// `SPC g c`: pick the ref to compare against, then the ref to
-    /// compare. Two pickers rather than one prompt so both halves get
-    /// fuzzy matching over the repo's real refs.
-    ///
-    /// The base list is ordered with `[git] base_branch` (default
-    /// `main`) first when it exists, since "how does this differ from
-    /// the mainline" is the question being asked most of the time.
-    pub(crate) fn start_compare_picker(&mut self) {
-        let repo_root = self.compare_repo_root();
-        let mut refs = self.compare_ref_candidates(&repo_root);
-        if refs.len() <= 1 {
-            self.set_error("no refs to compare -- is this a git repository?".to_string());
-            return;
-        }
-        // Lead with a mainline that actually exists. `[git] base_branch`
-        // first, then the two conventional names -- a repo on `master`
-        // would otherwise fall through to `HEAD` leading the list, and
-        // then Enter-Enter compares HEAD against HEAD and reports
-        // nothing, which reads as the feature being broken rather than
-        // as "you compared a ref with itself".
-        let preferred: Vec<String> = self
-            .config
-            .git_base_branch
-            .clone()
-            .into_iter()
-            .chain(["main".to_string(), "master".to_string()])
-            .collect();
-        if let Some(i) = preferred.iter().find_map(|p| refs.iter().position(|r| r == p)) {
-            let base = refs.remove(i);
-            refs.insert(0, base);
-        }
-        let candidates = refs.into_iter().map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
-        self.enter_picker(ActivePicker::CompareBase(fenix_picker::PickerState::new(candidates)));
-    }
-
-    /// `CompareBase`'s confirm: remembers the base and asks for the head.
-    fn compare_pick_head(&mut self, base: String) {
-        let repo_root = self.compare_repo_root();
-        let candidates = self.compare_ref_candidates(&repo_root).into_iter().map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
-        self.enter_picker(ActivePicker::CompareHead { base, picker: fenix_picker::PickerState::new(candidates) });
-    }
-
-    /// Opens (or retargets) the Compare view for `base` vs `head`.
-    pub(crate) fn open_compare_view(&mut self, base: String, head: String) {
-        let repo_root = self.compare_repo_root();
-        if let Some(session) = self.compare_session.as_mut() {
-            session.base = base;
-            session.head = head;
-            let (workspace_index, commits_pane) = (session.workspace_index, session.commits_pane);
-            self.workspaces.switch_to_index(workspace_index);
-            self.windows_mut().focus(commits_pane);
-            self.compare_refresh();
-            self.wake_caret();
-            return;
-        }
-
-        let commits_buffer = self.buffers.open_git("");
-        let empty = diff_view::render(&[], &HashSet::new());
-        let diff_buffer = self.buffers.open_diff(&empty.text);
-        self.diff_lines.insert(diff_buffer, empty.lines);
-
-        let cursor = Cursor::at_start();
-        self.workspaces.new_workspace(commits_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
-        let commits_pane = self.focused_pane_id();
-        let diff_pane = self.windows_mut().split(SplitKind::Vertical, diff_buffer);
-        self.workspaces.active_pane_states_mut().insert(diff_pane, PaneState::seeded_at(cursor));
-        // The commit list is narrow; the diff is what's being read.
-        // Negative: the delta grows the split's *first* child, which is
-        // the list.
-        self.windows_mut().resize_focused(-0.35);
-        self.windows_mut().focus(commits_pane);
-
-        self.pane_titles.insert(commits_pane, "1. Commits".to_string());
-        self.pane_titles.insert(diff_pane, "2. Changes".to_string());
-
-        self.compare_session =
-            Some(CompareSession { workspace_index, commits_pane, diff_pane, commits_buffer, diff_buffer, repo_root, base, head, three_dot: true });
-        self.compare_refresh();
-        self.wake_caret();
-    }
-
-    /// Re-runs the comparison and re-renders both panes.
-    fn compare_refresh(&mut self) {
-        let Some(session) = self.compare_session.as_ref() else { return };
-        let (repo_root, base, head, three_dot) = (session.repo_root.clone(), session.base.clone(), session.head.clone(), session.three_dot);
-        let (commits_buffer, diff_buffer) = (session.commits_buffer, session.diff_buffer);
-
-        const COMMIT_LIMIT: usize = 200;
-        let commits = fenix_git::commits_between(&repo_root, &base, &head, COMMIT_LIMIT);
-        let dots = if three_dot { "..." } else { ".." };
-        self.set_git_buffer(
-            commits_buffer,
-            git_panel::render_compare(&format!("{base}{dots}{head}"), &commits, commits.len() >= COMMIT_LIMIT),
-        );
-
-        // A comparison against a ref git doesn't know has to be loud.
-        // Rendered into the pane, not just flashed in the modeline: an
-        // empty diff pane beside an error that has already scrolled past
-        // reads as "these refs are identical", which is a completely
-        // different answer from "one of those isn't a ref".
-        match fenix_git::diff_refs(&repo_root, &base, &head, three_dot) {
-            Ok(diff) => self.set_diff_buffer(diff_buffer, Some(&diff), DiffSource::ReadOnly, &repo_root),
-            Err(err) => {
-                let mut rows = vec![(format!("couldn't compare {base}{dots}{head}"), diff_view::DiffStyle::Removed)];
-                rows.extend(err.trim().lines().map(|l| (format!("  {l}"), diff_view::DiffStyle::Meta)));
-                self.set_diff_buffer_message(diff_buffer, &rows, &repo_root);
-                self.set_error(err.trim().to_string());
-            }
-        }
-    }
-
-    /// `t` in the Compare view: three-dot (what `head` added since it
-    /// diverged) vs two-dot (every difference between the two trees).
-    pub(crate) fn compare_toggle_dots(&mut self) {
-        let Some(session) = self.compare_session.as_mut() else { return };
-        session.three_dot = !session.three_dot;
-        let now = if session.three_dot { "base...head (since diverging)" } else { "base..head (full difference)" };
-        self.set_message(now);
-        self.compare_refresh();
-        self.wake_caret();
-    }
-
-    /// `SPC g q` (in its workspace): closes the Compare view.
-    pub(crate) fn compare_close(&mut self) {
-        let Some(session) = self.compare_session.take() else { return };
-        for id in [session.commits_buffer, session.diff_buffer] {
-            self.buffers.close(id);
-            self.git_lines.remove(&id);
-            self.diff_lines.remove(&id);
-            self.diff_models.remove(&id);
-        }
-        for pane in [session.commits_pane, session.diff_pane] {
-            self.pane_titles.remove(&pane);
-        }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
-        self.refresh_project_root();
-        self.wake_caret();
     }
 
     /// `SPC g q` (in its workspace): closes the History view.
@@ -16642,8 +16469,6 @@ impl App {
         let panes = self.windows().windows();
         if self.history_session.as_ref().is_some_and(|s| s.workspace_index == here) {
             self.history_close();
-        } else if self.compare_session.as_ref().is_some_and(|s| s.workspace_index == here) {
-            self.compare_close();
         } else if self.merge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
             self.merge_close();
         } else if self.forge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
@@ -17067,14 +16892,6 @@ impl App {
                 let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
             }
-            Some(ActivePicker::CompareBase(state)) => {
-                let Some(base) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                // Straight into picking the other side -- `enter_picker`
-                // keeps `main_view` on the picker, so this reads as one
-                // two-step interaction rather than two separate ones.
-                self.compare_pick_head(base);
-            }
             Some(ActivePicker::Notebook { picker, .. }) => {
                 let Some(choice) = picker.selected().map(|c| c.payload.clone()) else { return };
                 let query = picker.query().to_string();
@@ -17095,12 +16912,18 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.setting_chosen(key, &value);
             }
-            Some(ActivePicker::CompareHead { base, picker }) => {
-                let Some(head) = picker.selected().map(|c| c.payload.clone()) else { return };
-                let base = base.clone();
+            Some(ActivePicker::CompareTarget(state)) => {
+                let Some(target) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                self.open_compare_view(base, head);
+                self.open_git_compare(target, None);
+            }
+            Some(ActivePicker::CompareOwn { target, picker }) => {
+                let Some(own) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let target = target.clone();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_git_compare(target, Some(own));
             }
             Some(ActivePicker::RebaseOnto(state)) => {
                 let Some(onto) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -20209,43 +20032,6 @@ impl App {
                 _ => {}
             }
         }
-        if self.compare_session.as_ref().is_some_and(|s| {
-            let focused = self.focused_pane_id();
-            focused == s.commits_pane || focused == s.diff_pane
-        }) && keypress.mods == Mods::default()
-        {
-            match keypress.code {
-                KeyCode::Char('t') => {
-                    self.compare_toggle_dots();
-                    return;
-                }
-                KeyCode::Char('u') => {
-                    self.compare_refresh();
-                    self.wake_caret();
-                    return;
-                }
-                KeyCode::Char('r') => {
-                    // Re-target without closing: the same two-step ref
-                    // picker `SPC g c` opens, reusing this workspace.
-                    self.start_compare_picker();
-                    return;
-                }
-                KeyCode::Char('x') => {
-                    self.git_menu_open = true;
-                    self.wake_caret();
-                    return;
-                }
-                KeyCode::Char(c) if c.is_ascii_digit() => {
-                    if let Some(pane) = self.compare_pane_by_number(c.to_digit(10).unwrap_or(0)) {
-                        self.windows_mut().focus(pane);
-                        self.wake_caret();
-                    }
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         // The Merge Requests view's own keys.
         if let Some((on_list, on_detail, on_review)) = self.forge_session.as_ref().map(|s| {
             let focused = self.focused_pane_id();
@@ -20985,6 +20771,8 @@ impl App {
                 self.terminal_buffer_labels.get(&buffer_id).cloned().unwrap_or_else(|| "*terminal*".to_string())
             } else if ob.kind == BufferKind::Page {
                 self.page_title(buffer_id)
+            } else if let Some(name) = self.ref_view_names.get(&buffer_id) {
+                name.clone()
             } else {
                 "[No Name]".to_string()
             }
@@ -21107,11 +20895,11 @@ impl App {
                 Some(picker @ ActivePicker::WorkspaceLauncher(_)) => ("WORKSPACE", picker_len(picker)),
                 Some(picker @ ActivePicker::Outline(_)) => ("OUTLINE", picker_len(picker)),
                 Some(picker @ ActivePicker::Task(_)) => ("TASK", picker_len(picker)),
-                Some(picker @ ActivePicker::CompareBase(_)) => ("COMPARE", picker_len(picker)),
+                Some(picker @ ActivePicker::CompareTarget(_)) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::RebaseOnto(_)) => ("REBASE ONTO", picker_len(picker)),
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
-                Some(picker @ ActivePicker::CompareHead { .. }) => ("COMPARE", picker_len(picker)),
+                Some(picker @ ActivePicker::CompareOwn { .. }) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaClockIn(_)) => (if self.agenda_gap_asked { "AWAY" } else { "CLOCK" }, picker_len(picker)),
                 Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
                 Some(picker @ ActivePicker::Embedded(_)) => ("EMBEDDED", picker_len(picker)),
@@ -21122,12 +20910,8 @@ impl App {
             // result reads in, and picking them the wrong way round
             // silently answers the opposite question.
             let suffix = match &self.active_picker {
-                Some(ActivePicker::CompareBase(_)) => {
-                    format!("{count} refs   pick the ref to compare *against* (the base) ")
-                }
-                Some(ActivePicker::CompareHead { base, .. }) => {
-                    format!("{count} refs   {base}...?   pick the ref whose changes you want to see ")
-                }
+                Some(ActivePicker::CompareTarget(_)) => format!("{count} refs   compare HEAD with… "),
+                Some(ActivePicker::CompareOwn { target, .. }) => format!("{count} refs   {target}...?   pick your side "),
                 // What this pick is for ("WHAT DOES BLOCKED MEAN IN
                 // PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
                 Some(ActivePicker::WorkSync(_)) => match &self.agenda_sync.picker {
@@ -22119,21 +21903,6 @@ impl App {
                 None
             };
             if let Some(bindings) = bindings {
-                return self.git_menu_popup_at(bindings, window_width, modeline_top);
-            }
-        }
-        if let Some(session) = &self.compare_session {
-            let focused = self.focused_pane_id();
-            if focused == session.commits_pane || focused == session.diff_pane {
-                let bindings: &[(&str, &str)] = &[
-                    ("1/2", "go to pane"),
-                    ("t", "three-dot/two-dot"),
-                    ("r", "re-target refs"),
-                    ("Tab", "fold/unfold file"),
-                    ("]", "next hunk"),
-                    ("[", "prev hunk"),
-                    ("u", "refresh"),
-                ];
                 return self.git_menu_popup_at(bindings, window_width, modeline_top);
             }
         }
@@ -35653,13 +35422,6 @@ configure_board stm32
         let session = app.merge_session.as_ref().unwrap();
         assert!(width_of(&app, session.files_pane) < width_of(&app, session.merge_pane), "the columns need the room");
         assert_eq!(width_of(&app, session.files_pane), 250.0);
-
-        // Compare: the commit list is narrow, the diff is what's read.
-        let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
-        app.open_compare_view("main".to_string(), "develop".to_string());
-        let session = app.compare_session.as_ref().unwrap();
-        assert!(width_of(&app, session.commits_pane) < width_of(&app, session.diff_pane), "the diff needs the room");
     }
 
     // -- Review (Milestone F) ------------------------------------------
@@ -37257,26 +37019,6 @@ configure_board stm32
     }
 
     #[test]
-    fn digit_keys_jump_between_the_compare_views_panes() {
-        let dir = diverged_repo("compare_digits");
-        let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
-        app.open_compare_view("main".to_string(), "side".to_string());
-        let (commits, diff) = {
-            let s = app.compare_session.as_ref().unwrap();
-            (s.commits_pane, s.diff_pane)
-        };
-
-        assert_eq!(app.compare_pane_by_number(1), Some(commits));
-        assert_eq!(app.compare_pane_by_number(2), Some(diff));
-        assert_eq!(app.compare_pane_by_number(3), None);
-
-        let target = app.compare_pane_by_number(2).unwrap();
-        app.windows_mut().focus(target);
-        assert_eq!(app.focused_pane_id(), diff);
-    }
-
-    #[test]
     fn the_commit_pane_gets_a_larger_share_than_the_refs_tree() {
         let dir = diverged_repo("history_proportions");
         let mut app = App::with_file(None);
@@ -37398,55 +37140,62 @@ configure_board stm32
         assert_eq!(app.workspaces.len(), workspaces);
     }
 
+    /// The focused Compare page's text, laid out.
+    fn compare_text(app: &mut App) -> String {
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        assert!(matches!(app.pages.get(&id).map(|s| &s.model), Some(pages::PageModel::Compare(_))), "the Compare page isn't focused");
+        app.ensure_page_layout(id, pane, 120);
+        app.open().buffer.text()
+    }
+
     #[test]
-    fn comparing_two_branches_lists_the_commits_and_diff_the_head_branch_adds() {
+    fn comparing_head_with_a_branch_lists_what_head_adds() {
         let dir = diverged_repo("compare_open");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
 
-        app.open_compare_view("main".to_string(), "side".to_string());
+        app.open_git_compare("side".to_string(), None);
 
-        let session = app.compare_session.as_ref().expect("a session");
-        let commits = app.buffers.get(session.commits_buffer).unwrap().buffer.text();
-        assert!(commits.contains("main...side"), "the header names the comparison:\n{commits}");
-        assert!(commits.contains("on side"));
-        assert!(!commits.contains("on main"), "main's own commits aren't what side adds:\n{commits}");
-
-        let diff = app.buffers.get(session.diff_buffer).unwrap().buffer.text();
-        assert!(diff.contains("from_side.txt"), "{diff}");
-        assert!(!diff.contains("from_main.txt"), "three-dot excludes the base's later work:\n{diff}");
+        let text = compare_text(&mut app);
+        assert!(text.contains("main compared with side"), "the header names both sides:
+{text}");
+        assert!(text.contains("Ahead (1)") && text.contains("on main"), "{text}");
+        assert!(text.contains("from_main.txt"), "{text}");
+        assert!(!text.contains("from_side.txt"), "three-dot leaves out side's own later work:
+{text}");
     }
 
     #[test]
-    fn toggling_to_two_dot_brings_in_what_the_base_gained_since_diverging() {
+    fn two_dot_brings_in_what_the_other_side_gained_since_diverging() {
         let dir = diverged_repo("compare_two_dot");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
-        app.open_compare_view("main".to_string(), "side".to_string());
+        app.open_git_compare("side".to_string(), None);
 
-        app.compare_toggle_dots();
+        assert!(app.page_key(KeyPress::char('t')));
 
-        assert!(!app.compare_session.as_ref().unwrap().three_dot);
-        let diff = app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text();
-        assert!(diff.contains("from_main.txt"), "two-dot sees the base's own newer work:\n{diff}");
-        let commits = app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text();
-        assert!(commits.contains("main..side"), "the header reflects the mode:\n{commits}");
+        let text = compare_text(&mut app);
+        assert!(text.contains("from_side.txt"), "two-dot compares the trees:
+{text}");
+        assert!(text.contains("every difference"), "the header reflects the mode:
+{text}");
     }
 
     #[test]
-    fn comparing_a_ref_against_itself_shows_no_changes_rather_than_an_error() {
+    fn comparing_a_ref_with_itself_says_there_is_no_difference_rather_than_an_error() {
         let dir = diverged_repo("compare_same");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
 
-        app.open_compare_view("main".to_string(), "main".to_string());
+        app.open_git_compare("main".to_string(), None);
 
-        assert!(app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text().contains("(no changes)"));
-        assert!(app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text().contains("No commits between"));
+        let text = compare_text(&mut app);
+        assert!(text.contains("No differences."), "{text}");
+        assert!(!text.contains("couldn't compare"), "{text}");
     }
 
     #[test]
-    fn the_compare_picker_offers_head_and_every_ref_with_the_base_branch_first() {
+    fn the_compare_picker_offers_every_ref_with_the_base_branch_first() {
         let dir = diverged_repo("compare_picker");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
@@ -37455,22 +37204,17 @@ configure_board stm32
         app.start_compare_picker();
 
         match &app.active_picker {
-            Some(ActivePicker::CompareBase(state)) => {
+            Some(ActivePicker::CompareTarget(state)) => {
                 let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
                 assert_eq!(labels[0], "side", "the configured base branch leads: {labels:?}");
-                assert!(labels.contains(&"HEAD".to_string()));
                 assert!(labels.contains(&"main".to_string()));
             }
-            _ => panic!("expected the compare-base picker"),
+            _ => panic!("expected the compare picker"),
         }
     }
 
     #[test]
     fn the_compare_picker_leads_with_master_when_there_is_no_main() {
-        // The trap this closes: with the default base of `main` absent,
-        // the list led with `HEAD`, so Enter-Enter compared HEAD against
-        // HEAD and reported nothing -- which reads as broken rather than
-        // as "you compared a ref with itself".
         let dir = diverged_repo("compare_base_master");
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git").current_dir(dir.path()).args(args).status().unwrap();
@@ -37483,60 +37227,44 @@ configure_board stm32
         app.start_compare_picker();
 
         match &app.active_picker {
-            Some(ActivePicker::CompareBase(state)) => {
+            Some(ActivePicker::CompareTarget(state)) => {
                 let labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
                 assert_eq!(labels[0], "master", "a repo on master should lead with it: {labels:?}");
             }
-            _ => panic!("expected the compare-base picker"),
+            _ => panic!("expected the compare picker"),
         }
     }
 
     #[test]
-    fn the_compare_pickers_say_which_side_is_being_chosen() {
+    fn the_compare_picker_says_what_its_choosing() {
         let dir = diverged_repo("compare_prompts");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
 
         app.start_compare_picker();
         let (_, suffix) = app.modeline_pieces();
-        assert!(suffix.contains("compare *against*"), "the base step must say which side it is: {suffix}");
-
-        app.compare_pick_head("main".to_string());
-        let (_, suffix) = app.modeline_pieces();
-        assert!(suffix.contains("main...?"), "the head step echoes the chosen base: {suffix}");
-        assert!(suffix.contains("changes you want to see"), "{suffix}");
+        assert!(suffix.contains("compare HEAD with"), "{suffix}");
     }
 
     #[test]
-    fn comparing_against_a_ref_that_does_not_exist_says_so_in_the_pane() {
-        // Not just in the modeline: an empty diff beside a message that
-        // has already scrolled past reads as "identical", which is a
-        // completely different answer from "that isn't a ref".
+    fn comparing_with_a_ref_that_does_not_exist_says_so_on_the_page() {
+        // An empty list beside a message that has already gone reads as
+        // "identical", a completely different answer from "not a ref".
         let dir = diverged_repo("compare_bad_ref");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
 
-        app.open_compare_view("main".to_string(), "no-such-branch".to_string());
+        app.open_git_compare("no-such-branch".to_string(), None);
 
-        let diff = app.buffers.get(app.compare_session.as_ref().unwrap().diff_buffer).unwrap().buffer.text();
-        assert!(diff.contains("couldn't compare main...no-such-branch"), "got:\n{diff}");
-        assert!(!diff.contains("(no changes)"), "must not claim the two sides match:\n{diff}");
+        let text = compare_text(&mut app);
+        assert!(text.contains("couldn't compare no-such-branch...HEAD"), "got:
+{text}");
+        assert!(!text.contains("No differences"), "must not claim the two sides match:
+{text}");
     }
 
     #[test]
-    fn the_compare_header_carries_the_commit_count() {
-        let dir = diverged_repo("compare_count");
-        let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
-
-        app.open_compare_view("main".to_string(), "side".to_string());
-
-        let commits = app.buffers.get(app.compare_session.as_ref().unwrap().commits_buffer).unwrap().buffer.text();
-        assert!(commits.contains("(1 commits)"), "got:\n{commits}");
-    }
-
-    #[test]
-    fn confirming_the_base_chains_into_picking_the_head() {
+    fn confirming_the_picker_opens_the_compare_page_and_r_on_it_picks_again() {
         let dir = diverged_repo("compare_chain");
         let mut app = App::with_file(None);
         app.project_root = Some(dir.path().to_path_buf());
@@ -37544,10 +37272,10 @@ configure_board stm32
 
         app.picker_key(KeyPress::named(FenixNamedKey::Enter));
 
-        match &app.active_picker {
-            Some(ActivePicker::CompareHead { base, .. }) => assert!(!base.is_empty()),
-            _ => panic!("expected the compare-head picker to follow"),
-        }
+        assert!(app.active_picker.is_none());
+        assert!(compare_text(&mut app).contains("compared with main"));
+        assert!(app.page_key(KeyPress::char('R')));
+        assert!(matches!(&app.active_picker, Some(ActivePicker::CompareOwn { target, .. }) if target == "main"));
     }
 
     #[test]
@@ -37557,18 +37285,6 @@ configure_board stm32
         app.project_root = Some(dir.path().to_path_buf());
         app.open_history_view();
         let pane = app.history_session.as_ref().unwrap().graph_pane;
-        app.windows_mut().focus(pane);
-
-        assert!(app.focused_pane_holds_a_tracked_session());
-    }
-
-    #[test]
-    fn a_compare_pane_is_a_tracked_session_too() {
-        let dir = diverged_repo("compare_guard");
-        let mut app = App::with_file(None);
-        app.project_root = Some(dir.path().to_path_buf());
-        app.open_compare_view("main".to_string(), "side".to_string());
-        let pane = app.compare_session.as_ref().unwrap().diff_pane;
         app.windows_mut().focus(pane);
 
         assert!(app.focused_pane_holds_a_tracked_session());
