@@ -370,7 +370,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.label_group(&[spc, KeyPress::char('g')], "git");
         // The which-key drawer lists git's keys in these sections, in
         // this order (`WHICH_KEY_SECTIONS`).
-        for (keys, section) in [("glGhHBec", "View"), ("wfprmPMz", "Branch & remote"), ("adix", "This change")] {
+        for (keys, section) in [("glGhHBecv", "View"), ("wfprmPMz", "Branch & remote"), ("adix", "This change")] {
             for key in keys.chars() {
                 t.set_section(&[spc, KeyPress::char('g'), KeyPress::char(key)], section);
             }
@@ -380,7 +380,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('H')], "these lines' history", "git.line_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare with a branch", "git.compare");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('v')], "this file beside a branch", "git.versus");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", "git.fetch");

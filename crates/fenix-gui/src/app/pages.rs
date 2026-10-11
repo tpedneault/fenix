@@ -9,6 +9,7 @@
 
 use super::projects::kind_color;
 use super::*;
+use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
@@ -48,6 +49,7 @@ pub(super) enum PageModel {
     Doctor(DoctorPage),
     Git(Box<GitStatus>),
     Log(Box<GitLog>),
+    Compare(Box<GitCompare>),
     Rebase(Box<RebasePage>),
     Request(Box<RequestPage>),
     UserSettings(Box<SettingsPage>),
@@ -101,6 +103,7 @@ impl PageState {
             PageModel::Doctor(_) => false,
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
+            PageModel::Compare(_) => false,
             PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
             PageModel::Snippets(p) => p.typing(),
@@ -148,6 +151,7 @@ impl PageState {
             PageModel::Doctor(_) => {}
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
+            PageModel::Compare(_) => {}
             PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
             PageModel::Snippets(p) => p.paste(text),
@@ -187,6 +191,11 @@ pub enum PageEvent {
     GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
     GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
     GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
+    CompareData { buffer: BufferId, data: Box<git_compare::CompareData> },
+    CompareFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
+    CompareDiff { buffer: BufferId, key: git_compare::DiffKey, diff: git_status::DiffState },
+    /// The Compare page's fetch finished: the remote, or why not.
+    CompareFetched { buffer: BufferId, result: Result<String, String> },
     /// Where the focused file's repository stands, for the modeline.
     /// `None`: the focused file isn't in a repository.
     ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
@@ -329,6 +338,7 @@ impl App {
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
             Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
@@ -543,6 +553,7 @@ impl App {
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
+            PageModel::Compare(c) => git_compare::layout(c, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
             PageModel::Request(r) => git_request::layout(r, cols),
             PageModel::UserSettings(p) => settings_page::layout(p, cols),
@@ -769,6 +780,10 @@ impl App {
                 let action = l.key(key);
                 self.git_log_action(id, action);
             }
+            PageModel::Compare(c) => {
+                let action = c.key(key);
+                self.git_compare_action(id, action);
+            }
             PageModel::Rebase(r) => {
                 let action = r.key(key);
                 self.git_rebase_action(id, action);
@@ -809,6 +824,9 @@ impl App {
                 self.apply_git_page_event(event)
             }
             event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
+            event @ (PageEvent::CompareData { .. } | PageEvent::CompareFiles { .. } | PageEvent::CompareDiff { .. } | PageEvent::CompareFetched { .. }) => {
+                self.apply_git_compare_event(event)
+            }
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
             event @ PageEvent::SettingsNote { .. } => self.apply_settings_event(event),

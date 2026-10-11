@@ -392,6 +392,15 @@ impl BufferList {
         self.insert(Buffer::from_text(text), None, BufferKind::Text)
     }
 
+    /// `open_text_view`, highlighted as the file at `like` would be -- a
+    /// file's content from somewhere other than disk, such as as it is
+    /// at a git ref. Pathless, so saving it can't overwrite anything.
+    pub fn open_text_view_like(&mut self, text: &str, like: &Path) -> BufferId {
+        let buffer = Buffer::from_text(text);
+        let syntax = fenix_syntax::detect_language_from_path(like).map(|language| fenix_syntax::SyntaxState::new(language, &buffer.text()));
+        self.insert(buffer, syntax, BufferKind::Text)
+    }
+
     /// Opens `path`, reusing an already-open buffer for that exact path
     /// instead of creating a duplicate -- matches Emacs: visiting a file
     /// that's already open shows the same buffer (same unsaved edits),

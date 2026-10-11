@@ -158,6 +158,8 @@ pub enum RequestAction {
     Browser(String),
     /// Review the one already open.
     Review(u64),
+    /// Every change it brings, file by file, on the Compare page.
+    Compare(String),
 }
 
 pub struct RequestPage {
@@ -485,6 +487,7 @@ impl RequestPage {
                     return RequestAction::Review(existing.number);
                 }
             }
+            Key::Char('D') if !self.base.is_empty() => return RequestAction::Compare(self.base.clone()),
             Key::Char('q') | Key::Escape => return RequestAction::Close,
             Key::CtrlC => {
                 if self.busy {
@@ -670,7 +673,7 @@ pub fn layout(page: &RequestPage, cols: usize) -> Page {
     } else if matches!(page.existing, Some(Some(_))) {
         vec![("M", "review it"), ("o", "browser"), ("q", "close")]
     } else {
-        vec![("C-c C-c", open.as_str()), ("Enter", "edit field"), ("e", "edit description"), ("j/k", "field"), ("d", "toggle draft"), ("q", "cancel")]
+        vec![("C-c C-c", open.as_str()), ("Enter", "edit field"), ("e", "edit description"), ("j/k", "field"), ("d", "toggle draft"), ("D", "full diff"), ("q", "cancel")]
     };
     g.keys(left, width, &keys);
     g.finish()

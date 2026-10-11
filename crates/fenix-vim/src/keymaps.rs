@@ -238,6 +238,8 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('['), KeyPress::char('t')], "previous TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: false });
     t.insert(&[KeyPress::char(']'), KeyPress::char('h')], "next changed hunk", VimAction::BracketJump { target: crate::state::BracketTarget::Hunk, forward: true });
     t.insert(&[KeyPress::char('['), KeyPress::char('h')], "previous changed hunk", VimAction::BracketJump { target: crate::state::BracketTarget::Hunk, forward: false });
+    t.insert(&[KeyPress::char(']'), KeyPress::char('c')], "next change (side by side)", VimAction::BracketJump { target: crate::state::BracketTarget::Change, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('c')], "previous change (side by side)", VimAction::BracketJump { target: crate::state::BracketTarget::Change, forward: false });
     t.insert(&[KeyPress::char(']'), KeyPress::char('d')], "next problem", VimAction::BracketJump { target: crate::state::BracketTarget::Diagnostic, forward: true });
     t.insert(&[KeyPress::char('['), KeyPress::char('d')], "previous problem", VimAction::BracketJump { target: crate::state::BracketTarget::Diagnostic, forward: false });
 

@@ -164,7 +164,8 @@ impl CommandRegistry {
         registry.register("git.history", "Show the commit graph, refs and commit detail", cmd_git_history);
         registry.register("git.history_close", "Close the History view", cmd_git_history_close);
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
-        registry.register("git.compare", "Compare two refs (changed files, commits, diffs)", cmd_git_compare);
+        registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
+        registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
         registry.register("settings.open", "Every setting, on one page: search, change, reset", cmd_settings_open);
         registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
@@ -178,7 +179,6 @@ impl CommandRegistry {
         registry.register("git.switch", "Switch branch, most recently used first", cmd_git_switch);
         registry.register("git.blame", "Show or hide who last changed each line", cmd_git_blame);
         registry.register("git.blame_explain", "Show the commit that last changed this line", cmd_git_blame_explain);
-        registry.register("git.compare_close", "Close the Compare view", cmd_git_compare_close);
         registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
         registry.register("git.continue", "Continue the suspended rebase/merge", cmd_git_continue);
         registry.register("git.abort", "Abort the suspended rebase/merge", cmd_git_abort);
@@ -1168,12 +1168,12 @@ fn cmd_git_operations(ctx: &mut CommandCtx) {
     ctx.app.open_git_operations();
 }
 
-fn cmd_git_compare(ctx: &mut CommandCtx) {
-    ctx.app.start_compare_picker();
+fn cmd_git_versus(ctx: &mut CommandCtx) {
+    ctx.app.start_side_by_side_picker();
 }
 
-fn cmd_git_compare_close(ctx: &mut CommandCtx) {
-    ctx.app.compare_close();
+fn cmd_git_compare(ctx: &mut CommandCtx) {
+    ctx.app.start_compare_picker();
 }
 
 fn cmd_git_rebase(ctx: &mut CommandCtx) {

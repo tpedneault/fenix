@@ -8,6 +8,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The Compare page (`SPC g c`) replaces the two-pane Compare view: HEAD
+  -- or the working tree, untracked files included -- against any
+  branch, local or remote, with the merge base, ahead/behind, how stale
+  the remote is (and `f` to fetch it), the commits on each side, and
+  every changed file with its line counts and an inline diff.
+- Side by side (`SPC g v`): the file you're editing beside its version
+  on any branch, lined up with blank rows like the merge view, scrolling
+  together and following your edits; `]c`/`[c` walk the changes and
+  `do` takes the branch's version of one.
+
 - The notebook (`SPC n`): notes, journal days and Mermaid diagrams Fenix
   keeps for you without asking where -- plain files in the data folder
   (or any folder, an Obsidian vault included), saved as you type with
