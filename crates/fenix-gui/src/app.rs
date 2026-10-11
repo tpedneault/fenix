@@ -8814,6 +8814,13 @@ impl App {
     /// no single-token line comment (`line_comment_token`), or the
     /// range is entirely blank.
     pub(crate) fn toggle_comment_lines(&mut self, start_line: usize, end_line: usize) {
+        // One edit per line underneath, one `u` to take them all back.
+        self.focused_buffer_and_cursor_mut().0.begin_undo_group();
+        self.toggle_comment_lines_inner(start_line, end_line);
+        self.focused_buffer_and_cursor_mut().0.end_undo_group();
+    }
+
+    fn toggle_comment_lines_inner(&mut self, start_line: usize, end_line: usize) {
         let language = self.focused_language();
         if let Some((open, close)) = language.filter(|l| line_comment_token(*l).is_none()).and_then(block_comment_tokens) {
             self.toggle_block_comment_lines(start_line, end_line, open, close);
