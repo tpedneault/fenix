@@ -29,6 +29,7 @@ pub enum VolumeKind {
 
 impl VolumeKind {
     /// Windows' own `Win32_LogicalDisk.DriveType` numbering.
+    #[cfg(windows)]
     fn from_drive_type(n: u32) -> Self {
         match n {
             2 => VolumeKind::Removable,
@@ -169,6 +170,7 @@ fn query_windows_volumes() -> Vec<Volume> {
 }
 
 /// `C:|3|Windows|123456|999999|` -> a `Volume`.
+#[cfg(windows)]
 fn parse_volume_row(line: &str) -> Option<Volume> {
     let mut fields = line.trim().split('|');
     let device = fields.next()?.trim();
@@ -216,6 +218,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn every_drive_type_windows_reports_has_a_meaning() {
         assert_eq!(VolumeKind::from_drive_type(2), VolumeKind::Removable);
         assert_eq!(VolumeKind::from_drive_type(3), VolumeKind::Fixed);
@@ -228,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn a_volume_row_becomes_something_openable() {
         let volume = parse_volume_row("C:|3|Windows|123456789|999999999|").unwrap();
         // The root directory, not the drive designator -- `C:` on its
@@ -242,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn a_mapped_drive_remembers_where_it_really_points() {
         // Which is the thing worth showing: `Z:` tells you nothing.
         let volume = parse_volume_row(r"Z:|4|  |500|1000|\\nas\media").unwrap();
@@ -250,6 +255,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn a_volume_that_did_not_answer_reports_nothing_rather_than_zero() {
         // An empty card reader is not a full one.
         let volume = parse_volume_row("D:|5||||").unwrap();
@@ -260,6 +266,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn blank_and_malformed_rows_are_skipped() {
         assert!(parse_volume_row("").is_none());
         assert!(parse_volume_row("   ").is_none());
