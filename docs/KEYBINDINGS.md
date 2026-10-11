@@ -83,7 +83,7 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC g l` | The Log page -- history with a menu on every commit (`a` for every branch) |
 | `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
 | `SPC g G` | Open the graph view (commit graph, refs, commit diff) |
-| `SPC g c` | Compare two refs (pick base, then head) |
+| `SPC g c` | The Compare page: HEAD (or the working tree) against a branch, local or remote |
 | `SPC g z` | The operation log -- undo what Fenix ran on the repository |
 | `SPC g w` / `SPC g f` / `SPC g p` | Switch branch (most recently used first) / fetch all remotes and prune / pull with `--rebase` |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
@@ -98,9 +98,9 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC g x o` / `t` / `b` | Keep ours / theirs / both for the conflict under the cursor |
 | `SPC g x s` | Stage the conflicted file as resolved |
 | `SPC g x c` / `SPC g x a` | Continue / abort the suspended rebase, merge, cherry-pick or revert |
-| `SPC g q` | Close the Git view in front -- the panel, graph, comparison, conflicts or merge requests view, or a Git page |
+| `SPC g q` | Close the Git view in front -- the panel, graph, conflicts or merge requests view, or a Git page |
 | `o` / `M` (Git page) | This branch's pull request -- review it, or open one / the review inbox |
-| `C-c C-c` / `Enter` / `e` / `d` (New pull request) | Open it (press twice) / edit a field / write the description / toggle draft |
+| `C-c C-c` / `Enter` / `e` / `d` / `D` (New pull request) | Open it (press twice) / edit a field / write the description / toggle draft / every change on the Compare page |
 | `1` / `2` (Merge Requests) | Jump to the list / detail pane |
 | `Enter` / `f` / `c` / `u` (Merge Requests) | Show this one / cycle filter / check it out locally / refresh |
 | `1` / `2` / `3` (Merge Requests) | Jump to the list / detail / review pane |
@@ -112,8 +112,9 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
 | `1` / `2` / `3` (History) | Jump to the Graph / Refs / Commit pane |
 | `u` / `f` (History) | Refresh / fetch |
-| `1` / `2` (Compare) | Jump to the Commits / Changes pane |
-| `t` / `r` / `u` (Compare) | Toggle three-dot vs two-dot / re-target refs / refresh |
+| `Tab` / `Enter` / `o` (Compare) | Open a file's diff or a commit's files / go to the file at that line / the target's version, read-only |
+| `t` / `w` / `s` (Compare) | Since splitting vs every difference / bring in the working tree / turn the comparison round |
+| `r` / `R` / `f` / `y` (Compare) | Compare with another ref / pick your own side / fetch the target's remote / copy the range |
 | `x` (any Git view) | Show the keys the focused pane understands |
 | `s` / `S` (working-tree diff) | Stage / unstage the hunk under the cursor |
 | `d` (working-tree diff) | Discard the hunk under the cursor (confirms first) |

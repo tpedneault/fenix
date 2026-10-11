@@ -381,6 +381,7 @@ impl App {
             self.refresh_stale_blames();
         } else {
             self.refresh_git_logs();
+            self.refresh_git_compares();
         }
         let visible: Vec<BufferId> = self.windows().windows().iter().filter_map(|p| self.windows().content(*p).copied()).collect();
         let ids: Vec<BufferId> = self

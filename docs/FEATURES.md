@@ -667,19 +667,23 @@ Everything Fenix does, by area. For the keys, see
   since every one of those badges is only as current as that. `SPC g f`
   fetches (`--all --prune`, so deleted remote branches actually
   disappear and `[gone]` becomes true); `u` refreshes; `SPC g q` closes.
-- **Compare refs** (`SPC g c`): pick any two refs -- branches, remote
-  branches or tags -- and see what one adds over the other: the commits
-  between them beside the full diff, hunk-navigable like every other
-  diff here. Defaults to three-dot (`base...head`, measured from the
-  merge base: "what does this branch actually do", the same thing a
-  merge request shows), with `t` toggling two-dot (`base..head`, every
-  difference between the two trees, including what the base gained
-  meanwhile). `r` re-targets without closing, `u` refreshes, `SPC g q`
-  closes. The base picker leads with the base branch from `SPC ,` (a
-  project can set its own), falling back to whichever of `main`/`master` the repo
-  actually has, so "how does this differ from the mainline" is two keys
-  and an Enter; each step says which side it's asking for, and the
-  second echoes the base you already chose (`master...?`).
+- **Compare** (`SPC g c`): your branch against any other -- local,
+  remote or a tag. The picker leads with the base branch from `SPC ,`
+  (its `origin/` copy first, else `main`/`master`), so "how does this
+  differ from the mainline" is two keys and an Enter. The page's header
+  says where the two stand: the merge base, how far ahead and behind,
+  how many files and lines, and -- for a remote ref -- how long ago you
+  last fetched (`f` fetches just that remote). Under it, the commits
+  each side has that the other doesn't, and every file that differs
+  with its line counts and renames; `Tab` opens a file's diff inline or
+  a commit to its files, `Enter` goes to the file at that line, `o`
+  shows the target's version of it. Three-dot by default (what your side
+  did since the two split -- what a pull request shows); `t` switches
+  to two-dot, every difference between the trees. `w` brings in what
+  isn't committed yet, untracked files included; `s` turns the
+  comparison round, to see what the other branch has over yours; `R`
+  picks a side other than HEAD. `D` on the new pull request page opens
+  it on the request's base.
 - **Rebase, merge and conflicts**: `SPC g r` rebases the current branch
   onto a ref you pick, `SPC g m` merges one in, `SPC g p` pulls with
   `--rebase`, and a push from the Git page's push menu with `-f` is

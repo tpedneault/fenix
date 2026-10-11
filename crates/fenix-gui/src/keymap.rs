@@ -380,7 +380,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('H')], "these lines' history", "git.line_history");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare refs", "git.compare");
+        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare with a branch", "git.compare");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", "git.fetch");

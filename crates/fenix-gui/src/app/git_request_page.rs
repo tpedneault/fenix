@@ -106,6 +106,13 @@ impl App {
                 self.open_compose_seeded(ComposePurpose::RequestDescription { page: id }, &seed);
             }
             RequestAction::Browser(url) => self.open_url(&url),
+            // The base as the forge names it; the remote's copy when
+            // there is one, since that's what the request will merge into.
+            RequestAction::Compare(base) => {
+                let remote = format!("origin/{base}");
+                let target = if fenix_git::merge_base(&root, &remote, "HEAD").is_some() { remote } else { base };
+                self.open_git_compare_in(root, target, None);
+            }
             RequestAction::Review(number) => {
                 self.close_page(id);
                 self.open_review(root, number, false);
