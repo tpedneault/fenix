@@ -189,19 +189,24 @@ impl<T> Node<T> {
     /// is moved, so `new_content` is only ever consumed along the one path
     /// that actually reaches `target`.
     fn split_leaf(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T) -> Node<T> {
+        self.split_leaf_at(target, kind, new_id, new_content, false)
+    }
+
+    /// `split_leaf`, with the new leaf put `before` the target (left of
+    /// it, or above) rather than after.
+    fn split_leaf_at(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T, before: bool) -> Node<T> {
         match self {
-            Node::Leaf { id, content } if id == target => Node::Split {
-                kind,
-                ratio: 0.5,
-                first: Box::new(Node::Leaf { id, content }),
-                second: Box::new(Node::Leaf { id: new_id, content: new_content }),
-            },
+            Node::Leaf { id, content } if id == target => {
+                let (old, new) = (Box::new(Node::Leaf { id, content }), Box::new(Node::Leaf { id: new_id, content: new_content }));
+                let (first, second) = if before { (new, old) } else { (old, new) };
+                Node::Split { kind, ratio: 0.5, first, second }
+            }
             Node::Leaf { .. } => self,
             Node::Split { kind: k, ratio, first, second } => {
                 if first.contains(target) {
-                    Node::Split { kind: k, ratio, first: Box::new(first.split_leaf(target, kind, new_id, new_content)), second }
+                    Node::Split { kind: k, ratio, first: Box::new(first.split_leaf_at(target, kind, new_id, new_content, before)), second }
                 } else {
-                    Node::Split { kind: k, ratio, first, second: Box::new(second.split_leaf(target, kind, new_id, new_content)) }
+                    Node::Split { kind: k, ratio, first, second: Box::new(second.split_leaf_at(target, kind, new_id, new_content, before)) }
                 }
             }
         }
@@ -398,6 +403,17 @@ impl<T> WindowTree<T> {
         new_id
     }
 
+    /// `split`, with the new window put before the focused one -- to its
+    /// left, or above it. Focus moves to the new window, as with `split`.
+    pub fn split_before(&mut self, kind: SplitKind, content: T) -> WindowId {
+        let new_id = alloc_id();
+        let focused = self.focused;
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        self.root = Some(old_root.split_leaf_at(focused, kind, new_id, content, true));
+        self.focused = new_id;
+        new_id
+    }
+
     /// Closes the focused window. A no-op returning `false` if it's the
     /// only window left (nothing to collapse into).
     pub fn close_focused(&mut self) -> bool {
@@ -495,6 +511,17 @@ mod tests {
         assert_eq!(t.window_count(), 2);
         assert_eq!(t.focused_id(), new_id);
         assert_eq!(t.focused_content(), &"b");
+    }
+
+    #[test]
+    fn split_before_puts_the_new_window_on_the_left() {
+        let mut t = WindowTree::new("a");
+        let a = t.focused_id();
+        let b = t.split_before(SplitKind::Vertical, "b");
+        assert_eq!(t.focused_id(), b);
+        let layout = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        let x = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1.x;
+        assert!(x(b) < x(a), "{layout:?}");
     }
 
     #[test]

@@ -66,7 +66,7 @@ impl App {
     /// configured, else `main`/`master` -- its remote copy first, since
     /// that's what a pull request targets -- then local branches, remote
     /// branches and tags.
-    fn compare_targets(&self, root: &Path) -> Vec<String> {
+    pub(super) fn compare_targets(&self, root: &Path) -> Vec<String> {
         let mut refs: Vec<String> = fenix_git::list_branches(root).into_iter().map(|b| b.name).collect();
         refs.extend(fenix_git::list_remote_branches(root));
         refs.extend(fenix_git::list_tags(root));
@@ -217,6 +217,15 @@ impl App {
                 }
                 Err(err) => self.set_error(err.trim().to_string()),
             },
+            CompareAction::SideBySide { rev, path } => {
+                let full = root.join(&path);
+                if !full.is_file() {
+                    self.set_error(format!("{path} isn't in the working tree"));
+                    return;
+                }
+                self.open_file_from_picker(&full);
+                self.open_side_by_side(&full, &rev);
+            }
             CompareAction::PickTarget => self.start_compare_picker(),
             CompareAction::PickOwn => self.start_compare_own_picker(&root, target),
             CompareAction::Fetch(remote) => self.page_spawn(move |send| {

@@ -20,9 +20,11 @@
 //! trailing `\r` -- exactly the corruption that would make hunk staging
 //! silently mangle every CRLF file in a repo).
 
+mod align;
 mod parse;
 mod patch;
 
+pub use align::{align, changed_spans, Alignment, Block, BlockKind, Side};
 pub use parse::parse;
 pub use patch::{hunk_patch, lines_patch};
 

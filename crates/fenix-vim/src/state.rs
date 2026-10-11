@@ -154,6 +154,11 @@ pub enum VimEvent {
     /// document's syntax, which only the host can answer; this crate
     /// only knows which key asked, in which direction, how many times.
     BracketJump { target: BracketTarget, forward: bool, count: u32 },
+    /// `do` / `dp` -- take the other side's version of the change under
+    /// the cursor (`put: false`, "obtain"), or give it this side's
+    /// (`put: true`). Only a side-by-side diff has another side; the
+    /// host decides what that is.
+    Diff { put: bool },
     /// `gt`/`gT`/`{n}gt`/`g<Tab>`/`gh` -- move along the focused pane's
     /// tab strip. Tabs are a host notion; this crate only says which key
     /// asked, with the count already folded in.
@@ -185,6 +190,8 @@ pub enum BracketTarget {
     /// `]d`/`[d`: a diagnostic -- a language server's, or a script
     /// checked against the MIB.
     Diagnostic,
+    /// `]c`/`[c`: a change in a side-by-side diff.
+    Change,
 }
 
 /// Which LSP request a `gd`/`gr`/`K` press asked for -- see `VimEvent::
@@ -402,6 +409,8 @@ pub struct VimState {
     /// `VimEvent::BracketJump`, the same round trip `pending_lsp_
     /// request` makes.
     pending_bracket_jump: Option<(BracketTarget, bool, u32)>,
+    /// `do`/`dp` seen, for the host: `true` for `dp`.
+    pending_diff: Option<bool>,
     /// Set by `gt`/`gT`/`g<Tab>`/`gh`; the same round trip again.
     pending_tab: Option<TabMove>,
     command_line: String,
@@ -474,6 +483,7 @@ impl VimState {
             pending_comment_lines: None,
             pending_lsp_request: None,
             pending_bracket_jump: None,
+            pending_diff: None,
             pending_tab: None,
             count: None,
             visual_anchor: 0,
@@ -841,6 +851,7 @@ impl VimState {
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
         let bracket_jump = self.pending_bracket_jump.take();
+        let diff = self.pending_diff.take();
         let tab = self.pending_tab.take();
         // A pulse is purely a visual-feedback hint layered on top of
         // whatever else happened; None is the only event a yank/paste
@@ -866,6 +877,7 @@ impl VimState {
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
             .or_else(|| bracket_jump.map(|(target, forward, count)| VimEvent::BracketJump { target, forward, count }))
             .or_else(|| tab.map(VimEvent::Tab))
+            .or_else(|| diff.map(|put| VimEvent::Diff { put }))
             .unwrap_or(event)
     }
 
@@ -1870,6 +1882,15 @@ impl VimState {
                 Operator::Delete => SurroundPending::Delete,
                 Operator::Change => SurroundPending::ChangeOld,
             });
+            return;
+        }
+
+        // `do`/`dp` (Vim's diff obtain / diff put): no motion is named
+        // `o` or `p`, so after `d` they can only mean this.
+        if !self.pending_matcher.is_pending() && op == Operator::Delete && (key == KeyPress::char('o') || key == KeyPress::char('p')) {
+            self.pending_op = None;
+            self.count = None;
+            self.pending_diff = Some(key == KeyPress::char('p'));
             return;
         }
 
@@ -3344,6 +3365,27 @@ mod tests {
         // didn't leak and swallow the next keypress.
         keys(&mut vim, &mut b, &mut c, "l");
         assert_eq!(c.char_idx, 1);
+    }
+
+    #[test]
+    fn do_and_dp_ask_the_host_for_a_diff_and_change_nothing() {
+        let mut buffer = Buffer::from_text("one
+two
+");
+        let mut cursor = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('d'));
+        assert_eq!(vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('o')), VimEvent::Diff { put: false });
+        vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('d'));
+        assert_eq!(vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('p')), VimEvent::Diff { put: true });
+        assert_eq!(buffer.text(), "one
+two
+");
+        // And `d` still deletes afterwards: nothing was left pending.
+        vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('d'));
+        vim.handle_key(&mut buffer, &mut cursor, KeyPress::char('d'));
+        assert_eq!(buffer.text(), "two
+");
     }
 
     #[test]

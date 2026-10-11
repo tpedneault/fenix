@@ -684,6 +684,18 @@ Everything Fenix does, by area. For the keys, see
   comparison round, to see what the other branch has over yours; `R`
   picks a side other than HEAD. `D` on the new pull request page opens
   it on the request's base.
+- **Side by side** (`SPC g v`, or `v` on a file in Compare): the file
+  you're editing beside its version on any branch -- that version
+  read-only on the left, your buffer on the right, still yours to edit.
+  Blank rows keep the two lined up the way the merge view does: a block
+  you added has space beside it, a block only the branch has leaves a
+  gap on your side, so matching lines always sit on the same row. Added,
+  removed and changed lines are tinted, changed words marked; the panes
+  scroll together and the cursor's line is matched across. It follows
+  your typing -- worked out in memory, nothing saved, no git per key.
+  `]c`/`[c` walk the changes, `do` (Vim's diff obtain) takes the
+  branch's version of the one under the cursor, as one undo step; `q`
+  in the left pane or `SPC g q` closes it.
 - **Rebase, merge and conflicts**: `SPC g r` rebases the current branch
   onto a ref you pick, `SPC g m` merges one in, `SPC g p` pulls with
   `--rebase`, and a push from the Git page's push menu with `-f` is
