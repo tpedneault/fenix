@@ -105,7 +105,10 @@ impl App {
     ) -> Vec<(String, glyphon::Color)> {
         let mut spans = Vec::new();
         for row in 0..rows {
-            if let Some(&line) = display_lines.get(row) {
+            if display_lines.get(row) == Some(&super::side_by_side::FILLER) {
+                // A side-by-side's filler row: blank, gutter and all.
+                spans.push((" ".repeat(gutter_chars), self.theme.gutter_fg));
+            } else if let Some(&line) = display_lines.get(row) {
                 spans.extend(self.content_spans(ob, line, 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col));
                 if collapsed_headers.contains(&line) {
                     spans.push(("  …".to_string(), self.theme.gutter_fg));

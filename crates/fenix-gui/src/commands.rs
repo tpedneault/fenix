@@ -164,6 +164,7 @@ impl CommandRegistry {
         registry.register("git.history", "Show the commit graph, refs and commit detail", cmd_git_history);
         registry.register("git.history_close", "Close the History view", cmd_git_history_close);
         registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
+        registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
         registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", cmd_git_compare);
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
         registry.register("settings.open", "Every setting, on one page: search, change, reset", cmd_settings_open);
@@ -1165,6 +1166,10 @@ fn cmd_git_line_history(ctx: &mut CommandCtx) {
 
 fn cmd_git_operations(ctx: &mut CommandCtx) {
     ctx.app.open_git_operations();
+}
+
+fn cmd_git_versus(ctx: &mut CommandCtx) {
+    ctx.app.start_side_by_side_picker();
 }
 
 fn cmd_git_compare(ctx: &mut CommandCtx) {

@@ -103,6 +103,8 @@ pub enum CompareAction {
     OpenFile { path: String, line: Option<usize> },
     /// A file as it is at a ref, read-only.
     OpenAt { rev: String, path: String },
+    /// The file on disk beside its version at `rev`, lined up.
+    SideBySide { rev: String, path: String },
     /// Choose the ref to compare with.
     PickTarget,
     /// Choose your own side.
@@ -337,6 +339,16 @@ impl GitCompare {
                 }
                 _ => self.say(format!("o opens a file as it is on {} -- put the cursor on one", self.target)),
             },
+            Key::Char('v') => match rows.get(self.cursor) {
+                Some(Row::File(DiffKey::Range(path)) | Row::Hunk(DiffKey::Range(path), _) | Row::Line(DiffKey::Range(path), ..)) => {
+                    match self.changed(path).map(|f| f.letter) {
+                        Some('A' | '?') => self.say(format!("{path} isn't on {} -- nothing to set beside it", self.target)),
+                        Some('D') => self.say(format!("{path} isn't on disk any more")),
+                        _ => CompareAction::SideBySide { rev: self.target.clone(), path: path.clone() },
+                    }
+                }
+                _ => self.say("v sets a file beside its version on the target -- put the cursor on one"),
+            },
             Key::Char('t') => {
                 self.three_dot = !self.three_dot;
                 self.refresh()
@@ -454,6 +466,7 @@ impl GitCompare {
                     verb("Tab", "open", "a file's diff, a commit's files, a section"),
                     verb("Enter", "open the file", "at the line under the cursor"),
                     verb("o", "the target's version", "of the file, read-only"),
+                    verb("v", "side by side", "the file beside the target's, lined up"),
                     verb("] [", "next / previous hunk", ""),
                     verb("t", "three-dot / two-dot", "since splitting, or every difference"),
                     verb("w", "working tree", "bring in uncommitted and untracked work"),
@@ -673,7 +686,7 @@ pub fn layout(page: &GitCompare, cols: usize) -> Page {
     let keys: &[(&str, &str)] = if page.help {
         &[("Esc", "close")]
     } else {
-        &[("Tab", "open"), ("Enter", "go to file"), ("t", "... / .."), ("w", "working tree"), ("s", "turn round"), ("r", "compare with"), ("f", "fetch"), ("?", "keys"), ("q", "close")]
+        &[("Tab", "open"), ("Enter", "go to file"), ("v", "side by side"), ("t", "... / .."), ("w", "working tree"), ("s", "turn round"), ("r", "compare with"), ("f", "fetch"), ("?", "keys"), ("q", "close")]
     };
     g.keys(left, width, keys);
     g.finish()
@@ -807,6 +820,14 @@ mod tests {
         assert_eq!(p.key(Key::Char('o')), CompareAction::OpenAt { rev: "main".into(), path: "old.rs".into() });
         p.key(Key::Char('j'));
         assert_eq!(p.key(Key::Char('o')), CompareAction::None, "an added file isn't on the target");
+    }
+
+    #[test]
+    fn v_sets_a_file_beside_the_targets_version() {
+        let mut p = page();
+        assert_eq!(p.key(Key::Char('v')), CompareAction::SideBySide { rev: "origin/main".into(), path: "src/decoder.rs".into() });
+        p.key(Key::Char('j'));
+        assert_eq!(p.key(Key::Char('v')), CompareAction::None, "an added file has no other side");
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod pages;
 mod git_page;
 mod git_editor;
 mod git_compare_page;
+mod side_by_side;
 mod git_log_page;
 mod git_rebase_page;
 mod git_request_page;
@@ -2289,6 +2290,8 @@ enum ActivePicker {
     /// `R` on the Compare page: your own side, other than HEAD. Carries
     /// the ref it's compared with, since confirming needs both.
     CompareOwn { target: String, picker: fenix_picker::PickerState<String> },
+    /// `SPC g v`: the ref to set the file at `path` beside.
+    Versus { path: PathBuf, picker: fenix_picker::PickerState<String> },
     /// Enter on a settings-page row with more choices than `h`/`l` should
     /// step through (the installed fonts): one of them, by name. What
     /// it's for is `key`; confirming hands the choice back to the page.
@@ -2420,6 +2423,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Embedded(s) => s.push_char(c),
         ActivePicker::CompareOwn { picker, .. } => picker.push_char(c),
+        ActivePicker::Versus { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
         ActivePicker::PdfHeading(picker) => picker.push_char(c),
 
@@ -2461,6 +2465,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Embedded(s) => s.backspace(),
         ActivePicker::CompareOwn { picker, .. } => picker.backspace(),
+        ActivePicker::Versus { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
         ActivePicker::PdfHeading(picker) => picker.backspace(),
 
@@ -2502,6 +2507,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Embedded(s) => s.move_selection(delta),
         ActivePicker::CompareOwn { picker, .. } => picker.move_selection(delta),
+        ActivePicker::Versus { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
         ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
 
@@ -2546,6 +2552,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Embedded(s) => s.toggle_mark(),
         ActivePicker::CompareOwn { picker, .. } => picker.toggle_mark(),
+        ActivePicker::Versus { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
         ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
 
@@ -2587,6 +2594,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Embedded(s) => s.query(),
         ActivePicker::CompareOwn { picker, .. } => picker.query(),
+        ActivePicker::Versus { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
         ActivePicker::PdfHeading(picker) => picker.query(),
 
@@ -2628,6 +2636,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Embedded(s) => s.len(),
         ActivePicker::CompareOwn { picker, .. } => picker.len(),
+        ActivePicker::Versus { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
         ActivePicker::PdfHeading(picker) => picker.len(),
 
@@ -2669,6 +2678,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Embedded(s) => s.selected_row(),
         ActivePicker::CompareOwn { picker, .. } => picker.selected_row(),
+        ActivePicker::Versus { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
         ActivePicker::PdfHeading(picker) => picker.selected_row(),
 
@@ -2714,6 +2724,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareOwn { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Versus { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
 
@@ -5701,6 +5712,11 @@ pub struct App {
     history_session: Option<HistorySession>,
     /// What a pathless view of a file at a ref is called (`main:src/a.rs`).
     ref_view_names: HashMap<BufferId, String>,
+    /// Open side-by-side diffs (`SPC g v`) -- see `side_by_side`.
+    side_by_sides: Vec<side_by_side::SideBySide>,
+    /// While a folded or side-by-side pane's overlays are worked out:
+    /// the buffer line `render_base_line` stands for (see its comment).
+    render_base_override: std::cell::Cell<Option<usize>>,
     merge_session: Option<MergeSession>,
     forge_session: Option<ForgeSession>,
     compose: Option<ComposeSession>,
@@ -6725,6 +6741,8 @@ impl App {
             git_lines: HashMap::new(),
             history_session: None,
             ref_view_names: HashMap::new(),
+            side_by_sides: Vec::new(),
+            render_base_override: std::cell::Cell::new(None),
             merge_session: None,
             forge_session: None,
             compose: None,
@@ -16465,6 +16483,9 @@ impl App {
     /// `SPC g q`: closes whichever Git view the focused workspace holds
     /// -- a panel view, or a Git page.
     pub(crate) fn close_git_view(&mut self) {
+        if self.side_by_side_close() {
+            return;
+        }
         let here = self.workspaces.active_index();
         let panes = self.windows().windows();
         if self.history_session.as_ref().is_some_and(|s| s.workspace_index == here) {
@@ -16917,6 +16938,13 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.open_git_compare(target, None);
+            }
+            Some(ActivePicker::Versus { path, picker }) => {
+                let Some(rev) = picker.selected().map(|c| c.payload.clone()) else { return };
+                let path = path.clone();
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.open_side_by_side(&path, &rev);
             }
             Some(ActivePicker::CompareOwn { target, picker }) => {
                 let Some(own) = picker.selected().map(|c| c.payload.clone()) else { return };
@@ -18148,6 +18176,10 @@ impl App {
     /// from the rows it stands for -- *except* while its names are being
     /// edited, which is the one time the text is the point.
     fn buffer_edits_are_reverted(&self, buffer: BufferId, kind: BufferKind) -> bool {
+        // A file as it is at a ref: there's nothing to save it to.
+        if self.ref_view_names.contains_key(&buffer) {
+            return true;
+        }
         if kind == BufferKind::Explorer {
             return !self.rename_mode.contains_key(&buffer);
         }
@@ -19954,6 +19986,12 @@ impl App {
                 _ => {}
             }
         }
+        // `q` in a side-by-side's read-only pane closes it -- that pane
+        // is nothing to record a macro in.
+        if keypress == KeyPress::char('q') && self.vim.mode() == Mode::Normal && self.focused_is_side_by_side_ref() {
+            self.side_by_side_close();
+            return;
+        }
 
         if self.focused_diff_buffer().is_some() && keypress.mods == Mods::default() {
             match keypress.code {
@@ -20482,6 +20520,8 @@ impl App {
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Change, forward, count } => self.side_by_side_jump(forward, count),
+            VimEvent::Diff { put } => self.side_by_side_take(put),
             VimEvent::Tab(mv) => self.move_tab(mv),
             VimEvent::None => {}
         }
@@ -20627,7 +20667,7 @@ impl App {
             let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
             let cursor = self.pane_state(pane).cursor;
             let document_line = ob.buffer.line_col(&cursor).0;
-            let display_line = self.folded_display_lines(buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
+            let display_line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
             (display_line, self.pane_state(pane).scroll_line)
         };
         let target = scroll_to_include(scroll_line, line, visible_lines);
@@ -20716,7 +20756,16 @@ impl App {
     /// rounded down. Content, caret, hl-line, selection, and pulse all
     /// anchor their row math to this (not `scroll_line`, which is only
     /// the *target* `rendered_scroll` is easing toward).
+    ///
+    /// In a pane whose rows aren't its lines one for one -- a scope
+    /// folded, or a side-by-side's filler rows -- the overlays (selection,
+    /// search matches, brackets) are worked out against a buffer line set
+    /// in `render_base_override` and then moved to the rows those lines
+    /// are on.
     fn render_base_line(&self) -> usize {
+        if let Some(line) = self.render_base_override.get() {
+            return line;
+        }
         self.pane_state(self.focused_pane_id()).rendered_scroll.floor().max(0.0) as usize
     }
 
@@ -20900,6 +20949,7 @@ impl App {
                 Some(picker @ ActivePicker::MergeFrom(_)) => ("MERGE", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareOwn { .. }) => ("COMPARE", picker_len(picker)),
+                Some(picker @ ActivePicker::Versus { .. }) => ("BESIDE", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaClockIn(_)) => (if self.agenda_gap_asked { "AWAY" } else { "CLOCK" }, picker_len(picker)),
                 Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
                 Some(picker @ ActivePicker::Embedded(_)) => ("EMBEDDED", picker_len(picker)),
@@ -20912,6 +20962,10 @@ impl App {
             let suffix = match &self.active_picker {
                 Some(ActivePicker::CompareTarget(_)) => format!("{count} refs   compare HEAD with… "),
                 Some(ActivePicker::CompareOwn { target, .. }) => format!("{count} refs   {target}...?   pick your side "),
+                Some(ActivePicker::Versus { path, .. }) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    format!("{count} refs   set {name} beside its version on… ")
+                }
                 // What this pick is for ("WHAT DOES BLOCKED MEAN IN
                 // PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
                 Some(ActivePicker::WorkSync(_)) => match &self.agenda_sync.picker {
@@ -22584,7 +22638,7 @@ impl App {
         let Some(ob) = self.buffers.get(buffer_id) else { return };
         let cursor = self.pane_state(pane).cursor;
         let (document_line, _) = ob.buffer.line_col(&cursor);
-        let line = self.folded_display_lines(buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
+        let line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
 
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
@@ -22751,7 +22805,7 @@ impl App {
     fn scroll_unfocused_pane(&mut self, pane: fenix_window::WindowId, lines: isize, rect_h: f32, line_height: f32) {
         let Some(&buffer_id) = self.windows().content(pane) else { return };
         if self.buffers.get(buffer_id).is_none() { return; }
-        let total = self.folded_display_lines(buffer_id).len();
+        let total = self.pane_display_lines(pane, buffer_id).len();
         let visible = text::lines_that_fit(rect_h, line_height);
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
@@ -23123,6 +23177,9 @@ impl App {
             /// applies.
             hl_row_strong: bool,
             marked_rows: Vec<usize>,
+            /// Whole rows tinted across the pane: a side-by-side's
+            /// added, removed and changed lines and its filler rows.
+            row_tints: Vec<(usize, [f32; 4])>,
             /// Per-cell background colours, as `(row, start_col,
             /// end_col, rgba)` runs. Empty for every pane but a
             /// terminal's: ordinary buffers get their backgrounds from
@@ -23233,6 +23290,7 @@ impl App {
         let mut pdf_highlights: Vec<((f32, f32, f32, f32), [f32; 4])> = Vec::new();
         // Where the focused page is scrolled to, for its popup.
         let mut page_popup_at: Option<PagePopupAt> = None;
+        self.side_by_side_frame();
         for (pane, rect) in &layout {
             let (pane, rect) = (*pane, *rect);
             // Looked up early (not just where it's needed for content
@@ -23332,6 +23390,7 @@ impl App {
                     hl_row: None,
                     hl_row_strong: false,
                     marked_rows: Vec::new(),
+                    row_tints: Vec::new(),
                     colored_bg_segments,
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
@@ -23421,6 +23480,7 @@ impl App {
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
+                        row_tints: Vec::new(),
                         colored_bg_segments: Vec::new(),
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
@@ -23502,6 +23562,7 @@ impl App {
                         hl_row: None,
                         hl_row_strong: false,
                         marked_rows: Vec::new(),
+                        row_tints: Vec::new(),
                         colored_bg_segments: Vec::new(),
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
@@ -23544,6 +23605,7 @@ impl App {
                     hl_row: selected_row,
                     hl_row_strong: true,
                     marked_rows: marks,
+                    row_tints: Vec::new(),
                     colored_bg_segments: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
@@ -23584,6 +23646,7 @@ impl App {
                     hl_row: selected_row,
                     hl_row_strong: true,
                     marked_rows: Vec::new(),
+                    row_tints: Vec::new(),
                     colored_bg_segments: Vec::new(),
                     selection_segments: Segments::new(),
                     pulse_overlay: None,
@@ -23627,6 +23690,10 @@ impl App {
                 self.page_scroll_to_top(buffer_id, pane, pane_visible_lines);
             }
             let is_dashboard = is_home || is_page;
+            if !is_focused {
+                // A side-by-side pane scrolls with the one beside it.
+                self.side_by_side_follow(pane, pane_visible_lines);
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -23650,7 +23717,7 @@ impl App {
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
             // to document rows for every operation below.
-            let display_lines = self.folded_display_lines(buffer_id);
+            let display_lines = self.pane_display_lines(pane, buffer_id);
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
@@ -23669,8 +23736,10 @@ impl App {
             // Home's layout is already centred; an empty pad list just
             // keeps `~` off the rows past its last line.
             let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
-            let syntax_start = visible_document_lines.first().copied().unwrap_or(0);
-            let syntax_end = visible_document_end_line(visible_document_lines, pane_visible_lines);
+            // Filler rows (`side_by_side::FILLER`) have no line to highlight.
+            let shown_lines: Vec<usize> = visible_document_lines.iter().take(pane_visible_lines + 1).copied().filter(|&l| l != side_by_side::FILLER).collect();
+            let syntax_start = shown_lines.first().copied().unwrap_or(0);
+            let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
             let tab_stops = self.tab_stops_for(buffer_id);
             // Char-column -> visual-column map for every visible row
@@ -23768,7 +23837,35 @@ impl App {
                     self.focused_caret(hl_row, col, render_base_line, pane_visible_lines).map(|(row, col)| (row, remap_col(row, col))),
                 )
             } else if is_focused {
-                (Segments::new(), None, Segments::new(), Segments::new(), hl_row.map(|row| (row, remap_col(row, col))))
+                // Rows aren't lines one for one here: work the overlays
+                // out from the first line shown, then move each to the
+                // row its line is on.
+                let (first, last) = (shown_lines.first().copied(), shown_lines.last().copied());
+                match (first, last) {
+                    (Some(first), Some(last)) => {
+                        let span = last - first + 1;
+                        let to_rows = |segments: Segments| -> Segments {
+                            segments
+                                .into_iter()
+                                .filter_map(|(r, s, e)| {
+                                    let row = visible_document_lines.iter().position(|&l| l == first + r)?;
+                                    (row <= pane_visible_lines).then_some((row, s, e))
+                                })
+                                .collect()
+                        };
+                        self.render_base_override.set(Some(first));
+                        let overlays = (
+                            remap_segments(to_rows(self.visual_selection_segments(span))),
+                            self.pulse_overlay(span).map(|(segs, a)| (remap_segments(to_rows(segs)), a)),
+                            remap_segments(to_rows(self.bracket_match_segments(span))),
+                            remap_segments(to_rows(self.hlsearch_segments(span))),
+                            hl_row.map(|row| (row, remap_col(row, col))),
+                        );
+                        self.render_base_override.set(None);
+                        overlays
+                    }
+                    _ => (Segments::new(), None, Segments::new(), Segments::new(), hl_row.map(|row| (row, remap_col(row, col)))),
+                }
             } else {
                 (Segments::new(), None, Segments::new(), Segments::new(), None)
             };
@@ -23777,7 +23874,8 @@ impl App {
             // kind's color, so they stand out while scrolling past --
             // the glyphs alone are easy to lose in a comment-colored
             // line.
-            let todo_bg_segments: Vec<(usize, usize, usize, [f32; 4])> = match (self.todo_spans.get(&buffer_id), self.buffers.get(buffer_id)) {
+            let (side_tints, side_words) = self.side_by_side_tints(pane, &visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)]);
+            let mut todo_bg_segments: Vec<(usize, usize, usize, [f32; 4])> = match (self.todo_spans.get(&buffer_id), self.buffers.get(buffer_id)) {
                 (Some(spans), Some(ob)) => spans
                     .iter()
                     .filter_map(|(range, kind)| {
@@ -23791,6 +23889,7 @@ impl App {
                     .collect(),
                 _ => Vec::new(),
             };
+            todo_bg_segments.extend(side_words.into_iter().map(|(row, s, e, color)| (row, remap_col(row, s), remap_col(row, e), color)));
 
             // A `show_tabs` theme's tab strip for this pane -- only for an
             // ordinary file-editing pane (no `pane_titles` override; a
@@ -23893,6 +23992,7 @@ impl App {
                 hl_row: if is_dashboard { None } else { hl_row },
                 hl_row_strong: false,
                 marked_rows: Vec::new(),
+                row_tints: side_tints,
                 colored_bg_segments: if is_dashboard { home_segments } else { todo_bg_segments },
                 selection_segments,
                 pulse_overlay,
@@ -24244,6 +24344,9 @@ impl App {
             for row in &pane.marked_rows {
                 let y = row_y(*row);
                 bg_rect.push_rect(gpu, pane.rect.x, y, pane.rect.w, line_height, theme.selection);
+            }
+            for &(row, color) in &pane.row_tints {
+                bg_rect.push_rect(gpu, pane.rect.x, row_y(row), pane.rect.w, line_height, color);
             }
             // Column-math x-offset for this pane's caret/selection/pulse
             // rects: its own left edge, plus `PAD_LEFT`, plus its own
@@ -25715,6 +25818,8 @@ impl App {
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
+            VimEvent::BracketJump { target: fenix_vim::BracketTarget::Change, forward, count } => self.side_by_side_jump(forward, count),
+            VimEvent::Diff { put } => self.side_by_side_take(put),
             VimEvent::Tab(mv) => self.move_tab(mv),
             _ => {}
         }

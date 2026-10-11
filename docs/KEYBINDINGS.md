@@ -84,6 +84,10 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC g h` / `SPC g H` | This file's history / the history of the selected lines |
 | `SPC g G` | Open the graph view (commit graph, refs, commit diff) |
 | `SPC g c` | The Compare page: HEAD (or the working tree) against a branch, local or remote |
+| `SPC g v` | This file beside its version on a branch, lined up (side by side) |
+| `]c` / `[c` (side by side) | Next / previous change |
+| `do` / `dp` (side by side) | Take the branch's version of the change under the cursor -- from your pane / from the branch's |
+| `q` (side by side, left pane) | Close it; your buffer stays |
 | `SPC g z` | The operation log -- undo what Fenix ran on the repository |
 | `SPC g w` / `SPC g f` / `SPC g p` | Switch branch (most recently used first) / fetch all remotes and prune / pull with `--rebase` |
 | `SPC g r` / `SPC g m` | Rebase onto / merge in a ref you pick |
@@ -112,7 +116,7 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
 | `1` / `2` / `3` (History) | Jump to the Graph / Refs / Commit pane |
 | `u` / `f` (History) | Refresh / fetch |
-| `Tab` / `Enter` / `o` (Compare) | Open a file's diff or a commit's files / go to the file at that line / the target's version, read-only |
+| `Tab` / `Enter` / `o` / `v` (Compare) | Open a file's diff or a commit's files / go to the file at that line / the target's version, read-only / side by side |
 | `t` / `w` / `s` (Compare) | Since splitting vs every difference / bring in the working tree / turn the comparison round |
 | `r` / `R` / `f` / `y` (Compare) | Compare with another ref / pick your own side / fetch the target's remote / copy the range |
 | `x` (any Git view) | Show the keys the focused pane understands |
