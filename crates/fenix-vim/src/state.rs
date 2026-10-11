@@ -819,6 +819,11 @@ impl VimState {
 
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         let edit_count_before = buffer.edit_count();
+        // Whatever one key does is one undo step, however many edits it
+        // takes underneath -- a visual `r#` rewrites every selected char
+        // separately, a block `d` deletes line by line, `:%s` replaces
+        // match by match, and `u` should take back all of it at once.
+        buffer.begin_undo_group();
         let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
@@ -827,6 +832,7 @@ impl VimState {
             Mode::Visual => self.handle_visual_key(buffer, cursor, key),
             Mode::Search => self.handle_search_key(buffer, cursor, key),
         };
+        buffer.end_undo_group();
         // hlsearch's persistent highlighting clears the moment a real
         // edit happens, regardless of what mode/action caused it -- see
         // `hlsearch_active`'s own doc comment for why this is simpler
@@ -2545,9 +2551,8 @@ impl VimState {
 
     /// `d`/`y`/`c` on a Block selection: acts on the same column range on
     /// every line in the block, clamped to each (possibly ragged) line's
-    /// length. Simplification, disclosed in the plan: this is N separate
-    /// undo steps (one delete_range per line), not one atomic block edit,
-    /// and the register just joins the per-line pieces with '\n' -- paste
+    /// length. One delete_range per line, which `handle_key`'s undo group
+    /// folds into a single undo step. The register just joins the per-line pieces with '\n' -- paste
     /// (`p`/`P`) won't reconstruct the block shape, only Delete/Yank
     /// themselves are block-aware.
     fn apply_block_operator(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, op: Operator) {
@@ -2912,6 +2917,35 @@ mod tests {
         assert_eq!(b.text(), "aZd\neZh");
         keys(&mut vim, &mut b, &mut c, "u");
         assert_eq!(b.text(), "abcd\nefgh");
+    }
+
+    #[test]
+    fn a_visual_replace_undoes_in_one_step() {
+        let (mut vim, mut b, mut c) = paste_setup("abc def
+xyz", 0, "", false);
+        keys(&mut vim, &mut b, &mut c, "V");
+        keys(&mut vim, &mut b, &mut c, "r#");
+        assert_eq!(b.text(), "#######
+xyz");
+        keys(&mut vim, &mut b, &mut c, "u");
+        assert_eq!(b.text(), "abc def
+xyz");
+    }
+
+    #[test]
+    fn a_visual_block_change_case_undoes_in_one_step() {
+        let (mut vim, mut b, mut c) = paste_setup("abc
+def
+ghi", 0, "", false);
+        vim.handle_key(&mut b, &mut c, KeyPress::char('v').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "jjlU");
+        assert_eq!(b.text(), "ABc
+DEf
+GHi");
+        keys(&mut vim, &mut b, &mut c, "u");
+        assert_eq!(b.text(), "abc
+def
+ghi");
     }
 
     #[test]

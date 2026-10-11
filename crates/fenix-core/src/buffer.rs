@@ -41,6 +41,25 @@ enum PendingKind {
     DeleteForward,
 }
 
+/// One undo step: the edits it made, in the order they were applied.
+/// Usually just one, but `begin_undo_group`/`end_undo_group` fold every
+/// edit a single command makes (a visual `r`, a block delete, a comment
+/// toggle across lines, ...) into one step, so `u` reverts the whole
+/// command rather than one character or line of it.
+type UndoStep = Vec<Edit>;
+
+/// An open `begin_undo_group`.
+struct UndoGroup {
+    /// Nesting depth; only the outermost `end_undo_group` merges.
+    depth: usize,
+    /// Index into `undo_stack` of the group's first step.
+    start: usize,
+    /// A typing run that was already pending when the group opened
+    /// belongs to whatever came before, not to this group -- when it's
+    /// flushed mid-group, `start` moves past it.
+    pending_at_open: bool,
+}
+
 /// An in-progress run of same-kind, contiguous edits (e.g. a typed word, or
 /// a run of backspaces) not yet committed to the undo stack, so that undo
 /// removes a whole run at once instead of one character at a time.
@@ -62,9 +81,10 @@ pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
     dirty: bool,
-    undo_stack: Vec<Edit>,
-    redo_stack: Vec<Edit>,
+    undo_stack: Vec<UndoStep>,
+    redo_stack: Vec<UndoStep>,
     pending: Option<Pending>,
+    undo_group: Option<UndoGroup>,
     pending_syntax_edits: Vec<EditDelta>,
     /// The same edits again, for whoever wants to show what changed
     /// (`take_changes`) -- kept apart from `pending_syntax_edits` so the
@@ -92,6 +112,7 @@ impl Buffer {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            undo_group: None,
             pending_syntax_edits: Vec::new(),
             change_log: Vec::new(),
             changes_overflowed: false,
@@ -114,6 +135,7 @@ impl Buffer {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            undo_group: None,
             pending_syntax_edits: Vec::new(),
             change_log: Vec::new(),
             changes_overflowed: false,
@@ -131,6 +153,7 @@ impl Buffer {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             pending: None,
+            undo_group: None,
             pending_syntax_edits: Vec::new(),
             change_log: Vec::new(),
             changes_overflowed: false,
@@ -470,7 +493,7 @@ impl Buffer {
         cursor.sticky_col = col;
         self.log_edit(start, removed.clone(), start);
 
-        self.undo_stack.push(Edit {
+        self.push_undo(Edit {
             at: start,
             removed: removed.clone(),
             inserted: String::new(),
@@ -499,7 +522,7 @@ impl Buffer {
         cursor.sticky_col = col;
         self.log_edit(at, String::new(), cursor.char_idx);
 
-        self.undo_stack.push(Edit {
+        self.push_undo(Edit {
             at,
             removed: String::new(),
             inserted: text.to_string(),
@@ -534,7 +557,7 @@ impl Buffer {
         cursor.sticky_col = col;
         self.log_edit(start, removed.clone(), cursor.char_idx);
 
-        self.undo_stack.push(Edit {
+        self.push_undo(Edit {
             at: start,
             removed: removed.clone(),
             inserted: text.to_string(),
@@ -549,13 +572,65 @@ impl Buffer {
     /// removes one "run" of typing/deleting at a time, not one char.
     fn flush_pending(&mut self) {
         if let Some(p) = self.pending.take() {
-            self.undo_stack.push(Edit {
+            self.push_undo(Edit {
                 at: p.at,
                 removed: p.removed,
                 inserted: p.inserted,
                 cursor_before: p.cursor_before,
                 cursor_after: p.cursor_after,
             });
+            if let Some(group) = self.undo_group.as_mut().filter(|g| g.pending_at_open) {
+                group.pending_at_open = false;
+                group.start = self.undo_stack.len();
+            }
+        }
+    }
+
+    fn push_undo(&mut self, edit: Edit) {
+        self.undo_stack.push(vec![edit]);
+    }
+
+    /// Starts folding every edit made until the matching `end_undo_group`
+    /// into a single undo step. Nests: only the outermost pair counts.
+    /// A typing run still pending (not yet an undo step) is left out of
+    /// the group, so it keeps coalescing with the keys that come after.
+    pub fn begin_undo_group(&mut self) {
+        match self.undo_group.as_mut() {
+            Some(group) => group.depth += 1,
+            None => {
+                self.undo_group = Some(UndoGroup {
+                    depth: 1,
+                    start: self.undo_stack.len(),
+                    pending_at_open: self.pending.is_some(),
+                });
+            }
+        }
+    }
+
+    /// Closes a `begin_undo_group`, merging the steps pushed since into
+    /// one. Unmatched calls are ignored.
+    pub fn end_undo_group(&mut self) {
+        let Some(group) = self.undo_group.as_mut() else { return };
+        group.depth -= 1;
+        if group.depth > 0 {
+            return;
+        }
+        let start = group.start;
+        self.undo_group = None;
+        if self.undo_stack.len() > start + 1 {
+            let merged: UndoStep = self.undo_stack.drain(start..).flatten().collect();
+            self.undo_stack.push(merged);
+        }
+    }
+
+    /// Keeps undo/redo steps out of an open group: undoing pops steps
+    /// that may predate it, and redoing pushes steps that are already
+    /// whole -- neither is something the group should fold together.
+    fn reset_undo_group_start(&mut self) {
+        let len = self.undo_stack.len();
+        if let Some(group) = self.undo_group.as_mut() {
+            group.start = len;
+            group.pending_at_open = false;
         }
     }
 
@@ -585,12 +660,17 @@ impl Buffer {
     /// before that run started. Returns `false` if there was nothing to undo.
     pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
-        let Some(edit) = self.undo_stack.pop() else { return false };
-        self.apply_inverse(&edit);
-        *cursor = edit.cursor_before;
+        let Some(step) = self.undo_stack.pop() else { return false };
+        for edit in step.iter().rev() {
+            self.apply_inverse(edit);
+        }
+        if let Some(first) = step.first() {
+            *cursor = first.cursor_before;
+        }
         self.dirty = true;
         self.edit_count += 1;
-        self.redo_stack.push(edit);
+        self.redo_stack.push(step);
+        self.reset_undo_group_start();
         true
     }
 
@@ -598,12 +678,17 @@ impl Buffer {
     /// was nothing to redo.
     pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
-        let Some(edit) = self.redo_stack.pop() else { return false };
-        self.apply_forward(&edit);
-        *cursor = edit.cursor_after;
+        let Some(step) = self.redo_stack.pop() else { return false };
+        for edit in &step {
+            self.apply_forward(edit);
+        }
+        if let Some(last) = step.last() {
+            *cursor = last.cursor_after;
+        }
         self.dirty = true;
         self.edit_count += 1;
-        self.undo_stack.push(edit);
+        self.undo_stack.push(step);
+        self.reset_undo_group_start();
         true
     }
 
@@ -821,6 +906,66 @@ cd");
         assert_eq!(buf.text(), "hello world");
         assert_eq!(cur.char_idx, 11);
         assert!(!buf.undo(&mut cur)); // one step, not six
+    }
+
+    #[test]
+    fn an_undo_group_undoes_and_redoes_as_one_step() {
+        let mut buf = buffer_with("aaa
+bbb");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_str(&mut cur, "x"); // before the group: its own step
+        buf.begin_undo_group();
+        buf.replace_range(&mut cur, 1, 2, "#");
+        buf.replace_range(&mut cur, 2, 3, "#");
+        buf.delete_range(&mut cur, 5, 6);
+        buf.end_undo_group();
+        assert_eq!(buf.text(), "x##a
+bb");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "xaaa
+bbb");
+        assert_eq!(cur.char_idx, 1); // where the group started
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.text(), "x##a
+bb");
+        assert!(buf.undo(&mut cur));
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "aaa
+bbb");
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn a_typing_run_pending_when_a_group_opens_stays_its_own_step() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_char(&mut cur, 'a');
+        buf.insert_char(&mut cur, 'b');
+        buf.begin_undo_group();
+        buf.insert_str(&mut cur, "XY"); // flushes "ab" first
+        buf.end_undo_group();
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "ab");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn redoing_inside_a_group_keeps_each_step_separate() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_str(&mut cur, "a");
+        buf.insert_str(&mut cur, "b");
+        buf.undo(&mut cur);
+        buf.undo(&mut cur);
+        buf.begin_undo_group();
+        buf.redo(&mut cur);
+        buf.redo(&mut cur);
+        buf.end_undo_group();
+        assert_eq!(buf.text(), "ab");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "a");
     }
 
     #[test]
