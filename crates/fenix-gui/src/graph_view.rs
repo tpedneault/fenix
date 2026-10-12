@@ -300,7 +300,7 @@ pub fn render_refs(branches: &[Branch], remotes: &[String], tags: &[String], fet
         };
         // The `-> upstream` half is supporting detail, dimmed like every
         // other secondary column in these panels.
-        let dim_from = upstream.is_empty().then_some(None).unwrap_or_else(|| Some(prefix.chars().count() + branch.name.chars().count()));
+        let dim_from = if upstream.is_empty() { None } else { Some(prefix.chars().count() + branch.name.chars().count()) };
         push(
             &mut text,
             &mut lines,

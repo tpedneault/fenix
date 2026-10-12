@@ -9,9 +9,11 @@ mod supervisor;
 pub use supervisor::{OutputLine, OutputStream, RunId, TaskEvent, TaskOutcome, TaskRunner};
 
 mod defs;
+mod location;
 mod output;
 
 pub use defs::TaskDef;
+pub use location::{parse_path_position, PathPosition};
 pub use output::{parse_line, ParsedLine, TaskLocation};
 
 use std::path::Path;

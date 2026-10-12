@@ -175,6 +175,8 @@ impl App {
     }
 
     /// The disk poll's tick: a set whose files changed is read again.
+    /// Tests only: the app polls through the disk probe instead.
+    #[cfg(test)]
     pub(super) fn mib_poll(&mut self) {
         if !self.config.mib_watch.unwrap_or(true) {
             return;

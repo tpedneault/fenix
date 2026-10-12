@@ -8,6 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `fenix file:12` and `fenix file:12:3` open a file at a line and
+  column, whether or not Fenix is already running (a Windows drive
+  letter is part of the path); `--goto file:line:col` always reads a
+  position, and `--project <dir>` switches to a project as `SPC p p`
+  does.
+- A control channel other tools can script: JSON-RPC to open files at a
+  position, open a project, or ask which project, file and line are in
+  focus. [docs/CONTROL.md](docs/CONTROL.md) is the reference.
+
 - The Compare page (`SPC g c`) replaces the two-pane Compare view: HEAD
   -- or the working tree, untracked files included -- against any
   branch, local or remote, with the merge base, ahead/behind, how stale
@@ -131,6 +140,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A second `fenix` on a shared machine (Remote Desktop, a shared Linux
+  box) no longer opens its files in another user's Fenix, and no other
+  user's process can make yours open a path: launches hand off over a
+  named pipe or Unix socket only you can reach, instead of a loopback
+  port shared by the whole machine.
+- On Windows, a Fenix that's minimized comes back to the front when a
+  file is opened from Explorer; it used to open the file and stay
+  minimized.
 - Arduino completion no longer stops after the first edit: Fenix now
   accepts the language server's progress-token request, whose refusal
   crashed `arduino-language-server`, so suggestions come from the
@@ -150,6 +167,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A launch now finds the running Fenix by your `FENIX_HOME`: a Fenix
+  with its own `FENIX_HOME` has its own channel and runs beside your
+  usual one rather than handing its files to it. A `fenix` older than
+  this release on `PATH` still hands off to a newer Fenix; the reverse
+  starts a second Fenix.
 - **Breaking:** the PDF reader's keys follow Vim. `J`/`K` turn the page
   (`n`/`p` did), `gg`/`G`/`{n}G` go to a page (`g` went to page 1),
   `=`, `zw`, `zp` and `z0` fit the page (`0` and `w` did), and `n`/`N`

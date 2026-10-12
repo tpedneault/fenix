@@ -10,8 +10,8 @@ and Cargo versions so toolchain changes can be diagnosed.
 
 | Check | Coverage |
 | --- | --- |
-| Windows workspace | Full workspace tests, strict Clippy for storage/tasks/LSP/project, and a debug GUI executable build on Windows Server 2022/MSVC. No package or test-name exclusions. |
-| Linux reliability | Storage, core, configuration, project tool settings, recovery, task process groups, RPC framing, LSP edits, DAP, and Vim tests; the same scoped Clippy gate. No GUI/system-display dependency. |
+| Windows workspace | Full workspace tests, strict Clippy for the whole workspace, and a debug GUI executable build on Windows Server 2022/MSVC. No package or test-name exclusions. |
+| Linux reliability | Storage, core, configuration, project tool settings, recovery, task process groups, RPC framing, the control channel (Unix socket, private directory, protocol), LSP edits, DAP, and Vim tests; strict Clippy for the crates it tests that build without a display. No GUI/system-display dependency. |
 
 The Windows checkout path contains a space. Storage tests also exercise Unicode
 paths with spaces, CRLF byte preservation, failed serialization, no-clobber
@@ -46,9 +46,8 @@ days; this is a debug build, not a signed release or an installer.
 
 The gates don't cover interactive GUI behavior, or the live integration
 tests that need a service (GitLab, Jira, a language server); those are
-checked by hand. Whole-workspace `rustfmt` and strict Clippy aren't
-gates yet: strict Clippy covers the storage, tasks, LSP and project
-crates, and is widened as the rest are cleaned up.
+checked by hand. Whole-workspace `rustfmt` isn't a gate yet; new code
+is formatted with it, and the rest is reformatted as it's touched.
 
 Releases are built by a separate workflow, `release.yml`, when a `v*`
 tag is pushed.

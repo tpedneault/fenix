@@ -176,7 +176,7 @@ mod tests {
         std::fs::write(tree.join("sub").join("b.txt"), "world").unwrap();
         let zip = dir.path().join("out.zip");
 
-        create(&[tree.clone()], &zip).unwrap();
+        create(std::slice::from_ref(&tree), &zip).unwrap();
         let back = dir.path().join("back");
         extract(&zip, &back).unwrap();
 

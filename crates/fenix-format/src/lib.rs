@@ -386,8 +386,8 @@ mod tests {
         let unskipped = reindent(source, 0, 1, 4, &[]);
         assert_eq!(unskipped, "puts \"{ not real\"\n    b", "sanity check: without skip, the stray brace does bump depth");
 
-        let skip = [5..17]; // byte range of the quoted string, including both quotes
-        let skipped = reindent(source, 0, 1, 4, &skip);
+        let skip = 5..17; // byte range of the quoted string, including both quotes
+        let skipped = reindent(source, 0, 1, 4, std::slice::from_ref(&skip));
         assert_eq!(skipped, source, "with the string excluded, there's nothing to indent from");
     }
 

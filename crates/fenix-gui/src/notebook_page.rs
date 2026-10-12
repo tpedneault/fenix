@@ -106,7 +106,6 @@ pub struct NotebookPage {
     /// Tags, most used first.
     pub tags: Vec<String>,
     pub searches: Vec<String>,
-    pub project: Option<String>,
     cursor: usize,
     pub filter: Filter,
     chip: usize,
@@ -139,8 +138,8 @@ pub fn age(when: Option<SystemTime>, now: chrono::DateTime<chrono::Local>) -> St
 }
 
 impl NotebookPage {
-    pub fn new(rows: Vec<Row>, tags: Vec<String>, searches: Vec<String>, project: Option<String>, folder: String) -> Self {
-        NotebookPage { rows, tags, searches, project, cursor: 0, filter: Filter::default(), chip: 0, mode: Mode::List, note: None, armed_delete: false, folder }
+    pub fn new(rows: Vec<Row>, tags: Vec<String>, searches: Vec<String>, folder: String) -> Self {
+        NotebookPage { rows, tags, searches, cursor: 0, filter: Filter::default(), chip: 0, mode: Mode::List, note: None, armed_delete: false, folder }
     }
 
     /// New contents, the cursor staying on the same entry.
@@ -750,7 +749,7 @@ mod tests {
         let mut pinned = row("c", Kind::Note, "ADR 007", &["decision"], 60 * 24 * 30);
         pinned.pinned = true;
         let rows = vec![row("a", Kind::Note, "Bench session", &["bench"], 5), row("b", Kind::Diagram, "TC flow", &[], 60), pinned];
-        NotebookPage::new(rows, vec!["bench".into(), "decision".into()], Vec::new(), None, "C:/nb".into())
+        NotebookPage::new(rows, vec!["bench".into(), "decision".into()], Vec::new(), "C:/nb".into())
     }
 
     fn text(p: &NotebookPage) -> String {

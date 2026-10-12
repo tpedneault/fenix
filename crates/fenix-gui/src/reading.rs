@@ -303,7 +303,7 @@ impl Writer {
                 };
                 let bar_x = x0.saturating_sub(2);
                 self.g.put(self.y, bar_x, "┃", role);
-                let label = format!("{}", title);
+                let label = title.to_string();
                 self.g.put(self.y, x0, &fit(&label, self.width.saturating_sub(x0)), role);
                 self.y += 1;
             }

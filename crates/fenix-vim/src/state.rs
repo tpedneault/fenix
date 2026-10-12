@@ -4217,7 +4217,7 @@ two
         keys(&mut vim, &mut b, &mut c, "l"); // ...then an ordinary motion, not a register command
         keys(&mut vim, &mut b, &mut c, "yl"); // plain yank, no "-prefix this time
         assert_eq!(vim.register(), ("b", false)); // the unnamed register got the plain yank...
-        assert!(vim.registers.get(&'a').is_none()); // ...register a was never actually written
+        assert!(!vim.registers.contains_key(&'a')); // ...register a was never actually written
     }
 
     #[test]

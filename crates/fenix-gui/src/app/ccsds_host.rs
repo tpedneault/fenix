@@ -448,7 +448,7 @@ fn time_hover(line: &str, col: usize, m: &Mission) -> Option<String> {
     }
     let word: String = chars[a..b].iter().collect();
     let word = word.trim_start_matches("0x").trim_start_matches("0X");
-    let hex = |s: &str| (s.len() % 2 == 0).then(|| fenix_ccsds::hex::parse(s)).flatten();
+    let hex = |s: &str| s.len().is_multiple_of(2).then(|| fenix_ccsds::hex::parse(s)).flatten();
     let bytes = match word.split_once('.') {
         Some((c, f)) => {
             let mut v = hex(c)?;

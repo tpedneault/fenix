@@ -9,7 +9,7 @@
 //! on the `lsp-types` crate for its; DAP's are chosen when that crate is
 //! built), and this crate has no business knowing either.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 /// On Windows, `std::process::Command::new` only launches a bare program
 /// name via `CreateProcess`'s own loader, which -- unlike a real shell --
@@ -132,6 +132,73 @@ pub fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
         // Any other header (e.g. `Content-Type`, which both LSP and DAP
         // technically allow) is read and silently ignored -- neither
         // protocol requires a client to act on one.
+    }
+    let content_length = content_length.expect("loop only breaks once content_length is Some");
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+/// The most header lines `read_message_limited` reads before giving up
+/// on a message. LSP and DAP send one or two; sixteen leaves room for
+/// any well-meaning peer while stopping one that never sends the blank
+/// line.
+pub const MAX_HEADER_LINES: usize = 16;
+
+/// `read_message` for a peer Fenix doesn't trust: anything that isn't a
+/// child process Fenix spawned itself, such as a client of the control
+/// endpoint. `read_message` allocates whatever `Content-Length` says and
+/// reads a header line for as long as the peer keeps it going, so a
+/// hostile or broken peer could make it allocate gigabytes or read
+/// forever; this one refuses, as `InvalidData`, a body longer than
+/// `max_body`, a header line longer than `max_header_line` bytes (its
+/// line ending included), and more than [`MAX_HEADER_LINES`] header
+/// lines -- each checked before anything is allocated for it.
+///
+/// Otherwise it behaves exactly like `read_message`: `Ok(None)` on a
+/// clean close before a new message, `Err` on a truncated one.
+pub fn read_message_limited<R: BufRead>(reader: &mut R, max_body: usize, max_header_line: usize) -> io::Result<Option<Vec<u8>>> {
+    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+    let mut content_length: Option<usize> = None;
+    let mut lines = 0;
+    loop {
+        if lines == MAX_HEADER_LINES {
+            return Err(invalid(format!("more than {MAX_HEADER_LINES} header lines")));
+        }
+        lines += 1;
+        let mut line = Vec::new();
+        // One byte past the limit, so a line exactly at the limit is
+        // told apart from a longer one.
+        (&mut *reader).take(max_header_line as u64 + 1).read_until(b'\n', &mut line)?;
+        if line.is_empty() {
+            return if lines == 1 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-header"))
+            };
+        }
+        if line.len() > max_header_line {
+            return Err(invalid(format!("a header line longer than {max_header_line} bytes")));
+        }
+        if line.last() != Some(&b'\n') {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-header"));
+        }
+        let line = std::str::from_utf8(&line).map_err(|_| invalid("a header line that isn't UTF-8".to_string()))?;
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            match content_length {
+                Some(_) => break,
+                None => return Err(invalid("message body started before any Content-Length header".to_string())),
+            }
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            let value = value.trim();
+            let parsed = value.parse::<usize>().map_err(|_| invalid(format!("malformed Content-Length header: {value:?}")))?;
+            if parsed > max_body {
+                return Err(invalid(format!("a {parsed}-byte message, over the {max_body}-byte limit")));
+            }
+            content_length = Some(parsed);
+        }
     }
     let content_length = content_length.expect("loop only breaks once content_length is Some");
     let mut body = vec![0u8; content_length];
@@ -285,5 +352,74 @@ mod tests {
         write_message(&mut buf, b"").unwrap();
         let mut cursor = Cursor::new(buf.as_slice());
         assert_eq!(read_message(&mut cursor).unwrap(), Some(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod limited_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn read(raw: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        read_message_limited(&mut Cursor::new(raw), 16, 32)
+    }
+
+    #[test]
+    fn reads_what_read_message_reads() {
+        let raw = b"Content-Type: x\r\nContent-Length: 2\r\n\r\n{}Content-Length: 4\r\n\r\ntrue";
+        let mut cursor = Cursor::new(&raw[..]);
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), Some(b"true".to_vec()));
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), None);
+    }
+
+    #[test]
+    fn a_body_at_the_limit_is_read() {
+        let mut raw = b"Content-Length: 16\r\n\r\n".to_vec();
+        raw.extend_from_slice(&[b'x'; 16]);
+        assert_eq!(read(&raw).unwrap(), Some(vec![b'x'; 16]));
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_before_it_is_read() {
+        // The body isn't there at all: refusing must not wait for it.
+        let err = read(b"Content-Length: 17\r\n\r\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = read(b"Content-Length: 18446744073709551615\r\n\r\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_header_line_over_the_limit_is_refused() {
+        // 32 bytes including CRLF is allowed; 33 isn't.
+        let at_limit = format!("X-Pad: {}\r\nContent-Length: 0\r\n\r\n", "a".repeat(32 - 9));
+        assert_eq!(read(at_limit.as_bytes()).unwrap(), Some(Vec::new()));
+        let over = format!("X-Pad: {}\r\nContent-Length: 0\r\n\r\n", "a".repeat(32 - 8));
+        assert_eq!(read(over.as_bytes()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn an_endless_header_line_is_refused_without_reading_it_all() {
+        let endless = io::repeat(b'a');
+        let err = read_message_limited(&mut io::BufReader::new(endless), 16, 32).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn too_many_header_lines_are_refused() {
+        let ok = format!("{}Content-Length: 0\r\n\r\n", "X: y\r\n".repeat(MAX_HEADER_LINES - 2));
+        assert_eq!(read(ok.as_bytes()).unwrap(), Some(Vec::new()));
+        let endless = "X: y\r\n".repeat(MAX_HEADER_LINES + 4);
+        assert_eq!(read(endless.as_bytes()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncation_and_malformed_headers_are_errors() {
+        assert_eq!(read(b"Content-Length: 2\r\n").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"Content-Len").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"Content-Length: 4\r\n\r\n{}").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read(b"Content-Length: x\r\n\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read(b"X: \xff\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 }

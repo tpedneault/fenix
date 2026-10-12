@@ -32,7 +32,7 @@ pub(super) fn decode_picture(path: &Path) -> Result<(u32, u32, Vec<u8>), String>
 }
 
 pub(super) fn rgba_to_bgra(mut px: Vec<u8>) -> Vec<u8> {
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         p.swap(0, 2);
     }
     px

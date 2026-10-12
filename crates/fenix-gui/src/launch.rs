@@ -9,7 +9,6 @@
 //! whatever events arrive early (a second launch handing over files) to
 //! pass on once `App` exists.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +19,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::app::{App, FenixUserEvent};
+use crate::cli::Invocation;
 use crate::gpu::GpuContext;
 use crate::motion::{self, Feature};
 use crate::splash::SplashHandle;
@@ -31,7 +31,7 @@ pub struct Launcher {
 
 struct Showing {
     proxy: EventLoopProxy<FenixUserEvent>,
-    files: Vec<String>,
+    startup: Invocation,
     queued: Vec<FenixUserEvent>,
     window: Arc<Window>,
     gpu_context: GpuContext,
@@ -40,7 +40,7 @@ struct Showing {
 }
 
 enum State {
-    Pending { proxy: EventLoopProxy<FenixUserEvent>, files: Vec<String>, queued: Vec<FenixUserEvent> },
+    Pending { proxy: EventLoopProxy<FenixUserEvent>, startup: Invocation, queued: Vec<FenixUserEvent> },
     /// The window is up with the splash in it; the slow part waits for
     /// the event loop to have gone round once, so Windows has actually
     /// shown the window before the loop is kept busy.
@@ -51,13 +51,15 @@ enum State {
 }
 
 impl Launcher {
-    /// `files`: what to open, the first one the way `App::new` opens it.
-    pub fn new(proxy: EventLoopProxy<FenixUserEvent>, files: Vec<String>) -> Self {
-        Launcher { state: State::Pending { proxy, files, queued: Vec::new() } }
+    /// `startup`: the command line -- the first file opened the way
+    /// `App::new` opens it, the rest and any positions and project once
+    /// the editor exists.
+    pub fn new(proxy: EventLoopProxy<FenixUserEvent>, startup: Invocation) -> Self {
+        Launcher { state: State::Pending { proxy, startup, queued: Vec::new() } }
     }
 
     fn launch(&mut self, event_loop: &ActiveEventLoop) {
-        let State::Pending { proxy, files, queued } = std::mem::replace(&mut self.state, State::Moving) else { return };
+        let State::Pending { proxy, startup, queued } = std::mem::replace(&mut self.state, State::Moving) else { return };
 
         // Only what the window needs: where it goes, its colours, and
         // whether there's a splash. `App::new` reads the file properly.
@@ -100,7 +102,7 @@ impl Launcher {
             window.set_visible(true);
             splash.set_progress(0.1);
         }
-        self.state = State::Showing(Box::new(Showing { proxy, files, queued, window, gpu_context, gpu, splash }));
+        self.state = State::Showing(Box::new(Showing { proxy, startup, queued, window, gpu_context, gpu, splash }));
         // Round the loop once more before the slow part: see `Showing`.
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     }
@@ -109,17 +111,16 @@ impl Launcher {
     fn load(&mut self, event_loop: &ActiveEventLoop) {
         let State::Showing(showing) = std::mem::replace(&mut self.state, State::Moving) else { return };
         let _busy = crate::watchdog::enter("starting up");
-        let Showing { proxy, files, queued, window, gpu_context, gpu, splash } = *showing;
+        let Showing { proxy, startup, queued, window, gpu_context, gpu, splash } = *showing;
         let progress = |p: f32| {
             if let Some(splash) = &splash {
                 splash.set_progress(p);
             }
         };
         progress(0.15);
-        let mut app = Box::new(App::new(proxy, files.first().cloned()));
-        for extra in files.iter().skip(1) {
-            app.open_startup_file(Path::new(extra));
-        }
+        let first = startup.files.first().map(|f| f.path.to_string_lossy().into_owned());
+        let mut app = Box::new(App::new(proxy, first));
+        app.apply_startup(&startup.files, startup.project.as_deref());
         crate::profile::launch_mark("App::new");
         progress(0.6);
         let window_id = window.id();

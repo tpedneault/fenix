@@ -331,9 +331,11 @@ impl Drop for VncClient {
     /// socket close to wait out.
     fn drop(&mut self) {
         let inner = self.inner.clone();
-        let _ = self.handle.spawn(async move {
+        // Dropping the join handle detaches the task: it closes the
+        // socket on its own while the thread below winds down.
+        drop(self.handle.spawn(async move {
             let _ = inner.close().await;
-        });
+        }));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

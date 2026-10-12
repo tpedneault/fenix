@@ -867,9 +867,8 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
 
 /// The services, a line each: the index `z` folds them into.
 fn services_folded(g: &mut Grid, page: &MibPage, set: &MibSet, svc: &[(u8, Vec<DefRef>)], left: usize, width: usize, top: usize) -> usize {
-    let mut y = top;
     let at = page.svc_head.min(svc.len().saturating_sub(1));
-    for (i, (service, defs)) in svc.iter().enumerate() {
+    for (y, (i, (service, defs))) in (top..).zip(svc.iter().enumerate()) {
         let tcs = defs.iter().filter(|d| d.kind == Kind::Telecommand).count();
         let x = g.put(y, left + 1, &format!("{service:>3}"), Role::Accent) + 2;
         let x = g.put(y, x, &fit(service_label(*service), 34), Role::Title).max(left + 42);
@@ -896,7 +895,6 @@ fn services_folded(g: &mut Grid, page: &MibPage, set: &MibSet, svc: &[(u8, Vec<D
         if i == at {
             g.focus(y, left..left + width);
         }
-        y += 1;
     }
     top + at
 }

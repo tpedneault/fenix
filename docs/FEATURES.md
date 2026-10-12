@@ -419,6 +419,17 @@ Everything Fenix does, by area. For the keys, see
   fresh regex pass per included file, not a snapshot from search time --
   a file that changed since the search is safely skipped rather than
   misapplied.
+- **One Fenix, opened from anywhere**: `fenix file`, Explorer's "Open
+  With" or a double-click hands the file to the Fenix already running,
+  which comes to the front (un-minimized). `fenix src/main.rs:12:3`
+  opens at a line and column -- a drive letter is part of the path --
+  `--goto` always reads a position, and `--project <dir>` switches to a
+  project as `SPC p p` does. The hand-off goes over a channel only you
+  can reach (a named pipe per user and login session on Windows, a
+  Unix socket in a private folder on Linux), so on a shared machine
+  your files never open in someone else's editor. Other tools can
+  script it -- open files at a position, open a project, ask what's in
+  focus -- with the JSON-RPC protocol in [CONTROL.md](CONTROL.md).
 
 ## Windows and the UI
 
