@@ -701,6 +701,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-control"
+version = "1.0.0"
+dependencies = [
+ "fenix-rpc",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fenix-core"
 version = "1.0.0"
 dependencies = [
@@ -818,6 +830,7 @@ dependencies = [
  "fenix-ccsds",
  "fenix-completion",
  "fenix-config",
+ "fenix-control",
  "fenix-core",
  "fenix-dap",
  "fenix-diagram",

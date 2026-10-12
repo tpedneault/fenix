@@ -39,14 +39,22 @@ try {
         $testArgs += '--workspace'
     } else {
         # No display, container engine, network service, or language server needed.
-        foreach ($package in @('fenix-storage', 'fenix-core', 'fenix-snippets', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-lsp', 'fenix-dap', 'fenix-vim')) {
+        foreach ($package in @('fenix-storage', 'fenix-core', 'fenix-snippets', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-control', 'fenix-lsp', 'fenix-dap', 'fenix-vim')) {
             $testArgs += @('-p', $package)
         }
     }
     Invoke-Gate 'tests' 'cargo' $testArgs
-    # Start strict linting with the newly hardened libraries. The rest of the
-    # repository has existing warnings; it remains covered by tests and build.
-    Invoke-Gate 'clippy' 'cargo' @('clippy', '--locked', '-p', 'fenix-storage', '-p', 'fenix-tasks', '-p', 'fenix-lsp', '-p', 'fenix-project', '-p', 'fenix-notebook', '-p', 'fenix-diagram', '--all-targets', '--', '-D', 'warnings')
+    # Strict linting: the whole workspace on Windows; on Linux, the crates
+    # its tests cover, which build without a display.
+    $clippyArgs = @('clippy', '--locked', '--all-targets')
+    if ($Suite -eq 'Workspace') {
+        $clippyArgs += '--workspace'
+    } else {
+        foreach ($package in @('fenix-storage', 'fenix-tasks', 'fenix-lsp', 'fenix-project', 'fenix-notebook', 'fenix-diagram', 'fenix-rpc', 'fenix-control')) {
+            $clippyArgs += @('-p', $package)
+        }
+    }
+    Invoke-Gate 'clippy' 'cargo' ($clippyArgs + @('--', '-D', 'warnings'))
     if ($Suite -eq 'Workspace') {
         Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui')
     }

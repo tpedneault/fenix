@@ -24,8 +24,10 @@ What you chose roams with your Windows profile; what Fenix noticed about
 this machine, and what it downloaded, doesn't. `FENIX_HOME=<folder>`
 puts all of it in one folder instead -- a portable install, or a test
 run that mustn't touch your real settings. A second `fenix` normally
-hands its files to the one already running; `FENIX_STANDALONE=1` makes
-it open its own window instead, for such a test run beside your Fenix.
+hands its files to the one already running with the same `FENIX_HOME`
+(see [the control channel](CONTROL.md)), so a test run with its own
+folder already runs beside your Fenix; `FENIX_STANDALONE=1` makes any
+launch open its own window instead.
 
 An installation from before `settings.toml` moves over by itself the
 first time Fenix starts: `config.ini` becomes `settings.toml`, the

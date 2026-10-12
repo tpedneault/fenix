@@ -1,232 +1,302 @@
-//! Single-instance IPC: makes a second `fenix` launch (Windows
-//! Explorer's "Open With" on a double-clicked file, or just blindly
-//! relaunching `fenix.exe` from a shortcut) hand its file arguments off
-//! to whichever instance is already running instead of opening a
-//! second window -- the same "one real process, every later launch is
-//! a thin client" shape `emacsclient`/`emacs --daemon` has.
+//! Single instance, and the control channel other tools use: makes a
+//! second `fenix` launch (Explorer's "Open With" on a double-clicked
+//! file, `fenix src/main.rs:12` in a terminal, a tool like Flint) hand
+//! what it was asked for to the Fenix already running instead of
+//! opening a second editor -- the "one real process, every later launch
+//! is a thin client" shape `emacsclient` has.
 //!
-//! Deliberately a bare loopback TCP socket on a fixed port, not a
-//! platform IPC primitive (a Windows named pipe, a Unix domain socket)
-//! -- `std::net` needs no new dependency, and this only ever needs to
-//! talk to itself on the same machine. The tradeoff: if some unrelated
-//! process happens to already be bound to this exact port, this
-//! instance can't tell that apart from "another Fenix is running" and
-//! just falls back to running standalone (see `negotiate`'s own doc
-//! comment) -- disclosed, not fixed, since it needs an unlikely
-//! coincidence to ever matter in practice.
+//! The endpoint, the protocol and its checks are `fenix-control`'s; this
+//! module is the glue to the event loop. The first launch takes the
+//! endpoint and serves it from a background thread; each request that
+//! needs the editor becomes a `FenixUserEvent::Control` carrying a reply
+//! channel, answered on the UI thread like every other cross-thread
+//! event, so nothing new is locked. A later launch connects, says
+//! `fenix/hello`, lets Fenix take the foreground (Windows only lets the
+//! foreground process hand that on), and sends `fenix/open` and
+//! `fenix/openProject`.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::mpsc;
 use std::time::Duration;
 
+use fenix_control::protocol::OpenPath;
+use fenix_control::{
+    BindError, Call, Client, ClientError, Endpoint, Listener, OpenParams, RpcError, ServerInfo,
+};
+use fenix_tasks::PathPosition;
+use serde_json::Value;
 use winit::event_loop::EventLoopProxy;
 
 use crate::app::FenixUserEvent;
+use crate::cli::Invocation;
 
-/// An arbitrary, uncommon high port -- nothing else on a typical
-/// developer machine has a reason to bind this exact number. Loopback
-/// only (`127.0.0.1`), never exposed off-machine.
-const IPC_PORT: u16 = 47821;
-
-/// How long a client (the *second* `fenix` invocation) waits for the
-/// existing instance to accept the connection before giving up and
-/// falling back to a standalone launch instead of hanging Explorer's
-/// double-click indefinitely.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+/// How long a request waits for the editor to answer it. Generous: a
+/// request arriving during startup waits for the editor to load. Past
+/// it the client gets an error rather than hanging, which a frozen UI
+/// thread would otherwise make it do.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What this launch turned out to be, once single-instance negotiation
 /// settles.
 pub enum Role {
-    /// The first/only instance -- bound the port, and owns it for as
-    /// long as this process runs. Pass the listener to `spawn_accept_
-    /// loop`.
-    Server(TcpListener),
-    /// Another instance was already listening and accepted this
-    /// launch's file list -- this process should exit immediately
-    /// without opening a window.
+    /// The first or only instance: it holds the endpoint for as long as
+    /// it runs. Pass the listener to `spawn_accept_loop`.
+    Server(Listener),
+    /// A running Fenix took this launch's request; exit without opening
+    /// a window.
     HandedOff,
-    /// Couldn't bind the port (something else has it) *and* couldn't
-    /// hand off to it either (it didn't answer, or wasn't really a
-    /// Fenix instance) -- proceed as an ordinary standalone launch,
-    /// just without serving IPC to any future launch.
+    /// Neither: the endpoint couldn't be used (an unsafe directory, a
+    /// Fenix that wouldn't answer). Run as an ordinary editor, without
+    /// serving later launches.
     Standalone,
 }
 
-/// Binds the IPC port if nobody else has it yet; otherwise tries to
-/// hand `args` (the file paths this launch was given, possibly empty)
-/// off to whoever does.
-pub fn negotiate(args: &[String]) -> Role {
-    negotiate_at(SocketAddr::from(([127, 0, 0, 1], IPC_PORT)), args)
+/// Hands `invocation` to the Fenix serving this user's endpoint, or
+/// takes the endpoint if nobody is.
+pub fn negotiate(invocation: &Invocation) -> Role {
+    negotiate_at(&Endpoint::current(), invocation)
 }
 
-fn negotiate_at(addr: SocketAddr, args: &[String]) -> Role {
-    match TcpListener::bind(addr) {
-        Ok(listener) => Role::Server(listener),
-        Err(_) => {
-            if send_to(addr, args) {
-                Role::HandedOff
-            } else {
-                Role::Standalone
+fn negotiate_at(endpoint: &Endpoint, invocation: &Invocation) -> Role {
+    // Two launches at once (Explorer opening a selection of files can
+    // start one per file) race for the endpoint; the loser connects to
+    // the winner, which may need a moment to start listening.
+    for _ in 0..20 {
+        match Client::connect(endpoint) {
+            Ok(Some(mut client)) => {
+                return match hand_off(&mut client, invocation) {
+                    Ok(()) => Role::HandedOff,
+                    Err(e) => {
+                        eprintln!("fenix: the running Fenix didn't take this launch ({e}); starting another");
+                        Role::Standalone
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("fenix: can't reach the control endpoint ({e}); running on its own");
+                return Role::Standalone;
+            }
+        }
+        match endpoint.bind() {
+            Ok(listener) => return Role::Server(listener),
+            Err(BindError::InUse) => std::thread::sleep(Duration::from_millis(50)),
+            Err(BindError::Io(e)) => {
+                eprintln!("fenix: can't serve the control endpoint ({e}); running on its own");
+                return Role::Standalone;
             }
         }
     }
+    Role::Standalone
 }
 
-/// One line per path, then closes the connection -- the server reads
-/// to EOF and splits on `\n` (see `parse_request`). `false` on any
-/// failure (nothing listening, or it stopped listening mid-connect),
-/// which `negotiate_at` treats as "there wasn't really a live instance
-/// after all."
-fn send_to(addr: SocketAddr, args: &[String]) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) else { return false };
-    let mut payload = String::new();
-    for arg in args {
-        payload.push_str(arg);
-        payload.push('\n');
-    }
-    stream.write_all(payload.as_bytes()).is_ok()
-}
-
-/// What one hand-off is asking the running instance to do.
-#[derive(Debug, PartialEq)]
-pub struct Request {
-    /// Whether the launch passed `--new-window`: open another OS window
-    /// for these files rather than putting them in whichever window is
-    /// already focused. What makes a desktop shortcut on a second
-    /// monitor add a frame to the running editor instead of jumping
-    /// focus back to the first monitor.
-    pub new_window: bool,
-    pub paths: Vec<String>,
-}
-
-/// The flag a launch passes to ask for its own window.
-pub const NEW_WINDOW_FLAG: &str = "--new-window";
-
-/// Splits a received payload into its request. Blank lines are
-/// dropped, so an empty payload (a bare relaunch with no arguments,
-/// just meant to focus the existing window) yields an empty path list
-/// rather than one blank entry.
-///
-/// Anything else beginning with `-` is dropped too rather than being
-/// taken for a filename: an unrecognized flag turning into an attempt
-/// to open a file called `--colour` is a worse outcome than ignoring
-/// it, and a real path starting with a dash can still be passed as
-/// `./-weird.txt`.
-pub fn parse_request(raw: &str) -> Request {
-    let mut request = Request { new_window: false, paths: Vec::new() };
-    for line in raw.lines().filter(|line| !line.is_empty()) {
-        if line == NEW_WINDOW_FLAG {
-            request.new_window = true;
-        } else if !line.starts_with('-') {
-            request.paths.push(line.to_string());
+/// The client half: `fenix/hello`, the foreground handed on, then the
+/// project and the files. A bare relaunch still sends an empty
+/// `fenix/open`, which brings Fenix forward.
+fn hand_off<R: std::io::Read, W: std::io::Write>(
+    client: &mut Client<R, W>,
+    invocation: &Invocation,
+) -> Result<(), ClientError> {
+    let hello = client.hello("fenix", env!("CARGO_PKG_VERSION"))?;
+    allow_foreground(hello.pid);
+    if let Some(project) = &invocation.project {
+        client.open_project(&plain(project))?;
+        if invocation.files.is_empty() {
+            return Ok(());
         }
     }
-    request
+    let paths = invocation
+        .files
+        .iter()
+        .map(|f| OpenPath {
+            path: plain(&f.path),
+            line: f.line,
+            column: f.column,
+        })
+        .collect();
+    client.open(&OpenParams {
+        paths,
+        new_window: invocation.new_window,
+        focus: true,
+    })
 }
 
-/// Spawns the background thread that accepts hand-offs from later
-/// `fenix` launches for as long as this process (the server) runs.
-/// Each connection is read to completion and delivered to the running
-/// app as `FenixUserEvent::OpenFiles` -- the same cross-thread wake-
-/// and-hand-data-over shape every other background thread in this app
-/// already uses (`GitSession`'s poller, `jira_sync_issues`, the
-/// terminal's async spawn, ...). Deliberately thin and not unit tested
-/// on its own (spawning a real thread and blocking on real accepted
-/// sockets isn't something a unit test should do) -- `parse_request`
-/// and `negotiate_at` carry the logic that's actually worth pinning
-/// down.
-pub fn spawn_accept_loop(listener: TcpListener, proxy: EventLoopProxy<FenixUserEvent>) {
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut buf = String::new();
-            if stream.read_to_string(&mut buf).is_err() {
+fn plain(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Lets the running Fenix take the foreground. Windows refuses
+/// `SetForegroundWindow` to a process the user isn't using, so the one
+/// they are -- this launch, which Explorer or a terminal just started --
+/// has to pass the right on before asking. Only that pid, and only
+/// until the user's next input.
+#[cfg(windows)]
+fn allow_foreground(pid: u32) {
+    // SAFETY: a plain call; failing just means Fenix may only flash.
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid) };
+}
+
+#[cfg(not(windows))]
+fn allow_foreground(_pid: u32) {}
+
+/// The reply to one control request, sent back from the UI thread.
+pub type Reply = Result<Value, RpcError>;
+
+/// Spawns the background thread that serves the endpoint for as long as
+/// this process runs, with a thread per connection so a client that
+/// keeps one open doesn't hold up the next. Each request the editor has
+/// to answer goes to it as `FenixUserEvent::Control`.
+pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUserEvent>) {
+    let info = ServerInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        pid: std::process::id(),
+    };
+    std::thread::spawn(move || loop {
+        let stream = match listener.accept() {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("fenix: control endpoint: {e}");
+                std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
-            let request = parse_request(&buf);
-            let event = if request.new_window {
-                FenixUserEvent::OpenFilesInNewFrame(request.paths)
-            } else {
-                FenixUserEvent::OpenFiles(request.paths)
+        };
+        let proxy = proxy.clone();
+        let info = info.clone();
+        std::thread::spawn(move || {
+            let Ok(writer) = stream.try_clone() else {
+                return;
             };
-            let _ = proxy.send_event(event);
-        }
+            let _ = fenix_control::serve(stream, writer, &info, |call| ask_editor(&proxy, call));
+        });
     });
+}
+
+/// Hands `call` to the UI thread and waits for its answer.
+fn ask_editor(proxy: &EventLoopProxy<FenixUserEvent>, call: Call) -> Reply {
+    let (reply, answer) = mpsc::channel();
+    proxy
+        .send_event(FenixUserEvent::Control { call, reply })
+        .map_err(|_| RpcError::internal("Fenix is closing"))?;
+    answer
+        .recv_timeout(ANSWER_TIMEOUT)
+        .map_err(|_| RpcError::internal("Fenix didn't answer in time"))?
+}
+
+/// `fenix/open`'s paths as the editor opens them.
+pub fn positions(paths: &[OpenPath]) -> Vec<PathPosition> {
+    paths
+        .iter()
+        .map(|p| PathPosition {
+            path: p.path.clone().into(),
+            line: p.line,
+            column: p.column,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
-    /// Binds an ephemeral port (`:0`) and immediately frees it --
-    /// yields an address nothing is listening on, without the
-    /// collision risk a fixed port would have across parallel test
-    /// threads or a real Fenix instance running on this machine.
-    fn free_addr() -> SocketAddr {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        listener.local_addr().unwrap()
+    fn unique() -> Endpoint {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        Endpoint::instance(&format!(
+            "gui-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 
-    #[test]
-    fn parse_request_splits_on_newlines_and_drops_blank_lines() {
-        assert_eq!(parse_request("a\nb\n\nc\n").paths, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn parse_request_of_an_empty_payload_asks_for_nothing() {
-        let request = parse_request("");
-        assert!(request.paths.is_empty());
-        assert!(!request.new_window);
-    }
-
-    #[test]
-    fn parse_request_recognizes_the_new_window_flag_and_keeps_the_paths() {
-        let request = parse_request("--new-window\nC:/notes.md\n");
-        assert!(request.new_window);
-        assert_eq!(request.paths, vec!["C:/notes.md"]);
-    }
-
-    #[test]
-    fn parse_request_asks_for_a_window_even_with_no_files_to_put_in_it() {
-        let request = parse_request("--new-window\n");
-        assert!(request.new_window);
-        assert!(request.paths.is_empty());
-    }
-
-    #[test]
-    fn parse_request_drops_an_unrecognized_flag_instead_of_opening_a_file_named_after_it() {
-        let request = parse_request("--colour\nreal.txt\n");
-        assert!(!request.new_window);
-        assert_eq!(request.paths, vec!["real.txt"]);
-    }
-
-    #[test]
-    fn send_to_returns_false_when_nothing_is_listening() {
-        assert!(!send_to(free_addr(), &["a.txt".to_string()]));
-    }
-
-    #[test]
-    fn negotiate_at_becomes_the_server_when_the_port_is_free() {
-        assert!(matches!(negotiate_at(free_addr(), &[]), Role::Server(_)));
-    }
-
-    #[test]
-    fn negotiate_at_hands_off_to_an_existing_listener() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr = listener.local_addr().unwrap();
+    /// Serves one connection with a recording editor; its calls come
+    /// back when the client hangs up.
+    fn serve_one(listener: Listener) -> mpsc::Receiver<Vec<Call>> {
+        let mut listener = listener;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = String::new();
-            stream.read_to_string(&mut buf).unwrap();
-            tx.send(buf).unwrap();
+            let stream = listener.accept().unwrap();
+            let writer = stream.try_clone().unwrap();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&calls);
+            let info = ServerInfo {
+                version: "1".into(),
+                pid: 1,
+            };
+            let _ = fenix_control::serve(stream, writer, &info, move |call| {
+                seen.lock().unwrap().push(call);
+                Ok(serde_json::json!({}))
+            });
+            tx.send(calls.lock().unwrap().clone()).unwrap();
         });
+        rx
+    }
 
-        let role = negotiate_at(addr, &["C:\\file.tcl".to_string(), "C:\\other.tcl".to_string()]);
-        assert!(matches!(role, Role::HandedOff));
+    #[test]
+    fn the_first_launch_becomes_the_server() {
+        assert!(matches!(
+            negotiate_at(&unique(), &Invocation::default()),
+            Role::Server(_)
+        ));
+    }
 
-        let received = rx.recv_timeout(Duration::from_secs(2)).expect("the accept thread should have received the payload");
-        assert_eq!(parse_request(&received).paths, vec!["C:\\file.tcl", "C:\\other.tcl"]);
+    #[test]
+    fn a_later_launch_hands_its_files_and_positions_over() {
+        let endpoint = unique();
+        let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else {
+            panic!("first launch should serve")
+        };
+        let calls = serve_one(listener);
+        let invocation = Invocation {
+            new_window: true,
+            files: vec![
+                PathPosition {
+                    path: PathBuf::from(r"C:\x.rs"),
+                    line: Some(12),
+                    column: Some(3),
+                },
+                PathPosition {
+                    path: PathBuf::from(r"C:\y.rs"),
+                    line: None,
+                    column: None,
+                },
+            ],
+            project: Some(PathBuf::from(r"C:\repo")),
+        };
+        assert!(matches!(
+            negotiate_at(&endpoint, &invocation),
+            Role::HandedOff
+        ));
+        let calls = calls.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(matches!(&calls[0], Call::OpenProject(p) if p.root == r"C:\repo"));
+        let Call::Open(open) = &calls[1] else {
+            panic!("{calls:?}")
+        };
+        assert!(open.new_window && open.focus);
+        assert_eq!(positions(&open.paths), invocation.files);
+    }
+
+    #[test]
+    fn a_bare_relaunch_asks_to_be_brought_forward() {
+        let endpoint = unique();
+        let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else {
+            panic!("first launch should serve")
+        };
+        let calls = serve_one(listener);
+        assert!(matches!(
+            negotiate_at(&endpoint, &Invocation::default()),
+            Role::HandedOff
+        ));
+        let calls = calls.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            calls,
+            vec![Call::Open(OpenParams {
+                paths: vec![],
+                new_window: false,
+                focus: true
+            })]
+        );
     }
 }

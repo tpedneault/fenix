@@ -40,6 +40,7 @@ mod notebook_capture;
 mod notebook_export;
 mod reading_host;
 mod diagram_host;
+mod control_host;
 use tool_sessions::LspKey;
 
 use std::cell::RefCell;
@@ -1983,18 +1984,12 @@ pub enum FenixUserEvent {
     /// Anything the agenda's Jira sync fetched or sent in the background
     /// -- see `agenda_sync::AgendaSyncEvent`.
     AgendaSync(AgendaSyncEvent),
-    /// File paths handed off from a *later* `fenix` launch via the
-    /// single-instance IPC server (`crate::ipc`) -- e.g. double-
-    /// clicking a file in Explorer while Fenix is already running. An
-    /// empty list means "just focus me," no file to open (a bare
-    /// relaunch with no arguments).
-    OpenFiles(Vec<String>),
-    /// The same hand-off, but from a launch that passed
-    /// `--new-window`: open another OS window first, then open these
-    /// paths in it. What makes `fenix --new-window` from a shortcut on
-    /// a second monitor add a frame to the running editor instead of
-    /// handing its files to the window already on the first one.
-    OpenFilesInNewFrame(Vec<String>),
+    /// A control-channel request (`crate::ipc`): a later `fenix`
+    /// launch -- double-clicking a file in Explorer while Fenix is
+    /// already running, `fenix x.rs:12` in a terminal -- or another
+    /// tool asking to open files or a project, or what's in focus.
+    /// Answered on `reply`; the connection's thread is waiting on it.
+    Control { call: fenix_control::Call, reply: std::sync::mpsc::Sender<crate::ipc::Reply> },
     /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
     /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
     /// spawns it on -- same "can't afford to block the main thread"
@@ -2060,8 +2055,7 @@ impl FenixUserEvent {
             Self::TerminalSpawned { .. } => "TerminalSpawned",
             Self::JiraActionDone { .. } => "JiraActionDone",
             Self::AgendaSync { .. } => "AgendaSync",
-            Self::OpenFiles { .. } => "OpenFiles",
-            Self::OpenFilesInNewFrame { .. } => "OpenFilesInNewFrame",
+            Self::Control { .. } => "Control",
             Self::VncConnected { .. } => "VncConnected",
             Self::VncFrame { .. } => "VncFrame",
             Self::PdfResponse { .. } => "PdfResponse",
@@ -5162,12 +5156,13 @@ pub struct App {
     /// otherwise only reachable through their own window handle -- and
     /// so headless tests can set one.
     frame_origin: (i32, i32),
-    /// Frames asked for by a `fenix --new-window` hand-off that haven't
-    /// been opened yet, each with the paths to open in it (possibly
-    /// empty). Drained by `about_to_wait`, which -- unlike
+    /// Frames asked for by a `fenix --new-window` hand-off (a
+    /// `fenix/open` with `newWindow`) that haven't been opened yet, each
+    /// with the files to open in it (possibly none) and whether to bring
+    /// it forward. Drained by `about_to_wait`, which -- unlike
     /// `handle_user_event`, where the request arrives -- has the
     /// `&ActiveEventLoop` that creating a window needs.
-    pending_frames: Vec<Vec<String>>,
+    pending_frames: Vec<(Vec<fenix_tasks::PathPosition>, bool)>,
     window: Option<Arc<Window>>,
     /// The wgpu instance/adapter/device/queue every frame shares -- see
     /// `GpuContext`'s own doc comment for why there's one of these
@@ -17112,25 +17107,6 @@ impl App {
         self.open_file_from_picker(existing.as_deref().unwrap_or(path));
     }
 
-    /// `FenixUserEvent::OpenFiles`: a *later* `fenix` launch handed its
-    /// file arguments off to this (the already-running) instance via
-    /// the single-instance IPC server (see `crate::ipc`) instead of
-    /// opening its own window. Opens each path the same way `open_
-    /// startup_file` does, then pulls this window to the front -- the
-    /// whole point of the hand-off is that the user just double-
-    /// clicked a file expecting *something* to respond, not a window
-    /// left sitting behind others.
-    fn apply_open_files(&mut self, paths: Vec<String>) {
-        for path in &paths {
-            self.open_file_from_picker(Path::new(path));
-        }
-        if let Some(window) = &self.window {
-            window.focus_window();
-            window.request_redraw();
-        }
-        self.wake_caret();
-    }
-
     /// `SPC f f`: starts the type-a-path find-file prompt.
     pub(crate) fn start_find_file_prompt(&mut self) {
         self.find_file_prompt = Some(String::new());
@@ -19229,13 +19205,15 @@ impl App {
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
-            FenixUserEvent::OpenFiles(paths) => self.apply_open_files(paths),
-            // Deferred rather than handled here: opening a window needs
-            // an `&ActiveEventLoop`, which `handle_user_event` doesn't
-            // take (it's deliberately the `ActiveEventLoop`-free half of
-            // `user_event`, so it stays directly testable). `about_to_
-            // wait` runs moments later and does have one.
-            FenixUserEvent::OpenFilesInNewFrame(paths) => self.pending_frames.push(paths),
+            // A new window asked for here is opened by `about_to_wait`:
+            // that needs an `&ActiveEventLoop`, which `handle_user_event`
+            // doesn't take (it's deliberately the `ActiveEventLoop`-free
+            // half of `user_event`, so it stays directly testable).
+            FenixUserEvent::Control { call, reply } => {
+                let answer = self.apply_control(call);
+                // The client may have hung up; nothing to do about it.
+                let _ = reply.send(answer);
+            }
             FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
             FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
             FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
@@ -25561,9 +25539,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // Frames requested by a `fenix --new-window` hand-off, which
         // arrived somewhere without an `&ActiveEventLoop` to open a
         // window with. See `App::pending_frames`.
-        for paths in std::mem::take(&mut self.pending_frames) {
+        for (files, focus) in std::mem::take(&mut self.pending_frames) {
             self.new_frame(event_loop);
-            self.apply_open_files(paths);
+            self.open_positions(&files, focus);
             needs_redraw = true;
         }
 
@@ -37911,28 +37889,6 @@ configure_board stm32
         app.open_startup_file(&file);
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.open().buffer.text(), "second file");
-    }
-
-    #[test]
-    fn apply_open_files_opens_every_path_ending_on_the_last_one() {
-        let dir = TempDir::new("apply_open_files");
-        let a = dir.write("a.txt", "file a");
-        let b = dir.write("b.txt", "file b");
-        let mut app = App::with_file(None);
-        app.apply_open_files(vec![a.display().to_string(), b.display().to_string()]);
-        assert_eq!(app.main_view, MainView::Editor);
-        assert_eq!(app.open().buffer.text(), "file b");
-    }
-
-    #[test]
-    fn apply_open_files_with_an_empty_list_does_not_panic_without_a_real_window() {
-        // The IPC hand-off path always tries to focus the window
-        // afterward; `App::window` is only ever `Some` after a real
-        // winit `resumed` callback (see `toggle_fullscreen_is_a_no_op_
-        // without_a_real_window`), so this just confirms an empty
-        // "just focus me" hand-off doesn't panic in a headless test.
-        let mut app = App::with_file(None);
-        app.apply_open_files(vec![]);
     }
 
     #[test]

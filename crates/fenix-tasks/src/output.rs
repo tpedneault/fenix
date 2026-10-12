@@ -8,6 +8,8 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+use crate::location;
+
 /// A source location recovered from one output line, in the same
 /// 1-indexed `(line, col)` convention `fenix_project::grep::GrepMatch`
 /// already uses (this app's `App::jump_to_grep_match` converts either
@@ -120,46 +122,17 @@ fn parse_cargo_json_line(line: &str) -> Option<CargoOutcome> {
 /// Recovers a `path:line:col: message` (or `path:line: message`, column
 /// omitted) location from one plain-text line -- the convention gcc/
 /// clang/most Unix build tools, `pytest`, and `ctest` all use for a
-/// failure's own location. No `regex` dependency: scans for the first
-/// `:<digits>:<digits>:` (or `:<digits>:`) run, treating everything
-/// before it as the path and everything after the final `:` as the
-/// message. A leading Windows drive letter (`C:\...`) is walked past
-/// first so its own colon is never mistaken for the line-number
-/// separator. Doesn't handle MSVC's `path(line,col): message`
+/// failure's own location. No `regex` dependency: `location::split`
+/// finds the first `:<digits>:<digits>` (or `:<digits>`) run that a `:`
+/// follows, walking past a leading Windows drive letter so its colon is
+/// never taken for the line's, and everything after that `:` is the
+/// message. Doesn't handle MSVC's `path(line,col): message`
 /// parenthesized convention -- a disclosed gap, not silently wrong: a
 /// line in that shape just displays with no recovered location, the
 /// same as any other line this can't make sense of.
 fn parse_generic_line(line: &str) -> Option<TaskLocation> {
-    let search_start = if line.as_bytes().get(1) == Some(&b':') && line.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) { 2 } else { 0 };
-    let mut i = search_start;
-    while let Some(rel) = line[i..].find(':') {
-        let colon1 = i + rel;
-        let after_colon1 = &line[colon1 + 1..];
-        let Some((line_no, rest)) = take_leading_digits(after_colon1) else {
-            i = colon1 + 1;
-            continue;
-        };
-        if let Some(after_second_colon) = rest.strip_prefix(':') {
-            if let Some((col_no, rest2)) = take_leading_digits(after_second_colon) {
-                if let Some(message) = rest2.strip_prefix(':') {
-                    return Some(TaskLocation { path: PathBuf::from(&line[..colon1]), line: line_no, col: col_no, message: message.trim().to_string() });
-                }
-            }
-            // `path:line: message` -- no column.
-            return Some(TaskLocation { path: PathBuf::from(&line[..colon1]), line: line_no, col: 1, message: after_second_colon.trim().to_string() });
-        }
-        i = colon1 + 1;
-    }
-    None
-}
-
-fn take_leading_digits(s: &str) -> Option<(usize, &str)> {
-    let digit_count = s.chars().take_while(char::is_ascii_digit).count();
-    if digit_count == 0 {
-        return None;
-    }
-    let (digits, rest) = s.split_at(digit_count);
-    digits.parse().ok().map(|n| (n, rest))
+    let found = location::split(line, |s| s.rest.starts_with(':'))?;
+    Some(TaskLocation { path: PathBuf::from(found.path), line: found.line, col: found.col.unwrap_or(1), message: found.rest[1..].trim().to_string() })
 }
 
 #[cfg(test)]

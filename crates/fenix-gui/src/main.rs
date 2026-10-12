@@ -19,6 +19,7 @@ mod time_page;
 mod stream_page;
 mod standards_page;
 mod app;
+mod cli;
 mod commands;
 mod completion;
 mod console;
@@ -95,31 +96,36 @@ fn main() -> anyhow::Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let invocation = match cli::parse(&args, &cwd, |path| path.exists()) {
+        Ok(invocation) => invocation,
+        Err(message) => {
+            eprintln!("fenix: {message}");
+            std::process::exit(2);
+        }
+    };
+
     // Single-instance: a second `fenix` launch (Explorer's "Open With"
-    // on a double-clicked file, or just relaunching `fenix.exe`) hands
-    // its file arguments to whichever instance is already running
-    // instead of opening a second window -- see `ipc`'s own doc
-    // comment for the mechanism and its one disclosed tradeoff.
+    // on a double-clicked file, `fenix x.rs:12`, or just relaunching
+    // `fenix.exe`) hands what it was asked for to the Fenix already
+    // running instead of opening a second window -- see `ipc`.
     // `FENIX_STANDALONE=1` opts out, for a test instance (usually with
-    // its own `FENIX_HOME`) beside a Fenix someone is using.
+    // its own `FENIX_HOME`, which has its own endpoint anyway) beside a
+    // Fenix someone is using.
     let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0");
-    let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&args) };
+    let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&invocation) };
     match role {
         ipc::Role::HandedOff => return Ok(()),
         ipc::Role::Server(listener) => ipc::spawn_accept_loop(listener, proxy.clone()),
         ipc::Role::Standalone => {}
     }
 
-    // This launch turned out to be the only one running, so there's
-    // nobody to hand `--new-window` to and no window to add one
-    // alongside -- the window this launch is about to open *is* the
-    // new one. The flag is dropped here along with any other flag, so
-    // it can't be mistaken for a file to open.
-    let files: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
-
+    // This launch turned out to be the editor, so there's nobody to
+    // hand `--new-window` to and no window to add one alongside -- the
+    // window this launch is about to open *is* the new one.
     // The window comes up first, with the launch splash in it, and the
     // editor loads behind it -- see `launch`.
-    let mut launcher = launch::Launcher::new(proxy, files.iter().map(|f| f.to_string()).collect());
+    let mut launcher = launch::Launcher::new(proxy, invocation);
     event_loop.run_app(&mut launcher)?;
 
     Ok(())

@@ -97,6 +97,8 @@ places to start:
 - [Building](docs/BUILDING.md): building from source, and the optional tools
 - [Snippets](docs/SNIPPETS.md), [project tools](docs/PROJECT_TOOLS.md)
   and [session restoration](docs/SESSION_RESTORATION.md)
+- [The control channel](docs/CONTROL.md): `fenix file:line`, and the
+  protocol other tools use to drive Fenix
 - [Architecture](docs/ARCHITECTURE.md): how the workspace is split into crates
 - [Continuous integration](docs/CI.md)
 - [Changelog](CHANGELOG.md)
